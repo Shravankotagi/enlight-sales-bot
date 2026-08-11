@@ -1,52 +1,86 @@
-# Enlight Metals WhatsApp Sales Bot
+# 🤖 Enlight Metals WhatsApp AI Bot — Easy Setup Guide
 
-This is a standalone Express.js webhook server that:
-1. Receives WhatsApp messages via Meta Cloud API webhook.
-2. Extracts message content (text, image, audio, document).
-3. Saves raw inquiry details to a Supabase database.
-4. Replies to the sender on WhatsApp confirming receipt of their inquiry.
+Welcome! This is the **WhatsApp AI Agent** for Enlight Metals. It listens to salesperson messages on WhatsApp, extracts deals, customer names, quantities, calculates rates from active rate sheets, and syncs everything with Zoho Bigin CRM.
 
-## Tech Stack
-- Node.js + Express
-- `@supabase/supabase-js` (database)
-- `axios` (WhatsApp API calls)
-- `dotenv` (environment variables configuration)
-- `@google/generative-ai` (Gemini integration - stubbed for Sprint 2)
+---
 
-## Setup Instructions
+## 🎯 What This Bot Does (In Simple Words)
 
-1. **Install dependencies**:
-   ```bash
-   cd bot
-   npm install
-   ```
+1. 📩 **Listens to WhatsApp Messages**: Receives text, voice notes, photos, or documents sent by salespersons on WhatsApp.
+2. 🧮 **Calculates Tonnage & Rates**:
+   - Converts Indian tonnage terms (`ton`, `tons`, `tonne`, `MT`) to `MT`.
+   - Checks active rate sheets (e.g. *HR Coil ₹52,000/MT*) and calculates exact quotation values.
+3. ❓ **Asks Smart Follow-ups**: If a salesperson specifies quantity (e.g. `50 tons`) without naming a product, the bot asks:
+   > *"Which metal product is Delta Structural Steel asking for? (e.g. HR Coil, CR Sheet, TMT Bar, MS Plates)"*
+4. 🔄 **Zoho Bigin Sync**: Automatically updates your database and syncs live deals directly into Zoho Bigin CRM.
 
-2. **Configure Environment Variables**:
-   - Copy `.env.example` to `.env`:
-     ```bash
-     cp .env.example .env
-     ```
-   - Fill in the required credentials in `.env`. Note that if you already have a global `.env` file in the parent folder, you can copy or reference its values.
+---
 
-3. **Run the Server**:
-   - For development (with auto-reload):
-     ```bash
-     npm run dev
-     ```
-   - For production:
-     ```bash
-     npm start
-     ```
+## 🚀 How to Run the Bot (Step-by-Step)
 
-## Exposing the Webhook Locally
+### Step 1: Open Terminal in the `bot` folder
 
-Since Meta needs a publicly accessible HTTPS URL to send webhook events, you can use **ngrok**:
+```bash
+cd bot
+```
 
-1. Run ngrok on port 3000:
-   ```bash
-   ngrok http 3000
-   ```
-2. Copy the forwarding HTTPS URL provided by ngrok (e.g., `https://your-ngrok-url.ngrok-free.app`).
-3. Your webhook URL format for Meta configuration will be:
-   `https://your-ngrok-url.ngrok-free.app/webhook`
-4. Set the **Verify Token** to the same value as `WHATSAPP_VERIFY_TOKEN` in your `.env`.
+### Step 2: Install Dependencies (First Time Only)
+
+```bash
+npm install
+```
+
+### Step 3: Start the Bot Server
+
+- **For Live Mode / Production**:
+  ```bash
+  npm start
+  ```
+- **For Development**:
+  ```bash
+  npm run dev
+  ```
+
+✅ **What Success Looks Like:**
+You will see a green console log:
+`Bot server running on port 3000`
+
+---
+
+## 🔑 Environment Settings (`.env` File)
+
+The bot requires a `.env` file in the `bot/` directory.
+
+Essential settings inside `.env`:
+- `PORT=3000`
+- `SUPABASE_URL` = Your Supabase database URL
+- `SUPABASE_SERVICE_ROLE_KEY` = Your Supabase secret key
+- `GEMINI_API_KEY` = Google Gemini AI key for understanding messages
+- `WHATSAPP_TOKEN` = WhatsApp Meta Cloud API Access Token
+- `ZOHO_CLIENT_ID` / `ZOHO_CLIENT_SECRET` / `ZOHO_REFRESH_TOKEN` = Zoho Bigin CRM integration keys
+
+*(If `.env` is missing, copy `.env.example` to `.env` and fill in the values.)*
+
+---
+
+## 🔗 Manual Zoho Bigin Sync Links (For Admins)
+
+If you ever need to manually trigger a sync via your browser:
+
+- 📤 **Push Database Records $\rightarrow$ Zoho Bigin**:
+  `http://localhost:3000/bigin-sync`
+- 📥 **Pull Zoho Bigin $\rightarrow$ Database**:
+  `http://localhost:3000/bigin-import`
+
+---
+
+## ❓ Simple Troubleshooting
+
+- **Issue:** `Error: EADDRINUSE: address already in use :::3000`
+  - **Solution:** Another program is using port 3000. Close any extra terminal windows or restart your computer.
+- **Issue:** `invalid oauth token` from Zoho Bigin
+  - **Solution:** Click the **`Push DB → Bigin`** button on your Web Dashboard to auto-refresh the token.
+
+---
+
+*Powered by Google Gemini AI & Enlight Sales OS.*
