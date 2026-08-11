@@ -2,7 +2,7 @@
 
 Welcome to **Enlight Sales OS**! This comprehensive guide provides step-by-step instructions for setting up, running, and managing the entire platform on your local computer or server.
 
-It is designed to be easily understood by **everyone** — whether you are a business manager, sales lead, or developer.
+It contains explicit terminal commands for **both Windows (CMD / PowerShell)** and **macOS (Mac Terminal) / Linux**.
 
 ---
 
@@ -23,18 +23,18 @@ The Enlight Sales OS consists of 3 synchronized modules working together:
 Before running the project, install the following free software on your computer:
 
 ### 1. Install Node.js (JavaScript Runtime)
-- Download **Node.js v18 LTS or v20 LTS** from [https://nodejs.org/](https://nodejs.org/).
-- Open the installer and click **Next** on all prompts to complete the installation.
-- Verify installation by opening Command Prompt (CMD) and typing:
-  ```bash
-  node -v
-  npm -v
-  ```
-  *(You should see version numbers like `v20.x.x` and `10.x.x`)*
+- **Windows (🪟)**: Download Node.js v18 LTS or v20 LTS `.msi` installer from [https://nodejs.org/](https://nodejs.org/) and double-click to install.
+- **macOS (🍎)**: Download Node.js v18 LTS or v20 LTS `.pkg` installer from [https://nodejs.org/](https://nodejs.org/) or install via Homebrew (`brew install node`).
+
+Verify installation by opening Command Prompt (Windows) or Terminal (macOS):
+```bash
+node -v
+npm -v
+```
 
 ### 2. Install Git (Version Control)
-- Download **Git** from [https://git-scm.com/downloads](https://git-scm.com/downloads).
-- Follow standard setup options and install.
+- **Windows (🪟)**: Download Git for Windows from [https://git-scm.com/download/win](https://git-scm.com/download/win).
+- **macOS (🍎)**: Run `git --version` in Mac Terminal to trigger Xcode Command Line Tools auto-install, or download from [https://git-scm.com/download/mac](https://git-scm.com/download/mac).
 
 ---
 
@@ -43,8 +43,20 @@ Before running the project, install the following free software on your computer
 Each folder (`/backend`, `/frontend`, `/bot`) requires a configuration file named `.env` containing your database keys and API secrets.
 
 ### A. Central Backend (`backend/.env`)
-Create a file named `.env` inside the `backend` folder and paste the following:
+Create `.env` inside `backend/`:
 
+- 🪟 **Windows (CMD / PowerShell)**:
+  ```cmd
+  cd backend
+  copy .env.example .env
+  ```
+- 🍎 **macOS / Linux (Terminal)**:
+  ```bash
+  cd backend
+  cp .env.example .env
+  ```
+
+Environment File Contents (`backend/.env`):
 ```env
 # Server Port
 PORT=3001
@@ -63,17 +75,45 @@ ZOHO_CLIENT_SECRET=your_zoho_client_secret
 ZOHO_REFRESH_TOKEN=your_zoho_refresh_token
 ```
 
-### B. Web Dashboard (`frontend/.env`)
-Create a file named `.env` inside the `frontend` folder and paste:
+---
 
+### B. Web Dashboard (`frontend/.env`)
+Create `.env` inside `frontend/`:
+
+- 🪟 **Windows (CMD / PowerShell)**:
+  ```cmd
+  cd frontend
+  copy .env.example .env
+  ```
+- 🍎 **macOS / Linux (Terminal)**:
+  ```bash
+  cd frontend
+  cp .env.example .env
+  ```
+
+Environment File Contents (`frontend/.env`):
 ```env
 # URL of your running backend server
 VITE_BACKEND_URL=http://localhost:3001
 ```
 
-### C. WhatsApp AI Bot (`bot/.env`)
-Create a file named `.env` inside the `bot` folder and paste:
+---
 
+### C. WhatsApp AI Bot (`bot/.env`)
+Create `.env` inside `bot/`:
+
+- 🪟 **Windows (CMD / PowerShell)**:
+  ```cmd
+  cd bot
+  copy .env.example .env
+  ```
+- 🍎 **macOS / Linux (Terminal)**:
+  ```bash
+  cd bot
+  cp .env.example .env
+  ```
+
+Environment File Contents (`bot/.env`):
 ```env
 # Server Port
 PORT=3000
@@ -100,42 +140,45 @@ ZOHO_REFRESH_TOKEN=your_zoho_refresh_token
 
 ## 🚀 Step 3: Running the Full Platform Locally
 
-To run the full system, open **3 separate terminal / command prompt windows**:
+Open **3 separate command windows** (Command Prompt / PowerShell on Windows, or Terminal tabs on macOS):
 
 ### 🟢 Terminal 1: Start Central Backend
-```bash
-cd backend
-npm install
-npm run start:dev
-```
-✅ **Success Indicator:** Terminal shows `[NestApplication] Nest application successfully started` on `http://localhost:3001`.
+- 🪟 **Windows (CMD / PowerShell)** & 🍎 **macOS (Terminal)**:
+  ```bash
+  cd backend
+  npm install
+  npm run start:dev
+  ```
+✅ **Success Indicator:** Shows `[NestApplication] Nest application successfully started` on `http://localhost:3001`.
 
 ---
 
 ### 🟢 Terminal 2: Start Web Dashboard
-```bash
-cd frontend
-npm install
-npm run dev
-```
-✅ **Success Indicator:** Terminal shows `Local: http://localhost:5173/`. Open Chrome and visit `http://localhost:5173`.
+- 🪟 **Windows (CMD / PowerShell)** & 🍎 **macOS (Terminal)**:
+  ```bash
+  cd frontend
+  npm install
+  npm run dev
+  ```
+✅ **Success Indicator:** Shows `Local: http://localhost:5173/`. Open Chrome/Edge/Safari and visit `http://localhost:5173`.
 
 ---
 
 ### 🟢 Terminal 3: Start WhatsApp AI Bot
-```bash
-cd bot
-npm install
-npm start
-```
-✅ **Success Indicator:** Terminal shows `Bot server running on port 3000`.
+- 🪟 **Windows (CMD / PowerShell)** & 🍎 **macOS (Terminal)**:
+  ```bash
+  cd bot
+  npm install
+  npm start
+  ```
+✅ **Success Indicator:** Shows `Bot server running on port 3000`.
 
 ---
 
 ## 🎮 How to Test & Verify Local Operations
 
 1. **Accessing the Web Dashboard**:
-   - Open Chrome and visit `http://localhost:5173`.
+   - Open your web browser (Chrome / Edge / Safari) and visit `http://localhost:5173`.
    - Log in with Admin credentials.
 
 2. **Testing Zoho Bigin CRM Sync**:
@@ -151,12 +194,12 @@ npm start
 
 ## ❓ Troubleshooting Common Setup Errors
 
-| Error Message | Cause | Simple Solution |
-| :--- | :--- | :--- |
-| `EADDRINUSE: address already in use :::3000` | Port 3000 is occupied by another program | Close existing node windows or restart your computer. |
-| `invalid oauth token` | Zoho Bigin access token expired | Click **Push DB → Bigin** in the Web Dashboard to auto-refresh tokens. |
-| `Cannot find module ...` | Packages not installed yet | Run `npm install` inside the affected folder (`backend`, `frontend`, or `bot`). |
-| `Failed to fetch / Network Error` | Backend server is not running | Ensure Terminal 1 (`backend`) is running on `http://localhost:3001`. |
+| Error Message | Cause | Windows Fix 🪟 | macOS / Linux Fix 🍎 |
+| :--- | :--- | :--- | :--- |
+| `EADDRINUSE: address already in use :::3000` | Port 3000 is occupied by another process | Open CMD: `netstat -ano \| findstr :3000` and `taskkill /PID <PID> /F` | Open Terminal: `lsof -i :3000` and `kill -9 <PID>` |
+| `invalid oauth token` | Zoho Bigin access token expired | Click **Push DB → Bigin** in the Web Dashboard | Click **Push DB → Bigin** in the Web Dashboard |
+| `Cannot find module ...` | Packages not installed yet | Run `npm install` inside the module folder | Run `npm install` inside the module folder |
+| `Failed to fetch / Network Error` | Backend server is not running | Ensure `backend` window is active on port 3001 | Ensure `backend` window is active on port 3001 |
 
 ---
 
