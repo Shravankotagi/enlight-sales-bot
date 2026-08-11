@@ -196,6 +196,43 @@ async function extractFromImage(imageBuffer, mimeType) {
   }
 }
 
+async function extractFromDocument(documentBuffer, mimeType = 'application/pdf') {
+  try {
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_2;
+    const model = new ChatGoogleGenerativeAI({
+      model: 'gemini-2.5-flash',
+      apiKey: apiKey,
+      temperature: 0.1,
+    });
+    const base64Doc = documentBuffer.toString('base64');
+    
+    const message = new HumanMessage({
+      content: [
+        { type: 'text', text: EXTRACTION_PROMPT },
+        { 
+          type: 'media', 
+          mimeType: mimeType || 'application/pdf', 
+          data: base64Doc 
+        }
+      ]
+    });
+    
+    const response = await model.invoke([message]);
+    const rawText = (typeof response.content === 'string' ? response.content : JSON.stringify(response.content)).trim();
+    
+    const parsed = safeParseJSON(rawText, null);
+    if (!parsed) {
+      return await extractFromImage(documentBuffer, mimeType);
+    }
+    const postProcessed = postProcessExtraction(parsed);
+    console.log('Gemini PDF document PO extraction successful:', JSON.stringify(postProcessed, null, 2));
+    return postProcessed;
+  } catch (error) {
+    console.error('Gemini document extraction error:', error.message);
+    return await extractFromImage(documentBuffer, mimeType);
+  }
+}
+
 const INTENT_PROMPT = `
 You are the intelligent message router for Enlight Metals, an Indian B2B metal distributor.
 A salesperson sends a WhatsApp message in English, Hindi, or Hinglish — casually, informally, 
@@ -334,4 +371,4 @@ async function classifyQueryType(text) {
   }
 }
 
-module.exports = { extractFromText, extractFromImage, classifyIntent, getLatestActiveRatesText, classifyQueryType };
+module.exports = { extractFromText, extractFromImage, extractFromDocument, classifyIntent, getLatestActiveRatesText, classifyQueryType };
