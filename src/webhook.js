@@ -483,8 +483,9 @@ router.post('/', async (req, res) => {
         // ── END ORCHESTRATOR ──────────────────────────────────────────────────
 
         // Only actual sales inquiries/POs reach here
-        // Apply duplicate check only for inquiry messages that were successfully processed
-        if (raw_text) {
+        // Apply duplicate check only for specific typed text messages (exclude document/image placeholders)
+        const isPlaceholderText = ['document received', 'image received', 'voice note received'].includes((raw_text || '').toLowerCase().trim());
+        if (raw_text && !isPlaceholderText && raw_text.length > 5) {
           const oneHourAgo = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString();
           const { data: duplicateInquiries } = await supabase
             .from('inquiries')

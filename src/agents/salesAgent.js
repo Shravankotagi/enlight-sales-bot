@@ -897,8 +897,51 @@ async function processSalesMessage(text, senderPhone) {
   }
 }
 
+/**
+ * Main image/document handler for PO and Sales Vision extraction.
+ */
+async function processSalesImage(imageBuffer, mimeType, senderPhone) {
+  try {
+    const { extractFromImage, extractFromDocument } = require('../gemini');
+    let extraction;
+    if (mimeType && mimeType.includes('pdf')) {
+      extraction = await extractFromDocument(imageBuffer, mimeType);
+    } else {
+      extraction = await extractFromImage(imageBuffer, mimeType);
+    }
+
+    if (!extraction || extraction.error || extraction.overall_confidence < 0.1) {
+      return `⚠️ Could not read PO document clearly. Please ensure the Purchase Order text/table is visible or send it as clear text.`;
+    }
+
+    // Convert extraction to synthetic sales message format for processSalesMessage
+    const custName = extraction.customer_name || 'Purchase Order Customer';
+    let poNum = extraction.po_number || null;
+    const lineItems = extraction.line_items || [];
+    
+    // Construct synthetic text describing the PO
+    let syntheticText = `${custName} purchase order confirmed`;
+    if (poNum) syntheticText += ` PO number ${poNum}`;
+    
+    if (lineItems.length > 0) {
+      const itemStrs = lineItems.map(i => `${i.quantity_mt || 1} MT ${i.product_requirement || 'Metal Material'}${i.rate_per_mt ? ' rate ' + i.rate_per_mt : ''}`);
+      syntheticText += ` requirement ${itemStrs.join(', ')}`;
+    } else if (extraction.quantity_mt || extraction.product_requirement) {
+      syntheticText += ` requirement ${extraction.quantity_mt || 1} MT ${extraction.product_requirement || 'Metal Material'}`;
+    }
+    
+    syntheticText += ` status won`;
+
+    return await processSalesMessage(syntheticText, senderPhone);
+  } catch (err) {
+    console.error('[SalesAgent] Error processing sales image/document:', err);
+    return `⚠️ Error processing PO document: ${err.message}`;
+  }
+}
+
 module.exports = {
   processSalesMessage,
+  processSalesImage,
   findBestDeal,
   lookupRateSheetPrice,
   detectInvalidUnitInMessage,
