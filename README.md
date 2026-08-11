@@ -2,8 +2,8 @@
 
 Welcome! This is the **WhatsApp AI Sales Bot** for Enlight Metals.
 
-> 📖 **Complete System Architecture & Setup Guide**:  
-> For full step-by-step local setup instructions across all modules, environment keys, and database connections, see **[Root Master Setup Guide (README.md)](../README.md)**.
+> 📖 **Complete System Architecture & Local Setup Guide**:  
+> For full step-by-step local setup instructions across all modules, environment keys, and database connections, see **[LOCAL_SETUP.md](LOCAL_SETUP.md)**.
 
 ---
 
@@ -26,7 +26,7 @@ npm start
 ```
 
 - Server runs on `http://localhost:3000`.
-- For complete `.env` configuration details, see **[Root Master Setup Guide (README.md)](../README.md)**.
+- For complete `.env` configuration details, see **[LOCAL_SETUP.md](LOCAL_SETUP.md)**.
 
 ---
 
