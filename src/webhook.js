@@ -161,6 +161,21 @@ router.post('/', async (req, res) => {
           raw_text = raw_text.substring(0, 2000) + "... (truncated)";
         }
 
+        // Extract customer name & customer phone from message if present
+        let extractedCustName = null;
+        let extractedCustPhone = null;
+
+        if (raw_text) {
+          const textLower = raw_text.toLowerCase();
+          if (textLower.includes('delta')) extractedCustName = 'Delta Structural Steel';
+          else if (textLower.includes('mehta')) extractedCustName = 'Mehta Engineering';
+          else if (textLower.includes('supreme')) extractedCustName = 'Supreme Steel';
+          else if (textLower.includes('scafform')) extractedCustName = 'SB Scafform Technovert Pvt. Ltd.';
+
+          const pMatch = raw_text.match(/\b([6-9]\d{9})\b/);
+          if (pMatch) extractedCustPhone = pMatch[1];
+        }
+
         // Save incoming inquiry to `inquiries` table so it shows on the web dashboard
         const { saveInquiry, getFullActiveSession, saveActiveSession } = require('./supabase');
         try {
@@ -171,6 +186,8 @@ router.post('/', async (req, res) => {
             voice_url: voice_url || null,
             sender_phone: senderPhone,
             sender_name: employeeRecord ? employeeRecord.name : senderName,
+            customer_name: extractedCustName,
+            customer_phone: extractedCustPhone,
             message_id: messageId,
             status: 'processed',
             overall_confidence: 0.92,

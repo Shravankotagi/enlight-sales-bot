@@ -62,6 +62,8 @@ async function saveInquiry(data) {
       voice_url: data.voice_url || null,
       sender_phone: data.sender_phone || data.salesperson_phone,
       sender_name: data.sender_name || null,
+      customer_name: data.customer_name || null,
+      customer_phone: data.customer_phone || null,
       whatsapp_message_id: data.message_id || null,
       status: data.status || "processed",
       created_at: new Date().toISOString(),
