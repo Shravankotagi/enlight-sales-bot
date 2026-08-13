@@ -994,17 +994,18 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
       ai_extraction_json: extraction,
     });
 
-    // 2. Process deal update
-    const poNum = extraction.po_number || `PO-2026-${Math.floor(1000 + Math.random() * 9000)}`;
-    const isPO = extraction.inquiry_type === 'purchase_order' || !!extraction.po_number;
-    const stage = isPO ? 'won' : 'review';
+    // 2. Process deal update - Generate Deal ID (Ref No) for new inquiry; PO Number is ONLY added when client finalizes deal!
+    const dealRefCode = extraction.po_number
+      ? `#DEAL-${extraction.po_number.replace(/^PO-?/i, '')}`
+      : `#DEAL-${Math.floor(1000 + Math.random() * 9000)}`;
+    const stage = 'review';
 
     let totalVal = extraction.total_amount || 0;
     if (totalVal <= 0 && extraction.line_items && extraction.line_items.length > 0) {
       totalVal = extraction.line_items.reduce((s, i) => s + ((i.quantity || 0) * (i.rate || 0)), 0);
     }
 
-    // 3. Save Deal to Supabase deals table
+    // 3. Save Deal to Supabase deals table (PO number left null until deal is won by client)
     const { data: newDeal, error: dealErr } = await supabase
       .from('deals')
       .insert({
@@ -1014,13 +1015,13 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
         customer_phone: customerPhone,
         stage: stage,
         total_amount: totalVal || 0,
-        inquiry_type: extraction.inquiry_type || 'purchase_order',
+        inquiry_type: 'inquiry',
         delivery_location: extraction.delivery_location || null,
         delivery_date: extraction.delivery_date || null,
         payment_terms: extraction.payment_terms || null,
         po_date: extraction.po_date || new Date().toISOString().split('T')[0],
-        po_number: poNum,
-        won_at: stage === 'won' ? new Date().toISOString() : null,
+        po_number: null, // PO number is null for inquiries
+        status: 'needs_review',
       })
       .select()
       .single();
@@ -1045,24 +1046,6 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
       }
     }
 
-    // 5. Log KRA 1 Sales Achievement when deal is won
-    if (stage === 'won') {
-      const alreadyLogged = await isKRA1AlreadyLogged(senderPhone, finalCustomerName);
-      if (!alreadyLogged) {
-        await supabase.from('kra_logs').insert({
-          salesperson_phone: senderPhone,
-          customer_name: finalCustomerName,
-          kra_number: 1,
-          kra_type: 'sales_achievement',
-          metric_name: 'won_deal_value',
-          value: totalVal,
-          notes: `Won deal for ${finalCustomerName}: ₹${Number(totalVal).toLocaleString('en-IN')} (PO: ${poNum})`,
-          created_at: new Date().toISOString(),
-        });
-        console.log(`[SalesAgent] Logged KRA 1 for PO Vision deal: ${finalCustomerName} = ₹${totalVal}`);
-      }
-    }
-
     let itemsBreakdown = '';
     if (extraction.line_items && extraction.line_items.length > 0) {
       itemsBreakdown = extraction.line_items
@@ -1077,16 +1060,18 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
     const inquiryEditLink = savedInq?.id ? `${frontendUrl}/inquiries?id=${savedInq.id}` : `${frontendUrl}/inquiries`;
 
     let replyMsg =
-      `📄 *INQUIRY / PO DOCUMENT EXTRACTED & LOGGED!* 🏆\n\n` +
+      `📄 *INQUIRY / SALES DEAL LOGGED!* 🏗️\n\n` +
       `Customer: *${finalCustomerName}*\n` +
-      (poNum ? `PO Number: *${poNum}*\n` : '') +
-      `Stage: *${stage.toUpperCase()}*\n` +
+      `Deal ID: *${dealRefCode}*\n` +
+      `Stage: *REVIEW 📄*\n` +
       (itemsBreakdown ? `Line Items:\n${itemsBreakdown}\n` : '') +
-      (totalVal > 0 ? `Calculated Deal Total: *₹${Number(totalVal).toLocaleString('en-IN')}* + GST\n` : '') +
+      (totalVal > 0 ? `Estimated Deal Total: *₹${Number(totalVal).toLocaleString('en-IN')}* + GST\n` : '') +
       `Delivery Location: *${extraction.delivery_location || 'Mumbai Warehouse'}*\n\n` +
-      `✏️ *Review & Edit Quotation Table:* \n` +
+      `✏️ *Review & Finalize Quotation:* \n` +
       `${inquiryEditLink}\n\n` +
       `✅ Logged live to Inquiries tab & Sales Pipeline!`;
+
+    return replyMsg;
 
     return replyMsg;
   } catch (error) {
