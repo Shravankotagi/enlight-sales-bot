@@ -178,7 +178,7 @@ router.post('/', async (req, res) => {
           raw_text = raw_text.substring(0, 2000) + "... (truncated)";
         }
 
-        const isMediaMessage = messageType === 'image' || messageType === 'document';
+        let isMediaMessage = messageType === 'image' || messageType === 'document';
 
         // Save incoming inquiry to `inquiries` table so it shows on the web dashboard.
         // For image/document messages, we SKIP this initial save — processSalesImage will
