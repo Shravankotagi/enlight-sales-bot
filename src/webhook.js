@@ -87,6 +87,12 @@ router.get('/', (req, res) => {
  * Endpoint to receive incoming WhatsApp messages.
  */
 router.post('/', async (req, res) => {
+  // ── RESPOND 200 IMMEDIATELY to prevent Meta webhook retries ──────────────
+  // Meta will retry the webhook if it doesn't get 200 within ~20s.
+  // Gemini Vision + Supabase can take longer → causes double replies.
+  // We ACK first, then process asynchronously.
+  res.status(200).send('EVENT_RECEIVED');
+
   try {
     const body = req.body;
 
@@ -105,6 +111,17 @@ router.post('/', async (req, res) => {
         // Safely extract sender profile name, fallback to "Customer" if missing
         const senderName = (value.contacts && value.contacts[0] && value.contacts[0].profile && value.contacts[0].profile.name) || "Customer";
         const messageType = message.type;
+
+        // ── DEDUPLICATION: skip if messageId already processed (Meta retry protection) ──
+        const { data: existingMsg } = await supabase
+          .from('inquiries')
+          .select('id')
+          .eq('whatsapp_message_id', messageId)
+          .limit(1);
+        if (existingMsg && existingMsg.length > 0) {
+          console.log(`[Webhook] MessageId ${messageId} already processed — skipping duplicate.`);
+          return;
+        }
 
         // Look up employee record for this sender phone
         const employeeRecord = await getEmployeeByPhone(senderPhone);
@@ -161,23 +178,30 @@ router.post('/', async (req, res) => {
           raw_text = raw_text.substring(0, 2000) + "... (truncated)";
         }
 
-        // Save incoming inquiry to `inquiries` table so it shows on the web dashboard
+        const isMediaMessage = messageType === 'image' || messageType === 'document';
+
+        // Save incoming inquiry to `inquiries` table so it shows on the web dashboard.
+        // For image/document messages, we SKIP this initial save — processSalesImage will
+        // do the single save with the actual base64 image data (renderable in the browser).
         const { saveInquiry, getFullActiveSession, saveActiveSession } = require('./supabase');
-        try {
-          await saveInquiry({
-            source_channel: 'whatsapp',
-            raw_text: raw_text || `${messageType} message`,
-            media_urls: media_urls || [],
-            voice_url: voice_url || null,
-            sender_phone: senderPhone,
-            sender_name: employeeRecord ? employeeRecord.name : senderName,
-            message_id: messageId,
-            status: 'processed',
-            overall_confidence: 0.92,
-            employee_id: employeeRecord ? employeeRecord.employee_id : null,
-          });
-        } catch (inqErr) {
-          console.error('[Webhook] Failed to save inquiry:', inqErr.message);
+        let savedInquiry = null;
+        if (!isMediaMessage) {
+          try {
+            savedInquiry = await saveInquiry({
+              source_channel: 'whatsapp',
+              raw_text: raw_text || `${messageType} message`,
+              media_urls: media_urls || [],
+              voice_url: voice_url || null,
+              sender_phone: senderPhone,
+              sender_name: employeeRecord ? employeeRecord.name : senderName,
+              message_id: messageId,
+              status: 'processed',
+              overall_confidence: 0.92,
+              employee_id: employeeRecord ? employeeRecord.employee_id : null,
+            });
+          } catch (inqErr) {
+            console.error('[Webhook] Failed to save inquiry:', inqErr.message);
+          }
         }
 
         // --- CHECK ACTIVE REJECTION FLOWS (multi-turn logic) ---
@@ -344,7 +368,7 @@ router.post('/', async (req, res) => {
           return;
         }
 
-        const isMediaMessage = messageType === 'image' || messageType === 'document' || (media_urls && media_urls.length > 0);
+        isMediaMessage = messageType === 'image' || messageType === 'document' || (media_urls && media_urls.length > 0);
 
         if (isMediaMessage) {
           // Immediately wipe any stale pending session so image/document gets processed fresh by Gemini Vision
@@ -534,7 +558,8 @@ router.post('/', async (req, res) => {
               return;
             } else {
               // Route to Sales & PO Vision Agent (KRA 1 & Zoho Bigin)
-              const salesVisionReply = await processSalesImage(mediaData.buffer, mediaData.mimeType, senderPhone);
+              // Pass messageId so processSalesImage can save with the correct base64 image data
+              const salesVisionReply = await processSalesImage(mediaData.buffer, mediaData.mimeType, senderPhone, messageId);
               await sendTextMessage(senderPhone, salesVisionReply);
               return;
             }
@@ -809,9 +834,6 @@ router.post('/', async (req, res) => {
     }
   } catch (error) {
     console.error("Error processing incoming webhook POST:", error);
-  } finally {
-    // Meta requires a 200 OK response within 5 seconds for all webhook requests
-    res.status(200).send('EVENT_RECEIVED');
   }
 });
 

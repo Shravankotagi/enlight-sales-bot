@@ -950,7 +950,7 @@ async function processSalesMessage(text, senderPhone) {
 /**
  * Process incoming PO / Sales document image via Gemini Vision (KRA 1 & Inquiries Tab)
  */
-async function processSalesImage(imageBuffer, mimeType, senderPhone) {
+async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) {
   try {
     const { extractFromImage } = require('../gemini');
     const { saveInquiry, verifyAndGetCustomerName } = require('../supabase');
@@ -963,7 +963,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
     const custName = extraction.customer.name || 'Customer Inquiry';
     const officialCustomerName = await verifyAndGetCustomerName(custName, senderPhone);
     const finalCustomerName = officialCustomerName || custName;
-    const customerPhone = extraction.customer.phone || '9123456789';
+    const customerPhone = extraction.customer.phone || null;
 
     // Construct raw text representation for inquiries tab
     const itemsText = (extraction.line_items || [])
@@ -989,6 +989,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
       customer_name: finalCustomerName,
       customer_phone: customerPhone,
       salesperson_phone: senderPhone,
+      message_id: messageId || null,  // for deduplication on Meta retry
       status: 'review',
       overall_confidence: extraction.overall_confidence || 0.95,
       ai_extraction_json: extraction,
@@ -1056,22 +1057,31 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
         .join('\n');
     }
 
+    // Calculate GST breakdown for WhatsApp reply
+    const baseAmt = totalVal;
+    const gstAmt = Math.round(baseAmt * 0.18);
+    const grandTotal = baseAmt + gstAmt;
+
+    const amountBreakdown = baseAmt > 0
+      ? `Product Amount: *₹${baseAmt.toLocaleString('en-IN')}*\n` +
+        `GST (18%): *₹${gstAmt.toLocaleString('en-IN')}*\n` +
+        `*Grand Total: ₹${grandTotal.toLocaleString('en-IN')}*\n`
+      : '';
+
     const frontendUrl = process.env.FRONTEND_URL || 'https://enlight-sales-frontend.vercel.app';
     const inquiryEditLink = savedInq?.id ? `${frontendUrl}/inquiries?id=${savedInq.id}` : `${frontendUrl}/inquiries`;
 
-    let replyMsg =
+    const replyMsg =
       `📄 *INQUIRY / SALES DEAL LOGGED!* 🏗️\n\n` +
       `Customer: *${finalCustomerName}*\n` +
       `Deal ID: *${dealRefCode}*\n` +
       `Stage: *REVIEW 📄*\n` +
       (itemsBreakdown ? `Line Items:\n${itemsBreakdown}\n` : '') +
-      (totalVal > 0 ? `Estimated Deal Total: *₹${Number(totalVal).toLocaleString('en-IN')}* + GST\n` : '') +
+      amountBreakdown +
       `Delivery Location: *${extraction.delivery_location || 'Mumbai Warehouse'}*\n\n` +
       `✏️ *Review & Finalize Quotation:* \n` +
       `${inquiryEditLink}\n\n` +
       `✅ Logged live to Inquiries tab & Sales Pipeline!`;
-
-    return replyMsg;
 
     return replyMsg;
   } catch (error) {
