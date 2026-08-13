@@ -62,13 +62,13 @@ async function saveInquiry(data) {
       voice_url: data.voice_url || null,
       sender_phone: data.sender_phone || data.salesperson_phone,
       sender_name: data.sender_name || null,
-      customer_name: data.customer_name || null,
-      customer_phone: data.customer_phone || null,
       whatsapp_message_id: data.message_id || null,
       status: data.status || "processed",
       created_at: new Date().toISOString(),
       salesperson_phone: data.salesperson_phone || data.sender_phone || null,
       employee_id: data.employee_id || null,
+      inquiry_type: data.inquiry_type || null,
+      ai_extraction_json: data.ai_extraction_json || null,
       overall_confidence: data.overall_confidence != null
         ? Number(data.overall_confidence)
         : (data.confidence != null ? Number(data.confidence) : 0.92),
