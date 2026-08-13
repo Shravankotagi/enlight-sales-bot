@@ -953,7 +953,7 @@ async function processSalesMessage(text, senderPhone) {
 async function processSalesImage(imageBuffer, mimeType, senderPhone) {
   try {
     const { extractFromImage } = require('../gemini');
-    const { saveInquiry } = require('../supabase');
+    const { saveInquiry, verifyAndGetCustomerName } = require('../supabase');
     const extraction = await extractFromImage(imageBuffer, mimeType);
 
     if (!extraction || extraction.error || !extraction.customer) {
@@ -963,6 +963,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
     const custName = extraction.customer.name || 'Customer Inquiry';
     const officialCustomerName = await verifyAndGetCustomerName(custName, senderPhone);
     const finalCustomerName = officialCustomerName || custName;
+    const customerPhone = extraction.customer.phone || '9123456789';
 
     // Construct raw text representation for inquiries tab
     const itemsText = (extraction.line_items || [])
@@ -974,7 +975,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
     const base64Data = `data:${mimeType || 'image/jpeg'};base64,${imageBuffer.toString('base64')}`;
 
     // 1. Save Inquiry to Supabase (so it appears in web dashboard Inquiries tab with image attached!)
-    await saveInquiry({
+    const savedInq = await saveInquiry({
       source_channel: 'whatsapp',
       raw_text: extraction.po_number
         ? `[Inquiry Attachment: ${extraction.po_number}.jpg] ${rawSummary}`
@@ -982,6 +983,8 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
       media_urls: [base64Data],
       sender_phone: senderPhone,
       sender_name: finalCustomerName,
+      customer_name: finalCustomerName,
+      customer_phone: customerPhone,
       salesperson_phone: senderPhone,
       status: 'review',
       overall_confidence: extraction.overall_confidence || 0.95,
@@ -994,8 +997,66 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
     const stage = isPO ? 'won' : 'review';
 
     let totalVal = extraction.total_amount || 0;
-    if (totalVal <= 0 && extraction.line_items) {
+    if (totalVal <= 0 && extraction.line_items && extraction.line_items.length > 0) {
       totalVal = extraction.line_items.reduce((s, i) => s + ((i.quantity || 0) * (i.rate || 0)), 0);
+    }
+
+    // 3. Save Deal to Supabase deals table
+    const { data: newDeal, error: dealErr } = await supabase
+      .from('deals')
+      .insert({
+        inquiry_id: savedInq?.id || null,
+        customer_name: finalCustomerName,
+        salesperson_phone: senderPhone,
+        customer_phone: customerPhone,
+        stage: stage,
+        total_amount: totalVal || 0,
+        inquiry_type: extraction.inquiry_type || 'purchase_order',
+        delivery_location: extraction.delivery_location || null,
+        delivery_date: extraction.delivery_date || null,
+        payment_terms: extraction.payment_terms || null,
+        po_date: extraction.po_date || new Date().toISOString().split('T')[0],
+        po_number: poNum,
+        won_at: stage === 'won' ? new Date().toISOString() : null,
+      })
+      .select()
+      .single();
+
+    if (dealErr) {
+      console.error('[SalesAgent] Error inserting deal from image vision:', dealErr.message || dealErr);
+    }
+
+    // 4. Save Deal Items
+    if (newDeal && extraction.line_items && extraction.line_items.length > 0) {
+      for (const item of extraction.line_items) {
+        await supabase.from('deal_items').insert({
+          deal_id: newDeal.id,
+          sku_text: item.sku_text || 'Hot Rolled Steel Coil',
+          quantity: item.quantity || 50,
+          unit: item.unit || 'MT',
+          rate: item.rate || 55000,
+          amount: (item.quantity || 50) * (item.rate || 55000),
+          created_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    // 5. Log KRA 1 Sales Achievement when deal is won
+    if (stage === 'won') {
+      const alreadyLogged = await isKRA1AlreadyLogged(senderPhone, finalCustomerName);
+      if (!alreadyLogged) {
+        await supabase.from('kra_logs').insert({
+          salesperson_phone: senderPhone,
+          customer_name: finalCustomerName,
+          kra_number: 1,
+          kra_type: 'sales_achievement',
+          metric_name: 'won_deal_value',
+          value: totalVal,
+          notes: `Won deal for ${finalCustomerName}: ₹${Number(totalVal).toLocaleString('en-IN')} (PO: ${poNum})`,
+          created_at: new Date().toISOString(),
+        });
+        console.log(`[SalesAgent] Logged KRA 1 for PO Vision deal: ${finalCustomerName} = ₹${totalVal}`);
+      }
     }
 
     let itemsBreakdown = '';
@@ -1008,7 +1069,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
     let replyMsg =
       `📄 *INQUIRY / PO DOCUMENT EXTRACTED & LOGGED!* 🏆\n\n` +
       `Customer: *${finalCustomerName}*\n` +
-      (extraction.po_number ? `PO Number: *${extraction.po_number}*\n` : '') +
+      (poNum ? `PO Number: *${poNum}*\n` : '') +
       `Stage: *${stage.toUpperCase()}*\n` +
       (itemsBreakdown ? `Line Items:\n${itemsBreakdown}\n` : '') +
       (totalVal > 0 ? `Calculated Deal Total: *₹${Number(totalVal).toLocaleString('en-IN')}* + GST\n` : '') +
