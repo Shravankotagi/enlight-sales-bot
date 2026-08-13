@@ -490,20 +490,18 @@ router.post('/', async (req, res) => {
         // ── END ORCHESTRATOR ──────────────────────────────────────────────────
 
         // Only actual sales inquiries/POs reach here
-        // Apply duplicate check only for inquiry messages that were successfully processed
-        if (raw_text) {
-          const oneHourAgo = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString();
+        // Prevent rapid back-to-back duplicate processing (within 15s window for Meta retries)
+        if (raw_text && messageType !== 'image' && messageType !== 'document') {
+          const fifteenSecAgo = new Date(Date.now() - 15 * 1000).toISOString();
           const { data: duplicateInquiries } = await supabase
             .from('inquiries')
             .select('id, created_at')
             .eq('salesperson_phone', senderPhone)
             .eq('raw_text', raw_text)
-            .in('status', ['processed', 'review'])
-            .gte('created_at', oneHourAgo);
+            .gte('created_at', fifteenSecAgo);
 
-          if (duplicateInquiries && duplicateInquiries.length > 0) {
-            console.log('Duplicate inquiry text detected in the last 1 hour. Skipping processing.');
-            await sendTextMessage(senderPhone, `⚠️ *Duplicate message ignored* - This inquiry was already received and processed recently.`);
+          if (duplicateInquiries && duplicateInquiries.length > 1) {
+            console.log('[Webhook] Rapid duplicate text message within 15s window ignored.');
             return;
           }
         }
