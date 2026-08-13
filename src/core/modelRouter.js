@@ -12,7 +12,7 @@
  * TIER 2 (STANDARD API KEY - Simple & High Volume):
  * - Used for: Simple Intent Classification, Query Type Routing, Basic FAQ responses
  * - Key: process.env.GEMINI_API_KEY
- * - Model: gemini-3.1-flash-lite (Fast & cost-effective)
+ * - Model: gemini-2.0-flash-lite (Fast & cost-effective)
  */
 
 const { ChatGoogleGenerativeAI } = require('@langchain/google-genai');
@@ -53,12 +53,12 @@ function getPaidHighAccuracyModel(tools = null) {
 
 /**
  * Lightweight Model for Simple Tasks (Intent routing, greetings, simple queries).
- * Powered by standard GEMINI_API_KEY with gemini-3.1-flash-lite.
+ * Powered by standard GEMINI_API_KEY with gemini-2.0-flash-lite.
  */
 function getLightweightModel(tools = null) {
   const key = getStandardGeminiKey();
   const model = new ChatGoogleGenerativeAI({
-    model: 'gemini-3.1-flash-lite',
+    model: 'gemini-2.0-flash-lite',
     apiKey: key,
     temperature: 0.1,
     maxRetries: 1,

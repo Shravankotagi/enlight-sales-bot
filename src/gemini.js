@@ -1,5 +1,5 @@
 /**
- * gemini.js — Inquiry extraction & classification module using Google Gemini (gemini-3.1-flash-lite)
+ * gemini.js — Inquiry extraction & classification module using Google Gemini (gemini-2.0-flash-lite)
  */
 
 const { ChatGoogleGenerativeAI } = require('@langchain/google-genai');
