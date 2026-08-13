@@ -967,7 +967,10 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
 
     // Construct raw text representation for inquiries tab
     const itemsText = (extraction.line_items || [])
-      .map(i => `${i.sku_text || 'Steel'} ${i.quantity || 0} MT ${i.rate ? '@ Rs ' + i.rate + '/MT' : ''}`)
+      .map(i => {
+        const dimStr = i.dimensions ? ` (${i.dimensions})` : '';
+        return `${i.sku_text || 'Steel'}${dimStr} ${i.quantity || 0} MT ${i.rate ? '@ Rs ' + i.rate + '/MT' : ''}`;
+      })
       .join(', ');
     const rawSummary = `${itemsText}. Delivery Location: ${extraction.delivery_location || 'Warehouse'}`;
 
@@ -1032,6 +1035,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
         await supabase.from('deal_items').insert({
           deal_id: newDeal.id,
           sku_text: item.sku_text || 'Hot Rolled Steel Coil',
+          dimensions: item.dimensions || null,
           quantity: item.quantity || 50,
           unit: item.unit || 'MT',
           rate: item.rate || 55000,
@@ -1062,9 +1066,15 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
     let itemsBreakdown = '';
     if (extraction.line_items && extraction.line_items.length > 0) {
       itemsBreakdown = extraction.line_items
-        .map(i => `  • *${i.sku_text || 'Material'}*: ${i.quantity || 0} MT ${i.rate ? '@ ₹' + Number(i.rate).toLocaleString('en-IN') + '/MT' : ''}`)
+        .map(i => {
+          const dimStr = i.dimensions ? ` (${i.dimensions})` : '';
+          return `  • *${i.sku_text || 'Material'}*${dimStr}: ${i.quantity || 0} MT ${i.rate ? '@ ₹' + Number(i.rate).toLocaleString('en-IN') + '/MT' : ''}`;
+        })
         .join('\n');
     }
+
+    const frontendUrl = process.env.FRONTEND_URL || 'https://enlight-sales-frontend.vercel.app';
+    const inquiryEditLink = savedInq?.id ? `${frontendUrl}/inquiries?id=${savedInq.id}` : `${frontendUrl}/inquiries`;
 
     let replyMsg =
       `📄 *INQUIRY / PO DOCUMENT EXTRACTED & LOGGED!* 🏆\n\n` +
@@ -1074,6 +1084,8 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone) {
       (itemsBreakdown ? `Line Items:\n${itemsBreakdown}\n` : '') +
       (totalVal > 0 ? `Calculated Deal Total: *₹${Number(totalVal).toLocaleString('en-IN')}* + GST\n` : '') +
       `Delivery Location: *${extraction.delivery_location || 'Mumbai Warehouse'}*\n\n` +
+      `✏️ *Review & Edit Quotation Table:* \n` +
+      `${inquiryEditLink}\n\n` +
       `✅ Logged live to Inquiries tab & Sales Pipeline!`;
 
     return replyMsg;
