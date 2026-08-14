@@ -873,7 +873,7 @@ async function processSalesMessage(text, senderPhone) {
           notes: `Won deal for ${finalCustomerName}: ₹${dealAmount.toLocaleString('en-IN')}`,
           created_at: new Date().toISOString(),
         });
-        console.log(`[SalesAgent] Logged KRA 1 for won deal: ${finalCustomerName} = ₹${dealAmount}`);
+        console.log(`[SalesAgent] Logged Sales Achievement for won deal: ${finalCustomerName} = ₹${dealAmount}`);
       }
     }
 
@@ -911,13 +911,13 @@ async function processSalesMessage(text, senderPhone) {
 
     if (dbStage === 'won') {
       let resultMsg =
-        `🎉 *DEAL WON & PURCHASE ORDER GENERATED!* 🏆\n\n` +
+        `🎉 *DEAL WON & ORDER CONFIRMED!* 🏆\n\n` +
         `Customer: *${finalCustomerName}*\n` +
         `Deal ID: *${dealCode}*\n` +
         `Official PO Number: *${poNumber}* 📄\n` +
         `Total Value: *₹${Number(dealAmount).toLocaleString('en-IN')}* + GST\n` +
         (poDate ? `PO Date: *${poDate}*\n` : '') +
-        `\nSynced live to KRA 1 Sales Achievement & Zoho Bigin CRM! ✅`;
+        `\nSynced live to the Sales Achievement tab & Orders tab! ✅`;
 
       if (missingPrompt) {
         resultMsg += `\n\n${missingPrompt}`;
@@ -934,7 +934,7 @@ async function processSalesMessage(text, senderPhone) {
       (totalQty > 0 ? `Total Quantity: *${totalQty} MT*\n` : '') +
       `Calculated Deal Total: *${formattedAmount}* + GST\n` +
       `PO Date: *${poDate}*\n\n` +
-      `Synced live to Sales Pipeline & KRA 1 Dashboard! ✅`;
+      `Synced live to Sales Pipeline & Metrics! ✅`;
 
     if (missingPrompt) {
       resultMsg += `\n\n${missingPrompt}`;
@@ -1236,7 +1236,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         `*Total PO Value: ₹${grandTotal.toLocaleString('en-IN')}*\n\n` +
         `Payment Terms: *${extraction.payment_terms || '30 Days Credit'}*\n` +
         `Delivery Location: *${extraction.delivery_location || 'Warehouse'}*\n\n` +
-        `✅ Synced live to Orders Tab, KRA 1 Sales Achievement & Payment Tracking! 🚀`
+        `✅ Synced live to Orders Tab, Sales Achievement & Payment Tracking! 🚀`
       );
     }
 
