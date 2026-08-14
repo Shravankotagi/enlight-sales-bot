@@ -1030,6 +1030,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
       salesperson_phone: senderPhone,
       message_id: messageId || null,
       status: inqStatus,
+      inquiry_type: isPo ? 'purchase_order' : 'inquiry',
       overall_confidence: extraction.overall_confidence || 0.98,
       ai_extraction_json: extraction,
     });
@@ -1037,56 +1038,123 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
     let dealId = null;
 
     if (isPo) {
-      // Find existing open deal for this customer to mark WON, or create new won deal
-      const { data: openDeals } = await supabase
-        .from('deals')
-        .select('*')
-        .ilike('customer_name', `%${finalCustomerName}%`)
-        .not('stage', 'in', '("won","lost")')
-        .order('created_at', { ascending: false })
-        .limit(1);
+      // ──────────────────────────────────────────────────────────────────
+      // Route PO to the backend /deals/process-po endpoint (proven reliable path)
+      // This is the SAME API the dashboard "Create New Order" button uses.
+      // ──────────────────────────────────────────────────────────────────
+      try {
+        const axios = require('axios');
+        const backendUrl = process.env.BACKEND_URL ||
+          process.env.BACKEND_SERVICE_URL ||
+          'https://enlight-sales-backend-production.up.railway.app';
 
-      if (openDeals && openDeals.length > 0) {
-        dealId = openDeals[0].id;
-        await supabase
-          .from('deals')
-          .update({
-            stage: 'won',
-            won_at: new Date().toISOString(),
-            po_number: poNumber,
-            po_date: poDate,
-            total_amount: finalOrderAmount,
-            delivery_location: extraction.delivery_location || openDeals[0].delivery_location,
-            payment_terms: extraction.payment_terms || openDeals[0].payment_terms,
-            inquiry_type: 'purchase_order',
-            status: 'auto_created',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', dealId);
-      } else {
-        const { data: newWonDeal } = await supabase
-          .from('deals')
-          .insert({
-            inquiry_id: savedInq?.id || null,
-            customer_name: finalCustomerName,
-            salesperson_phone: senderPhone,
-            customer_phone: customerPhone,
-            stage: 'won',
-            won_at: new Date().toISOString(),
-            po_number: poNumber,
-            po_date: poDate,
-            total_amount: finalOrderAmount,
-            delivery_location: extraction.delivery_location || null,
-            payment_terms: extraction.payment_terms || null,
-            inquiry_type: 'purchase_order',
-            status: 'auto_created',
-            overall_confidence: extraction.overall_confidence || 0.98,
-            created_at: new Date().toISOString(),
-          })
-          .select()
-          .single();
+        const backendPayload = {
+          customer_name: finalCustomerName,
+          customer_phone: customerPhone || null,
+          po_number: poNumber,
+          po_date: poDate,
+          total_amount: finalOrderAmount,
+          delivery_location: extraction.delivery_location || null,
+          payment_terms: extraction.payment_terms || null,
+          salesperson_phone: senderPhone,
+          inquiry_id: savedInq?.id || null,
+          overall_confidence: extraction.overall_confidence || 0.98,
+          line_items: (extraction.line_items || []).map(item => ({
+            sku_text: item.sku_text || 'Material',
+            dimensions: item.dimensions || null,
+            quantity: Number(item.quantity) || 0,
+            unit: item.unit || 'MT',
+            rate: Number(item.rate) || 0,
+            amount: Number(item.amount) || 0,
+          })),
+        };
 
-        if (newWonDeal) dealId = newWonDeal.id;
+        console.log('[SalesAgent] Calling backend process-po for PO:', poNumber, 'customer:', finalCustomerName);
+
+        // Use bot's internal JWT or a service secret header
+        const headers = {
+          'Content-Type': 'application/json',
+        };
+        if (process.env.BOT_INTERNAL_SECRET) {
+          headers['x-bot-secret'] = process.env.BOT_INTERNAL_SECRET;
+        }
+
+        const poResponse = await axios.post(
+          `${backendUrl}/deals/process-po-internal`,
+          backendPayload,
+          { headers, timeout: 15000 }
+        );
+
+        dealId = poResponse.data?.id || poResponse.data?.data?.id || null;
+        console.log('[SalesAgent] Backend process-po-internal success, dealId:', dealId);
+
+      } catch (backendErr) {
+        console.error('[SalesAgent] Backend process-po-internal failed, falling back to direct Supabase:', backendErr.message);
+
+        // FALLBACK: Direct Supabase write with correct NOT IN syntax
+        const { data: openDeals, error: openDealsErr } = await supabase
+          .from('deals')
+          .select('id, stage, customer_name')
+          .ilike('customer_name', `%${finalCustomerName}%`)
+          .not('stage', 'in', '(won,lost)')  // correct PostgREST syntax: no quotes around values
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (openDealsErr) {
+          console.error('[SalesAgent] openDeals query error:', openDealsErr.message);
+        }
+
+        if (openDeals && openDeals.length > 0) {
+          dealId = openDeals[0].id;
+          const { error: updateErr } = await supabase
+            .from('deals')
+            .update({
+              stage: 'won',
+              won_at: new Date().toISOString(),
+              po_number: poNumber,
+              po_date: poDate,
+              total_amount: finalOrderAmount,
+              delivery_location: extraction.delivery_location || openDeals[0].delivery_location,
+              payment_terms: extraction.payment_terms || openDeals[0].payment_terms,
+              inquiry_type: 'purchase_order',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', dealId);
+          if (updateErr) {
+            console.error('[SalesAgent] Fallback deal update error:', updateErr.message);
+          } else {
+            console.log('[SalesAgent] Fallback: updated existing deal to won, dealId:', dealId);
+          }
+        } else {
+          const { data: newWonDeal, error: insertErr } = await supabase
+            .from('deals')
+            .insert({
+              inquiry_id: savedInq?.id || null,
+              customer_name: finalCustomerName,
+              salesperson_phone: senderPhone,
+              customer_phone: customerPhone,
+              stage: 'won',
+              won_at: new Date().toISOString(),
+              po_number: poNumber,
+              po_date: poDate,
+              total_amount: finalOrderAmount,
+              delivery_location: extraction.delivery_location || null,
+              payment_terms: extraction.payment_terms || null,
+              inquiry_type: 'purchase_order',
+              status: 'auto_created',
+              overall_confidence: extraction.overall_confidence || 0.98,
+              created_at: new Date().toISOString(),
+            })
+            .select()
+            .single();
+
+          if (insertErr) {
+            console.error('[SalesAgent] Fallback deal insert error:', insertErr.message, insertErr);
+          } else {
+            dealId = newWonDeal?.id || null;
+            console.log('[SalesAgent] Fallback: created new won deal, dealId:', dealId);
+          }
+        }
       }
     } else {
       // Create new inquiry deal in review stage
