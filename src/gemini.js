@@ -164,77 +164,70 @@ async function extractFromText(text) {
   }
 }
 
-async function extractFromImage(imageBuffer, mimeType) {
+async function extractFromImageOrDoc(buffer, mimeType) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_2;
-    const model = new ChatGoogleGenerativeAI({
-      model: 'gemini-2.5-flash',
-      apiKey: apiKey,
-      temperature: 0.1,
-    });
-    const base64Img = imageBuffer.toString('base64');
-    const imageUrl = `data:${mimeType || 'image/jpeg'};base64,${base64Img}`;
-    
-    const message = new HumanMessage({
-      content: [
-        { type: 'text', text: EXTRACTION_PROMPT },
-        { type: 'image_url', image_url: { url: imageUrl } }
-      ]
-    });
-    
-    const response = await model.invoke([message]);
-    const rawText = (typeof response.content === 'string' ? response.content : JSON.stringify(response.content)).trim();
-    
+    const axios = require('axios');
+    const apiKey =
+      process.env.GEMINI_PAID_API_KEY ||
+      process.env.GEMINI_API_KEY ||
+      process.env.GEMINI_API_KEY_1 ||
+      process.env.GEMINI_API_KEY_2;
+    if (!apiKey) {
+      throw new Error('GEMINI API key missing');
+    }
+
+    const cleanBase64 = buffer.toString('base64');
+    const cleanMime = mimeType || 'application/pdf';
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+    const response = await axios.post(
+      url,
+      {
+        contents: [
+          {
+            parts: [
+              { text: EXTRACTION_PROMPT },
+              {
+                inline_data: {
+                  mime_type: cleanMime,
+                  data: cleanBase64,
+                },
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.1,
+          response_mime_type: 'application/json',
+        },
+      },
+      { timeout: 35000 },
+    );
+
+    const rawText =
+      response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
     const parsed = safeParseJSON(rawText, null);
-    if (!parsed) throw new Error('Could not parse image extraction from Gemini vision response');
+    if (!parsed) throw new Error('Could not parse JSON from Gemini vision response');
     const postProcessed = postProcessExtraction(parsed);
-    console.log('Gemini image extraction successful:', JSON.stringify(postProcessed, null, 2));
+    console.log('Gemini document/image extraction successful:', JSON.stringify(postProcessed, null, 2));
     return postProcessed;
   } catch (error) {
-    console.error('Gemini image extraction error:', error.message);
+    console.error('Gemini vision extraction error:', error.message);
     return {
       overall_confidence: 0,
       inquiry_type: 'unknown',
-      error: error.message
+      error: error.message,
     };
   }
 }
 
+async function extractFromImage(imageBuffer, mimeType) {
+  return extractFromImageOrDoc(imageBuffer, mimeType || 'image/jpeg');
+}
+
 async function extractFromDocument(documentBuffer, mimeType = 'application/pdf') {
-  try {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_2;
-    const model = new ChatGoogleGenerativeAI({
-      model: 'gemini-2.5-flash',
-      apiKey: apiKey,
-      temperature: 0.1,
-    });
-    const base64Doc = documentBuffer.toString('base64');
-    
-    const message = new HumanMessage({
-      content: [
-        { type: 'text', text: EXTRACTION_PROMPT },
-        { 
-          type: 'media', 
-          mimeType: mimeType || 'application/pdf', 
-          data: base64Doc 
-        }
-      ]
-    });
-    
-    const response = await model.invoke([message]);
-    const rawText = (typeof response.content === 'string' ? response.content : JSON.stringify(response.content)).trim();
-    
-    const parsed = safeParseJSON(rawText, null);
-    if (!parsed) {
-      return await extractFromImage(documentBuffer, mimeType);
-    }
-    const postProcessed = postProcessExtraction(parsed);
-    console.log('Gemini PDF document PO extraction successful:', JSON.stringify(postProcessed, null, 2));
-    return postProcessed;
-  } catch (error) {
-    console.error('Gemini document extraction error:', error.message);
-    return await extractFromImage(documentBuffer, mimeType);
-  }
+  return extractFromImageOrDoc(documentBuffer, mimeType || 'application/pdf');
 }
 
 const INTENT_PROMPT = `

@@ -979,13 +979,26 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
 
     // 1. Differentiate between Purchase Order (PO) and regular Inquiry
     const isPo = Boolean(
-      extraction.po_number &&
-      extraction.po_number !== 'null' &&
-      extraction.po_number !== 'None' &&
-      String(extraction.po_number).trim().length > 2
+      extraction.is_purchase_order === true ||
+      extraction.inquiry_type === 'purchase_order' ||
+      extraction.document_type === 'purchase_order' ||
+      (extraction.po_number &&
+        extraction.po_number !== 'null' &&
+        extraction.po_number !== 'None' &&
+        String(extraction.po_number).trim().length > 2)
     );
 
-    const poNumber = isPo ? String(extraction.po_number).trim() : null;
+    let poNumber = null;
+    if (isPo) {
+      if (extraction.po_number && extraction.po_number !== 'null' && String(extraction.po_number).trim().length > 2) {
+        poNumber = String(extraction.po_number).trim();
+      } else {
+        const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        const randomNum = Math.floor(1000 + Math.random() * 9000);
+        poNumber = `PO-${todayStr}-${randomNum}`;
+      }
+    }
+
     const poDate = extraction.po_date || new Date().toISOString().split('T')[0];
     const stage = isPo ? 'won' : 'review';
     const inqStatus = isPo ? 'confirmed' : 'review';
