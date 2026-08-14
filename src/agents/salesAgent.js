@@ -1018,7 +1018,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
 
     let savedInq = null;
     if (!isPo) {
-      // 2. Save Inquiry to Supabase (ONLY for regular Inquiries, not PO orders)
+      // 2. Save Inquiry to Supabase (for regular Inquiries)
       savedInq = await saveInquiry({
         source_channel: 'whatsapp',
         raw_text: `[Inquiry Document Attached] ${rawSummary}`,
@@ -1031,6 +1031,23 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         message_id: messageId || null,
         status: inqStatus,
         inquiry_type: 'inquiry',
+        overall_confidence: extraction.overall_confidence || 0.98,
+        ai_extraction_json: extraction,
+      });
+    } else {
+      // For Purchase Orders: Save media attachment linked with inquiry_type 'purchase_order'
+      savedInq = await saveInquiry({
+        source_channel: 'whatsapp',
+        raw_text: `[PO Document Attached: ${poNumber}] ${rawSummary}`,
+        media_urls: [base64Data],
+        sender_phone: senderPhone,
+        sender_name: finalCustomerName,
+        customer_name: finalCustomerName,
+        customer_phone: customerPhone,
+        salesperson_phone: senderPhone,
+        message_id: messageId || null,
+        status: 'order_created',
+        inquiry_type: 'purchase_order',
         overall_confidence: extraction.overall_confidence || 0.98,
         ai_extraction_json: extraction,
       });
@@ -1059,6 +1076,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
           payment_terms: extraction.payment_terms || null,
           salesperson_phone: senderPhone,
           inquiry_id: savedInq?.id || null,
+          media_urls: [base64Data],
           overall_confidence: extraction.overall_confidence || 0.98,
           line_items: (extraction.line_items || []).map(item => ({
             sku_text: item.sku_text || 'Material',
