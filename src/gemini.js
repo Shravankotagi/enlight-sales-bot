@@ -54,9 +54,11 @@ Extract the following into ONLY a JSON object (no prose, no markdown, no backtic
 }
 
 Rules:
-- CRITICAL PO vs INQUIRY RULE:
-  * If the document has a PO Number (e.g. "PO/2026/...", "26-27/MPO/471", "PO-1234", "P.O. No: ..."), extract it into po_number and set inquiry_type: "purchase_order".
-  * If NO PO Number is present in the document/text, po_number MUST be null, and inquiry_type MUST be "inquiry".
+- CRITICAL PO vs INQUIRY RULE — READ THIS CAREFULLY:
+  * A PURCHASE ORDER has an official PO Number printed/written on it (e.g. "P.O. No: 26-27/MPO/471", "PO/2026/123", "Purchase Order No: 4521"). Extract po_number and set inquiry_type: "purchase_order".
+  * A MATERIAL REQUIREMENT / INQUIRY / RFQ is a document listing what the customer WANTS TO BUY but has NO official PO number assigned yet. Set po_number: null and inquiry_type: "inquiry".
+  * "Inquiry Ref", "Ref No", "Quotation Ref" are NOT PO numbers. Only a field explicitly labeled "PO Number", "P.O. No", "Purchase Order No" qualifies.
+  * When in doubt, default to inquiry_type: "inquiry" and po_number: null.
 - Quantities: normalize to MT where unit is tonnes/ton/MT; keep KG/PCS as stated
 - SKU text: preserve the customer exact words in sku_text
 - Basic & GST Amounts: extract basic_amount (before tax), gst_amount (18%), and total_amount (grand total including GST).
