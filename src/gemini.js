@@ -14,9 +14,9 @@ async function callLightweightModel(prompt) {
 }
 
 const EXTRACTION_PROMPT = `
-You are an inquiry parser for an Indian B2B metal distributor called Enlight Metals.
-Input may be English, Hindi, or Hinglish. It could be typed text OR a photo of a 
-Purchase Order, handwritten requirement, or printed RFQ.
+You are an expert inquiry and purchase order (PO) parser for an Indian B2B metal distributor called Enlight Metals.
+Input may be English, Hindi, or Hinglish. It could be typed text OR a photo / PDF of a 
+Purchase Order (PO), handwritten requirement, or printed RFQ.
 
 Extract the following into ONLY a JSON object (no prose, no markdown, no backticks):
 
@@ -41,27 +41,31 @@ Extract the following into ONLY a JSON object (no prose, no markdown, no backtic
       "confidence": 0.0
     }
   ],
-  "po_number": "",
-  "po_date": "",
+  "po_number": null,
+  "po_date": null,
   "delivery_location": "",
   "delivery_date": "",
   "payment_terms": "",
+  "basic_amount": 0,
+  "gst_amount": 0,
   "total_amount": 0,
   "overall_confidence": 0.0,
   "inquiry_type": "purchase_order|inquiry|visiting_card|unknown"
 }
 
 Rules:
+- CRITICAL PO vs INQUIRY RULE:
+  * If the document has a PO Number (e.g. "PO/2026/...", "26-27/MPO/471", "PO-1234", "P.O. No: ..."), extract it into po_number and set inquiry_type: "purchase_order".
+  * If NO PO Number is present in the document/text, po_number MUST be null, and inquiry_type MUST be "inquiry".
 - Quantities: normalize to MT where unit is tonnes/ton/MT; keep KG/PCS as stated
 - SKU text: preserve the customer exact words in sku_text
+- Basic & GST Amounts: extract basic_amount (before tax), gst_amount (18%), and total_amount (grand total including GST).
 - If a field is absent return null - never invent values
-- DATE RULE: Current Year is 2026. Any date specifying month/day (e.g. "20 August", "25 August") MUST ALWAYS use year 2026 (e.g. 2026-08-20). NEVER output past years like 2024 or 2025.
+- DATE RULE: Current Year is 2026. Any date specifying month/day MUST ALWAYS use year 2026 (e.g. 2026-08-14).
 - CONFIDENCE RULE:
-  * 1.0 (100%) ONLY when quantity, product, unit, AND explicit rate/price per MT are stated.
+  * 1.0 (100%) when quantity, product, unit, AND explicit rate/price per MT are stated.
   * 0.85 when rate is auto-derived from rate sheet.
   * 0.75 - 0.80 when rate or customer details are missing.
-- overall_confidence: average of line item confidences, capped at 0.85 if rate is auto-derived.
-- inquiry_type: "purchase_order" if PO number present, "inquiry" if just a requirement
 - Return ONLY the JSON object. No prose. No markdown. No backticks.
 `;
 

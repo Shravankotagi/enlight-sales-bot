@@ -977,73 +977,226 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
     // Convert image buffer to base64 Data URL so web dashboard can render/view it!
     const base64Data = `data:${mimeType || 'image/jpeg'};base64,${imageBuffer.toString('base64')}`;
 
-    // 1. Save Inquiry to Supabase (so it appears in web dashboard Inquiries tab with image attached!)
+    // 1. Differentiate between Purchase Order (PO) and regular Inquiry
+    const isPo = Boolean(
+      extraction.po_number &&
+      extraction.po_number !== 'null' &&
+      extraction.po_number !== 'None' &&
+      String(extraction.po_number).trim().length > 2
+    );
+
+    const poNumber = isPo ? String(extraction.po_number).trim() : null;
+    const poDate = extraction.po_date || new Date().toISOString().split('T')[0];
+    const stage = isPo ? 'won' : 'review';
+    const inqStatus = isPo ? 'confirmed' : 'review';
+
+    let totalVal = extraction.total_amount || 0;
+    if (totalVal <= 0 && extraction.line_items && extraction.line_items.length > 0) {
+      totalVal = extraction.line_items.reduce(
+        (s, i) => s + ((Number(i.quantity) || 0) * (Number(i.rate) || 0)),
+        0
+      );
+    }
+
+    const baseAmt = extraction.basic_amount || totalVal;
+    const gstAmt = extraction.gst_amount || Math.round(baseAmt * 0.18);
+    const grandTotal = extraction.total_amount || (baseAmt + gstAmt);
+    const finalOrderAmount = grandTotal > 0 ? grandTotal : baseAmt;
+
+    // 2. Save Inquiry to Supabase
     const savedInq = await saveInquiry({
       source_channel: 'whatsapp',
-      raw_text: extraction.po_number
-        ? `[Inquiry Attachment: ${extraction.po_number}.jpg] ${rawSummary}`
-        : `[Inquiry Attachment: steel_inquiry_po.jpg] ${rawSummary}`,
+      raw_text: isPo
+        ? `[PO Document Attached: ${poNumber}] ${rawSummary}`
+        : `[Inquiry Document Attached] ${rawSummary}`,
       media_urls: [base64Data],
       sender_phone: senderPhone,
       sender_name: finalCustomerName,
       customer_name: finalCustomerName,
       customer_phone: customerPhone,
       salesperson_phone: senderPhone,
-      message_id: messageId || null,  // for deduplication on Meta retry
-      status: 'review',
-      overall_confidence: extraction.overall_confidence || 0.95,
+      message_id: messageId || null,
+      status: inqStatus,
+      overall_confidence: extraction.overall_confidence || 0.98,
       ai_extraction_json: extraction,
     });
 
-    // 2. Process deal update - Generate Deal ID (Ref No) for new inquiry; PO Number is ONLY added when client finalizes deal!
-    const dealRefCode = extraction.po_number
-      ? `#DEAL-${extraction.po_number.replace(/^PO-?/i, '')}`
-      : `#DEAL-${Math.floor(1000 + Math.random() * 9000)}`;
-    const stage = 'review';
+    let dealId = null;
 
-    let totalVal = extraction.total_amount || 0;
-    if (totalVal <= 0 && extraction.line_items && extraction.line_items.length > 0) {
-      totalVal = extraction.line_items.reduce((s, i) => s + ((i.quantity || 0) * (i.rate || 0)), 0);
+    if (isPo) {
+      // Find existing open deal for this customer to mark WON, or create new won deal
+      const { data: openDeals } = await supabase
+        .from('deals')
+        .select('*')
+        .ilike('customer_name', `%${finalCustomerName}%`)
+        .not('stage', 'in', '("won","lost")')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (openDeals && openDeals.length > 0) {
+        dealId = openDeals[0].id;
+        await supabase
+          .from('deals')
+          .update({
+            stage: 'won',
+            won_at: new Date().toISOString(),
+            po_number: poNumber,
+            po_date: poDate,
+            total_amount: finalOrderAmount,
+            delivery_location: extraction.delivery_location || openDeals[0].delivery_location,
+            payment_terms: extraction.payment_terms || openDeals[0].payment_terms,
+            inquiry_type: 'purchase_order',
+            status: 'auto_created',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', dealId);
+      } else {
+        const { data: newWonDeal } = await supabase
+          .from('deals')
+          .insert({
+            inquiry_id: savedInq?.id || null,
+            customer_name: finalCustomerName,
+            salesperson_phone: senderPhone,
+            customer_phone: customerPhone,
+            stage: 'won',
+            won_at: new Date().toISOString(),
+            po_number: poNumber,
+            po_date: poDate,
+            total_amount: finalOrderAmount,
+            delivery_location: extraction.delivery_location || null,
+            payment_terms: extraction.payment_terms || null,
+            inquiry_type: 'purchase_order',
+            status: 'auto_created',
+            overall_confidence: extraction.overall_confidence || 0.98,
+            created_at: new Date().toISOString(),
+          })
+          .select()
+          .single();
+
+        if (newWonDeal) dealId = newWonDeal.id;
+      }
+    } else {
+      // Create new inquiry deal in review stage
+      const dealRefCode = `#DEAL-${Math.floor(1000 + Math.random() * 9000)}`;
+      const { data: newInqDeal, error: dealErr } = await supabase
+        .from('deals')
+        .insert({
+          inquiry_id: savedInq?.id || null,
+          customer_name: finalCustomerName,
+          salesperson_phone: senderPhone,
+          customer_phone: customerPhone,
+          stage: 'review',
+          total_amount: baseAmt || 0,
+          inquiry_type: 'inquiry',
+          delivery_location: extraction.delivery_location || null,
+          delivery_date: extraction.delivery_date || null,
+          payment_terms: extraction.payment_terms || null,
+          po_date: poDate,
+          po_number: null,
+          status: 'needs_review',
+        })
+        .select()
+        .single();
+
+      if (dealErr) {
+        console.error('[SalesAgent] Error inserting inquiry deal:', dealErr.message || dealErr);
+      }
+      if (newInqDeal) dealId = newInqDeal.id;
     }
 
-    // 3. Save Deal to Supabase deals table (PO number left null until deal is won by client)
-    const { data: newDeal, error: dealErr } = await supabase
-      .from('deals')
-      .insert({
-        inquiry_id: savedInq?.id || null,
-        customer_name: finalCustomerName,
-        salesperson_phone: senderPhone,
-        customer_phone: customerPhone,
-        stage: stage,
-        total_amount: totalVal || 0,
-        inquiry_type: 'inquiry',
-        delivery_location: extraction.delivery_location || null,
-        delivery_date: extraction.delivery_date || null,
-        payment_terms: extraction.payment_terms || null,
-        po_date: extraction.po_date || new Date().toISOString().split('T')[0],
-        po_number: null, // PO number is null for inquiries
-        status: 'needs_review',
-      })
-      .select()
-      .single();
+    // 3. Save / Overwrite Deal Items
+    if (dealId && extraction.line_items && extraction.line_items.length > 0) {
+      await supabase.from('deal_items').delete().eq('deal_id', dealId);
 
-    if (dealErr) {
-      console.error('[SalesAgent] Error inserting deal from image vision:', dealErr.message || dealErr);
-    }
-
-    // 4. Save Deal Items
-    if (newDeal && extraction.line_items && extraction.line_items.length > 0) {
       for (const item of extraction.line_items) {
+        const q = Number(item.quantity) || 0;
+        const r = Number(item.rate) || 0;
+        const amt = Number(item.amount) || (q > 0 && r > 0 ? q * r : 0);
+
         await supabase.from('deal_items').insert({
-          deal_id: newDeal.id,
+          deal_id: dealId,
           sku_text: item.sku_text || 'Hot Rolled Steel Coil',
           dimensions: item.dimensions || null,
-          quantity: item.quantity || 50,
+          quantity: q > 0 ? q : null,
           unit: item.unit || 'MT',
-          rate: item.rate || 55000,
-          amount: (item.quantity || 50) * (item.rate || 55000),
+          rate: r > 0 ? r : null,
+          amount: amt > 0 ? amt : null,
           created_at: new Date().toISOString(),
         });
+      }
+    }
+
+    // 4. If PO: Log KRA 1 and create Payment Tracking record
+    if (isPo && dealId) {
+      // Log KRA 1 Sales Achievement
+      await supabase.from('kra_logs').insert({
+        salesperson_phone: senderPhone,
+        customer_name: finalCustomerName,
+        kra_number: 1,
+        kra_type: 'sales_achievement',
+        metric_name: 'won_deal_value',
+        value: finalOrderAmount,
+        notes: `PO Received: ${poNumber} for ${finalCustomerName} — ₹${finalOrderAmount.toLocaleString('en-IN')}`,
+        created_at: new Date().toISOString(),
+      });
+
+      // Update recurring customers
+      try {
+        await supabase
+          .from('recurring_customers')
+          .update({ last_order_date: new Date().toISOString() })
+          .ilike('customer_name', `%${finalCustomerName}%`);
+      } catch (err) {}
+
+      // Create / Update Payment Tracking
+      try {
+        let creditDays = 30;
+        const termsStr = String(extraction.payment_terms || '').toLowerCase();
+        const daysMatch = termsStr.match(/(\d+)\s*(?:days|day)/);
+        if (daysMatch) {
+          creditDays = parseInt(daysMatch[1], 10);
+        } else if (termsStr.includes('advance') || termsStr.includes('immediate') || termsStr.includes('cash')) {
+          creditDays = 0;
+        }
+
+        const poDateTime = new Date(poDate).getTime() || Date.now();
+        const dueDate = new Date(poDateTime + creditDays * 24 * 60 * 60 * 1000);
+        const dueDateStr = dueDate.toISOString().split('T')[0];
+
+        const { data: existingPay } = await supabase
+          .from('payment_tracking')
+          .select('id')
+          .eq('deal_id', dealId)
+          .limit(1);
+
+        if (existingPay && existingPay.length > 0) {
+          await supabase
+            .from('payment_tracking')
+            .update({
+              invoice_amount: finalOrderAmount,
+              outstanding: finalOrderAmount,
+              due_date: dueDateStr,
+              credit_period_days: creditDays,
+              customer_name: finalCustomerName,
+              salesperson_phone: senderPhone,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', existingPay[0].id);
+        } else {
+          await supabase.from('payment_tracking').insert({
+            deal_id: dealId,
+            salesperson_phone: senderPhone,
+            customer_name: finalCustomerName,
+            invoice_amount: finalOrderAmount,
+            outstanding: finalOrderAmount,
+            status: 'pending',
+            due_date: dueDateStr,
+            credit_period_days: creditDays,
+            created_at: new Date().toISOString(),
+          });
+        }
+      } catch (payErr) {
+        console.warn('[SalesAgent] Payment tracking notice:', payErr.message);
       }
     }
 
@@ -1057,33 +1210,37 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         .join('\n');
     }
 
-    // Calculate GST breakdown for WhatsApp reply
-    const baseAmt = totalVal;
-    const gstAmt = Math.round(baseAmt * 0.18);
-    const grandTotal = baseAmt + gstAmt;
-
-    const amountBreakdown = baseAmt > 0
-      ? `Product Amount: *₹${baseAmt.toLocaleString('en-IN')}*\n` +
+    if (isPo) {
+      return (
+        `🎉 *PURCHASE ORDER RECEIVED & DEAL WON!* 🏆\n\n` +
+        `Customer: *${finalCustomerName}*\n` +
+        `PO Number: *${poNumber}* 📄\n` +
+        `PO Date: *${poDate}*\n` +
+        `Stage: *WON / DELIVERED 🎉*\n\n` +
+        (itemsBreakdown ? `Line Items:\n${itemsBreakdown}\n` : '') +
+        `PO Basic Value: *₹${baseAmt.toLocaleString('en-IN')}*\n` +
         `GST (18%): *₹${gstAmt.toLocaleString('en-IN')}*\n` +
-        `*Grand Total: ₹${grandTotal.toLocaleString('en-IN')}*\n`
-      : '';
+        `*Total PO Value: ₹${grandTotal.toLocaleString('en-IN')}*\n\n` +
+        `Payment Terms: *${extraction.payment_terms || '30 Days Credit'}*\n` +
+        `Delivery Location: *${extraction.delivery_location || 'Warehouse'}*\n\n` +
+        `✅ Synced live to Orders Tab, KRA 1 Sales Achievement & Payment Tracking! 🚀`
+      );
+    }
 
     const frontendUrl = process.env.FRONTEND_URL || 'https://enlight-sales-frontend.vercel.app';
     const inquiryEditLink = savedInq?.id ? `${frontendUrl}/inquiries?id=${savedInq.id}` : `${frontendUrl}/inquiries`;
 
-    const replyMsg =
+    return (
       `📄 *INQUIRY / SALES DEAL LOGGED!* 🏗️\n\n` +
       `Customer: *${finalCustomerName}*\n` +
-      `Deal ID: *${dealRefCode}*\n` +
       `Stage: *REVIEW 📄*\n` +
       (itemsBreakdown ? `Line Items:\n${itemsBreakdown}\n` : '') +
-      amountBreakdown +
+      (baseAmt > 0 ? `Product Amount: *₹${baseAmt.toLocaleString('en-IN')}*\nGST (18%): *₹${gstAmt.toLocaleString('en-IN')}*\n*Grand Total: ₹${grandTotal.toLocaleString('en-IN')}*\n` : '') +
       `Delivery Location: *${extraction.delivery_location || 'Mumbai Warehouse'}*\n\n` +
       `✏️ *Review & Finalize Quotation:* \n` +
       `${inquiryEditLink}\n\n` +
-      `✅ Logged live to Inquiries tab & Sales Pipeline!`;
-
-    return replyMsg;
+      `✅ Logged live to Inquiries tab & Sales Pipeline!`
+    );
   } catch (error) {
     console.error('[SalesAgent] Error processing sales image:', error);
     return `⚠️ Error processing document image: ${error.message}`;
