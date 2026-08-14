@@ -1016,24 +1016,25 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
     const grandTotal = extraction.total_amount || (baseAmt + gstAmt);
     const finalOrderAmount = grandTotal > 0 ? grandTotal : baseAmt;
 
-    // 2. Save Inquiry to Supabase
-    const savedInq = await saveInquiry({
-      source_channel: 'whatsapp',
-      raw_text: isPo
-        ? `[PO Document Attached: ${poNumber}] ${rawSummary}`
-        : `[Inquiry Document Attached] ${rawSummary}`,
-      media_urls: [base64Data],
-      sender_phone: senderPhone,
-      sender_name: finalCustomerName,
-      customer_name: finalCustomerName,
-      customer_phone: customerPhone,
-      salesperson_phone: senderPhone,
-      message_id: messageId || null,
-      status: inqStatus,
-      inquiry_type: isPo ? 'purchase_order' : 'inquiry',
-      overall_confidence: extraction.overall_confidence || 0.98,
-      ai_extraction_json: extraction,
-    });
+    let savedInq = null;
+    if (!isPo) {
+      // 2. Save Inquiry to Supabase (ONLY for regular Inquiries, not PO orders)
+      savedInq = await saveInquiry({
+        source_channel: 'whatsapp',
+        raw_text: `[Inquiry Document Attached] ${rawSummary}`,
+        media_urls: [base64Data],
+        sender_phone: senderPhone,
+        sender_name: finalCustomerName,
+        customer_name: finalCustomerName,
+        customer_phone: customerPhone,
+        salesperson_phone: senderPhone,
+        message_id: messageId || null,
+        status: inqStatus,
+        inquiry_type: 'inquiry',
+        overall_confidence: extraction.overall_confidence || 0.98,
+        ai_extraction_json: extraction,
+      });
+    }
 
     let dealId = null;
 
