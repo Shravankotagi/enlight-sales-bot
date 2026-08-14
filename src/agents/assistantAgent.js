@@ -16,7 +16,7 @@ async function handleConversationalQuery(text, senderPhone) {
     const formatter = new Intl.DateTimeFormat('en-IN', {
       timeZone: 'Asia/Kolkata',
       dateStyle: 'full',
-      timeStyle: 'long'in
+      timeStyle: 'long'
     });
     const liveDateTime = formatter.format(now);
     
