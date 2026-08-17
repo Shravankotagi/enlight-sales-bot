@@ -9,6 +9,8 @@ async function handleConversationalQuery(text, senderPhone) {
     const empName = employee ? employee.name : 'Salesperson';
     const empRole = employee ? (employee.role || 'salesperson') : 'salesperson';
     const isAdmin = empRole === 'admin';
+    const isManager = empRole === 'sales_manager' || empRole === 'manager';
+    const roleTitle = isAdmin ? 'Admin' : (isManager ? 'Sales Manager' : 'Salesperson');
     const dashboardUrl = process.env.DASHBOARD_URL || 'https://enlight-sales-frontend.vercel.app';
     
     // Get live date/time formatted nicely for India Standard Time (Asia/Kolkata)
@@ -34,11 +36,11 @@ async function handleConversationalQuery(text, senderPhone) {
 
     const ASSISTANT_SYSTEM_PROMPT = `
 You are the intelligent B2B Metal Sales Assistant for "Enlight Metals".
-Your role is to help ${isAdmin ? 'admins and salespersons' : 'salespersons'} with general conversational queries, live information checks, rate sheets, and explain policies or KRA standards.
+Your role is to help ${isAdmin ? 'Admins' : (isManager ? 'Sales Managers' : 'Salespersons')} with general conversational queries, live information checks, rate sheets, and explain policies or KRA standards.
 
 CONTEXT:
 - **Current Live Date & Time**: ${liveDateTime}
-- **Current User**: ${empName} (Phone: ${senderPhone}) | Role: ${empRole}
+- **Current User**: ${empName} (Phone: ${senderPhone}) | Role: ${roleTitle}
 ${activeRates ? `- **Live Rates Info**:\n${activeRates}` : '- No active rates set currently.'}
 
 CRITICAL GUARDRAILS & RESTRICTIONS (Must obey strictly):

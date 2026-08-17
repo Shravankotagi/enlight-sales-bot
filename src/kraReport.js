@@ -26,12 +26,49 @@ function formatINR(amount) {
   return '₹' + Number(amount).toLocaleString('en-IN');
 }
 
-async function generateFullKRAReport(senderPhone, customMonthRange = null) {
+async function generateFullKRAReport(scopeOrPhone, customMonthRange = null) {
   const supabase = getSupabase();
+  const { getAccessibleSalespersonPhonesForBot } = require('./supabase');
+  const scope = typeof scopeOrPhone === 'object' && scopeOrPhone !== null
+    ? scopeOrPhone
+    : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
+
   const { start, end, monthName, year } = customMonthRange || getMonthRange();
   const now = new Date();
 
+  if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
+    return `📊 *Team KRA Monthly Report - ${monthName} ${year}*\n\n📋 No data found. You currently have no salespersons assigned to your team.`;
+  }
+
   try {
+    let dealsQuery = supabase.from('deals').select('*, deal_items(*)').neq('inquiry_type', 'unknown').gte('created_at', start).lte('created_at', end);
+    let inqQuery = supabase.from('inquiries').select('*').gte('created_at', start).lte('created_at', end);
+    let kraLogsQuery = supabase.from('kra_logs').select('*').gte('created_at', start).lte('created_at', end);
+    let visitsQuery = supabase.from('customer_visits').select('*').gte('visited_at', start).lte('visited_at', end);
+    let complaintsQuery = supabase.from('complaints').select('*').gte('reported_at', start).lte('reported_at', end);
+    let paymentsQuery = supabase.from('payment_tracking').select('*').gte('created_at', start).lte('created_at', end);
+    let recurringQuery = supabase.from('recurring_customers').select('*').eq('is_active', true);
+
+    if (scope.phones !== null) {
+      if (scope.phones.length === 1) {
+        dealsQuery = dealsQuery.eq('salesperson_phone', scope.phones[0]);
+        inqQuery = inqQuery.eq('salesperson_phone', scope.phones[0]);
+        kraLogsQuery = kraLogsQuery.eq('salesperson_phone', scope.phones[0]);
+        visitsQuery = visitsQuery.eq('salesperson_phone', scope.phones[0]);
+        complaintsQuery = complaintsQuery.eq('reported_by', scope.phones[0]);
+        paymentsQuery = paymentsQuery.eq('salesperson_phone', scope.phones[0]);
+        recurringQuery = recurringQuery.eq('assigned_salesperson_phone', scope.phones[0]);
+      } else {
+        dealsQuery = dealsQuery.in('salesperson_phone', scope.phones);
+        inqQuery = inqQuery.in('salesperson_phone', scope.phones);
+        kraLogsQuery = kraLogsQuery.in('salesperson_phone', scope.phones);
+        visitsQuery = visitsQuery.in('salesperson_phone', scope.phones);
+        complaintsQuery = complaintsQuery.in('reported_by', scope.phones);
+        paymentsQuery = paymentsQuery.in('salesperson_phone', scope.phones);
+        recurringQuery = recurringQuery.in('assigned_salesperson_phone', scope.phones);
+      }
+    }
+
     // Fetch all data in parallel
     const [
       dealsResult,
@@ -42,28 +79,13 @@ async function generateFullKRAReport(senderPhone, customMonthRange = null) {
       paymentsResult,
       recurringResult
     ] = await Promise.all([
-      supabase.from('deals').select('*, deal_items(*)')
-        .eq('salesperson_phone', senderPhone)
-        .neq('inquiry_type', 'unknown')
-        .gte('created_at', start).lte('created_at', end),
-      supabase.from('inquiries').select('*')
-        .eq('salesperson_phone', senderPhone)
-        .gte('created_at', start).lte('created_at', end),
-      supabase.from('kra_logs').select('*')
-        .eq('salesperson_phone', senderPhone)
-        .gte('created_at', start).lte('created_at', end),
-      supabase.from('customer_visits').select('*')
-        .eq('salesperson_phone', senderPhone)
-        .gte('visited_at', start).lte('visited_at', end),
-      supabase.from('complaints').select('*')
-        .eq('reported_by', senderPhone)
-        .gte('reported_at', start).lte('reported_at', end),
-      supabase.from('payment_tracking').select('*')
-        .eq('salesperson_phone', senderPhone)
-        .gte('created_at', start).lte('created_at', end),
-      supabase.from('recurring_customers').select('*')
-        .eq('assigned_salesperson_phone', senderPhone)
-        .eq('is_active', true)
+      dealsQuery,
+      inqQuery,
+      kraLogsQuery,
+      visitsQuery,
+      complaintsQuery,
+      paymentsQuery,
+      recurringQuery
     ]);
 
     const deals = dealsResult.data || [];

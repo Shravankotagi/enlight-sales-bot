@@ -27,26 +27,109 @@ function sanitizeNumber(val) {
   return isNaN(parsed) ? null : parsed;
 }
 
+function normalizePhone(phone) {
+  if (!phone) return '';
+  return String(phone).replace(/\D/g, '').slice(-10);
+}
+
 /**
  * Looks up an employee record by their phone number.
  * @param {string} phone - The sender phone number (e.g. '919876543210')
- * @returns {{ employee_id, name, role } | null}
+ * @returns {{ id, employee_id, name, role, phone, manager_id, manager_phone } | null}
  */
 async function getEmployeeByPhone(phone) {
   try {
     if (!phone) return null;
+    const clean = String(phone).replace(/\D/g, '');
+    const last10 = clean.slice(-10);
+    const variants = Array.from(
+      new Set([phone, clean, last10, `91${last10}`, `+91${last10}`]),
+    );
+
     const { data, error } = await supabase
       .from('employees')
-      .select('employee_id, name, role')
-      .eq('phone', phone)
+      .select('*')
+      .in('phone', variants)
       .eq('is_active', true)
-      .single();
-    if (error || !data) return null;
-    return data;
+      .limit(1);
+
+    if (error || !data || data.length === 0) return null;
+    return data[0];
   } catch (err) {
     console.warn('getEmployeeByPhone error:', err.message);
     return null;
   }
+}
+
+/**
+ * Resolves role-based access control phones list for a bot user:
+ * - Admin: role = 'admin', phones = null (unrestricted, all data)
+ * - Sales Manager: role = 'sales_manager', phones = [assigned_reps_phones] (empty array if 0 reps)
+ * - Salesperson: role = 'salesperson', phones = [senderPhone]
+ */
+async function getAccessibleSalespersonPhonesForBot(senderPhone) {
+  const employee = await getEmployeeByPhone(senderPhone);
+  if (!employee) {
+    return {
+      role: 'salesperson',
+      phones: [senderPhone],
+      employee: null,
+      isManager: false,
+      isAdmin: false,
+      assignedSalespersons: [],
+    };
+  }
+
+  const role = (employee.role || 'salesperson').toLowerCase();
+  const isAdmin = role.includes('admin');
+  const isManager = role.includes('manager') || role === 'sales_manager';
+
+  if (isAdmin) {
+    return {
+      role: 'admin',
+      phones: null,
+      employee,
+      isManager: false,
+      isAdmin: true,
+      assignedSalespersons: [],
+    };
+  }
+
+  if (isManager) {
+    const { data: allActive } = await supabase
+      .from('employees')
+      .select('*')
+      .eq('is_active', true);
+
+    const normPhone = normalizePhone(senderPhone);
+    const assigned = (allActive || []).filter((emp) => {
+      const empRole = (emp.role || '').toLowerCase();
+      if (empRole.includes('admin') || empRole.includes('manager')) return false;
+      if (emp.manager_id && emp.manager_id === employee.id) return true;
+      if (emp.manager_phone && normalizePhone(emp.manager_phone) === normPhone) return true;
+      return false;
+    });
+
+    const teamPhones = Array.from(new Set(assigned.map((a) => a.phone).filter(Boolean)));
+    return {
+      role: 'sales_manager',
+      phones: teamPhones, // empty array [] if 0 assigned salespersons
+      employee,
+      isManager: true,
+      isAdmin: false,
+      assignedSalespersons: assigned,
+    };
+  }
+
+  // Default Salesperson
+  return {
+    role: 'salesperson',
+    phones: [employee.phone || senderPhone],
+    employee,
+    isManager: false,
+    isAdmin: false,
+    assignedSalespersons: [],
+  };
 }
 
 /**
@@ -461,7 +544,9 @@ module.exports = {
   saveInquiry, 
   getInquiries, 
   saveDeal, 
-  getEmployeeByPhone, 
+  getEmployeeByPhone,
+  normalizePhone,
+  getAccessibleSalespersonPhonesForBot,
   ensureCustomerRecord,
   checkAndLogNewCustomer,
   fuzzyMatchCustomer,

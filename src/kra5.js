@@ -331,13 +331,32 @@ async function handlePaymentUpdate(text, senderPhone, intentData) {
 }
 
 // Get payment summary for query
-async function getPaymentSummary(senderPhone) {
+async function getPaymentSummary(scopeOrPhone) {
   const supabase = getSupabase();
   try {
-    const { data: payments } = await supabase
+    const { getAccessibleSalespersonPhonesForBot } = require('./supabase');
+    const scope = typeof scopeOrPhone === 'object' && scopeOrPhone !== null
+      ? scopeOrPhone
+      : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
+
+    if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
+      return '💰 *KRA 5 - Payment Status*\n\n✅ No pending payments tracked. You currently have no salespersons assigned to your team.';
+    }
+
+    let query = supabase
       .from('payment_tracking')
       .select('*')
       .order('due_date', { ascending: true });
+
+    if (scope.phones !== null) {
+      if (scope.phones.length === 1) {
+        query = query.eq('salesperson_phone', scope.phones[0]);
+      } else {
+        query = query.in('salesperson_phone', scope.phones);
+      }
+    }
+
+    const { data: payments } = await query;
 
     if (!payments || payments.length === 0) {
       return '✅ No pending payments tracked.';
@@ -358,7 +377,8 @@ async function getPaymentSummary(senderPhone) {
       (sum, p) => sum + (p.outstanding || 0), 0
     );
 
-    let msg = `💰 *KRA 5 - Payment Status*\n\n`;
+    const title = scope.isAdmin ? 'Company Payment Status' : (scope.isManager ? 'Team Payment Status' : 'Payment Status');
+    let msg = `💰 *KRA 5 - ${title}*\n\n`;
 
     if (overdue.length > 0) {
       msg += `🔴 *Overdue (${overdue.length}):*\n`;

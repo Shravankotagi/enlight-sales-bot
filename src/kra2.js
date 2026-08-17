@@ -114,18 +114,37 @@ async function logNewCustomer(deal, senderPhone) {
 }
 
 // Get KRA 2 summary
-async function getNewCustomerSummary(senderPhone) {
+async function getNewCustomerSummary(scopeOrPhone) {
   const supabase = getSupabase();
   try {
+    const { getAccessibleSalespersonPhonesForBot } = require('./supabase');
+    const scope = typeof scopeOrPhone === 'object' && scopeOrPhone !== null
+      ? scopeOrPhone
+      : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
+
     const { start, end, monthName, year } = getMonthRange();
 
-    const { data: logs } = await supabase
+    if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
+      return `👥 *KRA 2 - New Customers*\n${monthName} ${year}\n\nAcquired: 0/3\n⚠️ No salespersons assigned to your team yet.`;
+    }
+
+    let query = supabase
       .from('kra_logs')
       .select('*')
       .eq('kra_number', 2)
       .eq('kra_type', 'new_customer')
       .gte('created_at', start)
       .lte('created_at', end);
+
+    if (scope.phones !== null) {
+      if (scope.phones.length === 1) {
+        query = query.eq('salesperson_phone', scope.phones[0]);
+      } else {
+        query = query.in('salesperson_phone', scope.phones);
+      }
+    }
+
+    const { data: logs } = await query;
 
     const count = logs?.length || 0;
     const remaining = Math.max(0, 3 - count);

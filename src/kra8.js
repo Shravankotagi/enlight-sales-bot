@@ -411,19 +411,38 @@ async function handleComplaintResolution(text, senderPhone) {
 }
 
 // Get complaint summary for query
-async function getComplaintSummary(senderPhone) {
+async function getComplaintSummary(scopeOrPhone) {
   const supabase = getSupabase();
   try {
+    const { getAccessibleSalespersonPhonesForBot } = require('./supabase');
+    const scope = typeof scopeOrPhone === 'object' && scopeOrPhone !== null
+      ? scopeOrPhone
+      : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
+
+    if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
+      return '📊 *KRA 8 - Complaint Summary*\n\n✅ No complaints logged. You currently have no salespersons assigned to your team.';
+    }
+
     const now = new Date();
     const monthStart = new Date(
       now.getFullYear(), now.getMonth(), 1
     ).toISOString();
 
-    const { data: complaints } = await supabase
+    let query = supabase
       .from('complaints')
       .select('*')
       .gte('reported_at', monthStart)
       .order('reported_at', { ascending: false });
+
+    if (scope.phones !== null) {
+      if (scope.phones.length === 1) {
+        query = query.eq('reported_by', scope.phones[0]);
+      } else {
+        query = query.in('reported_by', scope.phones);
+      }
+    }
+
+    const { data: complaints } = await query;
 
     if (!complaints || complaints.length === 0) {
       return '✅ No complaints logged this month!';
@@ -440,7 +459,8 @@ async function getComplaintSummary(senderPhone) {
         )
       : null;
 
-    let msg = `📊 *KRA 8 - Complaint Summary*\n\n` +
+    const title = scope.isAdmin ? 'Company Complaint Summary' : (scope.isManager ? 'Team Complaint Summary' : 'Complaint Summary');
+    let msg = `📊 *KRA 8 - ${title}*\n\n` +
       `Total this month: ${complaints.length}\n` +
       `✅ Resolved: ${resolved.length}\n` +
       `⏳ Pending: ${pending.length}\n` +
