@@ -77,12 +77,13 @@ I'll notify the pricing desk to prepare the quotation! 📄
 
 Updated Customer Master & Sales Pipeline! ✅
 
-## Critical Rules
+- **ADMIN PRIVILEGES**: When the user is an Admin, they have full unrestricted read and write permissions across all data, customers, salespeople, and deals. When Admin asks to change or update a customer (e.g. "Change supreme steel order frequency to 45 days", "Max customer - Change supreme steel order frequency to 45 days"), you MUST execute the update immediately using `update_customer_profile`.
+- **CUSTOMER PROFILE & ORDER FREQUENCY UPDATES**: When a user requests to update a customer's order frequency (e.g. "Change [customer] order frequency to X days", "set frequency to 45 days"), reassign a customer to a salesperson (e.g. "reassign [customer] to Max"), or update contact details, CALL `update_customer_profile`. Do NOT call `onboard_new_customer` for updating an existing customer's order frequency.
 - NEVER output generic 1-line responses like "Activity updated in dashboard". Always format a complete manager response.
 - Use *bold* for customer names, products, amounts, and dates.
 - Always end with a KRA dashboard confirmation line when logging activities.
 - **BLOCKED REQUESTS**: If someone asks you to 'suggest products for [customer]', 'recommend materials', 'lock the rate sheet', 'create/update/delete a rate sheet', respond: "I cannot perform rate sheet or administrative actions via WhatsApp. Please use the Enlight Sales Web Dashboard for administrative actions." Do NOT call any tools.
-- **CROSS-SALESPERSON REQUESTS**: If a salesperson asks about ANOTHER salesperson's performance by name, respond: "You can only view your own performance data. Please contact your Sales Lead for team reports." Do NOT retrieve data for other salespersons.
+- **CROSS-SALESPERSON REQUESTS**: If a salesperson (NOT an Admin) asks about ANOTHER salesperson's performance by name, respond: "You can only view your own performance data. Please contact your Sales Lead for team reports." Do NOT retrieve data for other salespersons.
 - **TOOL QUESTIONS / WARNINGS**: If a tool returns an interactive question or warning (starting with ⚠️, ❓, or ❌), YOU MUST FORWARD THAT EXACT QUESTION / PROMPT TO THE USER! Do NOT claim a deal was recorded or updated if the tool returned a confirmation prompt or warning!
 - **ALWAYS INCLUDE DEAL ID**: Whenever a tool output includes a Deal ID (e.g. #DEAL-B8018B or #DEAL-3FBBB0), YOU MUST EXPLICITLY INCLUDE THAT EXACT DEAL ID IN YOUR RESPONSE TEXT!
 - **CUSTOMER DISAMBIGUATION**: Do NOT assume or carry forward a previous customer name from conversation history for a new requirement/inquiry (starting with 'Need...', 'Requires...', 'New inquiry...') unless the user explicitly names the customer in their message or is directly replying to a multi-deal choice option!`;
@@ -115,6 +116,9 @@ function getDeterministicIntentHint(text) {
   }
   if (/\b(complaint|defective|damaged|scratch|rust|quality|rejected|rejection|faulty)\b/i.test(lower)) {
     anchors.push('CALL log_complaint');
+  }
+  if (/\b(order frequency|frequency|reorder days|order cycle|reassign customer|change frequency)\b/i.test(lower)) {
+    anchors.push('CALL update_customer_profile');
   }
   if (/\b(requires|requirement|need|inquiry|quote|quotation|rfq|ton|mt|coil|plate|sheet|tmt|bar|hr|cr|ms)\b/i.test(lower)) {
     anchors.push('CALL update_deal_stage');
@@ -177,10 +181,18 @@ async function runOrchestrator(text, senderPhone, options = {}) {
       const activeContextPrompt = await getActiveContextPrompt(sp);
       const historyMessages = getChatHistory(sp);
 
+      const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+      const userScope = await getAccessibleSalespersonPhonesForBot(sp);
+      const roleDescription = userScope.isAdmin
+        ? 'Admin (Full Company-Wide Read & Write Access: can update, view, and manage any customer, salesperson, deal, or order frequency across the entire company)'
+        : (userScope.isManager
+            ? 'Sales Manager (Team Management Access: can manage assigned team salespersons and their customers)'
+            : 'Salesperson (Standard Access)');
+
       const contextMessages = [
         new SystemMessage(
           SYSTEM_PROMPT +
-          `\n\nCurrent salesperson: ${en || 'Salesperson'}\nPhone: ${sp}\nMessage type: ${mt}${activeContextPrompt}${intentAnchor}`
+          `\n\nCurrent user: ${en || 'User'} (Phone: ${sp}, Role: ${roleDescription})\nMessage type: ${mt}${activeContextPrompt}${intentAnchor}`
         ),
         ...historyMessages,
         ...messages,

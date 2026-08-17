@@ -202,6 +202,39 @@ function createTools(senderPhone, rawUserText = '') {
     }
   );
 
+  const updateCustomerProfileTool = tool(
+    async ({ customer_name, order_frequency_days, contact_person, phone, gst, address_or_city, assigned_salesperson, text }) => {
+      try {
+        const { updateCustomerProfileRecord } = getSupabase();
+        const res = await updateCustomerProfileRecord(senderPhone, customer_name, {
+          order_frequency_days,
+          contact_person,
+          phone,
+          gst,
+          address_or_city,
+          assigned_salesperson,
+        });
+        return res.message || JSON.stringify(res);
+      } catch (err) {
+        return `Error updating customer: ${err.message}`;
+      }
+    },
+    {
+      name: 'update_customer_profile',
+      description: `Use this tool when updating an existing customer's order frequency (e.g. 45 days, 30 days, 60 days), contact details (phone, owner name, city, GST), active status, or reassigning a customer to a salesperson. Finds the customer across the database and updates their record in place with zero duplicates.`,
+      schema: z.object({
+        customer_name: z.string().describe('The name of the company or customer to update'),
+        order_frequency_days: z.number().optional().describe('New order frequency in number of days (e.g. 45, 30, 60)'),
+        contact_person: z.string().optional().describe('New contact person / owner name'),
+        phone: z.string().optional().describe('New phone or mobile number'),
+        gst: z.string().optional().describe('New GST number'),
+        address_or_city: z.string().optional().describe('New address or city/location'),
+        assigned_salesperson: z.string().optional().describe('Salesperson name to reassign or associate with this customer (e.g. "Max", "Rahul")'),
+        text: z.string().optional().describe('The original message text'),
+      }),
+    }
+  );
+
   return [
     logCustomerVisitTool,
     updateDealStageTool,
@@ -209,6 +242,7 @@ function createTools(senderPhone, rawUserText = '') {
     logComplaintTool,
     logRetentionFollowupTool,
     onboardNewCustomerTool,
+    updateCustomerProfileTool,
     queryMyDataTool,
     getContextTool,
     processSalesImageTool,
