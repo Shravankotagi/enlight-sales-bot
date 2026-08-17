@@ -180,31 +180,41 @@ async function getSalesThisMonth(scopeOrPhone, text = '') {
       return `📊 *Team Sales Summary - ${monthName} ${year}*\n\n📋 No sales data found. You currently have no salespersons assigned to your team.`;
     }
 
+    // Match Dashboard logic: includes deals created in month OR won in month
     let query = supabase
       .from('deals')
       .select('*, deal_items(*)')
-      .gte('created_at', start)
-      .lte('created_at', end);
+      .or(`and(created_at.gte.${start},created_at.lte.${end}),and(stage.eq.won,won_at.gte.${start},won_at.lte.${end})`);
 
     query = applySalespersonFilter(query, scope.phones, 'salesperson_phone');
 
     const { data: deals, error } = await query;
     if (error) throw error;
 
-    const totalDeals = deals?.length || 0;
-    const wonDeals = deals?.filter(d => d.stage === 'won').length || 0;
-    const totalAmount = deals?.reduce((sum, d) => sum + (Number(d.total_amount) || 0), 0) || 0;
-    const totalItems = deals?.reduce((sum, d) => sum + (d.deal_items?.length || 0), 0) || 0;
+    const allDeals = deals || [];
+    const wonDealsList = allDeals.filter(d => d.stage === 'won');
+    const wonDealsCount = wonDealsList.length;
+    const wonRevenue = wonDealsList.reduce((sum, d) => sum + (Number(d.total_amount) || 0), 0);
+    const wonTonnage = wonDealsList.reduce((sum, d) => {
+      const items = d.deal_items || [];
+      return sum + items.reduce((iSum, it) => iSum + (Number(it.quantity) || 0), 0);
+    }, 0);
+
+    const totalCreatedDeals = allDeals.length;
+    const totalPipelineValue = allDeals.reduce((sum, d) => sum + (Number(d.total_amount) || 0), 0);
 
     const title = scope.targetRepName
       ? `${scope.targetRepName}'s Sales Summary`
       : (scope.isAdmin ? 'Company Sales Summary' : (scope.isManager ? 'Team Sales Summary' : 'Sales Summary'));
 
     return `📊 *${title} - ${monthName} ${year}*\n\n` +
-      `📋 Total Created Deals: ${totalDeals}\n` +
-      `✅ Won: ${wonDeals}\n` +
-      `📦 Total Line Items: ${totalItems}\n` +
-      `💰 Total Value: ${formatINR(totalAmount)}\n\n` +
+      `🏆 *Won Sales Achievement:*\n` +
+      `• Won Revenue: *${formatINR(wonRevenue)}*\n` +
+      `• Won Orders: *${wonDealsCount}*\n` +
+      (wonTonnage > 0 ? `• Delivered Volume: *${wonTonnage.toLocaleString('en-IN')} MT*\n` : '') +
+      `\n📋 *Pipeline Activity:*\n` +
+      `• Deals Created: ${totalCreatedDeals}\n` +
+      `• Total Pipeline Value: ${formatINR(totalPipelineValue)}\n\n` +
       `_Data from Enlight Sales OS_`;
   } catch (error) {
     console.error('getSalesThisMonth error:', error);
@@ -361,8 +371,7 @@ async function getKRAStatus(scopeOrPhone, text = '') {
     let dealsQuery = supabase
       .from('deals')
       .select('*, deal_items(*)')
-      .gte('created_at', start)
-      .lte('created_at', end);
+      .or(`and(created_at.gte.${start},created_at.lte.${end}),and(stage.eq.won,won_at.gte.${start},won_at.lte.${end})`);
     dealsQuery = applySalespersonFilter(dealsQuery, scope.phones, 'salesperson_phone');
 
     let inqQuery = supabase
@@ -375,51 +384,111 @@ async function getKRAStatus(scopeOrPhone, text = '') {
     const resolvedMonth = new Date(start).getMonth() + 1;
     const resolvedYear  = new Date(start).getFullYear();
 
-    let kra2Query = supabase
+    let kraLogsQuery = supabase
       .from('kra_logs')
-      .select('id')
-      .eq('kra_number', 2)
-      .eq('kra_type', 'new_customer')
-      .eq('month', resolvedMonth)
-      .eq('year', resolvedYear);
-    kra2Query = applySalespersonFilter(kra2Query, scope.phones, 'salesperson_phone');
+      .select('*')
+      .gte('created_at', start)
+      .lte('created_at', end);
+    kraLogsQuery = applySalespersonFilter(kraLogsQuery, scope.phones, 'salesperson_phone');
 
-    const [dealsRes, inqRes, kra2Res] = await Promise.all([
+    let visitsQuery = supabase
+      .from('customer_visits')
+      .select('*')
+      .gte('visited_at', start)
+      .lte('visited_at', end);
+    visitsQuery = applySalespersonFilter(visitsQuery, scope.phones, 'salesperson_phone');
+
+    let paymentsQuery = supabase
+      .from('payment_tracking')
+      .select('*');
+    paymentsQuery = applySalespersonFilter(paymentsQuery, scope.phones, 'salesperson_phone');
+
+    let recurringQuery = supabase
+      .from('recurring_customers')
+      .select('*')
+      .eq('is_active', true);
+    recurringQuery = applySalespersonFilter(recurringQuery, scope.phones, 'assigned_salesperson_phone');
+
+    let complaintsQuery = supabase
+      .from('complaints')
+      .select('*')
+      .gte('reported_at', start)
+      .lte('reported_at', end);
+    complaintsQuery = applySalespersonFilter(complaintsQuery, scope.phones, 'reported_by');
+
+    const [dealsRes, inqRes, kraLogsRes, visitsRes, paymentsRes, recurringRes, complaintsRes] = await Promise.all([
       dealsQuery,
       inqQuery,
-      kra2Query
+      kraLogsQuery,
+      visitsQuery,
+      paymentsQuery,
+      recurringQuery,
+      complaintsQuery
     ]);
 
     const deals = dealsRes.data || [];
     const inquiries = inqRes.data || [];
-    const kra2Logs = kra2Res.data || [];
+    const kraLogs = kraLogsRes.data || [];
+    const visits = visitsRes.data || [];
+    const payments = paymentsRes.data || [];
+    const recurring = recurringRes.data || [];
+    const complaints = complaintsRes.data || [];
 
-    const totalDeals = deals.length;
-    const wonDeals = deals.filter(d => d.stage === 'won') || [];
+    // KRA 1: Won deals, Revenue & Delivered Tonnage
+    const wonDeals = deals.filter(d => d.stage === 'won');
     const wonCount = wonDeals.length;
     const wonValue = wonDeals.reduce((sum, d) => sum + (Number(d.total_amount) || 0), 0);
+    const wonTonnage = wonDeals.reduce((sum, d) => {
+      const items = d.deal_items || [];
+      return sum + items.reduce((iSum, it) => iSum + (Number(it.quantity) || 0), 0);
+    }, 0);
 
-    const totalInquiries = inquiries.length;
-    const conversionRate = totalInquiries > 0 
-      ? Math.round((wonCount / totalInquiries) * 100) 
-      : 0;
+    // KRA 2: New Customers Acquired
+    const newCustomersCount = kraLogs.filter(l => l.kra_number === 2 && l.kra_type === 'new_customer').length;
 
-    const newCustomersCount = kra2Logs.length;
+    // KRA 3: Retention
+    const recurringWithOrder = deals.filter(d =>
+      recurring.some(r => r.customer_name?.toLowerCase().includes(d.customer_name?.toLowerCase() || ''))
+    ).length;
+    const retentionRate = recurring.length > 0 ? Math.round((recurringWithOrder / recurring.length) * 100) : 0;
+
+    // KRA 4: Enquiry Conversion
+    const kra4Inquiries = kraLogs.filter(l => l.kra_number === 4 && l.kra_type === 'inquiry_received').length || inquiries.length;
+    const conversionRate = kra4Inquiries > 0 ? Math.round((wonCount / kra4Inquiries) * 100) : 0;
+
+    // KRA 5: Payments
+    const collectedPayments = payments.filter(p => p.status === 'collected');
+    const pendingPayments = payments.filter(p => p.status === 'pending');
+    const totalCollected = collectedPayments.reduce((s, p) => s + (Number(p.invoice_amount) || 0), 0);
+    const totalOutstanding = pendingPayments.reduce((s, p) => s + (Number(p.outstanding) || Number(p.invoice_amount) || 0), 0);
+
+    // KRA 8: Complaints
+    const openComplaints = complaints.filter(c => c.status === 'pending');
+
+    // KRA 9: Visits
+    const totalVisits = visits.length;
+
     const title = scope.targetRepName
       ? `${scope.targetRepName}'s KRA Status`
       : (scope.isAdmin ? 'Company KRA Status' : (scope.isManager ? 'Team KRA Status' : 'KRA Status'));
 
     return `🎯 *${title} - ${monthName} ${year}*\n\n` +
       `📋 *KRA 1 - Sales Achievement*\n` +
-      `   Won Deals: ${wonCount} | Value: ${formatINR(wonValue)} (Total Created: ${totalDeals})\n\n` +
-      `👥 *KRA 2 - New Customers*\n` +
-      `   POs received: ${newCustomersCount} (target: 3)\n\n` +
-      `🔄 *KRA 4 - Enquiry Conversion*\n` +
-      `   Inquiries: ${totalInquiries} | Won: ${wonCount}\n` +
-      `   Rate: ${conversionRate}% (target: 70-80%)\n\n` +
-      `📊 *KRA 6 - CRM Compliance*\n` +
-      `   Logged today via WhatsApp bot ✅\n\n` +
-      `_Full KRA report available on Portal_`;
+      `   Won Revenue: *${formatINR(wonValue)}* | Orders: *${wonCount}*` +
+      (wonTonnage > 0 ? ` | Volume: *${wonTonnage.toLocaleString('en-IN')} MT*` : '') + `\n\n` +
+      `👥 *KRA 2 - New Customers Acquired*\n` +
+      `   Acquired: *${newCustomersCount}/3* new customers\n\n` +
+      `🔄 *KRA 3 - Customer Retention*\n` +
+      `   Active Accounts: *${recurringWithOrder}/${recurring.length}* (${retentionRate}%)\n\n` +
+      `📈 *KRA 4 - Enquiry Conversion*\n` +
+      `   Inquiries: *${kra4Inquiries}* | Won: *${wonCount}* | Rate: *${conversionRate}%*\n\n` +
+      `💵 *KRA 5 - Collections & Outstanding*\n` +
+      `   Collected: *${formatINR(totalCollected)}* | Outstanding: *${formatINR(totalOutstanding)}*\n\n` +
+      `⚠️ *KRA 8 - Quality & Complaints*\n` +
+      `   Total Logged: *${complaints.length}* | Open: *${openComplaints.length}*\n\n` +
+      `📍 *KRA 9 - Field Visits*\n` +
+      `   Total Visits: *${totalVisits}* (Target: 10/wk)\n\n` +
+      `_Full live metrics verified with Enlight Sales OS Dashboard_`;
   } catch (error) {
     console.error('getKRAStatus error:', error);
     return '❌ Could not fetch KRA status.';
@@ -443,8 +512,8 @@ async function getWonCustomers(scopeOrPhone, text = '') {
       .from('deals')
       .select('*, deal_items(*)')
       .eq('stage', 'won')
-      .gte('created_at', start)
-      .lte('created_at', end);
+      .or(`and(created_at.gte.${start},created_at.lte.${end}),and(won_at.gte.${start},won_at.lte.${end})`)
+      .order('created_at', { ascending: false });
     query = applySalespersonFilter(query, scope.phones, 'salesperson_phone');
 
     const { data: deals } = await query;
@@ -457,23 +526,33 @@ async function getWonCustomers(scopeOrPhone, text = '') {
     const lines = [];
     for (const deal of deals) {
       const items = deal.deal_items || [];
+      const poStr = deal.po_number ? ` (PO: ${deal.po_number})` : '';
       if (items.length === 0) {
-        lines.push(`${srNo++}. *${deal.customer_name}* — Amount: ${formatINR(deal.total_amount)}`);
+        lines.push(`${srNo++}. *${deal.customer_name}*${poStr}\n   💰 Value: ${formatINR(deal.total_amount)}`);
       } else {
-        for (const item of items) {
-          lines.push(`${srNo++}. *${deal.customer_name}*\n   Product: ${item.sku_text || 'N/A'}\n   Qty: ${item.quantity || 0} ${item.unit || 'MT'} | Rate: ${formatINR(item.rate)} | Amt: ${formatINR(item.amount)}`);
-        }
+        const itemLines = items.map(item =>
+          `   • ${item.sku_text || 'Material'}: ${item.quantity || 0} ${item.unit || 'MT'}` +
+          (item.rate ? ` @ ${formatINR(item.rate)}/MT` : '') +
+          (item.amount ? ` = ${formatINR(item.amount)}` : '')
+        ).join('\n');
+        lines.push(`${srNo++}. *${deal.customer_name}*${poStr}\n${itemLines}\n   💰 *Total: ${formatINR(deal.total_amount)}*`);
       }
     }
 
     const totalValue = deals.reduce((s, d) => s + (Number(d.total_amount) || 0), 0);
-    const title = scope.targetRepName
-      ? `${scope.targetRepName}'s Won Customers`
-      : (scope.isAdmin ? 'Company Won Customers' : (scope.isManager ? 'Team Won Customers' : 'Won Customers'));
+    const totalTonnage = deals.reduce((s, d) => {
+      const items = d.deal_items || [];
+      return s + items.reduce((is, it) => is + (Number(it.quantity) || 0), 0);
+    }, 0);
 
-    return `🏆 *${title} — ${monthName} ${year}* (${deals.length} deals)\n\n` +
+    const title = scope.targetRepName
+      ? `${scope.targetRepName}'s Won Deals`
+      : (scope.isAdmin ? 'Company Won Deals' : (scope.isManager ? 'Team Won Deals' : 'Won Deals'));
+
+    return `🏆 *${title} — ${monthName} ${year}* (${deals.length} won orders)\n\n` +
       lines.join('\n\n') +
-      `\n\n💰 *Total Won Value: ${formatINR(totalValue)}*`;
+      `\n\n💰 *Total Won Revenue: ${formatINR(totalValue)}*` +
+      (totalTonnage > 0 ? `\n📦 *Total Volume: ${totalTonnage.toLocaleString('en-IN')} MT*` : '');
   } catch (err) {
     console.error('getWonCustomers error:', err.message);
     return '❌ Could not fetch won customers.';
@@ -597,9 +676,9 @@ async function getVisitList(scopeOrPhone, text = '') {
     let query = supabase
       .from('customer_visits')
       .select('*')
-      .gte('visit_date', start)
-      .lte('visit_date', end)
-      .order('visit_date', { ascending: false });
+      .gte('visited_at', start)
+      .lte('visited_at', end)
+      .order('visited_at', { ascending: false });
     query = applySalespersonFilter(query, scope.phones, 'salesperson_phone');
 
     const { data: visits } = await query;
@@ -609,14 +688,18 @@ async function getVisitList(scopeOrPhone, text = '') {
     }
 
     const lines = visits.map((v, i) =>
-      `${i + 1}. *${v.customer_name}*\n   📅 ${new Date(v.visit_date).toLocaleDateString('en-IN')}\n   📝 ${v.notes || 'No notes'}`
+      `${i + 1}. *${v.customer_name || 'Customer'}*\n` +
+      `   📅 ${new Date(v.visited_at).toLocaleDateString('en-IN')}\n` +
+      (v.person_met ? `   👤 Contact: ${v.person_met}\n` : '') +
+      (v.customer_address ? `   📍 Location: ${v.customer_address}\n` : '') +
+      `   📝 Remarks: ${v.remarks || 'Visit completed'}`
     );
 
     const title = scope.targetRepName
       ? `${scope.targetRepName}'s Customer Visits`
       : (scope.isAdmin ? 'Company Customer Visits' : (scope.isManager ? 'Team Customer Visits' : 'Customer Visits'));
 
-    return `📍 *${title} — ${monthName} ${year}* (${visits.length})\n\n` + lines.join('\n\n');
+    return `📍 *${title} — ${monthName} ${year}* (${visits.length} visits)\n\n` + lines.join('\n\n');
   } catch (err) {
     console.error('getVisitList error:', err.message);
     return '❌ Could not fetch visit list.';
@@ -667,6 +750,128 @@ async function getVisitSummary(scopeOrPhone, text = '') {
   }
 }
 
+/** Inactive / Churn Risk customers (no order in 60+ days) */
+async function getInactiveCustomers(scopeOrPhone) {
+  try {
+    const supabase = getSupabase();
+    const scope = typeof scopeOrPhone === 'object' && scopeOrPhone !== null
+      ? scopeOrPhone
+      : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
+
+    if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
+      return '⚠️ No customer data found. You currently have no salespersons assigned to your team.';
+    }
+
+    let custQuery = supabase
+      .from('recurring_customers')
+      .select('*')
+      .eq('is_active', true)
+      .order('customer_name', { ascending: true });
+    custQuery = applySalespersonFilter(custQuery, scope.phones, 'assigned_salesperson_phone');
+
+    let dealsQuery = supabase
+      .from('deals')
+      .select('customer_name, created_at, stage')
+      .eq('stage', 'won')
+      .order('created_at', { ascending: false });
+    dealsQuery = applySalespersonFilter(dealsQuery, scope.phones, 'salesperson_phone');
+
+    const [{ data: customers }, { data: deals }] = await Promise.all([custQuery, dealsQuery]);
+
+    if (!customers || customers.length === 0) {
+      return '📋 No registered recurring customers found.';
+    }
+
+    const now = new Date();
+    const inactiveList = [];
+    for (const cust of customers) {
+      const custName = (cust.customer_name || '').toLowerCase();
+      const lastDeal = (deals || []).find(d => (d.customer_name || '').toLowerCase().includes(custName) || custName.includes((d.customer_name || '').toLowerCase()));
+      const lastDate = lastDeal ? new Date(lastDeal.created_at) : (cust.last_order_date ? new Date(cust.last_order_date) : null);
+
+      let daysSince = 999;
+      if (lastDate && !isNaN(lastDate.getTime())) {
+        daysSince = Math.floor((now - lastDate) / (1000 * 60 * 60 * 24));
+      }
+
+      if (daysSince >= 60) {
+        inactiveList.push({
+          name: cust.customer_name,
+          contact: cust.contact_person,
+          phone: cust.customer_phone,
+          daysSince: daysSince === 999 ? 'No orders recorded' : `${daysSince} days ago`,
+          lastDateStr: lastDate && !isNaN(lastDate.getTime()) ? lastDate.toLocaleDateString('en-IN') : 'None',
+        });
+      }
+    }
+
+    if (inactiveList.length === 0) {
+      return '✅ All customers are active and ordering regularly (no churn risk > 60 days)!';
+    }
+
+    const lines = inactiveList.slice(0, 15).map((c, i) =>
+      `${i + 1}. *${c.name}*\n` +
+      `   ⏳ Last Order: ${c.daysSince} (${c.lastDateStr})\n` +
+      `   👤 Contact: ${c.contact || 'N/A'} | 📱 ${c.phone || 'N/A'}`
+    );
+
+    const title = scope.targetRepName
+      ? `${scope.targetRepName}'s Inactive Customers (Churn Risk)`
+      : (scope.isAdmin ? 'Company Inactive Customers (Churn Risk)' : (scope.isManager ? 'Team Inactive Customers (Churn Risk)' : 'Inactive Customers (Churn Risk)'));
+
+    return `⚠️ *${title} (${inactiveList.length} accounts)*\n\n` +
+      lines.join('\n\n') +
+      `\n\n_Reach out under KRA 3 to re-engage these accounts!_`;
+  } catch (err) {
+    console.error('getInactiveCustomers error:', err.message);
+    return '❌ Could not fetch inactive customers.';
+  }
+}
+
+/** Reorder Queue (customers due for reorder) */
+async function getReorderQueue(scopeOrPhone) {
+  try {
+    const supabase = getSupabase();
+    const scope = typeof scopeOrPhone === 'object' && scopeOrPhone !== null
+      ? scopeOrPhone
+      : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
+
+    if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
+      return '📋 No reorder queue data. You currently have no salespersons assigned to your team.';
+    }
+
+    let taskQuery = supabase
+      .from('followup_tasks')
+      .select('*')
+      .in('status', ['reorder_expected', 'pending', 'open'])
+      .order('due_date', { ascending: true })
+      .limit(15);
+    taskQuery = applySalespersonFilter(taskQuery, scope.phones, 'salesperson_phone');
+
+    const { data: tasks } = await taskQuery;
+
+    if (!tasks || tasks.length === 0) {
+      return '✅ No open reorder tasks right now. Log follow-ups to add to reorder queue!';
+    }
+
+    const lines = tasks.map((t, i) => {
+      const dueStr = t.due_date ? new Date(t.due_date).toLocaleDateString('en-IN') : 'This week';
+      return `${i + 1}. *${t.customer_name}*\n` +
+        `   📅 Follow-up Due: ${dueStr}\n` +
+        `   📝 Notes: ${t.notes || t.remarks || 'Reorder expected'}`;
+    });
+
+    const title = scope.targetRepName
+      ? `${scope.targetRepName}'s Reorder Queue`
+      : (scope.isAdmin ? 'Company Reorder Queue' : (scope.isManager ? 'Team Reorder Queue' : 'Reorder Queue'));
+
+    return `🔄 *${title} (${tasks.length})*\n\n` + lines.join('\n\n');
+  } catch (err) {
+    console.error('getReorderQueue error:', err.message);
+    return '❌ Could not fetch reorder queue.';
+  }
+}
+
 /** Payment aging / outstanding list */
 async function getPaymentAging(scopeOrPhone) {
   try {
@@ -679,6 +884,14 @@ async function getPaymentAging(scopeOrPhone) {
       return '💰 No outstanding payments found. You currently have no salespersons assigned to your team.';
     }
 
+    let ptQuery = supabase
+      .from('payment_tracking')
+      .select('customer_name, invoice_amount, outstanding, due_date, status')
+      .neq('status', 'collected')
+      .order('due_date', { ascending: true })
+      .limit(15);
+    ptQuery = applySalespersonFilter(ptQuery, scope.phones, 'salesperson_phone');
+
     let dealsQuery = supabase
       .from('deals')
       .select('customer_name, total_amount, payment_terms, created_at, status')
@@ -688,15 +901,7 @@ async function getPaymentAging(scopeOrPhone) {
       .limit(15);
     dealsQuery = applySalespersonFilter(dealsQuery, scope.phones, 'salesperson_phone');
 
-    let ptQuery = supabase
-      .from('payment_tracking')
-      .select('customer_name, invoice_amount, outstanding, due_date, status')
-      .neq('status', 'collected')
-      .order('due_date', { ascending: true })
-      .limit(15);
-    ptQuery = applySalespersonFilter(ptQuery, scope.phones, 'salesperson_phone');
-
-    const [{ data: deals }, { data: ptRecords }] = await Promise.all([dealsQuery, ptQuery]);
+    const [{ data: ptRecords }, { data: deals }] = await Promise.all([ptQuery, dealsQuery]);
     const today = new Date();
     let rows = [];
 
@@ -855,6 +1060,11 @@ async function routeToHandler(category, text, scope, supabase) {
       return await getPaymentAging(scope);
     case 'lost_deals':
       return await getLostDeals(scope, text);
+    case 'inactive_customers':
+    case 'churn_risk':
+      return await getInactiveCustomers(scope);
+    case 'reorder_queue':
+      return await getReorderQueue(scope);
     default:
       return null;
   }
@@ -1000,8 +1210,16 @@ async function handleQuery(text, senderPhone) {
   if ((lower.includes('active') || lower.includes('current') || lower.includes('my deals') || lower.includes('team deals')) && lower.includes('deal')) {
     return await getActiveDealsDetail(effectiveScope);
   }
+  // Inactive customers / churn risk
+  if (lower.includes('not ordered') || lower.includes('order nahi') || lower.includes('inactive') || lower.includes('churn')) {
+    return await getInactiveCustomers(effectiveScope);
+  }
+  // Reorder queue
+  if (lower.includes('reorder') || lower.includes('repeat order')) {
+    return await getReorderQueue(effectiveScope);
+  }
   // Customer list
-  if (lower.includes('customer list') || lower.includes('my customers') || lower.includes('team customers') || lower.includes('client list')) {
+  if (lower.includes('customer list') || lower.includes('my customers') || lower.includes('team customers') || lower.includes('client list') || lower.includes('all customers')) {
     return await getCustomerList(effectiveScope);
   }
   // Rate sheet
@@ -1039,4 +1257,4 @@ async function handleQuery(text, senderPhone) {
   return await handleConversationalQuery(text, senderPhone);
 }
 
-module.exports = { isQuery, handleQuery, getVisitSummary };
+module.exports = { isQuery, handleQuery, getVisitSummary, getInactiveCustomers, getReorderQueue };

@@ -387,7 +387,7 @@ You are an intelligent query router for a B2B metal sales system.
 Your job is to classify the salesperson's request into one of the following categories:
 
 DATA QUERIES:
-- "dashboard_link", "sales_summary", "kra_status", "visit_summary", "payment_summary", "complaint_summary", "full_report", "deals_this_week", "pending_deals", "pending_inquiries", "new_customers_summary", "won_customers", "active_deals_detail", "customer_list", "rate_sheet", "visit_list", "payment_aging", "lost_deals"
+- "dashboard_link", "sales_summary", "kra_status", "visit_summary", "payment_summary", "complaint_summary", "full_report", "deals_this_week", "pending_deals", "pending_inquiries", "new_customers_summary", "won_customers", "active_deals_detail", "customer_list", "rate_sheet", "visit_list", "payment_aging", "lost_deals", "inactive_customers", "reorder_queue"
 
 ASSISTANT QUERIES: "general"
 BLOCKED QUERIES: "blocked"
