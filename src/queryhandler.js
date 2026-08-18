@@ -2078,4 +2078,4 @@ async function handleQuery(text, senderPhone) {
   return await handleConversationalQuery(text, senderPhone);
 }
 
-module.exports = { isQuery, handleQuery, getVisitSummary, getInactiveCustomers, getReorderQueue, getFilteredOrders };
+module.exports = { isQuery, handleQuery, getVisitSummary, getInactiveCustomers, getReorderQueue, getFilteredOrders, getInquiriesThisMonth };
