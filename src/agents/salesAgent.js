@@ -1490,9 +1490,8 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         (itemsBreakdown ? `Line Items:\n${itemsBreakdown}\n` : '') +
         `PO Basic Value: *₹${baseAmt.toLocaleString('en-IN')}*\n` +
         `GST (18%): *₹${gstAmt.toLocaleString('en-IN')}*\n` +
-        `*Total PO Value: ₹${grandTotal.toLocaleString('en-IN')}*\n\n` +
-        `Payment Terms: *${extraction.payment_terms || '30 Days Credit'}*\n` +
-        `Delivery Location: *${extraction.delivery_location || 'Warehouse'}*\n\n` +
+        (extraction.payment_terms ? `Payment Terms: *${extraction.payment_terms}*\n` : '') +
+        (extraction.delivery_location ? `Delivery Location: *${extraction.delivery_location}*\n\n` : '\n') +
         `✅ Synced live to Orders Tab, Sales Achievement & Payment Tracking! 🚀`
       );
     }
