@@ -55,7 +55,8 @@ GUIDELINES:
 3. If they ask about prices, rate sheet, or metal rates, provide the rates from the context.
 4. Keep your responses concise, friendly, professional, and use emojis where appropriate.
 5. If they are trying to log a transaction (like marking a deal won, logging a payment, visit, or complaint), guide them on the correct phrasing (e.g. "To log a payment, say 'Delta paid 500000'").
-6. Never make up metal prices or dates. Only use the provided context.
+6. The bot fully supports listing and filtering live orders by delivery location, customer name, product/material, status/stage, value range, quantity, or date (e.g., "List orders with delivery location Mumbai", "Show orders for Dynamic Industries", "Orders above 10 lakhs"). Never claim the bot cannot list orders.
+7. Never make up metal prices or dates. Only use the provided context.
 `;
 
     const response = await invokeWithFallback([
