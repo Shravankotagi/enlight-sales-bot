@@ -729,6 +729,20 @@ router.post('/', async (req, res) => {
           // Keep session context refreshed with the validated customer name
           await saveActiveSession(senderPhone, officialCustomerName, 'inquiry');
 
+          // Guard: Only save to inquiries table if it has genuine product line items and is NOT a chatbot query/question
+          const hasValidProductLineItems = Array.isArray(extraction.line_items) &&
+            extraction.line_items.length > 0 &&
+            extraction.line_items.some((i) => (Number(i.quantity) > 0 || Number(i.quantity_tons) > 0) && (i.sku_text || i.product_name));
+
+          const isChatbotOrQuestion = isQuery(raw_text) ||
+            /^(show|list|tell|what|how|why|where|can you|give me|is there|which customers|now show|change)\b/i.test(raw_text) ||
+            /\b(policy|moq|sop|guideline|portal|login|dashboard)\b/i.test(raw_text);
+
+          if (!hasValidProductLineItems || isChatbotOrQuestion) {
+            console.log(`[Webhook] Skipped saving inquiry for non-product message: "${raw_text.slice(0, 50)}"`);
+            return;
+          }
+
           // Use the official/corrected customer name from the database (fixes typos)
           // Save inquiry in inquiries table with validated customer and line items
           const { saveInquiry } = require('./supabase');
