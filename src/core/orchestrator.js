@@ -58,19 +58,21 @@ When confirming or discussing any text-based customer inquiry, requirement, or d
 
 ## FEW-SHOT EXAMPLES (Follow these exact response patterns)
 
-### Example 1 (Visit + Requirement with Missing Tonnage/Contact)
-User: "Met with Mehta Engineering in Pune. Introduced our products and collected their business card. Interested in CR Sheets and MS Plates"
-Tool Results: Synced visit and deal requirement.
+### Example 1 (Customer Visit Logged with Discussed Requirement)
+User: "Visited ABC Steel Mumbai office today, discussed next HR Coil requirement and future monthly consumption. Customer showed positive interest."
+Tool Results: log_customer_visit returned success: Visit logged with ABC Steel, location: Mumbai, outcome: Positive, requirement: HR Coil / future monthly requirement, follow-up: Collect required quantity, expected PO/delivery date, and customer details.
 Assistant Response:
-Awesome work visiting **Mehta Engineering** in Pune! 🚗 It's great to hear they are interested in our **CR Sheets** and **MS Plates**. I've logged your visit in our **Customer Visits Card** and recorded their requirement in our **Sales Achievement Card**.
+Great work visiting **ABC Steel** at their **Mumbai** office today! 🚗 It's fantastic that the meeting had a **Positive** outcome and that you discussed their upcoming **HR Coil** requirement and future monthly consumption.
 
-To help us prepare a formal quotation and complete their profile, could you please share a few details from their business card?
-1. **Contact Person's Name** and **Mobile Number**
-2. Approximately how many **tons (MT)** of CR Sheets & MS Plates do they require?
-3. What is their **expected PO / delivery date**?
+I've successfully logged your visit details in our **Customer Visits Card**!
 
-Keep up the great momentum! 🚀
-Updated Customer Visits & Sales Achievement Cards! ✅
+To follow up effectively:
+1. **Contact Details**: Could you share the contact person's name & direct mobile number?
+2. **Quantity & Timeline**: What is their estimated tonnage (MT) and expected PO date?
+
+💡 *Potential Opportunity:* If you would like to create a sales pipeline deal for this requirement, simply reply *"Create deal for ABC Steel"*.
+
+Updated Customer Visits Card! ✅
 
 ### Example 2 (Payment Logged with Partial Info)
 User: "Received 5 lakh advance from Delta Steel"
@@ -105,6 +107,7 @@ The inquiry has been logged with **Deal ID #DEAL-07578A** in our sales pipeline.
 Updated Sales Achievement Card! ✅
 
 ## Critical Rules
+- **VISIT VS DEAL LOGGING**: Customer site visits, meetings, and in-person check-ins MUST ONLY call \`log_customer_visit\`. NEVER call \`update_deal_stage\` or create a deal for a visit report. A visit report must ONLY update the **Customer Visits Card** (never Sales Achievement Card). Positive customer interest or requirements discussed during a visit are visit context and must NOT trigger automatic deal creation.
 - **ADMIN PRIVILEGES**: When the user is an Admin, they have full unrestricted read and write permissions across all data, customers, salespeople, and deals. When Admin asks to change or update a customer (e.g. "Change supreme steel order frequency to 45 days", "Max customer - Change supreme steel order frequency to 45 days"), you MUST execute the update immediately using update_customer_profile tool.
 - **CUSTOMER PROFILE & ORDER FREQUENCY UPDATES**: When a user requests to update a customer's order frequency (e.g. "Change [customer] order frequency to X days", "set frequency to 45 days"), reassign a customer to a salesperson (e.g. "reassign [customer] to Max"), or update contact details, CALL update_customer_profile. Do NOT call onboard_new_customer for updating an existing customer's order frequency.
 - NEVER output generic 1-line responses like "Activity updated in dashboard". Always format a complete manager response.
@@ -134,12 +137,15 @@ function getDeterministicIntentHint(text) {
   if (!text || typeof text !== 'string') return '';
   const lower = text.toLowerCase();
 
+  const isVisit = /\b(visited|visit|met|meeting|site|factory|plant|office|market visit)\b/i.test(lower);
+  const isExplicitDealCommand = /\b(create deal|create inquiry|log inquiry|add deal|generate quote|confirm order|deal won|deal lost|new deal|mark as won|mark as lost)\b/i.test(lower);
+
   const anchors = [];
 
   if (/\b(payment|advance|cheque|upi|neft|rtgs|invoice|balance|outstanding|baki|paid|amount received|payment collected)\b/i.test(lower)) {
     anchors.push('CALL log_payment');
   }
-  if (/\b(visited|visit|met|meeting|site|factory|plant|office|market visit)\b/i.test(lower)) {
+  if (isVisit) {
     anchors.push('CALL log_customer_visit');
   }
   if (/\b(complaint|defective|damaged|scratch|rust|quality|rejected|rejection|faulty)\b/i.test(lower)) {
@@ -148,11 +154,13 @@ function getDeterministicIntentHint(text) {
   if (/\b(order frequency|frequency|reorder days|order cycle|reassign customer|change frequency)\b/i.test(lower)) {
     anchors.push('CALL update_customer_profile');
   }
-  if (/\b(requires|requirement|need|inquiry|quote|quotation|rfq|ton|mt|coil|plate|sheet|tmt|bar|hr|cr|ms)\b/i.test(lower)) {
-    anchors.push('CALL update_deal_stage');
-  }
-  if (/\b(won|lost|closed|confirmed|order placed|po received|deal done|finalized)\b/i.test(lower)) {
-    anchors.push('CALL update_deal_stage');
+  if (!isVisit || isExplicitDealCommand) {
+    if (/\b(requires|requirement|need|inquiry|quote|quotation|rfq|ton|mt|coil|plate|sheet|tmt|bar|hr|cr|ms)\b/i.test(lower)) {
+      anchors.push('CALL update_deal_stage');
+    }
+    if (/\b(won|lost|closed|confirmed|order placed|po received|deal done|finalized)\b/i.test(lower)) {
+      anchors.push('CALL update_deal_stage');
+    }
   }
 
   if (anchors.length === 0) return '';
@@ -178,13 +186,16 @@ function shouldContinue(state) {
 /**
  * Main entry point — called from webhook.js for every incoming message.
  */
-async function runOrchestrator(text, senderPhone, options = {}) {
+async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
+  let text = typeof textOrParams === 'string' ? textOrParams : textOrParams?.text;
+  let senderPhone = typeof textOrParams === 'object' && textOrParams?.senderPhone ? textOrParams.senderPhone : senderPhoneParam;
+  let opts = typeof textOrParams === 'object' && !Array.isArray(textOrParams) ? { ...textOrParams, ...options } : options;
   const {
     employeeName  = 'Salesperson',
     messageType   = 'text',
     imageBuffer   = null,
     imageMimeType = null,
-  } = options;
+  } = opts;
 
   try {
     console.log(`[Orchestrator] Processing: "${text?.substring(0, 80)}..." from ${senderPhone}`);
@@ -345,4 +356,4 @@ async function runOrchestrator(text, senderPhone, options = {}) {
   }
 }
 
-module.exports = { runOrchestrator };
+module.exports = { runOrchestrator, getDeterministicIntentHint };

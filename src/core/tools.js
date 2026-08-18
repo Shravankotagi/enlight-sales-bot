@@ -34,7 +34,7 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'log_customer_visit',
-      description: `Use this tool when the salesperson reports visiting a customer site, meeting a customer in person, a field visit or market visit. This logs to Customer Visits Card and updates the customer profile.`,
+      description: `Use this tool when the salesperson reports visiting a customer site, meeting a customer in person, an office visit, a field visit or market visit. This logs to Customer Visits Card (KRA 9) and updates the customer profile.`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
       }),
@@ -51,7 +51,7 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'update_deal_stage',
-      description: `Use this tool when the salesperson reports any new customer requirement, inquiry, product demand, RFQ, deal won/lost/progressing, PO received, or any sales pipeline stage update.`,
+      description: `Use this tool when the salesperson explicitly requests to create a new inquiry, add a deal to the sales pipeline, update a deal stage, progress an RFQ/quotation, or mark a deal as won/lost. DO NOT call this tool for customer site visit or meeting reports (use log_customer_visit instead).`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
       }),
