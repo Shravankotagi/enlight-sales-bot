@@ -146,7 +146,8 @@ async function getNewCustomerSummary(scopeOrPhone) {
 
     const { data: logs } = await query;
 
-    const count = logs?.length || 0;
+    const uniqueCustomerNames = Array.from(new Set((logs || []).map(l => (l.customer_name || '').trim()).filter(Boolean)));
+    const count = uniqueCustomerNames.length;
     const remaining = Math.max(0, 3 - count);
 
     let msg = `👥 *New Customer Acquisition Card*\n` +
@@ -156,10 +157,10 @@ async function getNewCustomerSummary(scopeOrPhone) {
         ? `⚠️ ${remaining} more needed\n`
         : `✅ Target achieved!\n`);
 
-    if (logs && logs.length > 0) {
+    if (uniqueCustomerNames.length > 0) {
       msg += `\nNew customers this month:\n`;
-      logs.forEach((l, i) => {
-        msg += `${i + 1}. ${l.customer_name || 'Unknown'}\n`;
+      uniqueCustomerNames.forEach((name, i) => {
+        msg += `${i + 1}. ${name}\n`;
       });
     }
 

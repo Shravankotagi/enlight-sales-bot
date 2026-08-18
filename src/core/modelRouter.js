@@ -58,7 +58,7 @@ function getPaidHighAccuracyModel(tools = null) {
 function getLightweightModel(tools = null) {
   const key = getStandardGeminiKey();
   const model = new ChatGoogleGenerativeAI({
-    model: 'gemini-2.0-flash-lite',
+    model: 'gemini-2.5-flash',
     apiKey: key,
     temperature: 0.1,
     maxRetries: 1,

@@ -435,7 +435,12 @@ async function getKRAStatus(scopeOrPhone, text = '') {
     const complaints = complaintsRes.data || [];
 
     // KRA 1: Won deals, Revenue & Delivered Tonnage
-    const wonDeals = deals.filter(d => d.stage === 'won');
+    const dealsCreatedThisMonth = deals.filter(d => d.created_at >= start && d.created_at <= end);
+    const wonDeals = deals.filter(d => {
+      if (d.stage !== 'won') return false;
+      const dealDate = d.won_at || d.created_at;
+      return dealDate >= start && dealDate <= end;
+    });
     const wonCount = wonDeals.length;
     const wonValue = wonDeals.reduce((sum, d) => sum + (Number(d.total_amount) || 0), 0);
     const wonTonnage = wonDeals.reduce((sum, d) => {
@@ -443,24 +448,41 @@ async function getKRAStatus(scopeOrPhone, text = '') {
       return sum + items.reduce((iSum, it) => iSum + (Number(it.quantity) || 0), 0);
     }, 0);
 
-    // KRA 2: New Customers Acquired
-    const newCustomersCount = kraLogs.filter(l => l.kra_number === 2 && l.kra_type === 'new_customer').length;
+    // KRA 2: New Customers Acquired (distinct customer names)
+    const newCustomersCount = new Set(
+      kraLogs
+        .filter(l => l.kra_number === 2 && l.kra_type === 'new_customer')
+        .map(l => (l.customer_name || '').toLowerCase().trim())
+        .filter(Boolean)
+    ).size;
 
-    // KRA 3: Retention
-    const recurringWithOrder = deals.filter(d =>
-      recurring.some(r => r.customer_name?.toLowerCase().includes(d.customer_name?.toLowerCase() || ''))
-    ).length;
-    const retentionRate = recurring.length > 0 ? Math.round((recurringWithOrder / recurring.length) * 100) : 0;
+    // KRA 3: Retention (distinct recurring customers who ordered)
+    const uniqueRecurringWithOrder = new Set(
+      deals
+        .filter(d =>
+          recurring.some(r =>
+            r.customer_name?.toLowerCase().trim() === d.customer_name?.toLowerCase().trim() ||
+            (d.customer_name && r.customer_name && (
+              d.customer_name.toLowerCase().includes(r.customer_name.toLowerCase()) ||
+              r.customer_name.toLowerCase().includes(d.customer_name.toLowerCase())
+            ))
+          )
+        )
+        .map(d => d.customer_name?.toLowerCase().trim())
+        .filter(Boolean)
+    ).size;
+    const retentionRate = recurring.length > 0
+      ? Math.min(100, Math.round((uniqueRecurringWithOrder / recurring.length) * 100))
+      : 0;
 
-    // KRA 4: Enquiry Conversion
-    const kra4Inquiries = kraLogs.filter(l => l.kra_number === 4 && l.kra_type === 'inquiry_received').length || inquiries.length;
-    const conversionRate = kra4Inquiries > 0 ? Math.round((wonCount / kra4Inquiries) * 100) : 0;
+    // KRA 4: Enquiry Conversion (won deals / total deals created)
+    const totalDealsCount = dealsCreatedThisMonth.length;
+    const conversionRate = totalDealsCount > 0 ? Math.round((wonCount / totalDealsCount) * 100) : 0;
 
     // KRA 5: Payments
-    const collectedPayments = payments.filter(p => p.status === 'collected');
-    const pendingPayments = payments.filter(p => p.status === 'pending');
-    const totalCollected = collectedPayments.reduce((s, p) => s + (Number(p.invoice_amount) || 0), 0);
-    const totalOutstanding = pendingPayments.reduce((s, p) => s + (Number(p.outstanding) || Number(p.invoice_amount) || 0), 0);
+    const pendingPayments = payments.filter(p => p.status === 'pending' || p.status === 'partial');
+    const totalCollected = payments.reduce((s, p) => s + (Number(p.collected_amount) || 0), 0);
+    const totalOutstanding = pendingPayments.reduce((s, p) => s + (p.outstanding !== null && p.outstanding !== undefined ? Number(p.outstanding) : Number(p.invoice_amount || 0)), 0);
 
     // KRA 8: Complaints
     const openComplaints = complaints.filter(c => c.status === 'pending');
@@ -479,9 +501,9 @@ async function getKRAStatus(scopeOrPhone, text = '') {
       `👥 *New Customer Acquisition Card*\n` +
       `   Acquired: *${newCustomersCount}/3* new customers\n\n` +
       `🔄 *Customer Retention Card*\n` +
-      `   Active Accounts: *${recurringWithOrder}/${recurring.length}* (${retentionRate}%)\n\n` +
+      `   Active Accounts: *${uniqueRecurringWithOrder}/${recurring.length}* (${retentionRate}%)\n\n` +
       `📈 *Enquiry Conversion Card*\n` +
-      `   Inquiries: *${kra4Inquiries}* | Won: *${wonCount}* | Rate: *${conversionRate}%*\n\n` +
+      `   Inquiries: *${totalDealsCount}* | Won: *${wonCount}* | Rate: *${conversionRate}%*\n\n` +
       `💵 *Payment Collection Card*\n` +
       `   Collected: *${formatINR(totalCollected)}* | Outstanding: *${formatINR(totalOutstanding)}*\n\n` +
       `⚠️ *Customer Complaints Card*\n` +

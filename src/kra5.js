@@ -362,8 +362,9 @@ async function getPaymentSummary(scopeOrPhone) {
       return '✅ No pending payments tracked.';
     }
 
-    const pending = payments.filter(p => p.status === 'pending');
+    const pending = payments.filter(p => p.status === 'pending' || p.status === 'partial');
     const collected = payments.filter(p => p.status === 'collected');
+    const totalCollected = payments.reduce((sum, p) => sum + (Number(p.collected_amount) || 0), 0);
     const now = new Date();
 
     const overdue = pending.filter(p => 
@@ -374,7 +375,7 @@ async function getPaymentSummary(scopeOrPhone) {
     );
 
     const totalOutstanding = pending.reduce(
-      (sum, p) => sum + (p.outstanding || 0), 0
+      (sum, p) => sum + (p.outstanding !== null && p.outstanding !== undefined ? Number(p.outstanding) : Number(p.invoice_amount || 0)), 0
     );
 
     const title = scope.isAdmin ? 'Company Payment Status' : (scope.isManager ? 'Team Payment Status' : 'Payment Status');

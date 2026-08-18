@@ -41,12 +41,12 @@ async function generateFullKRAReport(scopeOrPhone, customMonthRange = null) {
   }
 
   try {
-    let dealsQuery = supabase.from('deals').select('*, deal_items(*)').neq('inquiry_type', 'unknown').gte('created_at', start).lte('created_at', end);
+    let dealsQuery = supabase.from('deals').select('*, deal_items(*)').or(`and(created_at.gte.${start},created_at.lte.${end}),and(stage.eq.won,won_at.gte.${start},won_at.lte.${end})`);
     let inqQuery = supabase.from('inquiries').select('*').gte('created_at', start).lte('created_at', end);
     let kraLogsQuery = supabase.from('kra_logs').select('*').gte('created_at', start).lte('created_at', end);
     let visitsQuery = supabase.from('customer_visits').select('*').gte('visited_at', start).lte('visited_at', end);
     let complaintsQuery = supabase.from('complaints').select('*').gte('reported_at', start).lte('reported_at', end);
-    let paymentsQuery = supabase.from('payment_tracking').select('*').gte('created_at', start).lte('created_at', end);
+    let paymentsQuery = supabase.from('payment_tracking').select('*');
     let recurringQuery = supabase.from('recurring_customers').select('*').eq('is_active', true);
 
     if (scope.phones !== null) {
@@ -97,42 +97,54 @@ async function generateFullKRAReport(scopeOrPhone, customMonthRange = null) {
     const recurring = recurringResult.data || [];
 
     // KRA 1 - Sales Achievement
-    const totalDeals = deals.length;
-    const wonDealsList = deals.filter(d => d.stage === 'won');
+    const dealsCreatedThisMonth = deals.filter(d => d.created_at >= start && d.created_at <= end);
+    const wonDealsList = deals.filter(d => {
+      if (d.stage !== 'won') return false;
+      const dealDate = d.won_at || d.created_at;
+      return dealDate >= start && dealDate <= end;
+    });
+    const totalDeals = dealsCreatedThisMonth.length;
     const wonDeals = wonDealsList.length;
     const totalValue = wonDealsList.reduce(
-      (sum, d) => sum + (d.total_amount || 0), 0
+      (sum, d) => sum + (Number(d.total_amount) || 0), 0
     );
 
-    // KRA 2 - New Customer Acquisition
-    const newCustomers = kraLogs.filter(
-      l => l.kra_number === 2 && l.kra_type === 'new_customer'
-    ).length;
+    // KRA 2 - New Customer Acquisition (distinct customer names)
+    const newCustomers = new Set(
+      kraLogs
+        .filter(l => l.kra_number === 2 && l.kra_type === 'new_customer')
+        .map(l => (l.customer_name || '').toLowerCase().trim())
+        .filter(Boolean)
+    ).size;
 
-    // KRA 3 - Customer Retention
-    const recurringWithOrder = deals.filter(d =>
-      recurring.some(r =>
-        r.customer_name?.toLowerCase()
-          .includes(d.customer_name?.toLowerCase() || '')
-      )
-    ).length;
+    // KRA 3 - Customer Retention (distinct active recurring customers who ordered)
+    const uniqueRecurringWithOrder = new Set(
+      deals
+        .filter(d =>
+          recurring.some(r =>
+            r.customer_name?.toLowerCase().trim() === d.customer_name?.toLowerCase().trim() ||
+            (d.customer_name && r.customer_name && (
+              d.customer_name.toLowerCase().includes(r.customer_name.toLowerCase()) ||
+              r.customer_name.toLowerCase().includes(d.customer_name.toLowerCase())
+            ))
+          )
+        )
+        .map(d => d.customer_name?.toLowerCase().trim())
+        .filter(Boolean)
+    ).size;
     const retentionRate = recurring.length > 0
-      ? Math.round((recurringWithOrder / recurring.length) * 100)
+      ? Math.min(100, Math.round((uniqueRecurringWithOrder / recurring.length) * 100))
       : 0;
 
-    // KRA 4 - Enquiry Conversion (accurate: use kra_logs inquiry_received vs won deals)
-    // Using kra_logs prevents double-counting when same customer sends multiple messages
-    const kra4InquiryLogs = kraLogs.filter(
-      l => l.kra_number === 4 && l.kra_type === 'inquiry_received'
-    );
-    const totalInquiries = kra4InquiryLogs.length || inquiries.length; // fallback to raw inquiries
+    // KRA 4 - Enquiry Conversion (consistent with dashboard: won deals / total deals created)
+    const totalInquiries = totalDeals;
     const conversionRate = totalInquiries > 0
       ? Math.round((wonDeals / totalInquiries) * 100)
       : 0;
 
     // KRA 5 - Payment Collection
     const pendingPayments = payments.filter(
-      p => p.status === 'pending'
+      p => p.status === 'pending' || p.status === 'partial'
     );
     const collectedPayments = payments.filter(
       p => p.status === 'collected'
@@ -140,8 +152,11 @@ async function generateFullKRAReport(scopeOrPhone, customMonthRange = null) {
     const overduePayments = pendingPayments.filter(
       p => p.due_date && new Date(p.due_date) < now
     );
+    const collectedAmount = payments.reduce(
+      (sum, p) => sum + (Number(p.collected_amount) || 0), 0
+    );
     const totalOutstanding = pendingPayments.reduce(
-      (sum, p) => sum + (p.outstanding || 0), 0
+      (sum, p) => sum + (p.outstanding !== null && p.outstanding !== undefined ? Number(p.outstanding) : Number(p.invoice_amount || 0)), 0
     );
 
     // KRA 6 - CRM Compliance (accurate: count distinct days with ANY kra_log OR deal/inquiry activity)
@@ -204,7 +219,7 @@ async function generateFullKRAReport(scopeOrPhone, customMonthRange = null) {
 
       `*3️⃣ Customer Retention & Order Frequency*\n` +
       `Recurring customers: ${recurring.length}\n` +
-      `Ordered this month: ${recurringWithOrder}\n` +
+      `Ordered this month: ${uniqueRecurringWithOrder}\n` +
       `${retentionRate >= 80 ? '✅' : '⚠️'} Retention: ${retentionRate}%\n\n` +
 
       `*4️⃣ Enquiry & Pipeline Conversion*\n` +
@@ -213,7 +228,7 @@ async function generateFullKRAReport(scopeOrPhone, customMonthRange = null) {
       ` (target: 70-80%)\n\n` +
 
       `*5️⃣ Payment Collection & Outstanding*\n` +
-      `Collected: ${collectedPayments.length}\n` +
+      `Collected: ${formatINR(collectedAmount)}\n` +
       `Pending: ${pendingPayments.length}\n` +
       `🔴 Overdue: ${overduePayments.length}\n` +
       `Outstanding: ${formatINR(totalOutstanding)}\n\n` +
