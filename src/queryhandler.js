@@ -335,6 +335,21 @@ function isProductInquiry(inquiry) {
   return hasMetalKeywords;
 }
 
+function getInquiryTonnage(inq) {
+  const ai = inq.ai_extraction_json || {};
+  if (ai.quantityTons && Number(ai.quantityTons) > 0) return Number(ai.quantityTons);
+  if (ai.quantity_mt && Number(ai.quantity_mt) > 0) return Number(ai.quantity_mt);
+  const items = ai.line_items || ai.lineItems || [];
+  if (Array.isArray(items) && items.length > 0) {
+    const sum = items.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+    if (sum > 0) return sum;
+  }
+  const textRaw = inq.raw_text || '';
+  const mtMatch = textRaw.match(/(\d+(?:\.\d+)?)\s*(?:mt|ton|tons|tonne)/i);
+  if (mtMatch) return parseFloat(mtMatch[1]);
+  return 0;
+}
+
 async function getInquiriesThisMonth(scopeOrPhone, text = '') {
   try {
     const supabase = getSupabase();
@@ -369,6 +384,8 @@ async function getInquiriesThisMonth(scopeOrPhone, text = '') {
     }).length;
     const processedCount = totalCount - reviewCount;
 
+    const totalTonnage = inqs.reduce((s, i) => s + getInquiryTonnage(i), 0);
+
     const title = scope.targetRepName
       ? `${scope.targetRepName}'s Inquiries`
       : (scope.isAdmin ? 'Company Inquiries' : (scope.isManager ? 'Team Inquiries' : 'My Inquiries'));
@@ -377,11 +394,45 @@ async function getInquiriesThisMonth(scopeOrPhone, text = '') {
       return `📥 *${title} - ${monthName} ${year}*\n\nWe haven't received any product inquiries yet for ${monthName} ${year}.`;
     }
 
+    const lower = (text || '').toLowerCase();
+
+    // Specific sub-intent: In Review / Pending count
+    if ((lower.includes('in review') || lower.includes('pending') || lower.includes('review queue')) && (lower.includes('how many') || lower.includes('count') || lower.includes('kitni'))) {
+      return `📥 *${title} - In Review (${monthName} ${year})*\n\n` +
+        `You currently have *${reviewCount} inquiries in review / pending* out of *${totalCount} total inquiries* received this month.\n\n` +
+        `📊 *Inquiry Status Breakdown:*\n` +
+        `• In Review / Pending: *${reviewCount}*\n` +
+        `• Processed / Confirmed: *${processedCount}*\n\n` +
+        `💡 _Tip: Say "List pending inquiries" to inspect pending items or review on the dashboard._`;
+    }
+
+    // Specific sub-intent: Processed / Confirmed count
+    if ((lower.includes('processed') || lower.includes('confirmed') || lower.includes('quoted')) && (lower.includes('how many') || lower.includes('count') || lower.includes('kitni'))) {
+      return `📥 *${title} - Processed Inquiries (${monthName} ${year})*\n\n` +
+        `*${processedCount} inquiries* have been successfully processed and confirmed out of *${totalCount} total inquiries* this month. 🎉\n\n` +
+        `📊 *Inquiry Status Breakdown:*\n` +
+        `• Processed / Confirmed: *${processedCount}*\n` +
+        `• In Review / Pending: *${reviewCount}*`;
+    }
+
+    // Specific sub-intent: Tonnage / Volume across inquiries
+    if (lower.includes('tonnage') || lower.includes('volume') || lower.includes('weight') || lower.includes('total mt') || lower.includes('total tons')) {
+      return `📥 *${title} - Total Inquiry Tonnage (${monthName} ${year})*\n\n` +
+        `Total volume across all inquiries this month is *${totalTonnage.toLocaleString('en-IN')} MT* across *${totalCount} inquiries*.\n\n` +
+        `📊 *Inquiry Breakdown:*\n` +
+        `• Total Inquiries: *${totalCount}*\n` +
+        `• Processed: *${processedCount}*\n` +
+        `• In Review: *${reviewCount}*\n` +
+        `• Total Volume: *${totalTonnage.toLocaleString('en-IN')} MT*`;
+    }
+
+    // General inquiry breakdown & summary
     return `📥 *${title} - ${monthName} ${year}*\n\n` +
       `We've received *${totalCount} inquiries* this month! That's a great volume of customer demand.\n\n` +
       `📊 *Inquiry Status Breakdown:*\n` +
-      `• Processed / Confirmed: *${processedCount}*\n` +
-      `• In Review / Pending: *${reviewCount}*\n\n` +
+      `• Processed: *${processedCount}*\n` +
+      `• In Review: *${reviewCount}*\n` +
+      (totalTonnage > 0 ? `• Total Volume: *${totalTonnage.toLocaleString('en-IN')} MT*\n\n` : '\n') +
       `_Directly synced with Enlight Sales OS Inquiries_`;
   } catch (error) {
     console.error('getInquiriesThisMonth error:', error);
