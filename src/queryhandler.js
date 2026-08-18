@@ -1237,6 +1237,19 @@ async function getFilteredOrders(scopeOrPhone, text = '') {
       query = query.lte('total_amount', filters.max_amount);
     }
 
+    // Location filter at DB level if specified
+    if (filters.delivery_location) {
+      query = query.or(`delivery_location.ilike.%${filters.delivery_location}%,customer_address.ilike.%${filters.delivery_location}%`);
+    }
+
+    // Customer name filter at DB level if specified
+    if (filters.customer_name) {
+      query = query.ilike('customer_name', `%${filters.customer_name}%`);
+    }
+
+    // Cap with sensible limit for high scalability
+    query = query.limit(100);
+
     // Fetch deals
     const { data: rawDeals, error } = await query;
     if (error) throw error;
