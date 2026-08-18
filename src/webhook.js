@@ -161,41 +161,37 @@ router.post('/', async (req, res) => {
           raw_text = raw_text.substring(0, 2000) + "... (truncated)";
         }
 
-        // Extract customer name & customer phone from message if present
-        let extractedCustName = null;
-        let extractedCustPhone = null;
+        // ── 1. EARLY INTERCEPTION FOR CHATBOT ASSISTANT QUERIES ──
+        // Questions, policy inquiries, data lookups, and conversational queries
+        // route directly to the Central Chatbot Gateway without creating inquiries or modifying deals.
+        const { isQuery } = require('./queryhandler');
+        const isChatbotQuery = messageType === 'text' && isQuery(raw_text);
 
-        if (raw_text) {
-          const textLower = raw_text.toLowerCase();
-          if (textLower.includes('delta')) extractedCustName = 'Delta Structural Steel';
-          else if (textLower.includes('mehta')) extractedCustName = 'Mehta Engineering';
-          else if (textLower.includes('supreme')) extractedCustName = 'Supreme Steel';
-          else if (textLower.includes('scafform')) extractedCustName = 'SB Scafform Technovert Pvt. Ltd.';
+        if (isChatbotQuery) {
+          console.log(`[Webhook] Intercepted Chatbot Query from ${senderPhone}: "${raw_text.slice(0, 60)}"`);
+          const axios = require('axios');
+          const backendUrl = process.env.CENTRAL_BACKEND_URL || 'http://127.0.0.1:3000';
+          try {
+            const res = await axios.post(
+              `${backendUrl}/chat/whatsapp/message`,
+              {
+                senderPhone,
+                messageText: raw_text,
+              },
+              { timeout: 25000 }
+            );
 
-          const pMatch = raw_text.match(/\b([6-9]\d{9})\b/);
-          if (pMatch) extractedCustPhone = pMatch[1];
+            const botReply = res.data?.data?.reply || res.data?.reply;
+            if (botReply) {
+              await sendTextMessage(senderPhone, botReply);
+              return;
+            }
+          } catch (backendErr) {
+            console.error(`[Webhook] Central backend error on query: ${backendErr.message}`);
+          }
         }
 
-        // Save incoming inquiry to `inquiries` table so it shows on the web dashboard
-        const { saveInquiry, getFullActiveSession, saveActiveSession } = require('./supabase');
-        try {
-          await saveInquiry({
-            source_channel: 'whatsapp',
-            raw_text: raw_text || `${messageType} message`,
-            media_urls: media_urls || [],
-            voice_url: voice_url || null,
-            sender_phone: senderPhone,
-            sender_name: employeeRecord ? employeeRecord.name : senderName,
-            customer_name: extractedCustName,
-            customer_phone: extractedCustPhone,
-            message_id: messageId,
-            status: 'processed',
-            overall_confidence: 0.92,
-            employee_id: employeeRecord ? employeeRecord.employee_id : null,
-          });
-        } catch (inqErr) {
-          console.error('[Webhook] Failed to save inquiry:', inqErr.message);
-        }
+        const { getFullActiveSession, saveActiveSession } = require('./supabase');
 
         // --- CHECK ACTIVE REJECTION FLOWS (multi-turn logic) ---
         const activeSession = await getFullActiveSession(senderPhone);
@@ -481,11 +477,32 @@ router.post('/', async (req, res) => {
           return;
         }
 
-        // ── AGENTIC ORCHESTRATOR (LangGraph + Google Gemini 3.1 Flash Lite) ──────────────
-        // Replaces all manual intent classification and if/else routing.
-        // The orchestrator understands any message (English/Hindi/Hinglish),
-        // calls the right tool(s), and writes an intelligent natural response.
+        // ── CENTRAL CHATBOT ORCHESTRATOR (NestJS + Gemini 3.5 Flash + pgvector RAG) ──
         if (messageType === 'text' && raw_text && raw_text.length >= 2) {
+          const axios = require('axios');
+          const backendUrl = process.env.CENTRAL_BACKEND_URL || 'http://127.0.0.1:3000';
+          try {
+            const res = await axios.post(
+              `${backendUrl}/chat/whatsapp/message`,
+              {
+                senderPhone,
+                messageText: raw_text,
+              },
+              { timeout: 25000 }
+            );
+
+            const botReply = res.data?.data?.reply || res.data?.reply;
+            if (botReply) {
+              await sendTextMessage(senderPhone, botReply);
+              return;
+            }
+          } catch (backendErr) {
+            console.warn(
+              `[Webhook] Central backend error (${backendErr.message}). Falling back to local orchestrator.`,
+            );
+          }
+
+          // Fallback to local orchestrator if central backend is unreachable
           const { runOrchestrator } = require('./core/orchestrator');
           const empName = employeeRecord ? employeeRecord.name : senderName;
 

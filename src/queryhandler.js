@@ -37,10 +37,14 @@ function isQuery(text) {
     'my deals', 'deals this week', 'is hafte',
     'active deals', 'current deals', 'won deals', 'won customers',
     'lost deals', 'rejected deals',
-    // Customer queries
+    // Customer & Contact queries
     'customer list', 'which customers', 'kaun se customer',
     'not ordered', 'order nahi', 'inactive customers',
     'my customers', 'all customers', 'client list', 'client directory',
+    'contact details', 'contact info', 'phone number', 'gst number', 'customer details',
+    // Knowledge Base & Policy queries
+    'sop', 'policy', 'moq', 'minimum order', 'guideline', 'guidelines',
+    'discount slab', 'discount policy', 'quotation validity', 'approval matrix',
     // Payment queries
     'outstanding', 'overdue', 'due payment',
     'pending payment', 'baaki payment', 'baaki list',
@@ -49,7 +53,7 @@ function isQuery(text) {
     'my performance', 'performance report', 'target achievements',
     'performance', 'performace', 'status report', 'performance status',
     'target status', 'sales achievement', 'my target', 'my status',
-    'kra status', 'kra report', 'my kra',
+    'kra status', 'kra report', 'my kra', 'churn radar', 'loss analytics',
     // Visit queries
     'my visits', 'visit log', 'who did i visit', 'field visits',
     'customer visits', 'site visits',
@@ -67,7 +71,7 @@ function isQuery(text) {
     // General conversational & date/pricing query triggers
     'date', 'time', 'today', 'aaj', 'din', 'tarikh', 'time kya',
     'what is', 'tell me', 'help', 'how to', 'bot', 'give me', 'show me', 'list',
-    'assistant', 'hello', 'hi', 'hey', 'namaste', 'joke', 'who are you', 'kaise ho'
+    'assistant', 'hello', 'hi', 'hey', 'namaste', 'joke', 'who are you', 'kaise ho', '?'
   ];
 
   return queryKeywords.some(keyword => lowerText.includes(keyword));

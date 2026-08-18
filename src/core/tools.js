@@ -129,6 +129,23 @@ function createTools(senderPhone, rawUserText = '') {
   const queryMyDataTool = tool(
     async ({ text }) => {
       try {
+        const axios = require('axios');
+        const backendUrl = process.env.CENTRAL_BACKEND_URL || 'http://127.0.0.1:3000';
+        const res = await axios.post(
+          `${backendUrl}/chat/whatsapp/message`,
+          {
+            senderPhone,
+            messageText: text,
+          },
+          { timeout: 20000 }
+        );
+        const reply = res.data?.data?.reply || res.data?.reply;
+        if (reply) return reply;
+      } catch (err) {
+        console.warn(`[queryMyDataTool] Central backend fallback: ${err.message}`);
+      }
+
+      try {
         return await getQueryHandler().handleQuery(text, senderPhone);
       } catch (err) {
         return `Error fetching data: ${err.message}`;
