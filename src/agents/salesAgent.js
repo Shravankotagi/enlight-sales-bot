@@ -608,7 +608,7 @@ async function processSalesMessage(text, senderPhone) {
     if (!customerName || customerName.length < 2) {
       const { saveActiveSession } = require('../supabase');
       await saveActiveSession(senderPhone, 'Unknown', 'pending_customer_for_deal');
-      return `❓ Which customer is this deal update for? Please reply with the customer/company name.`;
+      return `❓ Which customer is this inquiry for? Please reply with the customer/company name.`;
     }
 
     const officialCustomerName = await verifyAndGetCustomerName(
@@ -622,10 +622,22 @@ async function processSalesMessage(text, senderPhone) {
       .select('customer_phone')
       .ilike('customer_name', `%${finalCustomerName}%`)
       .limit(1);
-    const actualCustomerPhone =
+    let actualCustomerPhone =
       custRecord && custRecord.length > 0
         ? custRecord[0].customer_phone
         : data.customer_phone || null;
+
+    // Strict safety check: Under no circumstance should the salesperson's phone ever be used as customer phone
+    const cleanActualPhone = String(actualCustomerPhone || '').replace(/\D/g, '');
+    const cleanSenderPhone = String(senderPhone || '').replace(/\D/g, '');
+    if (
+      cleanActualPhone &&
+      cleanSenderPhone &&
+      (cleanActualPhone === cleanSenderPhone ||
+       cleanActualPhone.endsWith(cleanSenderPhone.slice(-10)))
+    ) {
+      actualCustomerPhone = null;
+    }
 
     let targetStage = data.target_stage || 'new_inquiry';
 
