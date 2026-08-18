@@ -341,7 +341,13 @@ const QUERY_CLASSIFIER_PROMPT = `
 You are an intelligent query router for a B2B metal sales system.
 Your job is to classify the salesperson's request into one of the following categories:
 
-DATA QUERIES:
+DATA & RBAC QUERIES:
+- "customer_360": Questions asking for 360 view, profile, deals, payments, or overview of a specific customer/company (e.g. "Customer 360 for Supreme Steel", "Tell me about Tata Motors", "Profile of Mehta Eng").
+- "knowledge_base": Questions about company policies, SOPs, MOQ (minimum order quantity), quotation validity, payment terms, discount slabs, or company guidelines.
+- "reorder_queue": Questions asking which recurring customers are due for reorder.
+- "churn_radar": Questions asking for churn radar or churn risk customers.
+- "loss_analytics": Questions asking for lost deal analysis or why deals were lost.
+- "team_pipeline": Questions from managers/admins asking for overall team pipeline or subordinates' deals.
 - "dashboard_link", "sales_summary", "kra_status", "visit_summary", "payment_summary", "complaint_summary", "full_report", "deals_this_week", "pending_deals", "pending_inquiries", "new_customers_summary", "won_customers", "active_deals_detail", "customer_list", "rate_sheet", "visit_list", "payment_aging", "lost_deals"
 
 ASSISTANT QUERIES: "general"
@@ -351,6 +357,7 @@ Return ONLY a JSON object (no markdown, no prose, no backticks):
 {
   "category": "<one of the categories above>",
   "confidence": <float 0.0 to 1.0>,
+  "customer_name": "<extracted customer/company name if category is customer_360, else null>",
   "target_salesperson": "<full name of the salesperson mentioned in the query if any, else null>"
 }
 `;

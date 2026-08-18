@@ -12,11 +12,12 @@ function getSupabase() {
   );
 }
 
-// Detect if message is a query or an inquiry
+// Detect if message is a query or an operational action
 function isQuery(text) {
-  const lowerText = text.toLowerCase();
+  if (!text || typeof text !== 'string') return false;
+  const lowerText = text.toLowerCase().trim();
 
-  // If it looks like a steel order/inquiry (e.g. contains quantity and units or pricing request), it is NOT a dashboard query!
+  // 1. If it looks like a steel order/inquiry (e.g. contains quantity and units or pricing request), it is NOT a chatbot query!
   const hasInquiryPatterns = 
     /\b\d+\s*(mt|kg|ton|pcs|sheet|coil|bar|flat|plate|mm|mtr)\b/i.test(lowerText) || 
     lowerText.includes('rate is') || 
@@ -28,47 +29,73 @@ function isQuery(text) {
     return false;
   }
 
+  // 2. Operational action logging patterns (visits, payments, complaints, onboarding, deal updates)
+  const isActionLogging = 
+    /\b(visited|met with|went to|meeting at|market visit|site visit)\b/i.test(lowerText) ||
+    /\b(received payment|paid rs|paid inr|received advance|collected payment|advance of|payment received|neft done|upi done|cheque received)\b/i.test(lowerText) ||
+    /\b(complaint about|defective material|damaged material|rejected material|material rejection|rust issue|quality complaint)\b/i.test(lowerText) ||
+    /\b(new customer|add customer|onboard customer|register customer)\b/i.test(lowerText);
+
+  const isExplicitQuery = 
+    /\b(my visits|who did i visit|visit log|show visits|visit summary)\b/i.test(lowerText) ||
+    /\b(pending payment|who hasn|overdue|payment aging|outstanding)\b/i.test(lowerText) ||
+    /\b(complaint status|show complaints|complaint summary)\b/i.test(lowerText) ||
+    /\b(customer list|my customers|which customers)\b/i.test(lowerText);
+
+  if (isActionLogging && !isExplicitQuery) {
+    return false;
+  }
+
   const queryKeywords = [
+    // 7 RBAC Tools queries
+    'open deals', 'pending deals', 'my deals', 'meri deals', 'deals', 'pipeline',
+    'customer 360', 'customer360', 'tell me about', 'profile of', 'about customer',
+    'reorder queue', 'reorder', 'due for reorder', 'reorders',
+    'knowledge base', 'sop', 'policy', 'guideline', 'guidelines', 'moq', 'minimum order',
+    'quotation validity', 'discount slab', 'discount policy', 'approval matrix',
+    'team pipeline', 'team sales', 'subordinates',
+    'churn radar', 'churn risk', 'at risk', 'churn',
+    'loss analytics', 'lost deals', 'why did we lose', 'loss reason', 'rejected deals',
+
     // Sales queries
     'my sales', 'meri sales', 'kitni sales', 'sales this month',
     'is mahine', 'this month', 'last month', 'pichle mahine',
-    // Deal queries  
-    'pending deals', 'open deals', 'meri deals',
-    'my deals', 'deals this week', 'is hafte',
-    'active deals', 'current deals', 'won deals', 'won customers',
-    'lost deals', 'rejected deals',
+    'deals this week', 'is hafte', 'active deals', 'current deals', 'won deals', 'won customers',
+
     // Customer & Contact queries
     'customer list', 'which customers', 'kaun se customer',
     'not ordered', 'order nahi', 'inactive customers',
     'my customers', 'all customers', 'client list', 'client directory',
     'contact details', 'contact info', 'phone number', 'gst number', 'customer details',
-    // Knowledge Base & Policy queries
-    'sop', 'policy', 'moq', 'minimum order', 'guideline', 'guidelines',
-    'discount slab', 'discount policy', 'quotation validity', 'approval matrix',
+
     // Payment queries
     'outstanding', 'overdue', 'due payment',
     'pending payment', 'baaki payment', 'baaki list',
-    'who hasn\'t paid', 'payment aging', 'collection due',
+    'who hasn\'t paid', 'who hasnt paid', 'payment aging', 'collection due',
+
     // Performance & Summary queries
     'my performance', 'performance report', 'target achievements',
     'performance', 'performace', 'status report', 'performance status',
     'target status', 'sales achievement', 'my target', 'my status',
-    'kra status', 'kra report', 'my kra', 'churn radar', 'loss analytics',
+    'kra status', 'kra report', 'my kra',
+
     // Visit queries
     'my visits', 'visit log', 'who did i visit', 'field visits',
     'customer visits', 'site visits',
+
     // Rate / Price queries
     'rate sheet', 'current rates', 'today\'s rates', 'steel rates',
     'bhav', 'price list', 'rate list',
+
     // Inquiry queries
     'my inquiries', 'meri inquiries', 'pending inquiries',
     'review queue', 'kitni inquiries',
-    // General / Command phrases
+
+    // General / Command phrases & Conversational triggers
     'monthly report', 'sales report', 'status report', 'show me sales',
     'my reports', 'my report', 'all reports', 'show reports', 'report card',
     'report', 'reports', 'dashboard', 'login', 'link', 'website', 'portal', 'url',
     'new customers', 'onboarded customers', 'kra 2',
-    // General conversational & date/pricing query triggers
     'date', 'time', 'today', 'aaj', 'din', 'tarikh', 'time kya',
     'what is', 'tell me', 'help', 'how to', 'bot', 'give me', 'show me', 'list',
     'assistant', 'hello', 'hi', 'hey', 'namaste', 'joke', 'who are you', 'kaise ho', '?'
@@ -605,9 +632,228 @@ async function getLostDeals(senderPhone, text = '') {
   }
 }
 
+async function getCustomer360(senderPhone, text, extractedName = null) {
+  let customerName = extractedName;
+  try {
+    const supabase = getSupabase();
+    const cleanPhone = (senderPhone || '').replace(/\D/g, '').slice(-10);
+
+    if (!customerName) {
+      customerName = text
+        .replace(/customer\s*360\s*(for|of)?/gi, '')
+        .replace(/360\s*view\s*(for|of)?/gi, '')
+        .replace(/tell\s*me\s*about/gi, '')
+        .replace(/profile\s*of/gi, '')
+        .replace(/about\s*customer/gi, '')
+        .replace(/[?.,]/g, '')
+        .trim();
+    }
+
+    if (!customerName || customerName.length < 2) {
+      return `❓ *Please specify the customer name.*\n\nExample: _"Customer 360 for Supreme Steel"_`;
+    }
+
+    // 1. Fetch profile
+    let custQuery = supabase
+      .from('recurring_customers')
+      .select('*')
+      .ilike('customer_name', `%${customerName}%`);
+    if (cleanPhone) {
+      custQuery = custQuery.ilike('assigned_salesperson_phone', `%${cleanPhone}%`);
+    }
+    const { data: profiles } = await custQuery.limit(1);
+    const profile = profiles && profiles.length > 0 ? profiles[0] : null;
+
+    // 2. Fetch deals
+    let dealsQuery = supabase
+      .from('deals')
+      .select('id, stage, total_amount, customer_name, customer_phone, customer_gst, customer_address, delivery_location, payment_terms, po_number, created_at, deal_items(*)')
+      .ilike('customer_name', `%${customerName}%`)
+      .order('created_at', { ascending: false });
+    if (cleanPhone) {
+      dealsQuery = dealsQuery.ilike('salesperson_phone', `%${cleanPhone}%`);
+    }
+    const { data: deals } = await dealsQuery.limit(5);
+
+    // 3. Fetch payment tracking
+    let payQuery = supabase
+      .from('payment_tracking')
+      .select('*')
+      .ilike('customer_name', `%${customerName}%`);
+    if (cleanPhone) {
+      payQuery = payQuery.ilike('salesperson_phone', `%${cleanPhone}%`);
+    }
+    const { data: payments } = await payQuery.limit(5);
+
+    if (!profile && (!deals || deals.length === 0) && (!payments || payments.length === 0)) {
+      return `🔍 *Customer 360 - ${customerName}*\n\nNo matching records found for "${customerName}" under your salesperson account.`;
+    }
+
+    const officialName = profile?.customer_name || deals?.[0]?.customer_name || customerName;
+    const phone = profile?.customer_phone || deals?.[0]?.customer_phone || 'Not specified';
+    const gst = profile?.customer_gst || deals?.[0]?.customer_gst || 'Not specified';
+    const address = profile?.customer_address || deals?.[0]?.customer_address || 'Not specified';
+
+    let dealsSection = '• No active deals recorded.';
+    if (deals && deals.length > 0) {
+      dealsSection = deals.map((d, i) => {
+        const amt = d.total_amount ? `₹${Number(d.total_amount).toLocaleString('en-IN')}` : 'Amount TBD';
+        const items = (d.deal_items || []).map(it => `${it.quantity_tons || it.quantity || ''} ${it.unit || 'MT'} ${it.product_name || it.sku_text || ''}`).filter(Boolean).join(', ');
+        return `• *Deal #${d.id.substring(0, 8)}* (${d.stage || 'inquiry'})\n  Value: ${amt}${items ? `\n  Items: ${items}` : ''}`;
+      }).join('\n\n');
+    }
+
+    let paySection = '• No past payment records or dues currently tracked for this account.';
+    if (payments && payments.length > 0) {
+      paySection = payments.map(p => {
+        const out = p.total_amount_pending ? `Pending: ₹${Number(p.total_amount_pending).toLocaleString('en-IN')}` : 'Paid in full';
+        return `• *Invoice:* ${p.invoice_number || 'N/A'} — ${out} (Status: ${p.status || 'active'})`;
+      }).join('\n');
+    }
+
+    return `🏢 *Customer 360 Overview: ${officialName}*\n\n` +
+      `📞 *Phone:* ${phone}\n` +
+      `📋 *GST:* ${gst}\n` +
+      `📍 *Address:* ${address}\n\n` +
+      `📦 *Recent Deals:*\n${dealsSection}\n\n` +
+      `💰 *Payment Status:*\n${paySection}`;
+  } catch (err) {
+    console.error('getCustomer360 error:', err.message);
+    return `❌ Could not fetch Customer 360 for ${customerName || 'customer'}.`;
+  }
+}
+
+async function getKnowledgeBaseAnswer(senderPhone, queryText) {
+  try {
+    const supabase = getSupabase();
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_2;
+    
+    // Generate query embedding via GoogleGenerativeAI with gemini-embedding-001
+    const { GoogleGenerativeAI } = require('@google/generative-ai');
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const embeddingModel = genAI.getGenerativeModel({ model: 'gemini-embedding-001' });
+    const result = await embeddingModel.embedContent(queryText);
+    const raw = result.embedding.values;
+    const queryEmbedding = raw.length > 768 ? raw.slice(0, 768) : raw;
+
+    let { data: chunks, error } = await supabase.rpc('match_kb_chunks', {
+      query_embedding: queryEmbedding,
+      match_count: 3,
+      allowed_roles: ['all', 'salesperson', 'manager', 'admin'],
+    });
+
+    if (error) {
+      const res2 = await supabase.rpc('match_kb_chunks', {
+        query_embedding: JSON.stringify(queryEmbedding),
+        match_count: 3,
+        allowed_roles: ['all', 'salesperson', 'manager', 'admin'],
+      });
+      chunks = res2.data;
+      error = res2.error;
+    }
+
+    if (!chunks || chunks.length === 0) {
+      return `📚 *Knowledge Base*\n\nI couldn't find specific company policy documentation for "${queryText}". Please check with your sales manager or operations lead.`;
+    }
+
+    const topChunk = chunks[0];
+    const sourceTitle = topChunk.title || 'Company Policy';
+
+    return `📚 *Enlight Metals Knowledge Base*\n\n${topChunk.content.trim()}\n\n📄 _Source: ${sourceTitle}_`;
+  } catch (err) {
+    console.error('getKnowledgeBaseAnswer error:', err.message);
+    return `⚠️ Could not search company knowledge base: ${err.message}`;
+  }
+}
+
+async function getReorderQueue(senderPhone) {
+  try {
+    const supabase = getSupabase();
+    const cleanPhone = (senderPhone || '').replace(/\D/g, '').slice(-10);
+
+    let query = supabase
+      .from('recurring_customers')
+      .select('id, customer_name, customer_phone, last_order_date, avg_order_frequency_days, notes')
+      .eq('is_active', true)
+      .order('last_order_date', { ascending: true })
+      .limit(10);
+
+    if (cleanPhone) {
+      query = query.ilike('assigned_salesperson_phone', `%${cleanPhone}%`);
+    }
+
+    const { data: accounts, error } = await query;
+    if (error || !accounts || accounts.length === 0) {
+      return `🔄 *Reorder Queue*\n\nNo recurring customers currently flagged for reorder under your account.`;
+    }
+
+    const list = accounts.map((a, i) => {
+      const lastDate = a.last_order_date ? new Date(a.last_order_date).toLocaleDateString('en-IN') : 'N/A';
+      return `${i + 1}. *${a.customer_name}*\n   📞 ${a.customer_phone || 'N/A'} | Last Order: ${lastDate}\n   Frequency: Every ${a.avg_order_frequency_days || 30} days`;
+    }).join('\n\n');
+
+    return `🔄 *Recurring Customers Due for Reorder (${accounts.length})*\n\n${list}\n\n_Tip: Reach out to these clients to secure repeat orders this week._`;
+  } catch (err) {
+    console.error('getReorderQueue error:', err.message);
+    return `❌ Could not fetch reorder queue.`;
+  }
+}
+
+async function getChurnRadar(senderPhone) {
+  try {
+    const supabase = getSupabase();
+    const cleanPhone = (senderPhone || '').replace(/\D/g, '').slice(-10);
+
+    let query = supabase
+      .from('recurring_customers')
+      .select('*')
+      .limit(20);
+
+    if (cleanPhone) {
+      query = query.ilike('assigned_salesperson_phone', `%${cleanPhone}%`);
+    }
+
+    const { data: accounts, error } = await query;
+    if (error || !accounts || accounts.length === 0) {
+      return `⚠️ *Churn Radar*\n\nNo accounts currently flagged at churn risk under your account.`;
+    }
+
+    const now = Date.now();
+    const atRisk = accounts.filter(a => {
+      if (!a.last_order_date) return false;
+      const last = new Date(a.last_order_date).getTime();
+      const days = (now - last) / (1000 * 60 * 60 * 24);
+      const expected = (a.avg_order_frequency_days || 30) * 1.5;
+      return days > expected;
+    });
+
+    if (atRisk.length === 0) {
+      return `✅ *Churn Radar*\n\nAll your recurring accounts are ordering within their healthy schedule!`;
+    }
+
+    const list = atRisk.map((a, i) => {
+      const days = Math.round((now - new Date(a.last_order_date).getTime()) / (1000 * 60 * 60 * 24));
+      return `${i + 1}. *${a.customer_name}*\n   Days since last order: *${days} days* (Avg cycle: ${a.avg_order_frequency_days || 30} days)`;
+    }).join('\n\n');
+
+    return `🚨 *Churn Risk Accounts (${atRisk.length})*\n\n${list}\n\n_Action: Schedule immediate retention visits/calls._`;
+  } catch (err) {
+    console.error('getChurnRadar error:', err.message);
+    return `❌ Could not fetch churn radar.`;
+  }
+}
+
 // Shared category → handler router (used by both admin and salesperson paths)
-async function routeToHandler(category, text, phone, isAdmin, supabase) {
+async function routeToHandler(category, text, phone, isAdmin, supabase, extra = {}) {
   switch (category) {
+    case 'customer_360':
+      return await getCustomer360(phone, text, extra.customer_name);
+    case 'knowledge_base':
+      return await getKnowledgeBaseAnswer(phone, text);
+    case 'reorder_queue':
+      return await getReorderQueue(phone);
+    case 'churn_radar':
+      return await getChurnRadar(phone);
     case 'dashboard_link': {
       const dashboardUrl = process.env.DASHBOARD_URL || 'https://enlight-sales-frontend.vercel.app';
       return `🔗 *Enlight Sales OS Portal*\n\n👉 ${dashboardUrl}\n\nEnter your registered WhatsApp number to log in.`;
@@ -720,7 +966,7 @@ async function handleQuery(text, senderPhone) {
 
       // Route using category
       if (classification && classification.category !== 'general' && classification.category !== 'blocked' && classification.confidence >= 0.65) {
-        return await routeToHandler(classification.category, text, effectivePhone, isAdmin, supabase);
+        return await routeToHandler(classification.category, text, effectivePhone, isAdmin, supabase, classification);
       }
     } catch (err) {
       console.error('Admin semantic router error:', err.message);
@@ -744,7 +990,7 @@ async function handleQuery(text, senderPhone) {
         return `⚠️ *Query Not Supported*\n\nThis type of request is outside the bot's scope.\n\nI can only answer queries related to *your own* deals, customers, payments, visits, KRA performance, and steel rates.`;
       }
       if (classification.category !== 'general') {
-        return await routeToHandler(classification.category, text, effectivePhone, isAdmin, supabase);
+        return await routeToHandler(classification.category, text, effectivePhone, isAdmin, supabase, classification);
       }
     }
   } catch (err) {
@@ -752,6 +998,22 @@ async function handleQuery(text, senderPhone) {
   }
 
   // ── Keyword fallback (backup for low-confidence semantic router) ─────────
+  // Customer 360 / Profile
+  if (lower.includes('360') || lower.includes('customer profile') || lower.includes('tell me about') || lower.includes('profile of')) {
+    return await getCustomer360(senderPhone, text);
+  }
+  // Knowledge base / SOP / Policy
+  if (lower.includes('moq') || lower.includes('sop') || lower.includes('policy') || lower.includes('guideline') || lower.includes('discount slab') || lower.includes('validity')) {
+    return await getKnowledgeBaseAnswer(senderPhone, text);
+  }
+  // Reorder queue
+  if (lower.includes('reorder') || lower.includes('due for order')) {
+    return await getReorderQueue(senderPhone);
+  }
+  // Churn radar
+  if (lower.includes('churn')) {
+    return await getChurnRadar(senderPhone);
+  }
   // KRA / performance
   if (lower.includes('kra') || lower.includes('target') || lower.includes('performance') ||
       lower.includes('performace') || lower.includes('achievement')) {

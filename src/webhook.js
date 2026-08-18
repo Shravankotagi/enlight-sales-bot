@@ -187,7 +187,15 @@ router.post('/', async (req, res) => {
               return;
             }
           } catch (backendErr) {
-            console.error(`[Webhook] Central backend error on query: ${backendErr.message}`);
+            console.error(`[Webhook] Central backend error on query: ${backendErr.message}. Falling back to local query handler.`);
+          }
+
+          // Fallback to local query handler if central backend is unreachable
+          const { handleQuery } = require('./queryhandler');
+          const queryReply = await handleQuery(raw_text, senderPhone);
+          if (queryReply) {
+            await sendTextMessage(senderPhone, queryReply);
+            return;
           }
         }
 
@@ -477,32 +485,8 @@ router.post('/', async (req, res) => {
           return;
         }
 
-        // ── CENTRAL CHATBOT ORCHESTRATOR (NestJS + Gemini 3.5 Flash + pgvector RAG) ──
+        // ── OPERATIONAL AGENTIC ORCHESTRATOR (LangGraph + Specialized Write Agents) ──
         if (messageType === 'text' && raw_text && raw_text.length >= 2) {
-          const axios = require('axios');
-          const backendUrl = process.env.CENTRAL_BACKEND_URL || 'http://127.0.0.1:3000';
-          try {
-            const res = await axios.post(
-              `${backendUrl}/chat/whatsapp/message`,
-              {
-                senderPhone,
-                messageText: raw_text,
-              },
-              { timeout: 25000 }
-            );
-
-            const botReply = res.data?.data?.reply || res.data?.reply;
-            if (botReply) {
-              await sendTextMessage(senderPhone, botReply);
-              return;
-            }
-          } catch (backendErr) {
-            console.warn(
-              `[Webhook] Central backend error (${backendErr.message}). Falling back to local orchestrator.`,
-            );
-          }
-
-          // Fallback to local orchestrator if central backend is unreachable
           const { runOrchestrator } = require('./core/orchestrator');
           const empName = employeeRecord ? employeeRecord.name : senderName;
 
@@ -723,22 +707,38 @@ router.post('/', async (req, res) => {
           await saveActiveSession(senderPhone, officialCustomerName, 'inquiry');
 
           // Use the official/corrected customer name from the database (fixes typos)
-          if (extraction.customer) {
-            extraction.customer.name = officialCustomerName;
-          }
-
-          // Update inquiry with extraction result
-          await supabase
-            .from('inquiries')
-            .update({ 
-              ai_extraction_json: extraction,
-              overall_confidence: extraction.overall_confidence,
-              status: extraction.overall_confidence >= 0.85 ? 'processed' : 'review'
-            })
-            .eq('id', savedInquiry.id);
+          // Save inquiry in inquiries table with validated customer and line items
+          const { saveInquiry } = require('./supabase');
+          const savedInquiry = await saveInquiry({
+            source_channel: 'whatsapp',
+            raw_text: raw_text,
+            media_urls: media_urls || [],
+            voice_url: voice_url || null,
+            sender_phone: senderPhone,
+            sender_name: senderName,
+            whatsapp_message_id: messageId || null,
+            status: extraction.overall_confidence >= 0.85 ? 'processed' : 'review',
+            salesperson_phone: senderPhone,
+            employee_id: employeeId,
+            inquiry_type: extraction.inquiry_type || 'Product Requirement',
+            overall_confidence: extraction.overall_confidence || 0.95,
+            ai_extraction_json: {
+              ...extraction,
+              customer: {
+                name: officialCustomerName,
+                phone: extraction.customer?.phone || null,
+                gst: extraction.customer?.gst || null,
+                address: extraction.customer?.address || null,
+              },
+              customer_name: officialCustomerName,
+              customer_phone: extraction.customer?.phone || null,
+              companyName: officialCustomerName,
+            },
+          });
+          const inquiryId = savedInquiry?.id || null;
 
           // Save deal + line items
-          deal = await saveDeal(savedInquiry.id, extraction, senderPhone, employeeId);
+          deal = await saveDeal(inquiryId, extraction, senderPhone, employeeId);
 
           // --- KRA 2 NEW CUSTOMER CHECK ---
           if (deal && deal.customer_name) {

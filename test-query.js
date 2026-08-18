@@ -1,4 +1,6 @@
-require('dotenv').config({ path: '../.env' });
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 const { isQuery, handleQuery } = require('./src/queryhandler');
 
 const testMessages = [
@@ -24,10 +26,12 @@ async function test() {
   console.log('\n=== QUERY RESPONSE TEST ===\n');
 
   const queries = [
+    'Customer 360 for Supreme Steel',
+    'What is our MOQ policy?',
+    'Which customers are due for reorder?',
+    'Show churn radar',
     'my sales this month',
-    'pending deals', 
-    'my kra status',
-    'deals this week'
+    'pending deals'
   ];
 
   for (const q of queries) {

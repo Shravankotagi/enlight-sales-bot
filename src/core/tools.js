@@ -153,7 +153,7 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'query_my_data',
-      description: `Use this tool when the salesperson is ASKING for information: outstanding payments, deal pipeline, visit history, KRA performance, customer list, metal rates, sales reports, or any question about existing data.`,
+      description: `Use this tool when the salesperson is ASKING for information: Customer 360 overview, company profile, SOP / company policy, MOQ (minimum order quantity), quotation validity, payment terms, outstanding payments, deal pipeline, visit history, KRA performance, customer list, metal rates, sales reports, or any question about existing data.`,
       schema: z.object({
         text: z.string().describe('The query question from the salesperson'),
       }),
