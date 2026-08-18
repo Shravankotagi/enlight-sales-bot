@@ -76,21 +76,31 @@ function isQuery(text) {
 }
 
 // Get current month date range
-function getMonthRange() {
+function getMonthRange(monthOffset = 0) {
   const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), 1);
-  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+  const targetDate = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
+  const start = new Date(targetDate.getFullYear(), targetDate.getMonth(), 1);
+  const end = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 0, 23, 59, 59);
   return {
     start: start.toISOString(),
     end: end.toISOString(),
-    monthName: now.toLocaleString('en-IN', { month: 'long' }),
-    year: now.getFullYear()
+    monthName: start.toLocaleString('en-IN', { month: 'long' }),
+    year: targetDate.getFullYear()
   };
 }
 
 function getMonthRangeFromQuery(text) {
   if (!text) return getMonthRange();
   const lower = text.toLowerCase();
+
+  // 1. Explicit relative phrases take priority if present
+  if (lower.includes('last month') || lower.includes('previous month') || lower.includes('pichle mahine') || lower.includes('beete mahine')) {
+    return getMonthRange(-1);
+  }
+  if (lower.includes('this month') || lower.includes('current month') || lower.includes('is mahine') || lower.includes('present month')) {
+    return getMonthRange(0);
+  }
+
   const months = [
     { name: 'january', aliases: ['january', 'jan', 'januari'] },
     { name: 'february', aliases: ['february', 'feb', 'februari'] },
@@ -112,10 +122,20 @@ function getMonthRangeFromQuery(text) {
 
   for (let idx = 0; idx < months.length; idx++) {
     const m = months[idx];
-    if (m.aliases.some(alias => lower.includes(alias))) {
+    const matched = m.aliases.some(alias => {
+      const regex = new RegExp(`\\b${alias}\\b`, 'i');
+      return regex.test(lower);
+    });
+    if (matched) {
       targetMonth = idx;
       break;
     }
+  }
+
+  // Extract explicit 4-digit year if present (e.g. 2025, 2026)
+  const yearMatch = text.match(/\b(202[0-9])\b/);
+  if (yearMatch) {
+    targetYear = parseInt(yearMatch[1], 10);
   }
 
   const start = new Date(targetYear, targetMonth, 1);
