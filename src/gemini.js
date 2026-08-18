@@ -387,6 +387,8 @@ You are an intelligent query router for a B2B metal sales system.
 Your job is to classify the salesperson's request into one of the following categories:
 
 DATA & RBAC QUERIES:
+- "inquiry_summary": Queries asking how many inquiries received, total inquiry count, inquiry stats (e.g. "How many inquiries have we received this month?", "Inquiry count", "Total inquiries this month", "Kitni inquiries aayi hai", "Number of inquiries", "Total inquiries")
+- "order_list": Queries asking to list, filter, find, search, or show specific orders/deals by delivery location, customer name, product/material, status/stage, amount/value, quantity, or date (e.g. "List orders with delivery location Mumbai", "Show orders for Dynamic Industries", "Orders with product HR coil", "Show deals above 10 lakhs", "Orders in Pune", "Filter orders by status won", "List deals delivering to Chakan")
 - "customer_360": Questions asking for 360 view, profile, deals, payments, or overview of a specific customer/company (e.g. "Customer 360 for Supreme Steel", "Tell me about Tata Motors", "Profile of Mehta Eng").
 - "knowledge_base": Questions about company policies, SOPs, MOQ (minimum order quantity), quotation validity, payment terms, discount slabs, or company guidelines.
 - "reorder_queue": Questions asking which recurring customers are due for reorder.

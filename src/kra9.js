@@ -53,6 +53,9 @@ Rules:
 Message: "${text}"
     `;
 
+    const res = await invokeWithFallback([new HumanMessage(prompt)], null, false);
+    const rawText = typeof res?.content === 'string' ? res.content : JSON.stringify(res?.content || '');
+
     const { safeParseJSON } = require('./utils/jsonUtils');
     const parsed = safeParseJSON(rawText, null);
     if (!parsed) throw new Error('Could not parse visit details JSON');

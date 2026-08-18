@@ -18,6 +18,7 @@ function isQuery(text) {
   if (!text || typeof text !== 'string') return false;
   const lowerText = text.toLowerCase().trim();
 
+<<<<<<< HEAD
   // 1. If it looks like a steel order/inquiry (e.g. contains quantity and units or pricing request), it is NOT a chatbot query!
   const hasInquiryPatterns = 
     /\b\d+\s*(mt|kg|ton|pcs|sheet|coil|bar|flat|plate|mm|mtr)\b/i.test(lowerText) || 
@@ -28,6 +29,29 @@ function isQuery(text) {
     
   if (hasInquiryPatterns) {
     return false;
+=======
+  const isExplicitQuery = 
+    /\b(list|show|get|filter|find|search|display|how many|which|view)\b/i.test(lowerText) ||
+    lowerText.includes('orders with') ||
+    lowerText.includes('deals with') ||
+    lowerText.includes('delivery location') ||
+    lowerText.includes('summary') ||
+    lowerText.includes('report') ||
+    lowerText.includes('status');
+
+  if (!isExplicitQuery) {
+    // If it looks like a steel order/inquiry (e.g. contains quantity and units or pricing request), it is NOT a dashboard query!
+    const hasInquiryPatterns = 
+      /\b\d+\s*(mt|kg|ton|pcs|sheet|coil|bar|flat|plate|mm|mtr)\b/i.test(lowerText) || 
+      lowerText.includes('rate is') || 
+      lowerText.includes('price is') ||
+      lowerText.includes('target rate') ||
+      /\b\d+\s*x\s*\d+/i.test(lowerText);
+      
+    if (hasInquiryPatterns) {
+      return false;
+    }
+>>>>>>> origin/main
   }
 
   // 2. Operational action logging patterns (visits, payments, complaints, onboarding, deal updates)
@@ -108,21 +132,31 @@ function isQuery(text) {
 }
 
 // Get current month date range
-function getMonthRange() {
+function getMonthRange(monthOffset = 0) {
   const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), 1);
-  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+  const targetDate = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
+  const start = new Date(targetDate.getFullYear(), targetDate.getMonth(), 1);
+  const end = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 0, 23, 59, 59);
   return {
     start: start.toISOString(),
     end: end.toISOString(),
-    monthName: now.toLocaleString('en-IN', { month: 'long' }),
-    year: now.getFullYear()
+    monthName: start.toLocaleString('en-IN', { month: 'long' }),
+    year: targetDate.getFullYear()
   };
 }
 
 function getMonthRangeFromQuery(text) {
   if (!text) return getMonthRange();
   const lower = text.toLowerCase();
+
+  // 1. Explicit relative phrases take priority if present
+  if (lower.includes('last month') || lower.includes('previous month') || lower.includes('pichle mahine') || lower.includes('beete mahine')) {
+    return getMonthRange(-1);
+  }
+  if (lower.includes('this month') || lower.includes('current month') || lower.includes('is mahine') || lower.includes('present month')) {
+    return getMonthRange(0);
+  }
+
   const months = [
     { name: 'january', aliases: ['january', 'jan', 'januari'] },
     { name: 'february', aliases: ['february', 'feb', 'februari'] },
@@ -144,10 +178,20 @@ function getMonthRangeFromQuery(text) {
 
   for (let idx = 0; idx < months.length; idx++) {
     const m = months[idx];
-    if (m.aliases.some(alias => lower.includes(alias))) {
+    const matched = m.aliases.some(alias => {
+      const regex = new RegExp(`\\b${alias}\\b`, 'i');
+      return regex.test(lower);
+    });
+    if (matched) {
       targetMonth = idx;
       break;
     }
+  }
+
+  // Extract explicit 4-digit year if present (e.g. 2025, 2026)
+  const yearMatch = text.match(/\b(202[0-9])\b/);
+  if (yearMatch) {
+    targetYear = parseInt(yearMatch[1], 10);
   }
 
   const start = new Date(targetYear, targetMonth, 1);
@@ -295,6 +339,149 @@ async function getPendingDeals(scopeOrPhone) {
   } catch (error) {
     console.error('getPendingDeals error:', error);
     return '❌ Could not fetch pending deals.';
+  }
+}
+
+function isProductInquiry(inquiry) {
+  if (!inquiry) return false;
+  const rawText = (inquiry.raw_text || '').toLowerCase().trim();
+  const ai = inquiry.ai_extraction_json || {};
+
+  if (Array.isArray(ai.line_items) && ai.line_items.length > 0) return true;
+  if (Array.isArray(ai.lineItems) && ai.lineItems.length > 0) return true;
+  if (ai.productType && ai.productType !== 'Unknown' && ai.productType !== 'Hot Rolled') return true;
+  if (ai.sku_text) return true;
+
+  if (
+    /^(yes|no|ok|done|won|lost|1|2|3|4|5|hi|hello|hey|thanks|thank you|good morning)$/i.test(rawText) ||
+    rawText.length < 5
+  ) {
+    return false;
+  }
+
+  if (
+    rawText.includes('quote sent') ||
+    rawText.includes('advance paid') ||
+    rawText.includes('visited client') ||
+    rawText.includes('deal won') ||
+    rawText.includes('deal lost') ||
+    rawText.includes('lost deal') ||
+    rawText.includes('payment received') ||
+    rawText.includes('payment of')
+  ) {
+    return false;
+  }
+
+  const hasMetalKeywords =
+    /\b(hr|cr|gi|gp|tmt|coil|sheet|plate|plates|sheets|coils|rebar|pipe|tube|steel|angle|beam|channel|mt|ton|tons|tonne|kg|kgs|mm|gauge|mtr|rate|price|quotation|rfq|po|order|require|requires|requirement|need|needs|dispatch)\b/i.test(
+      rawText,
+    );
+
+  return hasMetalKeywords;
+}
+
+function getInquiryTonnage(inq) {
+  const ai = inq.ai_extraction_json || {};
+  if (ai.quantityTons && Number(ai.quantityTons) > 0) return Number(ai.quantityTons);
+  if (ai.quantity_mt && Number(ai.quantity_mt) > 0) return Number(ai.quantity_mt);
+  const items = ai.line_items || ai.lineItems || [];
+  if (Array.isArray(items) && items.length > 0) {
+    const sum = items.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+    if (sum > 0) return sum;
+  }
+  const textRaw = inq.raw_text || '';
+  const mtMatch = textRaw.match(/(\d+(?:\.\d+)?)\s*(?:mt|ton|tons|tonne)/i);
+  if (mtMatch) return parseFloat(mtMatch[1]);
+  return 0;
+}
+
+async function getInquiriesThisMonth(scopeOrPhone, text = '') {
+  try {
+    const supabase = getSupabase();
+    const { start, end, monthName, year } = getMonthRangeFromQuery(text);
+
+    const scope = typeof scopeOrPhone === 'object' && scopeOrPhone !== null
+      ? scopeOrPhone
+      : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
+
+    if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
+      return `📥 *Team Inquiries - ${monthName} ${year}*\n\n0 inquiries found. You currently have no salespersons assigned to your team.`;
+    }
+
+    let query = supabase
+      .from('inquiries')
+      .select('id, sender_name, sender_phone, raw_text, status, source_channel, ai_extraction_json, created_at, salesperson_phone')
+      .gte('created_at', start)
+      .lte('created_at', end)
+      .order('created_at', { ascending: false });
+
+    query = applySalespersonFilter(query, scope.phones, 'salesperson_phone');
+
+    const { data: rawInqs, error } = await query;
+    if (error) throw error;
+
+    const inqs = (rawInqs || []).filter(isProductInquiry);
+    const totalCount = inqs.length;
+
+    const reviewCount = inqs.filter(i => {
+      const st = (i.status || 'review').toLowerCase();
+      return ['review', 'needs_review', 'pending', 'new', 'draft'].includes(st);
+    }).length;
+    const processedCount = totalCount - reviewCount;
+
+    const totalTonnage = inqs.reduce((s, i) => s + getInquiryTonnage(i), 0);
+
+    const title = scope.targetRepName
+      ? `${scope.targetRepName}'s Inquiries`
+      : (scope.isAdmin ? 'Company Inquiries' : (scope.isManager ? 'Team Inquiries' : 'My Inquiries'));
+
+    if (totalCount === 0) {
+      return `📥 *${title} - ${monthName} ${year}*\n\nWe haven't received any product inquiries yet for ${monthName} ${year}.`;
+    }
+
+    const lower = (text || '').toLowerCase();
+
+    // Specific sub-intent: In Review / Pending count
+    if ((lower.includes('in review') || lower.includes('pending') || lower.includes('review queue')) && (lower.includes('how many') || lower.includes('count') || lower.includes('kitni'))) {
+      return `📥 *${title} - In Review (${monthName} ${year})*\n\n` +
+        `You currently have *${reviewCount} inquiries in review / pending* out of *${totalCount} total inquiries* received this month.\n\n` +
+        `📊 *Inquiry Status Breakdown:*\n` +
+        `• In Review / Pending: *${reviewCount}*\n` +
+        `• Processed / Confirmed: *${processedCount}*\n\n` +
+        `💡 _Tip: Say "List pending inquiries" to inspect pending items or review on the dashboard._`;
+    }
+
+    // Specific sub-intent: Processed / Confirmed count
+    if ((lower.includes('processed') || lower.includes('confirmed') || lower.includes('quoted')) && (lower.includes('how many') || lower.includes('count') || lower.includes('kitni'))) {
+      return `📥 *${title} - Processed Inquiries (${monthName} ${year})*\n\n` +
+        `*${processedCount} inquiries* have been successfully processed and confirmed out of *${totalCount} total inquiries* this month. 🎉\n\n` +
+        `📊 *Inquiry Status Breakdown:*\n` +
+        `• Processed / Confirmed: *${processedCount}*\n` +
+        `• In Review / Pending: *${reviewCount}*`;
+    }
+
+    // Specific sub-intent: Tonnage / Volume across inquiries
+    if (lower.includes('tonnage') || lower.includes('volume') || lower.includes('weight') || lower.includes('total mt') || lower.includes('total tons')) {
+      return `📥 *${title} - Total Inquiry Tonnage (${monthName} ${year})*\n\n` +
+        `Total volume across all inquiries this month is *${totalTonnage.toLocaleString('en-IN')} MT* across *${totalCount} inquiries*.\n\n` +
+        `📊 *Inquiry Breakdown:*\n` +
+        `• Total Inquiries: *${totalCount}*\n` +
+        `• Processed: *${processedCount}*\n` +
+        `• In Review: *${reviewCount}*\n` +
+        `• Total Volume: *${totalTonnage.toLocaleString('en-IN')} MT*`;
+    }
+
+    // General inquiry breakdown & summary
+    return `📥 *${title} - ${monthName} ${year}*\n\n` +
+      `We've received *${totalCount} inquiries* this month! That's a great volume of customer demand.\n\n` +
+      `📊 *Inquiry Status Breakdown:*\n` +
+      `• Processed: *${processedCount}*\n` +
+      `• In Review: *${reviewCount}*\n` +
+      (totalTonnage > 0 ? `• Total Volume: *${totalTonnage.toLocaleString('en-IN')} MT*\n\n` : '\n') +
+      `_Directly synced with Enlight Sales OS Inquiries_`;
+  } catch (error) {
+    console.error('getInquiriesThisMonth error:', error);
+    return '❌ Could not fetch inquiry count.';
   }
 }
 
@@ -1073,6 +1260,7 @@ async function getLostDeals(scopeOrPhone, text = '') {
   }
 }
 
+<<<<<<< HEAD
 async function getCustomer360(senderPhone, text, extractedName = null) {
   let customerName = extractedName;
   try {
@@ -1283,6 +1471,331 @@ async function getChurnRadar(senderPhone) {
   } catch (err) {
     console.error('getChurnRadar error:', err.message);
     return `❌ Could not fetch churn radar.`;
+=======
+function parseAmountString(str) {
+  if (!str) return null;
+  const lower = str.toLowerCase().replace(/,/g, '');
+  const lakhMatch = lower.match(/(\d+(\.\d+)?)\s*(lakh|lacs|lac|l)\b/);
+  if (lakhMatch) return parseFloat(lakhMatch[1]) * 100000;
+  const crMatch = lower.match(/(\d+(\.\d+)?)\s*(crore|crores|cr)\b/);
+  if (crMatch) return parseFloat(crMatch[1]) * 10000000;
+  const kMatch = lower.match(/(\d+(\.\d+)?)\s*k\b/);
+  if (kMatch) return parseFloat(kMatch[1]) * 1000;
+  const numMatch = lower.match(/\b(\d{4,10})\b/);
+  if (numMatch) return parseFloat(numMatch[1]);
+  return null;
+}
+
+async function extractOrderFilters(text) {
+  const lower = text.toLowerCase();
+  
+  const filters = {
+    delivery_location: null,
+    customer_name: null,
+    product: null,
+    stage: null,
+    min_amount: null,
+    max_amount: null,
+    min_quantity: null,
+    max_quantity: null,
+    month_name: null,
+    year: null,
+    target_salesperson: null
+  };
+
+  // Rule-based fast regex extractors
+  // 1. Delivery Location
+  const locRegex = /(?:delivery\s*location|location|delivering\s*to|city|destination|at|in|to)\s*(?:is|:)?\s*([a-zA-Z0-9\s-]+?)(?:\s+(?:with|for|status|stage|above|below|more|less|on|and|$))/i;
+  const locMatch = text.match(locRegex);
+  if (locMatch) {
+    const candidate = locMatch[1].trim();
+    const blacklist = ['orders', 'deals', 'the', 'this', 'that', 'won', 'lost', 'pending', 'july', 'august', 'march', 'month', 'week', 'year', 'customer', 'all', 'me'];
+    if (!blacklist.includes(candidate.toLowerCase()) && candidate.length > 1) {
+      filters.delivery_location = candidate;
+    }
+  }
+
+  // 2. Stage / Status
+  if (lower.includes('status won') || lower.includes('stage won') || lower.includes('won orders') || lower.includes('won deals') || lower.includes('completed orders') || lower.includes('completed deals')) {
+    filters.stage = 'won';
+  } else if (lower.includes('status lost') || lower.includes('stage lost') || lower.includes('lost orders') || lower.includes('lost deals') || lower.includes('rejected')) {
+    filters.stage = 'lost';
+  } else if (lower.includes('negotiation')) {
+    filters.stage = 'negotiation';
+  } else if (lower.includes('quoted')) {
+    filters.stage = 'quoted';
+  } else if (lower.includes('review')) {
+    filters.stage = 'review';
+  } else if (lower.includes('pending') || lower.includes('open')) {
+    filters.stage = 'pending';
+  }
+
+  // 3. Amount range
+  const aboveMatch = text.match(/(?:above|greater\s*than|more\s*than|>|minimum|min)\s*(?:of|rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?\s*(?:lakh|lacs|lac|crore|cr|k|\d{3,}))/i);
+  if (aboveMatch) {
+    filters.min_amount = parseAmountString(aboveMatch[1]);
+  }
+  const belowMatch = text.match(/(?:below|less\s*than|under|<|maximum|max)\s*(?:of|rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?\s*(?:lakh|lacs|lac|crore|cr|k|\d{3,}))/i);
+  if (belowMatch) {
+    filters.max_amount = parseAmountString(belowMatch[1]);
+  }
+
+  // 4. Quantity range
+  const qtyAboveMatch = text.match(/(?:above|greater\s*than|more\s*than|>|minimum|min)\s*(\d+(?:\.\d+)?)\s*(?:mt|ton|tons|kgs|kg)\b/i);
+  if (qtyAboveMatch) {
+    filters.min_quantity = parseFloat(qtyAboveMatch[1]);
+  }
+
+  // LLM parsing for multi-attribute nuances (e.g. customer name, product grade)
+  try {
+    const { invokeWithFallback } = require('./core/modelRouter');
+    const { HumanMessage } = require('@langchain/core/messages');
+    const { safeParseJSON } = require('./utils/jsonUtils');
+
+    const prompt = `
+Extract order filtering criteria from this user query:
+"${text}"
+
+Return ONLY a JSON object (no markdown, no backticks, no prose):
+{
+  "delivery_location": "<city or destination if specified e.g. 'Mumbai', 'Pune', 'Chakan', else null>",
+  "customer_name": "<company or customer name if specified e.g. 'Dynamic Industries', 'Patel Construction', else null>",
+  "product": "<material, grade, SKU, or dimension if specified e.g. 'HR coil', 'MS plate', 'CR sheet', '8mm', else null>",
+  "stage": "<'won'|'lost'|'negotiation'|'quoted'|'review'|'new_inquiry'|'pending'|null>",
+  "min_amount": <numeric minimum rupee amount if specified e.g. 1000000, else null>,
+  "max_amount": <numeric maximum rupee amount if specified, else null>,
+  "min_quantity": <numeric minimum MT tonnage if specified, else null>,
+  "max_quantity": <numeric maximum MT tonnage if specified, else null>,
+  "month_name": "<month name if specified e.g. 'July', 'August', else null>",
+  "year": <4-digit year if specified e.g. 2026, else null>
+}
+`;
+    const res = await invokeWithFallback([new HumanMessage(prompt)], null, false);
+    const raw = typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
+    const parsed = safeParseJSON(raw, null);
+    if (parsed) {
+      if (parsed.delivery_location && !filters.delivery_location) filters.delivery_location = parsed.delivery_location;
+      if (parsed.customer_name) filters.customer_name = parsed.customer_name;
+      if (parsed.product) filters.product = parsed.product;
+      if (parsed.stage && !filters.stage) filters.stage = parsed.stage;
+      if (parsed.min_amount != null && filters.min_amount == null) filters.min_amount = parsed.min_amount;
+      if (parsed.max_amount != null && filters.max_amount == null) filters.max_amount = parsed.max_amount;
+      if (parsed.min_quantity != null && filters.min_quantity == null) filters.min_quantity = parsed.min_quantity;
+      if (parsed.max_quantity != null && filters.max_quantity == null) filters.max_quantity = parsed.max_quantity;
+      if (parsed.month_name) filters.month_name = parsed.month_name;
+      if (parsed.year) filters.year = parsed.year;
+    }
+  } catch (err) {
+    console.warn('LLM filter extraction notice:', err.message);
+  }
+
+  return filters;
+}
+
+/**
+ * Filtered Order Listing Engine with full RBAC scoping:
+ * Supports filtering by delivery location, customer name, product/material/SKU, status/stage,
+ * amount/value range, quantity (MT), date/month, and target salesperson.
+ */
+async function getFilteredOrders(scopeOrPhone, text = '') {
+  try {
+    const supabase = getSupabase();
+    const scope = typeof scopeOrPhone === 'object' && scopeOrPhone !== null
+      ? scopeOrPhone
+      : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
+
+    if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
+      return `📋 *Order Listing*\n\nNo orders found. You currently have no salespersons assigned to your team.`;
+    }
+
+    const filters = await extractOrderFilters(text);
+
+    // Base query with RBAC
+    let query = supabase
+      .from('deals')
+      .select('*, deal_items(*)')
+      .order('created_at', { ascending: false });
+
+    query = applySalespersonFilter(query, scope.phones, 'salesperson_phone');
+
+    // Stage filter at DB level if applicable
+    if (filters.stage === 'won') {
+      query = query.eq('stage', 'won');
+    } else if (filters.stage === 'lost') {
+      query = query.eq('stage', 'lost');
+    } else if (filters.stage === 'pending') {
+      query = query.not('stage', 'in', '("won","lost")');
+    } else if (filters.stage && ['negotiation', 'quoted', 'review', 'new_inquiry'].includes(filters.stage)) {
+      query = query.eq('stage', filters.stage);
+    }
+
+    // Min / Max amount at DB level
+    if (filters.min_amount != null) {
+      query = query.gte('total_amount', filters.min_amount);
+    }
+    if (filters.max_amount != null) {
+      query = query.lte('total_amount', filters.max_amount);
+    }
+
+    // Location filter at DB level if specified
+    if (filters.delivery_location) {
+      query = query.or(`delivery_location.ilike.%${filters.delivery_location}%,customer_address.ilike.%${filters.delivery_location}%`);
+    }
+
+    // Customer name filter at DB level if specified
+    if (filters.customer_name) {
+      query = query.ilike('customer_name', `%${filters.customer_name}%`);
+    }
+
+    // Cap with sensible limit for high scalability
+    query = query.limit(100);
+
+    // Fetch deals
+    const { data: rawDeals, error } = await query;
+    if (error) throw error;
+
+    let deals = rawDeals || [];
+
+    // Fetch employee names for manager/admin display
+    const { data: allEmps } = await supabase.from('employees').select('phone, name');
+    const phoneToName = {};
+    (allEmps || []).forEach(e => {
+      if (e.phone) phoneToName[e.phone] = e.name;
+    });
+
+    // In-memory filters:
+    // 1. Delivery Location filter
+    if (filters.delivery_location) {
+      const locQuery = filters.delivery_location.toLowerCase().trim();
+      deals = deals.filter(d => {
+        const dLoc = (d.delivery_location || '').toLowerCase();
+        const dAddr = (d.customer_address || '').toLowerCase();
+        return dLoc.includes(locQuery) || dAddr.includes(locQuery) || locQuery.split(/\s+/).some(w => w.length > 2 && (dLoc.includes(w) || dAddr.includes(w)));
+      });
+    }
+
+    // 2. Customer Name filter
+    if (filters.customer_name) {
+      const custQuery = filters.customer_name.toLowerCase().trim();
+      deals = deals.filter(d => {
+        const dName = (d.customer_name || '').toLowerCase();
+        return dName.includes(custQuery) || custQuery.includes(dName) || custQuery.split(/\s+/).some(w => w.length > 3 && dName.includes(w));
+      });
+    }
+
+    // 3. Product / SKU / Grade / Dimension filter
+    if (filters.product) {
+      const prodQuery = filters.product.toLowerCase().trim();
+      const prodTokens = prodQuery.split(/\s+/).filter(w => w.length > 1);
+      deals = deals.filter(d => {
+        const items = d.deal_items || [];
+        return items.some(it => {
+          const sku = (it.sku_text || '').toLowerCase();
+          const grade = (it.grade || '').toLowerCase();
+          const dim = (it.dimensions || '').toLowerCase();
+          const combined = `${sku} ${grade} ${dim}`;
+          return combined.includes(prodQuery) || prodTokens.some(tok => combined.includes(tok));
+        });
+      });
+    }
+
+    // 4. Quantity filter
+    if (filters.min_quantity != null || filters.max_quantity != null) {
+      deals = deals.filter(d => {
+        const items = d.deal_items || [];
+        const totalQty = items.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+        if (filters.min_quantity != null && totalQty < filters.min_quantity) return false;
+        if (filters.max_quantity != null && totalQty > filters.max_quantity) return false;
+        return true;
+      });
+    }
+
+    // 5. Month / Year filter
+    if (filters.month_name || filters.year) {
+      deals = deals.filter(d => {
+        const dDate = new Date(d.created_at || d.po_date);
+        if (filters.year && dDate.getFullYear() !== Number(filters.year)) return false;
+        if (filters.month_name) {
+          const mName = dDate.toLocaleString('en-IN', { month: 'long' }).toLowerCase();
+          if (!mName.includes(filters.month_name.toLowerCase())) return false;
+        }
+        return true;
+      });
+    }
+
+    // Build filter description title
+    const filterDesc = [];
+    if (filters.delivery_location) filterDesc.push(`Location: *${filters.delivery_location}*`);
+    if (filters.customer_name) filterDesc.push(`Customer: *${filters.customer_name}*`);
+    if (filters.product) filterDesc.push(`Product: *${filters.product}*`);
+    if (filters.stage) filterDesc.push(`Status: *${filters.stage}*`);
+    if (filters.min_amount) filterDesc.push(`Min Value: *${formatINR(filters.min_amount)}*`);
+    if (filters.max_amount) filterDesc.push(`Max Value: *${formatINR(filters.max_amount)}*`);
+    if (filters.min_quantity) filterDesc.push(`Min Qty: *${filters.min_quantity} MT*`);
+    if (filters.month_name) filterDesc.push(`Month: *${filters.month_name}*`);
+
+    const headerTag = filterDesc.length > 0 ? ` (${filterDesc.join(', ')})` : '';
+
+    if (!deals || deals.length === 0) {
+      return `📋 *No Matching Orders Found*\n\n` +
+        `No orders found matching your criteria${headerTag}.\n\n` +
+        `💡 *Tip*: Try broadening your search or check deal status on Enlight Sales OS.`;
+    }
+
+    // Format list of matching orders (up to 10)
+    const displayDeals = deals.slice(0, 10);
+    const orderCards = displayDeals.map((d, i) => {
+      const cust = d.customer_name || 'Unknown Customer';
+      const poStr = d.po_number ? ` (PO: ${d.po_number})` : '';
+      const stageStr = (d.stage || 'new_inquiry').toUpperCase();
+      const amountStr = d.total_amount ? formatINR(d.total_amount) : 'Amount TBD';
+      
+      const items = d.deal_items || [];
+      let itemsSummary = '';
+      if (items.length > 0) {
+        const itemLines = items.map(it => {
+          const name = it.sku_text || it.grade || 'Steel Item';
+          const qty = it.quantity ? `${it.quantity} ${it.unit || 'MT'}` : '';
+          const rate = it.rate ? `@ ₹${Number(it.rate).toLocaleString('en-IN')}` : '';
+          return `${name}${qty ? ` (${qty}${rate ? ` ${rate}` : ''})` : ''}`;
+        }).slice(0, 2);
+        itemsSummary = `   📦 Items: ${itemLines.join(', ')}${items.length > 2 ? ` (+${items.length - 2} more)` : ''}\n`;
+      }
+
+      const locStr = d.delivery_location ? `   📍 Location: *${d.delivery_location}*\n` : '';
+      const dateStr = d.created_at ? new Date(d.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+      
+      const repName = phoneToName[d.salesperson_phone];
+      const repStr = (scope.isAdmin || scope.isManager) && repName ? `   👤 Salesperson: *${repName}*\n` : '';
+
+      return `${i + 1}. *${cust}*${poStr}\n` +
+        `   Status: *${stageStr}* | Value: *${amountStr}*\n` +
+        locStr +
+        itemsSummary +
+        repStr +
+        `   📅 Date: ${dateStr}`;
+    });
+
+    const totalMatchingValue = deals.reduce((s, d) => s + (Number(d.total_amount) || 0), 0);
+    const totalMatchingTonnage = deals.reduce((s, d) => {
+      const items = d.deal_items || [];
+      return s + items.reduce((iSum, it) => iSum + (Number(it.quantity) || 0), 0);
+    }, 0);
+
+    const title = scope.targetRepName
+      ? `${scope.targetRepName}'s Orders`
+      : (scope.isAdmin ? 'Company Orders' : (scope.isManager ? 'Team Orders' : 'My Orders'));
+
+    return `📋 *${title}* (${deals.length} found)${headerTag}\n\n` +
+      orderCards.join('\n\n') +
+      (deals.length > 10 ? `\n\n_Showing top 10 of ${deals.length} orders_` : '') +
+      `\n\n📊 *Summary:* Total Value: *${formatINR(totalMatchingValue)}*` +
+      (totalMatchingTonnage > 0 ? ` | Volume: *${totalMatchingTonnage.toLocaleString('en-IN')} MT*` : '');
+
+  } catch (err) {
+    console.error('getFilteredOrders error:', err);
+    return `❌ Could not fetch orders: ${err.message}`;
+>>>>>>> origin/main
   }
 }
 
@@ -1302,6 +1815,14 @@ async function routeToHandler(category, text, scope, supabase, extra = {}) {
       const dashboardUrl = process.env.DASHBOARD_URL || 'https://enlight-sales-frontend.vercel.app';
       return `🔗 *Enlight Sales OS Portal*\n\n👉 ${dashboardUrl}\n\nEnter your registered WhatsApp number to log in.`;
     }
+    case 'order_list':
+    case 'filtered_orders':
+      return await getFilteredOrders(scope, text);
+    case 'inquiry_summary':
+    case 'inquiries_summary':
+    case 'inquiries_count':
+    case 'inquiry_count':
+      return await getInquiriesThisMonth(scope, text);
     case 'sales_summary':
       return await getSalesThisMonth(scope, text);
     case 'kra_status':
@@ -1455,9 +1976,36 @@ async function handleQuery(text, senderPhone) {
   if (lower.includes('moq') || lower.includes('sop') || lower.includes('policy') || lower.includes('guideline') || lower.includes('discount slab') || lower.includes('validity')) {
     return await getKnowledgeBaseAnswer(senderPhone, text);
   }
+  // Reorder queue
+  if (lower.includes('reorder') || lower.includes('due for order') || lower.includes('repeat order')) {
+    return await getReorderQueue(effectiveScope);
+  }
   // Churn radar
   if (lower.includes('churn')) {
     return await getChurnRadar(senderPhone);
+  }
+
+  // 0. Filtered order listing detection (delivery location, customer filter, product filter, status listing, price/amount filter, quantity filter)
+  const isOrderListingQuery = 
+    lower.includes('delivery location') ||
+    lower.includes('delivering to') ||
+    /\b(list|show|get|filter|find|search)\s+(all\s+)?(orders|deals)\b/i.test(lower) ||
+    /\b(orders|deals)\s+(with|for|in|at|by|above|below|under|over|delivering|to)\b/i.test(lower) ||
+    /\b(orders|deals)\s+(list|listing)\b/i.test(lower);
+
+  if (isOrderListingQuery) {
+    if (!lower.includes('summary') && !lower.includes('scorecard') && !lower.includes('report card') && !lower.includes('kra status') && !lower.includes('aging')) {
+      return await getFilteredOrders(effectiveScope, text);
+    }
+  }
+
+  // Inquiry count / Inquiries summary this month (must come before generic sales/this month and before review queue)
+  if (
+    (lower.includes('inquiry') || lower.includes('inquiries') || lower.includes('enquiry') || lower.includes('enquiries') || lower.includes('rfq')) &&
+    (lower.includes('how many') || lower.includes('kitni') || lower.includes('total') || lower.includes('count') || lower.includes('number') || lower.includes('received') || lower.includes('this month') || lower.includes('is mahine')) &&
+    !lower.includes('review') && !lower.includes('pending')
+  ) {
+    return await getInquiriesThisMonth(effectiveScope, text);
   }
   // Full KRA report
   if (lower.includes('full report') || lower.includes('monthly report') || lower.includes('report card') || (lower.includes('report') && lower.includes('kra'))) {
@@ -1543,4 +2091,4 @@ async function handleQuery(text, senderPhone) {
   return await handleConversationalQuery(text, senderPhone);
 }
 
-module.exports = { isQuery, handleQuery, getVisitSummary, getInactiveCustomers, getReorderQueue };
+module.exports = { isQuery, handleQuery, getVisitSummary, getInactiveCustomers, getReorderQueue, getFilteredOrders };
