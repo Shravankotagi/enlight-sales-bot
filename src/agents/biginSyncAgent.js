@@ -643,7 +643,7 @@ async function logSyncResult({
   try {
     const sb = getSupabase();
     await sb.from('crm_sync_log').insert({
-      salesperson_phone: salespersonPhone || '918262937458',
+      salesperson_phone: salespersonPhone || null,
       customer_name:     customerName,
       activity_type:     activityType,
       summary:           summary?.substring(0, 500),
@@ -665,7 +665,7 @@ async function logKRA6Event({ salespersonPhone, customerName,
   try {
     const sb = getSupabase();
     await sb.from('kra_logs').insert({
-      salesperson_phone: salespersonPhone || '918262937458',
+      salesperson_phone: salespersonPhone || null,
       kra_number:        6,
       kra_type:          activityType,
       customer_name:     customerName || null,
@@ -691,7 +691,7 @@ async function syncActivity(activityType, data) {
       normalizedType = data.stage === 'won' ? 'deal_won' : data.stage === 'lost' ? 'deal_lost' : 'deal_stage';
     }
 
-    const senderPhone = data.senderPhone || data.phone || '918262937458';
+    const senderPhone = data.salesperson_phone || data.salespersonPhone || data.senderPhone || data.phone || null;
     const customerName = data.customerName || 'Customer';
     let zohoContactId = null;
     let zohoNoteId = null;
