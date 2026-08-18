@@ -46,6 +46,7 @@ Extract into ONLY a JSON object (no prose, no markdown, no backticks):
   "visit_outcome": "positive|neutral|negative",
   "material_requirement": "<steel product, requirement description, or future consumption mentioned (e.g. 'HR Coil / future monthly requirement', '50 MT HR Coil', 'MS Plates future consumption'), else null>",
   "follow_up_action": "<specific next action or pending information needed (e.g. 'Collect required quantity, expected PO/delivery date, and customer details', 'Send quotation for HR Coil', 'Share catalogue'), else null>",
+  "followup_days": <number of days mentioned by customer to think/decide before ordering e.g. 3, 5, 7, else 4 if interested, null if not interested>,
   "confidence": <float 0.0 to 1.0>
 }
 
@@ -256,6 +257,30 @@ async function processVisitMessage(text, senderPhone) {
 
     // Save active session for context retention (follow-up messages will know this customer)
     await saveActiveSession(senderPhone, finalCustomerName, 'visit_logged');
+
+    // Schedule Condition 2 — Visit Interest Follow-up Task if product interest was shown
+    const interestProducts = productInterests || materialRequirement;
+    if (visitOutcome === 'positive' && interestProducts) {
+      try {
+        const promisedDays = Number(data.followup_days) || 4;
+        const visitDueDate = new Date(Date.now() + promisedDays * 24 * 60 * 60 * 1000).toISOString();
+
+        await supabase.from('followup_tasks').insert({
+          task_type: 'visit_interest_followup',
+          customer_name: finalCustomerName,
+          customer_phone: contactNo || '',
+          salesperson_phone: senderPhone,
+          due_date: visitDueDate,
+          status: 'pending',
+          reminder_sent_at: null,
+          follow_up_count: 0,
+          resolution_notes: `Visit Interest Follow-up: Customer showed interest in ${interestProducts}. Promised decision timeframe: ${promisedDays} days. Notes: ${remarks}`,
+        });
+        console.log(`[VisitAgent] Scheduled visit interest follow-up for ${finalCustomerName} in ${promisedDays} days`);
+      } catch (fErr) {
+        console.error('[VisitAgent] Follow-up task creation notice:', fErr.message);
+      }
+    }
 
     // Count ALL visits this month
     const { data: visitLogs } = await supabase
