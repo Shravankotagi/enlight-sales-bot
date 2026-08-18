@@ -18,18 +18,6 @@ function isQuery(text) {
   if (!text || typeof text !== 'string') return false;
   const lowerText = text.toLowerCase().trim();
 
-<<<<<<< HEAD
-  // 1. If it looks like a steel order/inquiry (e.g. contains quantity and units or pricing request), it is NOT a chatbot query!
-  const hasInquiryPatterns = 
-    /\b\d+\s*(mt|kg|ton|pcs|sheet|coil|bar|flat|plate|mm|mtr)\b/i.test(lowerText) || 
-    lowerText.includes('rate is') || 
-    lowerText.includes('price is') ||
-    lowerText.includes('target rate') ||
-    /\b\d+\s*x\s*\d+/i.test(lowerText);
-    
-  if (hasInquiryPatterns) {
-    return false;
-=======
   const isExplicitQuery = 
     /\b(list|show|get|filter|find|search|display|how many|which|view)\b/i.test(lowerText) ||
     lowerText.includes('orders with') ||
@@ -51,7 +39,6 @@ function isQuery(text) {
     if (hasInquiryPatterns) {
       return false;
     }
->>>>>>> origin/main
   }
 
   // 2. Operational action logging patterns (visits, payments, complaints, onboarding, deal updates)
@@ -61,13 +48,13 @@ function isQuery(text) {
     /\b(complaint about|defective material|damaged material|rejected material|material rejection|rust issue|quality complaint)\b/i.test(lowerText) ||
     /\b(new customer|add customer|onboard customer|register customer)\b/i.test(lowerText);
 
-  const isExplicitQuery = 
+  const isExplicitActionQuery = 
     /\b(my visits|who did i visit|visit log|show visits|visit summary)\b/i.test(lowerText) ||
     /\b(pending payment|who hasn|overdue|payment aging|outstanding)\b/i.test(lowerText) ||
     /\b(complaint status|show complaints|complaint summary)\b/i.test(lowerText) ||
     /\b(customer list|my customers|which customers)\b/i.test(lowerText);
 
-  if (isActionLogging && !isExplicitQuery) {
+  if (isActionLogging && !isExplicitActionQuery) {
     return false;
   }
 
@@ -1260,7 +1247,6 @@ async function getLostDeals(scopeOrPhone, text = '') {
   }
 }
 
-<<<<<<< HEAD
 async function getCustomer360(senderPhone, text, extractedName = null) {
   let customerName = extractedName;
   try {
@@ -1471,7 +1457,9 @@ async function getChurnRadar(senderPhone) {
   } catch (err) {
     console.error('getChurnRadar error:', err.message);
     return `❌ Could not fetch churn radar.`;
-=======
+  }
+}
+
 function parseAmountString(str) {
   if (!str) return null;
   const lower = str.toLowerCase().replace(/,/g, '');
@@ -1795,7 +1783,6 @@ async function getFilteredOrders(scopeOrPhone, text = '') {
   } catch (err) {
     console.error('getFilteredOrders error:', err);
     return `❌ Could not fetch orders: ${err.message}`;
->>>>>>> origin/main
   }
 }
 
