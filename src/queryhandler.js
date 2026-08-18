@@ -297,6 +297,98 @@ async function getPendingDeals(scopeOrPhone) {
   }
 }
 
+function isProductInquiry(inquiry) {
+  if (!inquiry) return false;
+  const rawText = (inquiry.raw_text || '').toLowerCase().trim();
+  const ai = inquiry.ai_extraction_json || {};
+
+  if (Array.isArray(ai.line_items) && ai.line_items.length > 0) return true;
+  if (Array.isArray(ai.lineItems) && ai.lineItems.length > 0) return true;
+  if (ai.productType && ai.productType !== 'Unknown' && ai.productType !== 'Hot Rolled') return true;
+  if (ai.sku_text) return true;
+
+  if (
+    /^(yes|no|ok|done|won|lost|1|2|3|4|5|hi|hello|hey|thanks|thank you|good morning)$/i.test(rawText) ||
+    rawText.length < 5
+  ) {
+    return false;
+  }
+
+  if (
+    rawText.includes('quote sent') ||
+    rawText.includes('advance paid') ||
+    rawText.includes('visited client') ||
+    rawText.includes('deal won') ||
+    rawText.includes('deal lost') ||
+    rawText.includes('lost deal') ||
+    rawText.includes('payment received') ||
+    rawText.includes('payment of')
+  ) {
+    return false;
+  }
+
+  const hasMetalKeywords =
+    /\b(hr|cr|gi|gp|tmt|coil|sheet|plate|plates|sheets|coils|rebar|pipe|tube|steel|angle|beam|channel|mt|ton|tons|tonne|kg|kgs|mm|gauge|mtr|rate|price|quotation|rfq|po|order|require|requires|requirement|need|needs|dispatch)\b/i.test(
+      rawText,
+    );
+
+  return hasMetalKeywords;
+}
+
+async function getInquiriesThisMonth(scopeOrPhone, text = '') {
+  try {
+    const supabase = getSupabase();
+    const { start, end, monthName, year } = getMonthRangeFromQuery(text);
+
+    const scope = typeof scopeOrPhone === 'object' && scopeOrPhone !== null
+      ? scopeOrPhone
+      : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
+
+    if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
+      return `📥 *Team Inquiries - ${monthName} ${year}*\n\n0 inquiries found. You currently have no salespersons assigned to your team.`;
+    }
+
+    let query = supabase
+      .from('inquiries')
+      .select('id, sender_name, sender_phone, raw_text, status, source_channel, ai_extraction_json, created_at, salesperson_phone')
+      .gte('created_at', start)
+      .lte('created_at', end)
+      .order('created_at', { ascending: false });
+
+    query = applySalespersonFilter(query, scope.phones, 'salesperson_phone');
+
+    const { data: rawInqs, error } = await query;
+    if (error) throw error;
+
+    const inqs = (rawInqs || []).filter(isProductInquiry);
+    const totalCount = inqs.length;
+
+    const reviewCount = inqs.filter(i => {
+      const st = (i.status || 'review').toLowerCase();
+      return ['review', 'needs_review', 'pending', 'new', 'draft'].includes(st);
+    }).length;
+    const processedCount = totalCount - reviewCount;
+
+    const title = scope.targetRepName
+      ? `${scope.targetRepName}'s Inquiries`
+      : (scope.isAdmin ? 'Company Inquiries' : (scope.isManager ? 'Team Inquiries' : 'My Inquiries'));
+
+    if (totalCount === 0) {
+      return `📥 *${title} - ${monthName} ${year}*\n\nWe haven't received any product inquiries yet for ${monthName} ${year}.`;
+    }
+
+    return `📥 *${title} - ${monthName} ${year}*\n\n` +
+      `We've received *${totalCount} inquiries* this month! That's a great volume of customer demand.\n\n` +
+      `📊 *Inquiry Status Breakdown:*\n` +
+      `• Processed / Confirmed: *${processedCount}*\n` +
+      `• In Review / Pending: *${reviewCount}*\n\n` +
+      `_Directly synced with Enlight Sales OS Inquiries_`;
+  } catch (error) {
+    console.error('getInquiriesThisMonth error:', error);
+    return '❌ Could not fetch inquiry count.';
+  }
+}
+
 async function getPendingInquiries(scopeOrPhone) {
   try {
     const supabase = getSupabase();
@@ -1408,6 +1500,11 @@ async function routeToHandler(category, text, scope, supabase) {
     case 'order_list':
     case 'filtered_orders':
       return await getFilteredOrders(scope, text);
+    case 'inquiry_summary':
+    case 'inquiries_summary':
+    case 'inquiries_count':
+    case 'inquiry_count':
+      return await getInquiriesThisMonth(scope, text);
     case 'sales_summary':
       return await getSalesThisMonth(scope, text);
     case 'kra_status':
@@ -1567,6 +1664,15 @@ async function handleQuery(text, senderPhone) {
     if (!lower.includes('summary') && !lower.includes('scorecard') && !lower.includes('report card') && !lower.includes('kra status') && !lower.includes('aging')) {
       return await getFilteredOrders(effectiveScope, text);
     }
+  }
+
+  // Inquiry count / Inquiries summary this month (must come before generic sales/this month and before review queue)
+  if (
+    (lower.includes('inquiry') || lower.includes('inquiries') || lower.includes('enquiry') || lower.includes('enquiries') || lower.includes('rfq')) &&
+    (lower.includes('how many') || lower.includes('kitni') || lower.includes('total') || lower.includes('count') || lower.includes('number') || lower.includes('received') || lower.includes('this month') || lower.includes('is mahine')) &&
+    !lower.includes('review') && !lower.includes('pending')
+  ) {
+    return await getInquiriesThisMonth(effectiveScope, text);
   }
 
   // Full KRA report
