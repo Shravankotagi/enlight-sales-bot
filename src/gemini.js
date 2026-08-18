@@ -1,5 +1,5 @@
 /**
- * gemini.js — Inquiry extraction & classification module using Google Gemini (gemini-3.1-flash-lite)
+ * gemini.js — Inquiry extraction & classification module using Google Gemini (gemini-2.5-flash)
  */
 
 const { ChatGoogleGenerativeAI } = require('@langchain/google-genai');
@@ -14,9 +14,30 @@ async function callLightweightModel(prompt) {
 }
 
 const EXTRACTION_PROMPT = `
-You are an inquiry parser for an Indian B2B metal distributor called Enlight Metals.
-Input may be English, Hindi, or Hinglish. It could be typed text OR a photo of a 
-Purchase Order, handwritten requirement, or printed RFQ.
+You are an expert document parser for Enlight Metals, an Indian B2B metal distributor.
+Input is a photo or PDF of a business document — either a PURCHASE ORDER (PO) or a MATERIAL REQUIREMENT/INQUIRY/RFQ.
+
+════════════════════════════════════════════════════
+🔴 RULE #1 — PO vs INQUIRY (MOST IMPORTANT RULE):
+════════════════════════════════════════════════════
+
+STEP 1: Scan the ENTIRE document for a field explicitly labeled:
+  "PO No", "P.O. No", "PO Number", "Purchase Order No", "Purchase Order Number", "PO Ref", "P.O. Ref"
+
+STEP 2A — If such a label EXISTS and has a value (e.g. "PO No: 471" or "PO/2026/123"):
+  → Set inquiry_type: "purchase_order"
+  → Set po_number: "<that exact value>"
+  → This is a CONFIRMED PURCHASE ORDER.
+
+STEP 2B — If NO such label exists, OR the document says "Inquiry", "RFQ", "Quotation Request", "Material Requirement":
+  → Set inquiry_type: "inquiry"
+  → Set po_number: null
+  → This is an INQUIRY/RFQ, NOT a purchase order.
+
+⚠️  IMPORTANT: "Ref No", "Inquiry Ref", "Quotation Ref", "Our Ref", "Your Ref" are NOT PO numbers.
+    Only fields explicitly labeled PO No / Purchase Order No qualify.
+    When in doubt → inquiry_type: "inquiry", po_number: null.
+════════════════════════════════════════════════════
 
 Extract the following into ONLY a JSON object (no prose, no markdown, no backticks):
 
@@ -41,27 +62,28 @@ Extract the following into ONLY a JSON object (no prose, no markdown, no backtic
       "confidence": 0.0
     }
   ],
-  "po_number": "",
-  "po_date": "",
+  "po_number": null,
+  "po_date": null,
   "delivery_location": "",
   "delivery_date": "",
   "payment_terms": "",
+  "basic_amount": 0,
+  "gst_amount": 0,
   "total_amount": 0,
   "overall_confidence": 0.0,
   "inquiry_type": "purchase_order|inquiry|visiting_card|unknown"
 }
 
-Rules:
+Additional Rules:
 - Quantities: normalize to MT where unit is tonnes/ton/MT; keep KG/PCS as stated
-- SKU text: preserve the customer exact words in sku_text
-- If a field is absent return null - never invent values
-- DATE RULE: Current Year is 2026. Any date specifying month/day (e.g. "20 August", "25 August") MUST ALWAYS use year 2026 (e.g. 2026-08-20). NEVER output past years like 2024 or 2025.
+- SKU text: preserve the customer's exact words in sku_text
+- Basic & GST Amounts: extract basic_amount (before tax), gst_amount (18%), and total_amount (grand total including GST).
+- If a field is absent return null — never invent values
+- DATE RULE: Current Year is 2026. Any date specifying month/day MUST ALWAYS use year 2026 (e.g. 2026-08-14).
 - CONFIDENCE RULE:
-  * 1.0 (100%) ONLY when quantity, product, unit, AND explicit rate/price per MT are stated.
+  * 1.0 (100%) when quantity, product, unit, AND explicit rate/price per MT are stated.
   * 0.85 when rate is auto-derived from rate sheet.
   * 0.75 - 0.80 when rate or customer details are missing.
-- overall_confidence: average of line item confidences, capped at 0.85 if rate is auto-derived.
-- inquiry_type: "purchase_order" if PO number present, "inquiry" if just a requirement
 - Return ONLY the JSON object. No prose. No markdown. No backticks.
 `;
 
@@ -91,6 +113,22 @@ async function getLatestActiveRatesText() {
 
 function postProcessExtraction(parsed) {
   if (!parsed) return parsed;
+
+  // 0. PO vs Inquiry enforcement: if po_number is set, inquiry_type MUST be purchase_order
+  if (
+    parsed.po_number &&
+    parsed.po_number !== 'null' &&
+    parsed.po_number !== 'None' &&
+    String(parsed.po_number).trim().length > 2
+  ) {
+    // Has a real PO number → this IS a purchase order, regardless of what model said
+    parsed.inquiry_type = 'purchase_order';
+  } else if (parsed.inquiry_type === 'purchase_order') {
+    // Model said purchase_order but no PO number found → revert to inquiry
+    parsed.inquiry_type = 'inquiry';
+    parsed.po_number = null;
+    console.warn('[Gemini] postProcess: model set purchase_order but no po_number found — corrected to inquiry');
+  }
 
   // 1. Delivery Date Year Correction (Ensure 2026 or future year)
   if (parsed.delivery_date) {
@@ -160,77 +198,84 @@ async function extractFromText(text) {
   }
 }
 
-async function extractFromImage(imageBuffer, mimeType) {
+async function extractFromImageOrDoc(buffer, mimeType) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_2;
-    const model = new ChatGoogleGenerativeAI({
-      model: 'gemini-2.5-flash',
-      apiKey: apiKey,
-      temperature: 0.1,
-    });
-    const base64Img = imageBuffer.toString('base64');
-    const imageUrl = `data:${mimeType || 'image/jpeg'};base64,${base64Img}`;
-    
-    const message = new HumanMessage({
-      content: [
-        { type: 'text', text: EXTRACTION_PROMPT },
-        { type: 'image_url', image_url: { url: imageUrl } }
-      ]
-    });
-    
-    const response = await model.invoke([message]);
-    const rawText = (typeof response.content === 'string' ? response.content : JSON.stringify(response.content)).trim();
-    
+    const axios = require('axios');
+    const apiKey =
+      process.env.GEMINI_PAID_API_KEY ||
+      process.env.GEMINI_API_KEY ||
+      process.env.GEMINI_API_KEY_1 ||
+      process.env.GEMINI_API_KEY_2;
+    if (!apiKey) {
+      throw new Error('GEMINI API key missing');
+    }
+
+    const cleanBase64 = buffer.toString('base64');
+    const cleanMime = mimeType || 'application/pdf';
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    // Using gemini-2.5-flash — highest accuracy multimodal model for PO vs Inquiry differentiation
+
+    const response = await axios.post(
+      url,
+      {
+        system_instruction: {
+          parts: [
+            {
+              text: `You are a document classifier for Enlight Metals (Indian B2B metal distributor).
+CRITICAL: Before you do ANYTHING else, scan the document for a field labeled "PO No", "P.O. No", "PO Number", "Purchase Order No", or "Purchase Order Number".
+- If that label EXISTS with a value → inquiry_type MUST be "purchase_order" and po_number MUST be set to that value.
+- If that label does NOT exist → inquiry_type MUST be "inquiry" and po_number MUST be null.
+"Ref No", "Inquiry Ref", "Quotation Ref" are NOT PO numbers. Never confuse them with a PO Number.
+Return ONLY a valid JSON object. No markdown, no prose, no backticks.`,
+            },
+          ],
+        },
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: EXTRACTION_PROMPT },
+              {
+                inline_data: {
+                  mime_type: cleanMime,
+                  data: cleanBase64,
+                },
+              },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.05,
+          response_mime_type: 'application/json',
+        },
+      },
+      { timeout: 35000 },
+    );
+
+    const rawText =
+      response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
     const parsed = safeParseJSON(rawText, null);
-    if (!parsed) throw new Error('Could not parse image extraction from Gemini vision response');
+    if (!parsed) throw new Error('Could not parse JSON from Gemini vision response');
     const postProcessed = postProcessExtraction(parsed);
-    console.log('Gemini image extraction successful:', JSON.stringify(postProcessed, null, 2));
+    console.log('Gemini document/image extraction successful:', JSON.stringify(postProcessed, null, 2));
     return postProcessed;
   } catch (error) {
-    console.error('Gemini image extraction error:', error.message);
+    console.error('Gemini vision extraction error:', error.message);
     return {
       overall_confidence: 0,
       inquiry_type: 'unknown',
-      error: error.message
+      error: error.message,
     };
   }
 }
 
+async function extractFromImage(imageBuffer, mimeType) {
+  return extractFromImageOrDoc(imageBuffer, mimeType || 'image/jpeg');
+}
+
 async function extractFromDocument(documentBuffer, mimeType = 'application/pdf') {
-  try {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_2;
-    const model = new ChatGoogleGenerativeAI({
-      model: 'gemini-2.5-flash',
-      apiKey: apiKey,
-      temperature: 0.1,
-    });
-    const base64Doc = documentBuffer.toString('base64');
-    
-    const message = new HumanMessage({
-      content: [
-        { type: 'text', text: EXTRACTION_PROMPT },
-        { 
-          type: 'media', 
-          mimeType: mimeType || 'application/pdf', 
-          data: base64Doc 
-        }
-      ]
-    });
-    
-    const response = await model.invoke([message]);
-    const rawText = (typeof response.content === 'string' ? response.content : JSON.stringify(response.content)).trim();
-    
-    const parsed = safeParseJSON(rawText, null);
-    if (!parsed) {
-      return await extractFromImage(documentBuffer, mimeType);
-    }
-    const postProcessed = postProcessExtraction(parsed);
-    console.log('Gemini PDF document PO extraction successful:', JSON.stringify(postProcessed, null, 2));
-    return postProcessed;
-  } catch (error) {
-    console.error('Gemini document extraction error:', error.message);
-    return await extractFromImage(documentBuffer, mimeType);
-  }
+  return extractFromImageOrDoc(documentBuffer, mimeType || 'application/pdf');
 }
 
 const INTENT_PROMPT = `
@@ -348,6 +393,7 @@ DATA & RBAC QUERIES:
 - "churn_radar": Questions asking for churn radar or churn risk customers.
 - "loss_analytics": Questions asking for lost deal analysis or why deals were lost.
 - "team_pipeline": Questions from managers/admins asking for overall team pipeline or subordinates' deals.
+- "inactive_customers": Questions asking for inactive recurring customer accounts.
 - "dashboard_link", "sales_summary", "kra_status", "visit_summary", "payment_summary", "complaint_summary", "full_report", "deals_this_week", "pending_deals", "pending_inquiries", "new_customers_summary", "won_customers", "active_deals_detail", "customer_list", "rate_sheet", "visit_list", "payment_aging", "lost_deals"
 
 ASSISTANT QUERIES: "general"

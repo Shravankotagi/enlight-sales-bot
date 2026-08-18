@@ -87,6 +87,12 @@ router.get('/', (req, res) => {
  * Endpoint to receive incoming WhatsApp messages.
  */
 router.post('/', async (req, res) => {
+  // ── RESPOND 200 IMMEDIATELY to prevent Meta webhook retries ──────────────
+  // Meta will retry the webhook if it doesn't get 200 within ~20s.
+  // Gemini Vision + Supabase can take longer → causes double replies.
+  // We ACK first, then process asynchronously.
+  res.status(200).send('EVENT_RECEIVED');
+
   try {
     const body = req.body;
 
@@ -105,6 +111,17 @@ router.post('/', async (req, res) => {
         // Safely extract sender profile name, fallback to "Customer" if missing
         const senderName = (value.contacts && value.contacts[0] && value.contacts[0].profile && value.contacts[0].profile.name) || "Customer";
         const messageType = message.type;
+
+        // ── DEDUPLICATION: skip if messageId already processed (Meta retry protection) ──
+        const { data: existingMsg } = await supabase
+          .from('inquiries')
+          .select('id')
+          .eq('whatsapp_message_id', messageId)
+          .limit(1);
+        if (existingMsg && existingMsg.length > 0) {
+          console.log(`[Webhook] MessageId ${messageId} already processed — skipping duplicate.`);
+          return;
+        }
 
         // Look up employee record for this sender phone
         const employeeRecord = await getEmployeeByPhone(senderPhone);
@@ -199,6 +216,7 @@ router.post('/', async (req, res) => {
           }
         }
 
+        let isMediaMessage = messageType === 'image' || messageType === 'document';
         const { getFullActiveSession, saveActiveSession } = require('./supabase');
 
         // --- CHECK ACTIVE REJECTION FLOWS (multi-turn logic) ---
@@ -365,124 +383,131 @@ router.post('/', async (req, res) => {
           return;
         }
 
-        if (activeSession?.last_intent?.startsWith('pending_amount_confirm|')) {
-          const parts = activeSession.last_intent.split('|');
-          const customerName = parts[1];
-          const amountPaid = Number(parts[2]);
-          const amountPending = Number(parts[3]);
-          const isFullPayment = parts[4] === 'true';
-          const correctedPending = Number(parts[5]);
+        isMediaMessage = messageType === 'image' || messageType === 'document' || (media_urls && media_urls.length > 0);
 
-          const cleanInput = raw_text.replace(/[️⃣\s]/g, '').trim();
-          await saveActiveSession(senderPhone, customerName, 'general');
+        if (isMediaMessage) {
+          // Immediately wipe any stale pending session so image/document gets processed fresh by Gemini Vision
+          await saveActiveSession(senderPhone, 'Unknown', 'general');
+        } else {
+          if (activeSession?.last_intent?.startsWith('pending_amount_confirm|')) {
+            const parts = activeSession.last_intent.split('|');
+            const customerName = parts[1];
+            const amountPaid = Number(parts[2]);
+            const amountPending = Number(parts[3]);
+            const isFullPayment = parts[4] === 'true';
+            const correctedPending = Number(parts[5]);
 
-          if (cleanInput === '3' || cleanInput.toLowerCase().includes('cancel')) {
-            await sendTextMessage(
-              senderPhone,
-              `✅ Cancelled. Please resend the correct payment details when ready.`,
-            );
+            const cleanInput = raw_text.replace(/[️⃣\s]/g, '').trim();
+            await saveActiveSession(senderPhone, customerName, 'general');
+
+            if (cleanInput === '3' || cleanInput.toLowerCase().includes('cancel')) {
+              await sendTextMessage(
+                senderPhone,
+                `✅ Cancelled. Please resend the correct payment details when ready.`,
+              );
+              return;
+            }
+
+            let finalPending = amountPending;
+            if (cleanInput === '1') {
+              finalPending = correctedPending;
+            }
+
+            const { processPaymentMessage } = require('./agents/paymentAgent');
+            const syntheticText =
+              `${customerName} paid ₹${amountPaid}` +
+              (finalPending > 0 ? ` outstanding ₹${finalPending}` : ' full payment');
+            const reply = await processPaymentMessage(syntheticText, senderPhone);
+
+            await sendTextMessage(senderPhone, reply);
             return;
           }
 
-          let finalPending = amountPending;
-          if (cleanInput === '1') {
-            finalPending = correctedPending;
-          }
+          if (activeSession?.last_intent?.startsWith('pending_unit_confirm|')) {
+            const parts = activeSession.last_intent.split('|');
+            const customerName = parts[1];
+            const productName = parts[2];
+            const qtyNum = parts[3];
 
-          const { processPaymentMessage } = require('./agents/paymentAgent');
-          const syntheticText =
-            `${customerName} paid ₹${amountPaid}` +
-            (finalPending > 0 ? ` outstanding ₹${finalPending}` : ' full payment');
-          const reply = await processPaymentMessage(syntheticText, senderPhone);
+            const cleanInput = raw_text.trim();
 
-          await sendTextMessage(senderPhone, reply);
-          return;
-        }
+            // Check if user is sending a brand new inquiry/requirement instead of answering confirmation
+            const isNewInquiry = /\b(need|requires|new deal|inquiry|requirement|want|order)\b/i.test(cleanInput);
 
-        if (activeSession?.last_intent?.startsWith('pending_unit_confirm|')) {
-          const parts = activeSession.last_intent.split('|');
-          const customerName = parts[1];
-          const productName = parts[2];
-          const qtyNum = parts[3];
+            if (!isNewInquiry) {
+              await saveActiveSession(senderPhone, customerName, 'general');
+              const { processSalesMessage } = require('./agents/salesAgent');
 
-          const cleanInput = raw_text.trim();
+              if (cleanInput === '1' || cleanInput.toLowerCase().includes('yes')) {
+                // Confirmed as MT
+                const syntheticText = `${customerName} requirement ${qtyNum} MT ${productName}`;
+                const reply = await processSalesMessage(syntheticText, senderPhone);
+                await sendTextMessage(senderPhone, reply);
+                return;
+              }
 
-          // Check if user is sending a brand new inquiry/requirement instead of answering confirmation
-          const isNewInquiry = /\b(need|requires|new deal|inquiry|requirement|want|order)\b/i.test(cleanInput);
-
-          if (!isNewInquiry) {
-            await saveActiveSession(senderPhone, customerName, 'general');
-            const { processSalesMessage } = require('./agents/salesAgent');
-
-            if (cleanInput === '1' || cleanInput.toLowerCase().includes('yes')) {
-              // Confirmed as MT
-              const syntheticText = `${customerName} requirement ${qtyNum} MT ${productName}`;
+              // If salesperson supplied a valid unit answer e.g. "15 MT" or "1500 kg"
+              const syntheticText = `${customerName} requirement ${raw_text} ${productName}`;
               const reply = await processSalesMessage(syntheticText, senderPhone);
               await sendTextMessage(senderPhone, reply);
               return;
             }
 
-            // If salesperson supplied a valid unit answer e.g. "15 MT" or "1500 kg"
-            const syntheticText = `${customerName} requirement ${raw_text} ${productName}`;
-            const reply = await processSalesMessage(syntheticText, senderPhone);
-            await sendTextMessage(senderPhone, reply);
-            return;
+            // If new inquiry, clear stale session and let orchestrator process fresh
+            await saveActiveSession(senderPhone, 'Unknown', 'general');
           }
 
-          // If new inquiry, clear stale session and let orchestrator process fresh
-          await saveActiveSession(senderPhone, 'Unknown', 'general');
-        }
+          if (activeSession?.last_intent?.startsWith('pending_product_for_deal|')) {
+            const parts = activeSession.last_intent.split('|');
+            const customerName = parts[1];
+            const qtyNum = parts[2];
+            const unitStr = parts[3] || 'MT';
 
-        if (activeSession?.last_intent?.startsWith('pending_product_for_deal|')) {
-          const parts = activeSession.last_intent.split('|');
-          const customerName = parts[1];
-          const qtyNum = parts[2];
-          const unitStr = parts[3] || 'MT';
+            const cleanInput = raw_text.trim();
+            await saveActiveSession(senderPhone, customerName, 'general');
 
-          const cleanInput = raw_text.trim();
-          await saveActiveSession(senderPhone, customerName, 'general');
-
-          const { processSalesMessage } = require('./agents/salesAgent');
-          const syntheticText = `${customerName} requirement ${qtyNum} ${unitStr} ${cleanInput}`;
-          const reply = await processSalesMessage(syntheticText, senderPhone);
-          await sendTextMessage(senderPhone, reply);
-          return;
-        }
-
-        if (activeSession?.last_intent?.startsWith('pending_custom_rate|')) {
-          const parts = activeSession.last_intent.split('|');
-          const customerName = parts[1];
-          const materialName = parts[2];
-
-          const cleanInput = raw_text.trim();
-          await saveActiveSession(senderPhone, customerName, 'general');
-
-          const rateMatch = cleanInput.match(/\d[\d,.]*/);
-          const customRate = rateMatch ? Number(rateMatch[0].replace(/,/g, '')) : 0;
-
-          if (customRate > 0) {
             const { processSalesMessage } = require('./agents/salesAgent');
-            const syntheticText = `${customerName} requirement ${materialName} rate ${customRate}`;
+            const syntheticText = `${customerName} requirement ${qtyNum} ${unitStr} ${cleanInput}`;
             const reply = await processSalesMessage(syntheticText, senderPhone);
             await sendTextMessage(senderPhone, reply);
             return;
           }
-        }
 
-        if (activeSession?.last_intent?.startsWith('pending_deal_choice|')) {
-          const parts = activeSession.last_intent.split('|');
-          const customerName = parts[1];
-          const dbStage = parts[2];
-          const originalMsg = parts[3] || '';
+          if (activeSession?.last_intent?.startsWith('pending_custom_rate|')) {
+            const parts = activeSession.last_intent.split('|');
+            const customerName = parts[1];
+            const materialName = parts[2];
 
-          const cleanInput = raw_text.trim();
-          await saveActiveSession(senderPhone, customerName, 'general');
+            const cleanInput = raw_text.trim();
+            await saveActiveSession(senderPhone, customerName, 'general');
 
-          const { processSalesMessage } = require('./agents/salesAgent');
-          const syntheticText = `${originalMsg} deal ${cleanInput}`;
-          const reply = await processSalesMessage(syntheticText, senderPhone);
-          await sendTextMessage(senderPhone, reply);
-          return;
+            const rateMatch = cleanInput.match(/\d[\d,.]*/);
+            const customRate = rateMatch ? Number(rateMatch[0].replace(/,/g, '')) : 0;
+
+            if (customRate > 0) {
+              const { processSalesMessage } = require('./agents/salesAgent');
+              const syntheticText = `${customerName} requirement ${materialName} rate ${customRate}`;
+              const reply = await processSalesMessage(syntheticText, senderPhone);
+              await sendTextMessage(senderPhone, reply);
+              return;
+            }
+          }
+
+          if (activeSession?.last_intent?.startsWith('pending_deal_choice|')) {
+            const parts = activeSession.last_intent.split('|');
+            const customerName = parts[1];
+            const dbStage = parts[2];
+            const originalMsg = parts[3] || '';
+
+            const cleanInput = raw_text.trim();
+            await saveActiveSession(senderPhone, customerName, 'general');
+
+            const { processSalesMessage } = require('./agents/salesAgent');
+            const syntheticText = `${originalMsg} deal ${cleanInput}`;
+            const reply = await processSalesMessage(syntheticText, senderPhone);
+            await sendTextMessage(senderPhone, reply);
+            return;
+          }
         }
 
         // ── OPERATIONAL AGENTIC ORCHESTRATOR (LangGraph + Specialized Write Agents) ──
@@ -501,21 +526,18 @@ router.post('/', async (req, res) => {
         // ── END ORCHESTRATOR ──────────────────────────────────────────────────
 
         // Only actual sales inquiries/POs reach here
-        // Apply duplicate check only for specific typed text messages (exclude document/image placeholders)
-        const isPlaceholderText = ['document received', 'image received', 'voice note received'].includes((raw_text || '').toLowerCase().trim());
-        if (raw_text && !isPlaceholderText && raw_text.length > 5) {
-          const oneHourAgo = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString();
+        // Prevent rapid back-to-back duplicate processing (within 15s window for Meta retries)
+        if (raw_text && messageType !== 'image' && messageType !== 'document') {
+          const fifteenSecAgo = new Date(Date.now() - 15 * 1000).toISOString();
           const { data: duplicateInquiries } = await supabase
             .from('inquiries')
             .select('id, created_at')
             .eq('salesperson_phone', senderPhone)
             .eq('raw_text', raw_text)
-            .in('status', ['processed', 'review'])
-            .gte('created_at', oneHourAgo);
+            .gte('created_at', fifteenSecAgo);
 
-          if (duplicateInquiries && duplicateInquiries.length > 0) {
-            console.log('Duplicate inquiry text detected in the last 1 hour. Skipping processing.');
-            await sendTextMessage(senderPhone, `⚠️ *Duplicate message ignored* - This inquiry was already received and processed recently.`);
+          if (duplicateInquiries && duplicateInquiries.length > 1) {
+            console.log('[Webhook] Rapid duplicate text message within 15s window ignored.');
             return;
           }
         }
@@ -548,7 +570,8 @@ router.post('/', async (req, res) => {
               return;
             } else {
               // Route to Sales & PO Vision Agent (KRA 1 & Zoho Bigin)
-              const salesVisionReply = await processSalesImage(mediaData.buffer, mediaData.mimeType, senderPhone);
+              // Pass messageId so processSalesImage can save with the correct base64 image data
+              const salesVisionReply = await processSalesImage(mediaData.buffer, mediaData.mimeType, senderPhone, messageId);
               await sendTextMessage(senderPhone, salesVisionReply);
               return;
             }
@@ -695,7 +718,7 @@ router.post('/', async (req, res) => {
               senderPhone,
               `⚠️ *Client Not Found in your Customer List*\n\n` +
               `Client *"${extractedCustomerName}"* is not registered under your salesperson account.\n\n` +
-              `Please onboard this customer first under *KRA 2 (Customer Onboarding)* before logging inquiries or orders.\n\n` +
+              `Please onboard this customer first under *New Customer Acquisition Card* before logging inquiries or orders.\n\n` +
               `*Example to onboard customer:*\n` +
               `_"New customer ${extractedCustomerName} owner Mr. Kapoor location Mumbai phone 9876543210 gst 27AAAAA1111A1Z1"_\n\n` +
               `Once added, you can resend this inquiry.`
@@ -839,9 +862,6 @@ router.post('/', async (req, res) => {
     }
   } catch (error) {
     console.error("Error processing incoming webhook POST:", error);
-  } finally {
-    // Meta requires a 200 OK response within 5 seconds for all webhook requests
-    res.status(200).send('EVENT_RECEIVED');
   }
 });
 

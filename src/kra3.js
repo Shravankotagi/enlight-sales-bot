@@ -162,7 +162,7 @@ async function handleExistingTask(task, customer, daysSinceOrder, supabase) {
       const salesLeadPhone = process.env.SALES_LEAD_PHONE;
       if (salesLeadPhone) {
         const escalationMsg = 
-          `🚨 *KRA 3 Escalation*\n\n` +
+          `🚨 *Customer Retention Escalation*\n\n` +
           `${customer.customer_name} has not ordered this month.\n` +
           `Assigned salesperson has been reminded ${newCount} times.\n` +
           `Days since last order: ${daysSinceOrder || 'Unknown'}\n\n` +
@@ -192,7 +192,7 @@ function buildFollowUpMessage(customer, daysSinceOrder, reminderCount, taskId) {
     ? `\n⚠️ Reminder #${reminderCount}` 
     : '';
   
-  return `🔔 *KRA 3 Follow-up Alert*${reminderText}\n\n` +
+  return `🔔 *Customer Retention Follow-up Alert*${reminderText}\n\n` +
     `🏢 *${customer.customer_name}*\n` +
     `${daysText}\n` +
     `Usual order: every ${customer.avg_order_frequency_days} days\n\n` +
@@ -298,7 +298,7 @@ async function handleFollowUpReply(text, senderPhone) {
     }
 
     if (!task) {
-      // No pending task found — still log the follow-up as a free-form KRA 3 activity
+      // No pending task found — still log the follow-up as a free-form activity
       console.log('No active pending KRA 3 task found. Logging as free-form follow-up for:', customerKeyword);
 
       await supabase.from('kra_logs').insert({
@@ -311,10 +311,10 @@ async function handleFollowUpReply(text, senderPhone) {
         year: new Date().getFullYear()
       });
 
-      return `🔄 *KRA 3 - Follow-up Logged*\n\n` +
+      return `🔄 *Customer Retention Follow-up Logged*\n\n` +
         (customerKeyword ? `Customer: ${customerKeyword}\n` : '') +
         `Status: Follow-up recorded\n\n` +
-        `Logged to KRA 3 ✅`;
+        `Updated Customer Retention Card! ✅`;
     }
 
     if (task) {
@@ -350,11 +350,11 @@ async function handleFollowUpReply(text, senderPhone) {
     };
     const emoji = emojiMap[matchedAction.toUpperCase()] || '🔄';
     
-    return `${emoji} *KRA 3 Updated*\n\n` +
+    return `${emoji} *Customer Retention Updated*\n\n` +
       `Action: ${matchedAction}\n` +
       `Customer: ${task?.customer_name || customerKeyword}\n` +
       `Outcome: ${outcome}\n\n` +
-      `Logged to KRA 3 ✅`;
+      `Updated Customer Retention Card! ✅`;
   } catch (error) {
     console.error('handleFollowUpReply error:', error);
     return '❌ Could not log follow-up. Please try again.';

@@ -93,7 +93,7 @@ async function logNewCustomer(deal, senderPhone) {
 
     // Send notification to salesperson
     const message =
-      `🆕 *KRA 2 - New Customer Detected!*\n\n` +
+      `🆕 *New Customer Detected!*\n\n` +
       `🏢 ${deal.customer_name}\n` +
       `📋 Type: ${deal.inquiry_type}\n` +
       (deal.total_amount
@@ -103,7 +103,7 @@ async function logNewCustomer(deal, senderPhone) {
       `New customers: ${count}/3\n` +
       (remaining > 0
         ? `${remaining} more needed to meet target`
-        : `✅ Monthly target achieved!`);
+        : `✅ Monthly target achieved!\n\nUpdated New Customer Acquisition Card! ✅`);
 
     await sendTextMessage(senderPhone, message);
     return count;
@@ -114,12 +114,21 @@ async function logNewCustomer(deal, senderPhone) {
 }
 
 // Get KRA 2 summary
-async function getNewCustomerSummary(senderPhone) {
+async function getNewCustomerSummary(scopeOrPhone) {
   const supabase = getSupabase();
   try {
+    const { getAccessibleSalespersonPhonesForBot } = require('./supabase');
+    const scope = typeof scopeOrPhone === 'object' && scopeOrPhone !== null
+      ? scopeOrPhone
+      : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
+
     const { start, end, monthName, year } = getMonthRange();
 
-    const { data: logs } = await supabase
+    if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
+      return `👥 *New Customer Acquisition Card*\n${monthName} ${year}\n\nAcquired: 0/3\n⚠️ No salespersons assigned to your team yet.`;
+    }
+
+    let query = supabase
       .from('kra_logs')
       .select('*')
       .eq('kra_number', 2)
@@ -127,27 +136,38 @@ async function getNewCustomerSummary(senderPhone) {
       .gte('created_at', start)
       .lte('created_at', end);
 
-    const count = logs?.length || 0;
+    if (scope.phones !== null) {
+      if (scope.phones.length === 1) {
+        query = query.eq('salesperson_phone', scope.phones[0]);
+      } else {
+        query = query.in('salesperson_phone', scope.phones);
+      }
+    }
+
+    const { data: logs } = await query;
+
+    const uniqueCustomerNames = Array.from(new Set((logs || []).map(l => (l.customer_name || '').trim()).filter(Boolean)));
+    const count = uniqueCustomerNames.length;
     const remaining = Math.max(0, 3 - count);
 
-    let msg = `👥 *KRA 2 - New Customers*\n` +
+    let msg = `👥 *New Customer Acquisition Card*\n` +
       `${monthName} ${year}\n\n` +
       `Acquired: ${count}/3\n` +
       (remaining > 0
         ? `⚠️ ${remaining} more needed\n`
         : `✅ Target achieved!\n`);
 
-    if (logs && logs.length > 0) {
+    if (uniqueCustomerNames.length > 0) {
       msg += `\nNew customers this month:\n`;
-      logs.forEach((l, i) => {
-        msg += `${i + 1}. ${l.customer_name || 'Unknown'}\n`;
+      uniqueCustomerNames.forEach((name, i) => {
+        msg += `${i + 1}. ${name}\n`;
       });
     }
 
     return msg;
   } catch (error) {
     console.error('getNewCustomerSummary error:', error.message);
-    return '❌ Could not fetch KRA 2 data.';
+    return '❌ Could not fetch New Customer Acquisition Card data.';
   }
 }
 
@@ -199,14 +219,15 @@ async function handleNewCustomerAnnouncement(customerName, senderPhone) {
     const count = allLogs?.length || 1;
     const remaining = Math.max(0, 3 - count);
 
-    return `🆕 *KRA 2 - New Customer Logged!*\n\n` +
+    return `🆕 *New Customer Logged!*\n\n` +
       `🏢 Customer: *${customerName}*\n` +
       `✅ Recorded as new customer acquisition\n\n` +
       `📊 *${monthName} ${year} Progress*\n` +
       `New customers: ${count}/3\n` +
       (remaining > 0
         ? `⚠️ ${remaining} more needed to meet target`
-        : `✅ Monthly target achieved!`);
+        : `✅ Monthly target achieved!`) +
+      `\n\nUpdated New Customer Acquisition Card! ✅`;
   } catch (error) {
     console.error('handleNewCustomerAnnouncement error:', error.message);
     return '❌ Could not log new customer. Please try again.';

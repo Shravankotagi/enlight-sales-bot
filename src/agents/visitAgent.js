@@ -40,28 +40,27 @@ Extract into ONLY a JSON object (no prose, no markdown, no backticks):
   "is_new_prospect": <true if this seems to be a first meeting / new lead / prospect not yet in system, else false>,
   "person_met": "<full name and designation of person met (e.g. 'Mr. Sharma, Purchase Manager'), else null>",
   "contact_no": "<phone number of person met if EXPLICITLY stated in message, else null>",
-  "city": "<city or location of the customer if mentioned (e.g. 'Pune', 'Mumbai'), else null>",
+  "city": "<city or location of the customer/visit if mentioned (e.g. 'Mumbai', 'Pune'), else null>",
   "product_interests": "<steel products the customer is interested in, comma-separated (e.g. 'CR Sheets, MS Plates', 'HR Coil, TMT bars'), else null>",
   "remarks": "<rich, detailed 2-3 line summary of what was discussed, what was shown/introduced, and the outcome. Do NOT use generic text like 'Field Visit' or 'Market Presence'. Capture the actual business context.>",
   "visit_outcome": "positive|neutral|negative",
-  "material_requirement": "<steel product + quantity the customer needs (e.g. '50 MT HR Coil', '10 ton MS Plates'), else null>",
-  "follow_up_action": "<specific next action with deadline if mentioned (e.g. 'Send quotation by tomorrow', 'Share catalogue'), else null>",
+  "material_requirement": "<steel product, requirement description, or future consumption mentioned (e.g. 'HR Coil / future monthly requirement', '50 MT HR Coil', 'MS Plates future consumption'), else null>",
+  "follow_up_action": "<specific next action or pending information needed (e.g. 'Collect required quantity, expected PO/delivery date, and customer details', 'Send quotation for HR Coil', 'Share catalogue'), else null>",
   "confidence": <float 0.0 to 1.0>
 }
 
 Rules:
 - "is_new_prospect": true if message says "introduced", "first meeting", "new contact", "business card collected", "new lead", etc.
 - "visit_outcome":
-  - "positive" → interest shown, products discussed, quotation asked, deal progressed, business card exchanged
+  - "positive" → interest shown, products discussed, quotation asked, deal progressed, business card exchanged, positive discussion
   - "negative" → customer not available, bad response, rejected meeting, not interested
   - "neutral" → routine check-in, no specific outcome mentioned
 - "product_interests": Extract ALL products mentioned as interests (even without a quantity). e.g. "interested in CR Sheets and MS Plates" → "CR Sheets, MS Plates"
-- "material_requirement": Only if a specific quantity is mentioned. e.g. "need 50 MT HR Coil" → "50 MT HR Coil"
+- "material_requirement": Extract any steel product requirement, future consumption, or product need discussed (e.g. "discussed next HR Coil requirement and future monthly consumption" → "HR Coil / future monthly requirement", "need 50 MT HR Coil" → "50 MT HR Coil"). NEVER leave as null when requirements or future consumption are mentioned.
+- "follow_up_action": When the message discusses potential requirements, next steps, or when information is needed to prepare a quote, capture a clear follow-up action (e.g. "Collect required quantity, expected PO/delivery date, and customer details", "Send quotation by tomorrow", "Follow up for technical specifications"). NEVER return null when next steps or future discussions are implied.
 - "remarks": Must be specific and business-relevant.
-  - BAD: "Visited and market presence recorded"
-  - GOOD: "First meeting with Mehta Engineering, Pune. Introduced product range. Customer showed interest in CR Sheets and MS Plates. Business card collected."
 - "contact_no": ONLY if a phone number is explicitly stated. Otherwise null — never invent.
-- "city": Extract if any city/location is mentioned. e.g. "in Pune" → "Pune"
+- "city": Extract the city or location of the visit/office if mentioned (e.g. "Mumbai office" → "Mumbai", "in Pune" → "Pune"). NEVER leave as null when location/city is stated.
 
 Return ONLY the JSON object.
 `;
@@ -151,31 +150,43 @@ async function processVisitMessage(text, senderPhone) {
         `Your visit with *${finalCustomerName}* is already recorded on your KRA 9 dashboard!\n\n` +
         `If you meant to update their contact info, say: _"${finalCustomerName} phone 9876543210 owner Mr. Kapoor"_\n` +
         `Or to log a new inquiry, say: _"${finalCustomerName} needs 10 MT HR Coil"_\n\n` +
-        `Updated KRA 9 Customer Visit Dashboard! ✅`;
+        `Updated Customer Visits Card! ✅`;
     }
 
     // Extract all fields — NEVER use placeholder values
+    const city                = data.city               || null;
     const remarks             = data.remarks            || 'On-site meeting';
     const personMet           = data.person_met         || null;
     const contactNo           = data.contact_no         || null;
-    const visitOutcome        = data.visit_outcome       || 'neutral';
-    const materialRequirement = data.material_requirement || null;
-    const followUpAction      = data.follow_up_action    || null;
+    const visitOutcome        = data.visit_outcome       || 'positive';
+    const materialRequirement = data.material_requirement || (data.product_interests ? `${data.product_interests} requirement` : null);
+    
+    // Meaningful follow-up action:
+    let followUpAction = data.follow_up_action || null;
+    if (!followUpAction) {
+      if (materialRequirement || data.product_interests) {
+        followUpAction = 'Collect required quantity, expected PO/delivery date, and customer details';
+      } else if (visitOutcome === 'positive') {
+        followUpAction = 'Follow up with customer on discussed requirements';
+      }
+    }
     const productInterests    = data.product_interests   || null;
 
     // Format metadata into structured tags inside remarks for clean storage & dashboard parsing
     const metaTags = [];
     if (visitOutcome)        metaTags.push(`[Outcome: ${visitOutcome.charAt(0).toUpperCase() + visitOutcome.slice(1)}]`);
+    if (city)                metaTags.push(`[Location: ${city}]`);
     if (materialRequirement) metaTags.push(`[Requirement: ${materialRequirement}]`);
     if (followUpAction)      metaTags.push(`[FollowUp: ${followUpAction}]`);
     if (productInterests)    metaTags.push(`[Interests: ${productInterests}]`);
 
     const fullRemarks = metaTags.length > 0 ? `${metaTags.join(' ')} ${remarks}` : remarks;
 
-    // Insert visit record with valid table columns
+    // Insert visit record with valid table columns including structured customer_address (location)
     const { error: visitErr } = await supabase.from('customer_visits').insert({
       customer_name:        finalCustomerName,
       salesperson_phone:    senderPhone,
+      customer_address:     city,
       person_met:           personMet,
       contact_no:           contactNo,
       remarks:              fullRemarks,
@@ -186,9 +197,22 @@ async function processVisitMessage(text, senderPhone) {
       console.error('[VisitAgent] customer_visits insert error:', visitErr.message);
     }
 
+    // Update customer master profile if city or contact info was captured
+    if (city || contactNo || personMet) {
+      const custUpdate = { updated_at: new Date().toISOString() };
+      if (city) custUpdate.city = city;
+      if (contactNo) custUpdate.customer_phone = contactNo;
+      if (personMet) custUpdate.contact_person = personMet;
+      await supabase
+        .from('recurring_customers')
+        .update(custUpdate)
+        .ilike('customer_name', `%${finalCustomerName}%`);
+    }
+
     // Log KRA 9 with full business context
     const kraDescription = [
       `Visit: ${finalCustomerName}`,
+      city                    ? `Location: ${city}`       : null,
       isNewProspect           ? 'NEW PROSPECT'            : null,
       personMet               ? `Met: ${personMet}`       : null,
       visitOutcome            ? `Outcome: ${visitOutcome}` : null,
@@ -267,7 +291,7 @@ async function processVisitMessage(text, senderPhone) {
     // Build response
     let reply = isNewProspect
       ? `🆕 *New Prospect Added & Visit Logged!*\n\n`
-      : `🚗 *KRA 9 - Customer Visit Logged!*\n\n`;
+      : `🚗 *Customer Visit Logged!*\n\n`;
 
     reply += `Customer: *${finalCustomerName}*\n`;
     if (data.city)         reply += `Location: *${data.city}*\n`;
@@ -279,7 +303,7 @@ async function processVisitMessage(text, senderPhone) {
     if (materialRequirement) reply += `📦 Requirement: *${materialRequirement}*\n`;
     if (followUpAction)      reply += `📌 Follow-up: *${followUpAction}*\n`;
     reply += `\nTotal Visits This Month: *${totalVisits}*\n`;
-    reply += `\nUpdated KRA 9 Customer Visit Dashboard! ✅`;
+    reply += `\nUpdated Customer Visits Card! ✅`;
 
     // For new prospects, ask for missing mandatory details
     if (isNewProspect) {
@@ -297,6 +321,10 @@ async function processVisitMessage(text, senderPhone) {
       const { getCustomerMissingInfoPrompt } = require('../supabase');
       const missingPrompt = await getCustomerMissingInfoPrompt(finalCustomerName, senderPhone);
       if (missingPrompt) reply += missingPrompt;
+    }
+
+    if (materialRequirement || productInterests) {
+      reply += `\n\n💡 *Potential Opportunity:* To create a sales pipeline deal for this requirement, reply *"Create deal for ${finalCustomerName}"*.`;
     }
 
     return reply;

@@ -179,7 +179,7 @@ function buildPaymentAlert(deal, dueDate, daysUntilDue) {
 
   const customerShort = deal.customer_name.split(' ')[0].toUpperCase();
 
-  return `${emoji} *KRA 5 - Payment Alert*\n\n` +
+  return `${emoji} *Payment Collection Alert*\n\n` +
     `🏢 ${deal.customer_name}\n` +
     `💵 Amount: ${formatAmount(deal.total_amount)}\n` +
     `📋 Terms: ${deal.payment_terms || '30 days'}\n` +
@@ -272,11 +272,11 @@ async function handlePaymentUpdate(text, senderPhone, intentData) {
 
       const remainingStr = amountPending > 0 ? `\n⏳ Outstanding Pending: *₹${Number(amountPending).toLocaleString('en-IN')}*` : '';
 
-      return `💵 *KRA 5 - Advance/Partial Payment Logged!*\n\n` +
+      return `💵 *Advance/Partial Payment Logged!*\n\n` +
         `🏢 Customer: *${payment?.customer_name || customerName}*\n` +
         `💰 Amount Paid: *₹${Number(amountPaid).toLocaleString('en-IN')}*` +
         `${remainingStr}\n\n` +
-        `Recorded in KRA 5 Pending ✅`;
+        `Updated Payment Collection Card! ✅`;
 
     } else {
       // Record full payment collection
@@ -318,11 +318,11 @@ async function handlePaymentUpdate(text, senderPhone, intentData) {
         year: new Date().getFullYear()
       });
 
-      return `💰 *KRA 5 - Full Payment Collected!*\n\n` +
+      return `💰 *Full Payment Collected!*\n\n` +
         `🏢 Customer: *${payment?.customer_name || customerName}*\n` +
         (amountPaid ? `💵 Amount Collected: *₹${Number(amountPaid).toLocaleString('en-IN')}*\n` : '') +
         `Status: Marked as FULLY collected ✅\n\n` +
-        `Logged to KRA 5 ✅`;
+        `Updated Payment Collection Card! ✅`;
     }
   } catch (error) {
     console.error('handlePaymentUpdate error:', error.message);
@@ -331,20 +331,40 @@ async function handlePaymentUpdate(text, senderPhone, intentData) {
 }
 
 // Get payment summary for query
-async function getPaymentSummary(senderPhone) {
+async function getPaymentSummary(scopeOrPhone) {
   const supabase = getSupabase();
   try {
-    const { data: payments } = await supabase
+    const { getAccessibleSalespersonPhonesForBot } = require('./supabase');
+    const scope = typeof scopeOrPhone === 'object' && scopeOrPhone !== null
+      ? scopeOrPhone
+      : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
+
+    if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
+      return '💰 *Payment Collection Card*\n\n✅ No pending payments tracked. You currently have no salespersons assigned to your team.';
+    }
+
+    let query = supabase
       .from('payment_tracking')
       .select('*')
       .order('due_date', { ascending: true });
+
+    if (scope.phones !== null) {
+      if (scope.phones.length === 1) {
+        query = query.eq('salesperson_phone', scope.phones[0]);
+      } else {
+        query = query.in('salesperson_phone', scope.phones);
+      }
+    }
+
+    const { data: payments } = await query;
 
     if (!payments || payments.length === 0) {
       return '✅ No pending payments tracked.';
     }
 
-    const pending = payments.filter(p => p.status === 'pending');
+    const pending = payments.filter(p => p.status === 'pending' || p.status === 'partial');
     const collected = payments.filter(p => p.status === 'collected');
+    const totalCollected = payments.reduce((sum, p) => sum + (Number(p.collected_amount) || 0), 0);
     const now = new Date();
 
     const overdue = pending.filter(p => 
@@ -355,10 +375,11 @@ async function getPaymentSummary(senderPhone) {
     );
 
     const totalOutstanding = pending.reduce(
-      (sum, p) => sum + (p.outstanding || 0), 0
+      (sum, p) => sum + (p.outstanding !== null && p.outstanding !== undefined ? Number(p.outstanding) : Number(p.invoice_amount || 0)), 0
     );
 
-    let msg = `💰 *KRA 5 - Payment Status*\n\n`;
+    const title = scope.isAdmin ? 'Company Payment Status' : (scope.isManager ? 'Team Payment Status' : 'Payment Status');
+    let msg = `💰 *Payment Collection Card - ${title}*\n\n`;
 
     if (overdue.length > 0) {
       msg += `🔴 *Overdue (${overdue.length}):*\n`;

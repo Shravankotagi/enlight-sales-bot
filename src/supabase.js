@@ -27,26 +27,109 @@ function sanitizeNumber(val) {
   return isNaN(parsed) ? null : parsed;
 }
 
+function normalizePhone(phone) {
+  if (!phone) return '';
+  return String(phone).replace(/\D/g, '').slice(-10);
+}
+
 /**
  * Looks up an employee record by their phone number.
  * @param {string} phone - The sender phone number (e.g. '919876543210')
- * @returns {{ employee_id, name, role } | null}
+ * @returns {{ id, employee_id, name, role, phone, manager_id, manager_phone } | null}
  */
 async function getEmployeeByPhone(phone) {
   try {
     if (!phone) return null;
+    const clean = String(phone).replace(/\D/g, '');
+    const last10 = clean.slice(-10);
+    const variants = Array.from(
+      new Set([phone, clean, last10, `91${last10}`, `+91${last10}`]),
+    );
+
     const { data, error } = await supabase
       .from('employees')
-      .select('employee_id, name, role')
-      .eq('phone', phone)
+      .select('*')
+      .in('phone', variants)
       .eq('is_active', true)
-      .single();
-    if (error || !data) return null;
-    return data;
+      .limit(1);
+
+    if (error || !data || data.length === 0) return null;
+    return data[0];
   } catch (err) {
     console.warn('getEmployeeByPhone error:', err.message);
     return null;
   }
+}
+
+/**
+ * Resolves role-based access control phones list for a bot user:
+ * - Admin: role = 'admin', phones = null (unrestricted, all data)
+ * - Sales Manager: role = 'sales_manager', phones = [assigned_reps_phones] (empty array if 0 reps)
+ * - Salesperson: role = 'salesperson', phones = [senderPhone]
+ */
+async function getAccessibleSalespersonPhonesForBot(senderPhone) {
+  const employee = await getEmployeeByPhone(senderPhone);
+  if (!employee) {
+    return {
+      role: 'salesperson',
+      phones: [senderPhone],
+      employee: null,
+      isManager: false,
+      isAdmin: false,
+      assignedSalespersons: [],
+    };
+  }
+
+  const role = (employee.role || 'salesperson').toLowerCase();
+  const isAdmin = role.includes('admin');
+  const isManager = role.includes('manager') || role === 'sales_manager';
+
+  if (isAdmin) {
+    return {
+      role: 'admin',
+      phones: null,
+      employee,
+      isManager: false,
+      isAdmin: true,
+      assignedSalespersons: [],
+    };
+  }
+
+  if (isManager) {
+    const { data: allActive } = await supabase
+      .from('employees')
+      .select('*')
+      .eq('is_active', true);
+
+    const normPhone = normalizePhone(senderPhone);
+    const assigned = (allActive || []).filter((emp) => {
+      const empRole = (emp.role || '').toLowerCase();
+      if (empRole.includes('admin') || empRole.includes('manager')) return false;
+      if (emp.manager_id && emp.manager_id === employee.id) return true;
+      if (emp.manager_phone && normalizePhone(emp.manager_phone) === normPhone) return true;
+      return false;
+    });
+
+    const teamPhones = Array.from(new Set(assigned.map((a) => a.phone).filter(Boolean)));
+    return {
+      role: 'sales_manager',
+      phones: teamPhones, // empty array [] if 0 assigned salespersons
+      employee,
+      isManager: true,
+      isAdmin: false,
+      assignedSalespersons: assigned,
+    };
+  }
+
+  // Default Salesperson
+  return {
+    role: 'salesperson',
+    phones: [employee.phone || senderPhone],
+    employee,
+    isManager: false,
+    isAdmin: false,
+    assignedSalespersons: [],
+  };
 }
 
 /**
@@ -62,13 +145,13 @@ async function saveInquiry(data) {
       voice_url: data.voice_url || null,
       sender_phone: data.sender_phone || data.salesperson_phone,
       sender_name: data.sender_name || null,
-      customer_name: data.customer_name || null,
-      customer_phone: data.customer_phone || null,
       whatsapp_message_id: data.message_id || null,
       status: data.status || "processed",
       created_at: new Date().toISOString(),
       salesperson_phone: data.salesperson_phone || data.sender_phone || null,
       employee_id: data.employee_id || null,
+      inquiry_type: data.inquiry_type || null,
+      ai_extraction_json: data.ai_extraction_json || null,
       overall_confidence: data.overall_confidence != null
         ? Number(data.overall_confidence)
         : (data.confidence != null ? Number(data.confidence) : 0.92),
@@ -190,50 +273,81 @@ async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
 async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
   if (!customerName || !senderPhone) return null;
   const cleanName = customerName.trim();
-
-  // 1. Check exact/case-insensitive match for this salesperson
-  const { data: existing } = await supabase
-    .from('recurring_customers')
-    .select('*')
-    .ilike('customer_name', cleanName)
-    .eq('assigned_salesperson_phone', senderPhone)
-    .limit(1);
-
-  if (existing && existing.length > 0) {
-    const rec = existing[0];
-    const updatePayload = {};
-    if (extraData.customer_phone && !rec.customer_phone) updatePayload.customer_phone = extraData.customer_phone;
-    if (extraData.customer_gst && !rec.customer_gst) updatePayload.customer_gst = extraData.customer_gst;
-    if (extraData.city && !rec.customer_address) updatePayload.customer_address = extraData.city;
-    if (extraData.contact_person && !rec.contact_person) updatePayload.contact_person = extraData.contact_person;
-
-    if (Object.keys(updatePayload).length > 0) {
-      await supabase
-        .from('recurring_customers')
-        .update({ ...updatePayload, updated_at: new Date().toISOString() })
-        .eq('id', rec.id);
-    }
-    return rec;
+  if (!cleanName || cleanName.toLowerCase() === 'unknown' || cleanName.toLowerCase() === 'null') {
+    return null;
   }
 
-  // 2. Insert new record with fallback for race conditions
   try {
+    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+
+    // 1. Check if customer already exists (role-scoped, or company-wide for Admin)
+    let query = supabase
+      .from('recurring_customers')
+      .select('*')
+      .ilike('customer_name', cleanName)
+      .limit(1);
+
+    if (scope.phones !== null) {
+      if (scope.phones.length === 1) {
+        query = query.eq('assigned_salesperson_phone', scope.phones[0]);
+      } else if (scope.phones.length > 1) {
+        query = query.in('assigned_salesperson_phone', scope.phones);
+      }
+    }
+
+    let { data: existing } = await query;
+
+    // If not found and sender is Admin, check company-wide regardless
+    if ((!existing || existing.length === 0) && scope.isAdmin) {
+      const { data: globalExisting } = await supabase
+        .from('recurring_customers')
+        .select('*')
+        .ilike('customer_name', cleanName)
+        .limit(1);
+      existing = globalExisting;
+    }
+
+    if (existing && existing.length > 0) {
+      const rec = existing[0];
+      const updatePayload = {};
+      if (extraData.customer_phone && !rec.customer_phone) updatePayload.customer_phone = extraData.customer_phone;
+      if (extraData.customer_gst && !rec.customer_gst) updatePayload.customer_gst = extraData.customer_gst;
+      if (extraData.city && !rec.customer_address) updatePayload.customer_address = extraData.city;
+      if (extraData.contact_person && !rec.contact_person) updatePayload.contact_person = extraData.contact_person;
+      if (extraData.avg_order_frequency_days) updatePayload.avg_order_frequency_days = Number(extraData.avg_order_frequency_days);
+      if (extraData.assigned_salesperson_phone && scope.isAdmin) updatePayload.assigned_salesperson_phone = extraData.assigned_salesperson_phone;
+
+      if (Object.keys(updatePayload).length > 0) {
+        updatePayload.updated_at = new Date().toISOString();
+        await supabase
+          .from('recurring_customers')
+          .update(updatePayload)
+          .eq('id', rec.id);
+      }
+      return rec;
+    }
+
+    // 2. Insert new record only if genuine new customer and valid name
+    const insertPayload = {
+      customer_name: cleanName,
+      assigned_salesperson_phone: extraData.assigned_salesperson_phone || senderPhone,
+      customer_phone: extraData.customer_phone || null,
+      customer_gst: extraData.customer_gst || null,
+      customer_address: extraData.city || null,
+      contact_person: extraData.contact_person || null,
+      is_active: true,
+      avg_order_frequency_days: Number(extraData.avg_order_frequency_days) || 30,
+    };
+
     const { data: newCustomer } = await supabase
       .from('recurring_customers')
-      .insert({
-        customer_name: cleanName,
-        assigned_salesperson_phone: senderPhone,
-        customer_phone: extraData.customer_phone || null,
-        customer_gst: extraData.customer_gst || null,
-        customer_address: extraData.city || null,
-        contact_person: extraData.contact_person || null,
-        is_active: true,
-        avg_order_frequency_days: 30,
-      })
+      .insert(insertPayload)
       .select()
       .single();
+
     return newCustomer;
   } catch (err) {
+    console.error('ensureCustomerRecord error:', err.message);
     const { data: fallback } = await supabase
       .from('recurring_customers')
       .select('*')
@@ -310,37 +424,189 @@ Rules:
 }
 
 /**
- * Verifies if a customer is registered in the salesperson's account.
+ * Verifies if a customer is registered in the user's account / accessible scope.
+ * Supports Admin (company-wide), Sales Manager (team-wide), and Salesperson (own).
  * Handles exact matching and fuzzy matching (typos/Hinglish).
  * Returns the matched official name or null if not found.
  */
 async function verifyAndGetCustomerName(customerName, senderPhone) {
   if (!customerName || !senderPhone) return null;
-  
+  const clean = customerName.trim();
+  if (!clean || clean.toLowerCase() === 'unknown' || clean.toLowerCase() === 'null') return null;
+
   try {
-    const { data: customerRows } = await supabase
+    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+    let query = supabase
       .from('recurring_customers')
       .select('customer_name')
-      .eq('assigned_salesperson_phone', senderPhone)
       .eq('is_active', true);
+
+    if (scope.phones !== null) {
+      if (scope.phones.length === 1) {
+        query = query.eq('assigned_salesperson_phone', scope.phones[0]);
+      } else if (scope.phones.length > 1) {
+        query = query.in('assigned_salesperson_phone', scope.phones);
+      } else {
+        return null;
+      }
+    }
+
+    let { data: customerRows } = await query;
+
+    if (!customerRows || customerRows.length === 0) {
+      if (scope.isAdmin) {
+        const { data: allRows } = await supabase
+          .from('recurring_customers')
+          .select('customer_name')
+          .eq('is_active', true);
+        customerRows = allRows;
+      }
+    }
 
     if (!customerRows || customerRows.length === 0) return null;
 
     const customerList = customerRows.map(c => c.customer_name);
 
     // 1. Exact match (case insensitive, trimmed)
-    const cleanInput = customerName.toLowerCase().trim();
-    const exactMatch = customerList.find(c => c.toLowerCase().trim() === cleanInput);
+    const exactMatch = customerList.find(c => c.toLowerCase().trim() === clean.toLowerCase());
     if (exactMatch) return exactMatch;
 
     // 2. Fuzzy match using Gemini
-    const fuzzyMatch = await fuzzyMatchCustomer(customerName, customerList);
+    const fuzzyMatch = await fuzzyMatchCustomer(clean, customerList);
     if (fuzzyMatch) return fuzzyMatch;
 
   } catch (err) {
     console.error('verifyAndGetCustomerName error:', err.message);
   }
   return null;
+}
+
+/**
+ * Updates an existing customer's profile and configuration in place (order frequency, contact, rep).
+ * Supports full Admin, Sales Manager, and Salesperson role-scoping.
+ */
+async function updateCustomerProfileRecord(senderPhone, customerName, updates = {}) {
+  if (!customerName || !senderPhone) {
+    return { success: false, message: 'Customer name is required for update.' };
+  }
+  const cleanName = customerName.trim();
+  if (!cleanName || cleanName.toLowerCase() === 'unknown') {
+    return { success: false, message: 'Invalid customer name.' };
+  }
+
+  try {
+    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+
+    // 1. Fetch accessible customer records
+    let query = supabase
+      .from('recurring_customers')
+      .select('*')
+      .eq('is_active', true);
+
+    if (scope.phones !== null) {
+      if (scope.phones.length === 1) {
+        query = query.eq('assigned_salesperson_phone', scope.phones[0]);
+      } else if (scope.phones.length > 1) {
+        query = query.in('assigned_salesperson_phone', scope.phones);
+      } else {
+        return { success: false, message: 'No salespersons assigned to your team.' };
+      }
+    }
+
+    let { data: customers } = await query;
+
+    // Admin can search company-wide if not found in filtered list
+    if ((!customers || customers.length === 0) && scope.isAdmin) {
+      const { data: allCusts } = await supabase.from('recurring_customers').select('*');
+      customers = allCusts || [];
+    }
+
+    if (!customers || customers.length === 0) {
+      return { success: false, message: `No registered customer found matching "${cleanName}".` };
+    }
+
+    // 2. Exact or fuzzy match
+    let matched = customers.find(c => c.customer_name.toLowerCase().trim() === cleanName.toLowerCase());
+    if (!matched) {
+      matched = customers.find(c => c.customer_name.toLowerCase().includes(cleanName.toLowerCase()) || cleanName.toLowerCase().includes(c.customer_name.toLowerCase()));
+    }
+    if (!matched) {
+      const matchedName = await fuzzyMatchCustomer(cleanName, customers.map(c => c.customer_name));
+      if (matchedName) {
+        matched = customers.find(c => c.customer_name === matchedName);
+      }
+    }
+
+    if (!matched) {
+      return { success: false, message: `Could not find any customer matching "${cleanName}".` };
+    }
+
+    // 3. Build update payload
+    const updatePayload = { updated_at: new Date().toISOString() };
+    if (updates.order_frequency_days != null) {
+      const freq = parseInt(updates.order_frequency_days, 10);
+      if (!isNaN(freq) && freq > 0) updatePayload.avg_order_frequency_days = freq;
+    }
+    if (updates.contact_person) updatePayload.contact_person = updates.contact_person;
+    if (updates.phone) updatePayload.customer_phone = updates.phone;
+    if (updates.gst) updatePayload.customer_gst = updates.gst;
+    if (updates.address_or_city) updatePayload.customer_address = updates.address_or_city;
+    if (updates.is_active != null) updatePayload.is_active = Boolean(updates.is_active);
+
+    // If Admin/Manager reassigning to another salesperson
+    let targetRepEmployee = null;
+    if (updates.assigned_salesperson && (scope.isAdmin || scope.isManager)) {
+      const { data: allEmps } = await supabase.from('employees').select('*').eq('is_active', true);
+      const targetLower = updates.assigned_salesperson.toLowerCase().trim();
+      const foundEmp = (allEmps || []).find(e =>
+        e.name?.toLowerCase().includes(targetLower) ||
+        targetLower.includes(e.name?.toLowerCase()) ||
+        e.phone === updates.assigned_salesperson
+      );
+      if (foundEmp) {
+        targetRepEmployee = foundEmp;
+        updatePayload.assigned_salesperson_phone = foundEmp.phone;
+      }
+    }
+
+    // 4. Update in place
+    const { data: updatedRecord, error: updateError } = await supabase
+      .from('recurring_customers')
+      .update(updatePayload)
+      .eq('id', matched.id)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    // Get current assigned rep name for display
+    let assignedRepName = targetRepEmployee ? targetRepEmployee.name : null;
+    if (!assignedRepName && updatedRecord.assigned_salesperson_phone) {
+      const { data: repData } = await supabase
+        .from('employees')
+        .select('name')
+        .eq('phone', updatedRecord.assigned_salesperson_phone)
+        .limit(1);
+      if (repData && repData.length > 0) assignedRepName = repData[0].name;
+    }
+
+    return {
+      success: true,
+      customer: updatedRecord,
+      assignedRepName,
+      message: `✅ *Customer Profile Updated!*\n\n` +
+        `🏢 Company: *${updatedRecord.customer_name}*\n` +
+        (updates.order_frequency_days ? `📅 Order Frequency: *Every ${updatedRecord.avg_order_frequency_days} days*\n` : '') +
+        (updatedRecord.contact_person ? `👤 Contact: *${updatedRecord.contact_person}*\n` : '') +
+        (updatedRecord.customer_phone ? `📱 Phone: *${updatedRecord.customer_phone}*\n` : '') +
+        (updatedRecord.customer_address ? `📍 Location: *${updatedRecord.customer_address}*\n` : '') +
+        (assignedRepName ? `💼 Assigned Salesperson: *${assignedRepName}*\n` : '') +
+        `\n_Updated live on Enlight Sales OS Dashboard!_ ✅`,
+    };
+  } catch (err) {
+    console.error('updateCustomerProfileRecord error:', err.message);
+    return { success: false, message: `❌ Could not update customer: ${err.message}` };
+  }
 }
 
 /**
@@ -461,7 +727,9 @@ module.exports = {
   saveInquiry, 
   getInquiries, 
   saveDeal, 
-  getEmployeeByPhone, 
+  getEmployeeByPhone,
+  normalizePhone,
+  getAccessibleSalespersonPhonesForBot,
   ensureCustomerRecord,
   checkAndLogNewCustomer,
   fuzzyMatchCustomer,
@@ -469,5 +737,6 @@ module.exports = {
   getCustomerMissingInfoPrompt,
   saveActiveSession,
   getActiveSession,
-  getFullActiveSession
+  getFullActiveSession,
+  updateCustomerProfileRecord
 };

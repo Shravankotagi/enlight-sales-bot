@@ -99,38 +99,12 @@ async function getLinkedDeal(customerName, senderPhone) {
 }
 
 /**
- * Ensure customer exists in recurring_customers.
+ * Ensure customer exists in recurring_customers (role-scoped).
  */
 async function ensureCustomerExists(customerName, senderPhone) {
-  const { data: existing } = await supabase
-    .from('recurring_customers')
-    .select('id')
-    .ilike('customer_name', `%${customerName}%`)
-    .eq('assigned_salesperson_phone', senderPhone)
-    .limit(1);
-
-  if (existing && existing.length > 0) {
-    await supabase
-      .from('recurring_customers')
-      .update({
-        updated_at: new Date().toISOString(),
-        assigned_salesperson_phone: senderPhone,
-      })
-      .eq('id', existing[0].id);
-    return existing[0].id;
-  } else {
-    const { data: newRec } = await supabase
-      .from('recurring_customers')
-      .insert({
-        customer_name:              customerName,
-        assigned_salesperson_phone: senderPhone,
-        is_active:                  true,
-        avg_order_frequency_days:   30,
-      })
-      .select('id')
-      .single();
-    return newRec ? newRec.id : null;
-  }
+  const { ensureCustomerRecord } = require('../supabase');
+  const rec = await ensureCustomerRecord(customerName, senderPhone);
+  return rec ? rec.id : null;
 }
 
 async function processRetentionMessage(text, senderPhone) {
@@ -348,7 +322,7 @@ async function processRetentionMessage(text, senderPhone) {
       routine_checkin:     '📞 Routine Check-in',
     };
 
-    return `🔄 *KRA 3 - Customer Retention Follow-up Logged!*\n\n` +
+    return `🔄 *Customer Retention Follow-up Logged!*\n\n` +
       `Customer: *${finalCustomerName}*\n` +
       `Status: *${statusLabels[followupStatus] || followupStatus}*\n` +
       `Summary: ${followupSummary}\n` +
@@ -358,7 +332,7 @@ async function processRetentionMessage(text, senderPhone) {
         : '') +
       `📌 Next Follow-up Scheduled: *${followupDateStr}* (${followupDays} days)\n` +
       `Monthly Follow-ups: *${followupCount} logged this month*\n\n` +
-      `Updated KRA 3 Customer Retention Dashboard! ✅` + (missingPrompt || '');
+      `Updated Customer Retention Card! ✅` + (missingPrompt || '');
 
   } catch (error) {
     console.error('Retention Agent Error:', error.message);
