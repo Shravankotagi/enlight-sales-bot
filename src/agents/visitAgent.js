@@ -267,7 +267,7 @@ async function processVisitMessage(text, senderPhone) {
     // Build response
     let reply = isNewProspect
       ? `🆕 *New Prospect Added & Visit Logged!*\n\n`
-      : `🚗 *KRA 9 - Customer Visit Logged!*\n\n`;
+      : `🚗 *Customer Visit Logged!*\n\n`;
 
     reply += `Customer: *${finalCustomerName}*\n`;
     if (data.city)         reply += `Location: *${data.city}*\n`;
@@ -279,7 +279,7 @@ async function processVisitMessage(text, senderPhone) {
     if (materialRequirement) reply += `📦 Requirement: *${materialRequirement}*\n`;
     if (followUpAction)      reply += `📌 Follow-up: *${followUpAction}*\n`;
     reply += `\nTotal Visits This Month: *${totalVisits}*\n`;
-    reply += `\nUpdated KRA 9 Customer Visit Dashboard! ✅`;
+    reply += `\nUpdated Customer Visits Card! ✅`;
 
     // For new prospects, ask for missing mandatory details
     if (isNewProspect) {

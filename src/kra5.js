@@ -179,7 +179,7 @@ function buildPaymentAlert(deal, dueDate, daysUntilDue) {
 
   const customerShort = deal.customer_name.split(' ')[0].toUpperCase();
 
-  return `${emoji} *KRA 5 - Payment Alert*\n\n` +
+  return `${emoji} *Payment Collection Alert*\n\n` +
     `🏢 ${deal.customer_name}\n` +
     `💵 Amount: ${formatAmount(deal.total_amount)}\n` +
     `📋 Terms: ${deal.payment_terms || '30 days'}\n` +
@@ -272,11 +272,11 @@ async function handlePaymentUpdate(text, senderPhone, intentData) {
 
       const remainingStr = amountPending > 0 ? `\n⏳ Outstanding Pending: *₹${Number(amountPending).toLocaleString('en-IN')}*` : '';
 
-      return `💵 *KRA 5 - Advance/Partial Payment Logged!*\n\n` +
+      return `💵 *Advance/Partial Payment Logged!*\n\n` +
         `🏢 Customer: *${payment?.customer_name || customerName}*\n` +
         `💰 Amount Paid: *₹${Number(amountPaid).toLocaleString('en-IN')}*` +
         `${remainingStr}\n\n` +
-        `Recorded in KRA 5 Pending ✅`;
+        `Updated Payment Collection Card! ✅`;
 
     } else {
       // Record full payment collection
@@ -318,11 +318,11 @@ async function handlePaymentUpdate(text, senderPhone, intentData) {
         year: new Date().getFullYear()
       });
 
-      return `💰 *KRA 5 - Full Payment Collected!*\n\n` +
+      return `💰 *Full Payment Collected!*\n\n` +
         `🏢 Customer: *${payment?.customer_name || customerName}*\n` +
         (amountPaid ? `💵 Amount Collected: *₹${Number(amountPaid).toLocaleString('en-IN')}*\n` : '') +
         `Status: Marked as FULLY collected ✅\n\n` +
-        `Logged to KRA 5 ✅`;
+        `Updated Payment Collection Card! ✅`;
     }
   } catch (error) {
     console.error('handlePaymentUpdate error:', error.message);
@@ -340,7 +340,7 @@ async function getPaymentSummary(scopeOrPhone) {
       : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
 
     if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
-      return '💰 *KRA 5 - Payment Status*\n\n✅ No pending payments tracked. You currently have no salespersons assigned to your team.';
+      return '💰 *Payment Collection Card*\n\n✅ No pending payments tracked. You currently have no salespersons assigned to your team.';
     }
 
     let query = supabase
@@ -378,7 +378,7 @@ async function getPaymentSummary(scopeOrPhone) {
     );
 
     const title = scope.isAdmin ? 'Company Payment Status' : (scope.isManager ? 'Team Payment Status' : 'Payment Status');
-    let msg = `💰 *KRA 5 - ${title}*\n\n`;
+    let msg = `💰 *Payment Collection Card - ${title}*\n\n`;
 
     if (overdue.length > 0) {
       msg += `🔴 *Overdue (${overdue.length}):*\n`;

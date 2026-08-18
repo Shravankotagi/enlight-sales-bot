@@ -322,7 +322,7 @@ async function processRetentionMessage(text, senderPhone) {
       routine_checkin:     '📞 Routine Check-in',
     };
 
-    return `🔄 *KRA 3 - Customer Retention Follow-up Logged!*\n\n` +
+    return `🔄 *Customer Retention Follow-up Logged!*\n\n` +
       `Customer: *${finalCustomerName}*\n` +
       `Status: *${statusLabels[followupStatus] || followupStatus}*\n` +
       `Summary: ${followupSummary}\n` +
@@ -332,7 +332,7 @@ async function processRetentionMessage(text, senderPhone) {
         : '') +
       `📌 Next Follow-up Scheduled: *${followupDateStr}* (${followupDays} days)\n` +
       `Monthly Follow-ups: *${followupCount} logged this month*\n\n` +
-      `Updated KRA 3 Customer Retention Dashboard! ✅` + (missingPrompt || '');
+      `Updated Customer Retention Card! ✅` + (missingPrompt || '');
 
   } catch (error) {
     console.error('Retention Agent Error:', error.message);

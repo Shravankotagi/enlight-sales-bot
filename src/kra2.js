@@ -93,7 +93,7 @@ async function logNewCustomer(deal, senderPhone) {
 
     // Send notification to salesperson
     const message =
-      `🆕 *KRA 2 - New Customer Detected!*\n\n` +
+      `🆕 *New Customer Detected!*\n\n` +
       `🏢 ${deal.customer_name}\n` +
       `📋 Type: ${deal.inquiry_type}\n` +
       (deal.total_amount
@@ -103,7 +103,7 @@ async function logNewCustomer(deal, senderPhone) {
       `New customers: ${count}/3\n` +
       (remaining > 0
         ? `${remaining} more needed to meet target`
-        : `✅ Monthly target achieved!`);
+        : `✅ Monthly target achieved!\n\nUpdated New Customer Acquisition Card! ✅`);
 
     await sendTextMessage(senderPhone, message);
     return count;
@@ -125,7 +125,7 @@ async function getNewCustomerSummary(scopeOrPhone) {
     const { start, end, monthName, year } = getMonthRange();
 
     if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
-      return `👥 *KRA 2 - New Customers*\n${monthName} ${year}\n\nAcquired: 0/3\n⚠️ No salespersons assigned to your team yet.`;
+      return `👥 *New Customer Acquisition Card*\n${monthName} ${year}\n\nAcquired: 0/3\n⚠️ No salespersons assigned to your team yet.`;
     }
 
     let query = supabase
@@ -149,7 +149,7 @@ async function getNewCustomerSummary(scopeOrPhone) {
     const count = logs?.length || 0;
     const remaining = Math.max(0, 3 - count);
 
-    let msg = `👥 *KRA 2 - New Customers*\n` +
+    let msg = `👥 *New Customer Acquisition Card*\n` +
       `${monthName} ${year}\n\n` +
       `Acquired: ${count}/3\n` +
       (remaining > 0
@@ -166,7 +166,7 @@ async function getNewCustomerSummary(scopeOrPhone) {
     return msg;
   } catch (error) {
     console.error('getNewCustomerSummary error:', error.message);
-    return '❌ Could not fetch KRA 2 data.';
+    return '❌ Could not fetch New Customer Acquisition Card data.';
   }
 }
 
@@ -218,14 +218,15 @@ async function handleNewCustomerAnnouncement(customerName, senderPhone) {
     const count = allLogs?.length || 1;
     const remaining = Math.max(0, 3 - count);
 
-    return `🆕 *KRA 2 - New Customer Logged!*\n\n` +
+    return `🆕 *New Customer Logged!*\n\n` +
       `🏢 Customer: *${customerName}*\n` +
       `✅ Recorded as new customer acquisition\n\n` +
       `📊 *${monthName} ${year} Progress*\n` +
       `New customers: ${count}/3\n` +
       (remaining > 0
         ? `⚠️ ${remaining} more needed to meet target`
-        : `✅ Monthly target achieved!`);
+        : `✅ Monthly target achieved!`) +
+      `\n\nUpdated New Customer Acquisition Card! ✅`;
   } catch (error) {
     console.error('handleNewCustomerAnnouncement error:', error.message);
     return '❌ Could not log new customer. Please try again.';

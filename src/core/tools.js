@@ -34,7 +34,7 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'log_customer_visit',
-      description: `Use this tool when the salesperson reports visiting a customer site, meeting a customer in person, a field visit or market visit. This logs to KRA 9 and updates the customer profile.`,
+      description: `Use this tool when the salesperson reports visiting a customer site, meeting a customer in person, a field visit or market visit. This logs to Customer Visits Card and updates the customer profile.`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
       }),

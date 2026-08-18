@@ -134,13 +134,14 @@ function buildComplaintConfirmation(details, complaint) {
     'other': '❓'
   }[details.complaint_type] || '❓';
 
-  return `${severityEmoji} *Complaint Logged - KRA 8*\n\n` +
+  return `${severityEmoji} *Customer Complaint Logged*\n\n` +
     `🏢 Customer: ${details.customer_name || 'Not specified'}\n` +
     `${typeEmoji} Type: ${details.complaint_type}\n` +
     `📝 Description: ${details.description}\n` +
     `⚡ Severity: ${details.severity}\n` +
     `🔖 Ref: ${shortId}\n\n` +
     `⏰ *48-hour resolution timer started*\n\n` +
+    `Updated Customer Complaints Card! ✅\n\n` +
     `You will receive reminders at:\n` +
     `• 24 hours - if still open\n` +
     `• 48 hours - escalation to Sales Lead\n\n` +
@@ -151,7 +152,7 @@ function buildComplaintConfirmation(details, complaint) {
 async function checkComplaints() {
   const supabase = getSupabase();
   try {
-    console.log('Running KRA 8 complaint check...');
+    console.log('Running Customer Complaints check...');
 
     const { data: complaints, error } = await supabase
       .from('complaints')
@@ -184,7 +185,7 @@ async function checkComplaints() {
 
         // Notify salesperson
         const salespersonMsg =
-          `🚨 *KRA 8 - Complaint Escalated*\n\n` +
+          `🚨 *Customer Complaint Escalated*\n\n` +
           `Complaint ref: ${complaint.id.substring(0, 8)}\n` +
           `Customer: ${complaint.customer_name || 'Unknown'}\n` +
           `Type: ${complaint.complaint_type}\n` +
@@ -199,7 +200,7 @@ async function checkComplaints() {
         const salesLeadPhone = process.env.SALES_LEAD_PHONE;
         if (salesLeadPhone && salesLeadPhone !== salespersonPhone) {
           const leadMsg =
-            `🚨 *KRA 8 Escalation Alert*\n\n` +
+            `🚨 *Customer Complaint Escalation Alert*\n\n` +
             `Unresolved complaint after 48 hours:\n\n` +
             `Customer: ${complaint.customer_name || 'Unknown'}\n` +
             `Type: ${complaint.complaint_type}\n` +
@@ -215,7 +216,7 @@ async function checkComplaints() {
       // 24 hours - send reminder
       } else if (hoursElapsed >= 24 && hoursElapsed < 48) {
         const reminderMsg =
-          `⚠️ *KRA 8 - Complaint Reminder*\n\n` +
+          `⚠️ *Customer Complaint Reminder*\n\n` +
           `Complaint open for ${Math.round(hoursElapsed)} hours:\n\n` +
           `Customer: ${complaint.customer_name || 'Unknown'}\n` +
           `Type: ${complaint.complaint_type}\n` +
@@ -398,12 +399,12 @@ async function handleComplaintResolution(text, senderPhone) {
     });
 
     const withinTarget = resolutionHrs <= 48;
-    return `✅ *KRA 8 - Complaint Resolved*\n\n` +
+    return `✅ *Complaint Resolved*\n\n` +
       `Customer: ${complaint.customer_name}\n` +
       `Resolution: ${resolution}\n` +
       `Time taken: ${resolutionHrs} hours\n` +
       `${withinTarget ? '✅ Within 48-hour target!' : '⚠️ Exceeded 48-hour target'}\n\n` +
-      `Logged to KRA 8 ✅`;
+      `Updated Customer Complaints Card! ✅`;
   } catch (error) {
     console.error('handleComplaintResolution error:', error.message);
     return '❌ Could not log resolution. Please try again.';
@@ -420,7 +421,7 @@ async function getComplaintSummary(scopeOrPhone) {
       : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
 
     if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
-      return '📊 *KRA 8 - Complaint Summary*\n\n✅ No complaints logged. You currently have no salespersons assigned to your team.';
+      return '📊 *Customer Complaints Card*\n\n✅ No complaints logged. You currently have no salespersons assigned to your team.';
     }
 
     const now = new Date();
@@ -460,7 +461,7 @@ async function getComplaintSummary(scopeOrPhone) {
       : null;
 
     const title = scope.isAdmin ? 'Company Complaint Summary' : (scope.isManager ? 'Team Complaint Summary' : 'Complaint Summary');
-    let msg = `📊 *KRA 8 - ${title}*\n\n` +
+    let msg = `📊 *Customer Complaints Card - ${title}*\n\n` +
       `Total this month: ${complaints.length}\n` +
       `✅ Resolved: ${resolved.length}\n` +
       `⏳ Pending: ${pending.length}\n` +

@@ -577,7 +577,7 @@ async function processSalesMessage(text, senderPhone) {
         await saveActiveSession(senderPhone, finalCustomerName, `pending_product_for_deal|${finalCustomerName}|${qty}|MT`);
         return `❓ *Which metal product is ${finalCustomerName} asking for?*\n\n` +
           `You specified a quantity of *${qty} MT*, but no specific metal product was mentioned.\n\n` +
-          `Please reply with the product name (e.g. _HR Coil_, _CR Sheet_, _TMT Bar_, _MS Plates_) so I can check our active rate sheet and calculate the quotation for KRA 1 & Sales Pipeline! 📈`;
+          `Please reply with the product name (e.g. _HR Coil_, _CR Sheet_, _TMT Bar_, _MS Plates_) so I can record the requirement for our Sales Achievement Card & Sales Pipeline! 📈`;
       }
 
       const itemAmount = qty > 0 && rate > 0 ? qty * rate : 0;
@@ -596,7 +596,7 @@ async function processSalesMessage(text, senderPhone) {
       await saveActiveSession(senderPhone, finalCustomerName, `pending_custom_rate|${finalCustomerName}|${unlistedMaterialName}`);
       return `⚠️ *Product Price Confirmation Required*\n\n` +
         `The material *"${unlistedMaterialName}"* is not listed in our active rate sheet.\n\n` +
-        `Please confirm the per MT rate for *${unlistedMaterialName}* (e.g. reply _"${unlistedMaterialName} rate is 54000"_) so I can calculate the deal total and update KRA 1 & Sales Pipeline! 📈`;
+        `Please confirm the per MT rate for *${unlistedMaterialName}* (e.g. reply _"${unlistedMaterialName} rate is 54000"_) so I can calculate the deal total and update the Sales Achievement Card & Sales Pipeline! 📈`;
     }
 
     let dealAmount = 0;
@@ -899,13 +899,6 @@ async function processSalesMessage(text, senderPhone) {
     const formattedAmount = dealAmount > 0 ? `₹${dealAmount.toLocaleString('en-IN')}` : 'To be calculated';
     const totalQty = processedItems.reduce((s, i) => s + i.qty, 0);
 
-    let itemsBreakdownStr = '';
-    if (processedItems.length > 0) {
-      itemsBreakdownStr = processedItems
-        .map((pi) => `  • *${pi.pName}*: ${pi.qty > 0 ? pi.qty + ' MT' : ''} ${pi.rate > 0 ? '@ ₹' + pi.rate.toLocaleString('en-IN') + '/MT = ₹' + pi.itemAmount.toLocaleString('en-IN') : ''}`)
-        .join('\n');
-    }
-
     const activeDeal = existingDeal || { id: dealId };
     const dealCode = getDealCode(activeDeal);
 
@@ -917,12 +910,20 @@ async function processSalesMessage(text, senderPhone) {
         `Official PO Number: *${poNumber}* 📄\n` +
         `Total Value: *₹${Number(dealAmount).toLocaleString('en-IN')}* + GST\n` +
         (poDate ? `PO Date: *${poDate}*\n` : '') +
-        `\nSynced live to the Sales Achievement tab & Orders tab! ✅`;
+        `\nUpdated Sales Achievement Card! ✅`;
 
       if (missingPrompt) {
         resultMsg += `\n\n${missingPrompt}`;
       }
       return resultMsg;
+    }
+
+    // Text Inquiry / Requirement / Non-Won Deal: Format line items WITHOUT amounts/rates
+    let itemsBreakdownStr = '';
+    if (processedItems.length > 0) {
+      itemsBreakdownStr = processedItems
+        .map((pi) => `  • *${pi.pName}*${pi.qty > 0 ? ': ' + pi.qty + ' MT' : ''}`)
+        .join('\n');
     }
 
     let resultMsg =
@@ -932,9 +933,9 @@ async function processSalesMessage(text, senderPhone) {
       `Stage: *${dbStage.toUpperCase()} 📄*\n` +
       (itemsBreakdownStr ? `Line Items:\n${itemsBreakdownStr}\n` : '') +
       (totalQty > 0 ? `Total Quantity: *${totalQty} MT*\n` : '') +
-      `Calculated Deal Total: *${formattedAmount}* + GST\n` +
-      `PO Date: *${poDate}*\n\n` +
-      `Synced live to Sales Pipeline & Metrics! ✅`;
+      (data.delivery_location ? `Delivery Location: *${data.delivery_location}*\n` : '') +
+      (data.delivery_date ? `Target Date: *${data.delivery_date}*\n` : (poDate ? `Target PO Date: *${poDate}*\n` : '')) +
+      `\nUpdated Sales Achievement Card! ✅`;
 
     if (missingPrompt) {
       resultMsg += `\n\n${missingPrompt}`;

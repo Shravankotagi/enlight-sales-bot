@@ -196,12 +196,12 @@ async function processComplaintMessage(text, senderPhone) {
         const { getCustomerMissingInfoPrompt } = require('../supabase');
         const missingPrompt = await getCustomerMissingInfoPrompt(finalCustomerName, senderPhone);
 
-        return `✅ *KRA 8 - Complaint Resolved!*\n\n` +
+        return `✅ *Complaint Resolved!*\n\n` +
           `Customer: *${finalCustomerName}*\n` +
           `Complaint Type: *${complaintType.toUpperCase()}*\n` +
           `Resolution Time: *${resolutionTimeHrs} Hours*\n` +
           `SLA Target (48h): *${isSlaCompliant ? '✅ Achieved — Within Target!' : '⚠️ Breached — Escalated!'}*\n\n` +
-          `Updated KRA 8 Complaint Resolution Dashboard! ✅` + (missingPrompt || '');
+          `Updated Customer Complaints Card! ✅` + (missingPrompt || '');
 
       } else {
         // Edge Case 3: No prior open complaint found → create a backdated resolved record
@@ -230,10 +230,10 @@ async function processComplaintMessage(text, senderPhone) {
         const { getCustomerMissingInfoPrompt } = require('../supabase');
         const missingPrompt = await getCustomerMissingInfoPrompt(finalCustomerName, senderPhone);
 
-        return `✅ *KRA 8 - Complaint Resolved!*\n\n` +
+        return `✅ *Complaint Resolved!*\n\n` +
           `Customer: *${finalCustomerName}*\n` +
           `_Note: No prior open complaint found. Created and resolved in one step._\n\n` +
-          `Updated KRA 8 Complaint Resolution Dashboard! ✅` + (missingPrompt || '');
+          `Updated Customer Complaints Card! ✅` + (missingPrompt || '');
       }
     }
 
@@ -312,13 +312,14 @@ async function processComplaintMessage(text, senderPhone) {
       senderPhone:  targetPhone,
     });
 
-    return `🚨 *KRA 7 - Quality Complaint Logged*\n\n` +
+    return `🚨 *Customer Complaint Logged*\n\n` +
       `Customer: *${finalCustomerName}*\n` +
       `Type: *${complaintType.toUpperCase()}*\n` +
       (affectedProduct ? `Product Affected: *${affectedProduct}*\n` : '') +
       `Details: ${rawDescription}\n` +
       `Status: *Open ⏱️ (48-Hour SLA Clock Started)*\n` +
       `SLA Due: *${slaDueAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}*\n\n` +
+      `Updated Customer Complaints Card! ✅\n\n` +
       `When resolved, reply: _"Resolved ${finalCustomerName} complaint"_ ✅` + (missingPrompt || '');
 
   } catch (error) {

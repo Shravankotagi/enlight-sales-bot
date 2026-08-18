@@ -469,24 +469,24 @@ async function getKRAStatus(scopeOrPhone, text = '') {
     const totalVisits = visits.length;
 
     const title = scope.targetRepName
-      ? `${scope.targetRepName}'s KRA Status`
-      : (scope.isAdmin ? 'Company KRA Status' : (scope.isManager ? 'Team KRA Status' : 'KRA Status'));
+      ? `${scope.targetRepName}'s Performance Scorecard`
+      : (scope.isAdmin ? 'Company Performance Scorecard' : (scope.isManager ? 'Team Performance Scorecard' : 'Performance Scorecard'));
 
     return `🎯 *${title} - ${monthName} ${year}*\n\n` +
-      `📋 *KRA 1 - Sales Achievement*\n` +
+      `📋 *Sales Achievement Card*\n` +
       `   Won Revenue: *${formatINR(wonValue)}* | Orders: *${wonCount}*` +
       (wonTonnage > 0 ? ` | Volume: *${wonTonnage.toLocaleString('en-IN')} MT*` : '') + `\n\n` +
-      `👥 *KRA 2 - New Customers Acquired*\n` +
+      `👥 *New Customer Acquisition Card*\n` +
       `   Acquired: *${newCustomersCount}/3* new customers\n\n` +
-      `🔄 *KRA 3 - Customer Retention*\n` +
+      `🔄 *Customer Retention Card*\n` +
       `   Active Accounts: *${recurringWithOrder}/${recurring.length}* (${retentionRate}%)\n\n` +
-      `📈 *KRA 4 - Enquiry Conversion*\n` +
+      `📈 *Enquiry Conversion Card*\n` +
       `   Inquiries: *${kra4Inquiries}* | Won: *${wonCount}* | Rate: *${conversionRate}%*\n\n` +
-      `💵 *KRA 5 - Collections & Outstanding*\n` +
+      `💵 *Payment Collection Card*\n` +
       `   Collected: *${formatINR(totalCollected)}* | Outstanding: *${formatINR(totalOutstanding)}*\n\n` +
-      `⚠️ *KRA 8 - Quality & Complaints*\n` +
+      `⚠️ *Customer Complaints Card*\n` +
       `   Total Logged: *${complaints.length}* | Open: *${openComplaints.length}*\n\n` +
-      `📍 *KRA 9 - Field Visits*\n` +
+      `📍 *Customer Visits Card*\n` +
       `   Total Visits: *${totalVisits}* (Target: 10/wk)\n\n` +
       `_Full live metrics verified with Enlight Sales OS Dashboard_`;
   } catch (error) {
@@ -715,7 +715,7 @@ async function getVisitSummary(scopeOrPhone, text = '') {
       : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
 
     if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
-      return `📊 *KRA 9 Team Visits - ${monthName} ${year}*\n\nNo visits logged. You currently have no salespersons assigned to your team.`;
+      return `📊 *Customer Visits Card (Team) - ${monthName} ${year}*\n\nNo visits logged. You currently have no salespersons assigned to your team.`;
     }
 
     let query = supabase
@@ -729,7 +729,7 @@ async function getVisitSummary(scopeOrPhone, text = '') {
     const { data: visits } = await query;
 
     if (!visits || visits.length === 0) {
-      return `📊 *KRA 9 - ${monthName} ${year}*\n\nNo visits logged this month yet.\n\nLog a visit:\n"visited ABC Fabricators today, met Rahul, discussed pricing"`;
+      return `📊 *Customer Visits Card - ${monthName} ${year}*\n\nNo visits logged this month yet.\n\nLog a visit:\n"visited ABC Fabricators today, met Rahul, discussed pricing"`;
     }
 
     const visitList = visits.slice(0, 5).map((v, i) =>
@@ -737,8 +737,8 @@ async function getVisitSummary(scopeOrPhone, text = '') {
     ).join('\n');
 
     const title = scope.targetRepName
-      ? `${scope.targetRepName}'s KRA 9 Visits`
-      : (scope.isAdmin ? 'Company KRA 9' : (scope.isManager ? 'Team KRA 9' : 'KRA 9'));
+      ? `${scope.targetRepName}'s Customer Visits`
+      : (scope.isAdmin ? 'Company Customer Visits' : (scope.isManager ? 'Team Customer Visits' : 'Customer Visits Card'));
 
     return `📊 *${title} - ${monthName} ${year}*\n\n` +
       `Total visits: ${visits.length}\n\n` +
@@ -821,7 +821,7 @@ async function getInactiveCustomers(scopeOrPhone) {
 
     return `⚠️ *${title} (${inactiveList.length} accounts)*\n\n` +
       lines.join('\n\n') +
-      `\n\n_Reach out under KRA 3 to re-engage these accounts!_`;
+      `\n\n_Reach out under Customer Retention Card to re-engage these accounts!_`;
   } catch (err) {
     console.error('getInactiveCustomers error:', err.message);
     return '❌ Could not fetch inactive customers.';

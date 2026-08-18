@@ -145,7 +145,7 @@ function buildVisitConfirmation(details, weekStats) {
     'neutral': '👍'
   }[details.outcome] || '👍';
 
-  return `✅ *Visit Logged - KRA 9*\n\n` +
+  return `✅ *Customer Visit Logged*\n\n` +
     `🏢 Customer: ${details.customer_name || 'Not specified'}\n` +
     (details.person_met ? `👤 Met: ${details.person_met}\n` : '') +
     (details.remarks ? `💬 Remarks: ${details.remarks}\n` : '') +
@@ -155,14 +155,14 @@ function buildVisitConfirmation(details, weekStats) {
     (remaining > 0 ? ` (${remaining} more needed)` : ' ✅ Target met!') + '\n' +
     `Field days: ${weekStats.days}/3` +
     (daysRemaining > 0 ? ` (${daysRemaining} more days needed)` : ' ✅') + '\n\n' +
-    `_Keep it up! 💪_`;
+    `Updated Customer Visits Card! ✅`;
 }
 
-// Weekly KRA 9 check - send reminder if below target
+// Weekly Customer Visits check - send reminder if below target
 async function checkWeeklyVisits() {
   const supabase = getSupabase();
   try {
-    console.log('Running KRA 9 weekly visit check...');
+    console.log('Running Customer Visits weekly check...');
 
     // Get all unique salesperson phones
     const { data: salespeople } = await supabase
@@ -195,17 +195,18 @@ async function checkWeeklyVisits() {
         const daysLeftInWeek = 6 - now.getDay();
 
         const message =
-          `📊 *KRA 9 Weekly Visit Update*\n\n` +
+          `📊 *Customer Visits Weekly Update*\n\n` +
           `Visits this week: ${stats.count}/10\n` +
           `Field days: ${stats.days}/3\n\n` +
           (remaining > 0 ? `⚠️ ${remaining} more visits needed\n` : '✅ Visit target met!\n') +
           (daysRemaining > 0 ? `⚠️ ${daysRemaining} more field days needed\n` : '✅ Field days target met!\n') +
           `\n📅 ${daysLeftInWeek} days left this week\n\n` +
           `Log a visit by sending:\n` +
-          `"visited [Company] today, met [Person], [outcome]"`;
+          `"visited [Company] today, met [Person], [outcome]"\n\n` +
+          `Updated Customer Visits Card! ✅`;
 
         await sendTextMessage(phone, message);
-        console.log(`KRA 9 reminder sent to ${phone}`);
+        console.log(`Customer Visits reminder sent to ${phone}`);
 
         // Small delay
         await new Promise(r => setTimeout(r, 1000));

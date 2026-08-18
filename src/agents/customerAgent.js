@@ -349,13 +349,13 @@ async function processCustomerMessage(text, senderPhone) {
       senderPhone,
     });
 
-    return `👤 *KRA 2 - New Customer Onboarded!*\n\n` +
+    return `👤 *New Customer Onboarded!*\n\n` +
       `Company: *${finalCustomerName}*\n` +
       (data.contact_person ? `Contact/Owner: *${data.contact_person}*\n` : '') +
       (data.phone          ? `Phone: *${data.phone}*\n` : '') +
       (data.city           ? `City: *${data.city}*\n` : '') +
       `Monthly Progress: *${currentCount} / 3 Onboarded*\n\n` +
-      `Added live to your Customers Dashboard! ✅` +
+      `Updated New Customer Acquisition Card! ✅` +
       promptSuffix;
 
   } catch (error) {

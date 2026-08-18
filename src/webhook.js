@@ -706,7 +706,7 @@ router.post('/', async (req, res) => {
               senderPhone,
               `⚠️ *Client Not Found in your Customer List*\n\n` +
               `Client *"${extractedCustomerName}"* is not registered under your salesperson account.\n\n` +
-              `Please onboard this customer first under *KRA 2 (Customer Onboarding)* before logging inquiries or orders.\n\n` +
+              `Please onboard this customer first under *New Customer Acquisition Card* before logging inquiries or orders.\n\n` +
               `*Example to onboard customer:*\n` +
               `_"New customer ${extractedCustomerName} owner Mr. Kapoor location Mumbai phone 9876543210 gst 27AAAAA1111A1Z1"_\n\n` +
               `Once added, you can resend this inquiry.`

@@ -438,7 +438,7 @@ async function processPaymentMessage(text, senderPhone) {
 
       return `Perfect, I've updated the payment mode for *${finalCustomerName}* to *${paymentMode || 'RTGS'}*.\n\n` +
         `Current Status: *₹${resultMode.finalCollected.toLocaleString('en-IN')}* collected | *₹${resultMode.finalOutstanding.toLocaleString('en-IN')}* remaining balance.\n\n` +
-        `Updated KRA 5 Payment Collection Dashboard! ✅`;
+        `Updated Payment Collection Card! ✅`;
     }
 
     if (amountPaid <= 0 && amountPending <= 0 && !isFullPayment) {
@@ -483,7 +483,7 @@ async function processPaymentMessage(text, senderPhone) {
     }
 
     const lines = [
-      `💰 *KRA 5 - Payment ${result2.existing ? 'Updated' : 'Logged'}!*`,
+      `💰 *Payment ${result2.existing ? 'Updated' : 'Logged'}!*`,
       ``,
       `Customer: *${finalCustomerName}*`,
       amountPaid > 0 ? `Amount Received: *₹${amountPaid.toLocaleString('en-IN')}*` : null,
@@ -493,7 +493,7 @@ async function processPaymentMessage(text, senderPhone) {
       `Remaining Outstanding: *${result2.finalOutstanding > 0 ? '₹' + result2.finalOutstanding.toLocaleString('en-IN') : '₹0 (Fully Settled 🎉)'}*`,
       `Status: *${result2.finalStatus.toUpperCase()}*`,
       ``,
-      `Updated KRA 5 Payment Collection Dashboard! ✅`,
+      `Updated Payment Collection Card! ✅`,
     ].filter(Boolean);
 
     return lines.join('\n');
