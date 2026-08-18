@@ -582,7 +582,57 @@ async function processSalesMessage(text, senderPhone) {
       }
     }
 
+    const PRODUCT_KEYWORDS = [
+      'hr coil', 'hot rolled', 'cr sheet', 'cold rolled', 'cr coil',
+      'ms plate', 'ms plates', 'ms sheet', 'tmt bar', 'tmt bars',
+      'gi coil', 'gi sheet', 'pipe', 'pipes', 'steel pipe', 'steel pipes',
+      'angles', 'channels', 'beams', 'flats', 'rebars', 'sheet', 'plate',
+      'coil', 'steel', 'metal', 'iron', 'structure', 'structures',
+      'pickled', 'galvanized', 'erw pipe', 'seamless pipe', 'is 2062',
+      'is 277', 'is 3589', 'e250', 'e350', 'fe 410', 'fe 500'
+    ];
+
+    const SALESPERSON_NAMES = [
+      'rishabh', 'rishabh makwana', 'max', 'akruti', 'salesperson',
+      'sales rep', 'dhananjay goel', 'rahul sharma', 'suresh sharma',
+      'kumar varma', 'john', 'andrew', 'test', 'customer', 'client',
+      'the customer', 'customer inquiry', 'web customer', 'unknown', 'self'
+    ];
+
+    const SYSTEM_EMPLOYEE_PHONES = new Set([
+      '8262937458', '9619226169', '7977088031', '9187305823', '9876543210',
+      '9876543222', '7896248624', '7892739774', '7878787878', '7894561237'
+    ]);
+
+    function isInvalidCustomerName(name) {
+      if (!name || typeof name !== 'string') return true;
+      const clean = name.toLowerCase().trim().replace(/[.:,\-_/()]/g, ' ');
+      if (clean.length < 2) return true;
+
+      if (SALESPERSON_NAMES.some((sn) => clean === sn || clean.startsWith(sn + ' ') || clean.endsWith(' ' + sn))) {
+        return true;
+      }
+
+      const words = clean.split(/\s+/).filter((w) => w.length > 0);
+      if (words.length === 1 && PRODUCT_KEYWORDS.includes(words[0])) {
+        return true;
+      }
+
+      const allWordsProduct = words.every((w) =>
+        PRODUCT_KEYWORDS.includes(w) ||
+        /^\d+(?:mm|mt|ton|tons|kg|gsm|br)?$/i.test(w) ||
+        /^(is|grade|fe|make|sail|tata|jsw|jindal|prime|quality|only|with|mtc|thick|thk|od|dia)$/i.test(w)
+      );
+      if (allWordsProduct) return true;
+
+      return false;
+    }
+
     let customerName = data.customer_name;
+    if (isInvalidCustomerName(customerName)) {
+      customerName = null;
+    }
+
     const textLower = (text || '').toLowerCase();
     const isNewReqMessage = /\b(need|requires|required|want|order|inquiry|rfq|new deal)\b/i.test(textLower);
 
@@ -599,16 +649,16 @@ async function processSalesMessage(text, senderPhone) {
       if (!isNewReqMessage) {
         const { getActiveSession } = require('../supabase');
         const activeCust = await getActiveSession(senderPhone);
-        if (activeCust && activeCust !== 'Unknown') {
+        if (activeCust && activeCust !== 'Unknown' && !isInvalidCustomerName(activeCust)) {
           customerName = activeCust;
         }
       }
     }
 
-    if (!customerName || customerName.length < 2) {
+    if (!customerName || customerName.length < 2 || isInvalidCustomerName(customerName)) {
       const { saveActiveSession } = require('../supabase');
       await saveActiveSession(senderPhone, 'Unknown', 'pending_customer_for_deal');
-      return `❓ Which customer is this inquiry for? Please reply with the customer/company name.`;
+      return `❓ Which customer is this inquiry for? Please reply with the customer/company name (e.g. _"Inquiry for ABC Steel"_).`;
     }
 
     const officialCustomerName = await verifyAndGetCustomerName(
@@ -627,14 +677,15 @@ async function processSalesMessage(text, senderPhone) {
         ? custRecord[0].customer_phone
         : data.customer_phone || null;
 
-    // Strict safety check: Under no circumstance should the salesperson's phone ever be used as customer phone
-    const cleanActualPhone = String(actualCustomerPhone || '').replace(/\D/g, '');
-    const cleanSenderPhone = String(senderPhone || '').replace(/\D/g, '');
+    // Strict safety check: Under no circumstance should any salesperson's / employee's phone ever be used as customer phone
+    const cleanActualPhone = String(actualCustomerPhone || '').replace(/\D/g, '').slice(-10);
+    const cleanSenderPhone = String(senderPhone || '').replace(/\D/g, '').slice(-10);
+
     if (
-      cleanActualPhone &&
-      cleanSenderPhone &&
-      (cleanActualPhone === cleanSenderPhone ||
-       cleanActualPhone.endsWith(cleanSenderPhone.slice(-10)))
+      !cleanActualPhone ||
+      cleanActualPhone.length < 10 ||
+      cleanActualPhone === cleanSenderPhone ||
+      SYSTEM_EMPLOYEE_PHONES.has(cleanActualPhone)
     ) {
       actualCustomerPhone = null;
     }

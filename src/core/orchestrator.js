@@ -135,7 +135,16 @@ const OrchestratorState = Annotation.Root({
 
 function getDeterministicIntentHint(text) {
   if (!text || typeof text !== 'string') return '';
-  const lower = text.toLowerCase();
+  const lower = text.toLowerCase().trim();
+
+  // 1. Guard: If user is asking an informational query / question, route to query_my_data only!
+  const isQueryPattern =
+    /^(how many|how much|what is|what's|whats|show me|show|list|tell me|give me|check|is there|which|kitni|kitna|summary|status|report|view)\b/i.test(lower) ||
+    /\b(how many|how much|total count|inquiry count|deal count|order summary|kra status|full report|aging|outstanding balance|revenue this month)\b/i.test(lower);
+
+  if (isQueryPattern) {
+    return '\n[REQUIRED TOOL CALLS THIS TURN: CALL query_my_data. You MUST call query_my_data to fetch accurate CRM data before responding.]';
+  }
 
   const isVisit = /\b(visited|visit|met|meeting|site|factory|plant|office|market visit)\b/i.test(lower);
   const isExplicitDealCommand = /\b(create deal|create inquiry|log inquiry|add deal|generate quote|confirm order|deal won|deal lost|new deal|mark as won|mark as lost)\b/i.test(lower);
