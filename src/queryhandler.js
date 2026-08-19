@@ -391,6 +391,38 @@ function isProductInquiry(inquiry) {
   return hasMetalKeywords;
 }
 
+function classifyInquirySource(inquiry) {
+  const channel = (inquiry.source_channel || '').toLowerCase().trim();
+  const raw = (inquiry.raw_text || '').toLowerCase().trim();
+  const inqType = (inquiry.inquiry_type || '').toLowerCase().trim();
+  const hasMedia = Array.isArray(inquiry.media_urls) && inquiry.media_urls.length > 0;
+
+  if (channel.includes('dashboard') || channel === 'web_dashboard') {
+    return 'Dashboard Entry';
+  }
+
+  if (
+    channel === 'whatsapp_po' ||
+    inqType === 'purchase_order' ||
+    raw.startsWith('[po document') ||
+    raw.startsWith('[purchase order document')
+  ) {
+    return 'WhatsApp PO';
+  }
+
+  if (
+    channel === 'whatsapp_image' ||
+    inqType.includes('document') ||
+    raw.startsWith('[inquiry attachment') ||
+    raw.startsWith('[inquiry document') ||
+    hasMedia
+  ) {
+    return 'WhatsApp Image/Document';
+  }
+
+  return 'WhatsApp Text';
+}
+
 function getInquiryTonnage(inq) {
   const ai = inq.ai_extraction_json || {};
   if (ai.quantityTons && Number(ai.quantityTons) > 0) return Number(ai.quantityTons);
@@ -421,7 +453,7 @@ async function getInquiriesThisMonth(scopeOrPhone, text = '') {
 
     let query = supabase
       .from('inquiries')
-      .select('id, sender_name, sender_phone, raw_text, status, source_channel, ai_extraction_json, created_at, salesperson_phone')
+      .select('id, sender_name, sender_phone, raw_text, status, source_channel, inquiry_type, media_urls, ai_extraction_json, created_at, salesperson_phone')
       .gte('created_at', start)
       .lte('created_at', end)
       .order('created_at', { ascending: false });
@@ -442,6 +474,18 @@ async function getInquiriesThisMonth(scopeOrPhone, text = '') {
 
     const totalTonnage = inqs.reduce((s, i) => s + getInquiryTonnage(i), 0);
 
+    const channelBreakdown = {
+      'WhatsApp Text': 0,
+      'WhatsApp Image/Document': 0,
+      'WhatsApp PO': 0,
+      'Dashboard Entry': 0,
+    };
+
+    inqs.forEach(i => {
+      const cat = classifyInquirySource(i);
+      channelBreakdown[cat] = (channelBreakdown[cat] || 0) + 1;
+    });
+
     const title = scope.targetRepName
       ? `${scope.targetRepName}'s Inquiries`
       : (scope.isAdmin ? 'Company Inquiries' : (scope.isManager ? 'Team Inquiries' : 'My Inquiries'));
@@ -452,10 +496,34 @@ async function getInquiriesThisMonth(scopeOrPhone, text = '') {
 
     const lower = (text || '').toLowerCase();
 
+    const inqWord = (n) => (n === 1 ? '1 inquiry' : `${n} inquiries`);
+
+    // Specific sub-intent: Source Channel Breakdown
+    const isChannelBreakdownQuery =
+      lower.includes('channel') ||
+      lower.includes('source') ||
+      lower.includes('whatsapp vs') ||
+      lower.includes('dashboard vs') ||
+      lower.includes('medium') ||
+      lower.includes('split') ||
+      (lower.includes('breakdown') && !lower.includes('status') && !lower.includes('tonnage'));
+
+    if (isChannelBreakdownQuery) {
+      return `📥 *${title} by Source Channel - ${monthName} ${year}*\n\n` +
+        `Total inquiries received: *${inqWord(totalCount)}*\n\n` +
+        `📊 *Source Channel Breakdown:*\n` +
+        `• WhatsApp Text: *${inqWord(channelBreakdown['WhatsApp Text'])}*\n` +
+        `• WhatsApp Image/Document: *${inqWord(channelBreakdown['WhatsApp Image/Document'])}*\n` +
+        `• WhatsApp PO: *${inqWord(channelBreakdown['WhatsApp PO'])}*\n` +
+        `• Dashboard Entry: *${inqWord(channelBreakdown['Dashboard Entry'])}*\n\n` +
+        `💰 *Total: ${inqWord(totalCount)}*\n\n` +
+        `_Directly synced with Enlight Sales OS Inquiries_`;
+    }
+
     // Specific sub-intent: In Review / Pending count
     if ((lower.includes('in review') || lower.includes('pending') || lower.includes('review queue')) && (lower.includes('how many') || lower.includes('count') || lower.includes('kitni'))) {
       return `📥 *${title} - In Review (${monthName} ${year})*\n\n` +
-        `You currently have *${reviewCount} inquiries in review / pending* out of *${totalCount} total inquiries* received this month.\n\n` +
+        `You currently have *${reviewCount} inquiries in review / pending* out of *${inqWord(totalCount)}* received this month.\n\n` +
         `📊 *Inquiry Status Breakdown:*\n` +
         `• In Review / Pending: *${reviewCount}*\n` +
         `• Processed / Confirmed: *${processedCount}*\n\n` +
@@ -465,7 +533,7 @@ async function getInquiriesThisMonth(scopeOrPhone, text = '') {
     // Specific sub-intent: Processed / Confirmed count
     if ((lower.includes('processed') || lower.includes('confirmed') || lower.includes('quoted')) && (lower.includes('how many') || lower.includes('count') || lower.includes('kitni'))) {
       return `📥 *${title} - Processed Inquiries (${monthName} ${year})*\n\n` +
-        `*${processedCount} inquiries* have been successfully processed and confirmed out of *${totalCount} total inquiries* this month. 🎉\n\n` +
+        `*${processedCount} inquiries* have been successfully processed and confirmed out of *${inqWord(totalCount)}* this month. 🎉\n\n` +
         `📊 *Inquiry Status Breakdown:*\n` +
         `• Processed / Confirmed: *${processedCount}*\n` +
         `• In Review / Pending: *${reviewCount}*`;
@@ -474,7 +542,7 @@ async function getInquiriesThisMonth(scopeOrPhone, text = '') {
     // Specific sub-intent: Tonnage / Volume across inquiries
     if (lower.includes('tonnage') || lower.includes('volume') || lower.includes('weight') || lower.includes('total mt') || lower.includes('total tons')) {
       return `📥 *${title} - Total Inquiry Tonnage (${monthName} ${year})*\n\n` +
-        `Total volume across all inquiries this month is *${totalTonnage.toLocaleString('en-IN')} MT* across *${totalCount} inquiries*.\n\n` +
+        `Total volume across all inquiries this month is *${totalTonnage.toLocaleString('en-IN')} MT* across *${inqWord(totalCount)}*.\n\n` +
         `📊 *Inquiry Breakdown:*\n` +
         `• Total Inquiries: *${totalCount}*\n` +
         `• Processed: *${processedCount}*\n` +
@@ -484,11 +552,16 @@ async function getInquiriesThisMonth(scopeOrPhone, text = '') {
 
     // General inquiry breakdown & summary
     return `📥 *${title} - ${monthName} ${year}*\n\n` +
-      `We've received *${totalCount} inquiries* this month! That's a great volume of customer demand.\n\n` +
+      `We've received *${inqWord(totalCount)}* this month! That's a great volume of customer demand.\n\n` +
       `📊 *Inquiry Status Breakdown:*\n` +
       `• Processed: *${processedCount}*\n` +
       `• In Review: *${reviewCount}*\n` +
       (totalTonnage > 0 ? `• Total Volume: *${totalTonnage.toLocaleString('en-IN')} MT*\n\n` : '\n') +
+      `📱 *Source Channel Breakdown:*\n` +
+      `• WhatsApp Text: *${channelBreakdown['WhatsApp Text']}*\n` +
+      `• WhatsApp Image/Document: *${channelBreakdown['WhatsApp Image/Document']}*\n` +
+      `• WhatsApp PO: *${channelBreakdown['WhatsApp PO']}*\n` +
+      `• Dashboard Entry: *${channelBreakdown['Dashboard Entry']}*\n\n` +
       `_Directly synced with Enlight Sales OS Inquiries_`;
   } catch (error) {
     console.error('getInquiriesThisMonth error:', error);
@@ -2010,10 +2083,10 @@ async function handleQuery(text, senderPhone) {
     }
   }
 
-  // Inquiry count / Inquiries summary this month (must come before generic sales/this month and before review queue)
+  // Inquiry count / Inquiries summary this month / channel breakdown
   if (
     (lower.includes('inquiry') || lower.includes('inquiries') || lower.includes('enquiry') || lower.includes('enquiries') || lower.includes('rfq')) &&
-    (lower.includes('how many') || lower.includes('kitni') || lower.includes('total') || lower.includes('count') || lower.includes('number') || lower.includes('received') || lower.includes('this month') || lower.includes('is mahine')) &&
+    (lower.includes('how many') || lower.includes('kitni') || lower.includes('total') || lower.includes('count') || lower.includes('number') || lower.includes('received') || lower.includes('this month') || lower.includes('is mahine') || lower.includes('channel') || lower.includes('source') || lower.includes('breakdown') || lower.includes('whatsapp vs') || lower.includes('dashboard') || lower.includes('split')) &&
     !lower.includes('review') && !lower.includes('pending')
   ) {
     return await getInquiriesThisMonth(effectiveScope, text);
