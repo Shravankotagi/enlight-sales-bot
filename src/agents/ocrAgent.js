@@ -30,10 +30,12 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
       return `⚠️ Could not clearly extract inquiry details from the document image. Please send a clearer picture or type the details (e.g. "Delta Structural Steel 50 MT HR Coil @ 55,000 Delivery Mumbai").`;
     }
 
-    const custName = extraction.customer.name || 'Customer Inquiry';
-    const officialCustomerName = await verifyAndGetCustomerName(custName, senderPhone);
-    const finalCustomerName = officialCustomerName || custName;
-    const customerPhone = extraction.customer.phone || null;
+    const rawCustName = extraction.customer && extraction.customer.name ? String(extraction.customer.name).trim() : '';
+    const isGenericName = !rawCustName || rawCustName === 'null' || rawCustName === 'None' || rawCustName.length < 2;
+    const custName = isGenericName ? null : rawCustName;
+    const officialCustomerName = custName ? await verifyAndGetCustomerName(custName, senderPhone) : null;
+    const finalCustomerName = officialCustomerName || custName || null;
+    const customerPhone = extraction.customer?.phone || null;
 
     // Construct raw text representation for inquiries tab
     const itemsText = (extraction.line_items || [])
@@ -378,7 +380,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
     if (isPo) {
       return (
         `🎉 *PURCHASE ORDER RECEIVED & DEAL WON!* 🏆\n\n` +
-        `Customer: *${finalCustomerName}*\n` +
+        `Customer: *${finalCustomerName || '—'}*\n` +
         `PO Number: *${poNumber}* 📄\n` +
         `PO Date: *${poDate}*\n` +
         `Stage: *WON / DELIVERED 🎉*\n\n` +
@@ -396,7 +398,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
 
     return (
       `📄 *INQUIRY / SALES DEAL LOGGED!* 🏗️\n\n` +
-      `Customer: *${finalCustomerName}*\n` +
+      `Customer: *${finalCustomerName || '—'}*\n` +
       `Stage: *REVIEW 📄*\n` +
       (itemsBreakdown ? `Line Items:\n${itemsBreakdown}\n` : '') +
       (baseAmt > 0 ? `Product Amount: *₹${baseAmt.toLocaleString('en-IN')}*\nGST (18%): *₹${gstAmt.toLocaleString('en-IN')}*\n*Grand Total: ₹${grandTotal.toLocaleString('en-IN')}*\n` : '') +
