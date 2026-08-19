@@ -19,6 +19,7 @@ const { processCustomerMessage } = require('./agents/customerAgent');
 const { processComplaintMessage } = require('./agents/complaintAgent');
 const { processVisitMessage } = require('./agents/visitAgent');
 const { processRetentionMessage } = require('./agents/retentionAgent');
+const { calculateSubtotal } = require('./utils/pricingEngine');
 
 /**
  * KRA 6 - CRM Compliance Logger
@@ -265,10 +266,7 @@ router.post('/', async (req, res) => {
           if (dealRow && dealRow.length > 0) {
             dealAmount = Number(dealRow[0].total_amount || 0);
             if (dealAmount === 0 && dealRow[0].deal_items && dealRow[0].deal_items.length > 0) {
-              dealAmount = dealRow[0].deal_items.reduce(
-                (sum, item) => sum + (Number(item.amount) || (Number(item.quantity || 0) * Number(item.rate || 0))),
-                0,
-              );
+              dealAmount = calculateSubtotal(dealRow[0].deal_items);
             }
           }
 
