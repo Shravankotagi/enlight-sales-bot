@@ -138,7 +138,42 @@ function getDeterministicIntentHint(text) {
   if (!text || typeof text !== 'string') return '';
   const lower = text.toLowerCase().trim();
 
-  // 1. Guard: If user is asking an informational query / question, route to query_my_data only!
+  const isExplicitDealCommand =
+    /\b(create|log|add|new|record|enter|post)\s+(?:new\s+)?(?:deal|inquiry|requirement|rfq|quote|quotation|order)\b/i.test(lower) ||
+    /^(?:log\s+)?new\s+inquiry\b/i.test(lower) ||
+    /\b(company\s+name|material|grade\/spec|target\s+price)\s*:/i.test(lower) ||
+    /\b(deal won|deal lost|mark as won|mark as lost|stage update|po received|order placed|order confirmed)\b/i.test(lower);
+
+  const isVisit = /\b(visited|met with|meeting at|site visit|factory visit|plant visit|market visit)\b/i.test(lower);
+  const isPayment = /\b(received payment|paid rs|paid inr|received advance|collected payment|advance of|payment received|neft done|upi done|cheque received)\b/i.test(lower);
+  const isComplaint = /\b(complaint|defective|damaged|scratch|rust|quality|rejected|rejection|faulty)\b/i.test(lower);
+  const isProfileUpdate = /\b(order frequency|frequency|reorder days|order cycle|reassign customer|change frequency)\b/i.test(lower);
+
+  const anchors = [];
+
+  if (isPayment) {
+    anchors.push('CALL log_payment');
+  }
+  if (isVisit) {
+    anchors.push('CALL log_customer_visit');
+  }
+  if (isComplaint) {
+    anchors.push('CALL log_complaint');
+  }
+  if (isProfileUpdate) {
+    anchors.push('CALL update_customer_profile');
+  }
+  if (!isVisit || isExplicitDealCommand) {
+    if (isExplicitDealCommand || /\b(requires|requirement|need|inquiry|quote|quotation|rfq|ton|mt|coil|plate|sheet|tmt|bar|hr|cr|ms)\b/i.test(lower)) {
+      anchors.push('CALL update_deal_stage');
+    }
+  }
+
+  if (anchors.length > 0) {
+    return `\n[REQUIRED TOOL CALLS THIS TURN: ${anchors.join(' AND ')}. You MUST call ALL of these tools before responding. Missing any = incomplete action.]`;
+  }
+
+  // Guard: ONLY if NO operational write action is detected, check if user is asking an informational query
   const isQueryPattern =
     /^(how many|how much|what is|what's|whats|show me|show|list|tell me|give me|check|is there|which|kitni|kitna|summary|status|report|view)\b/i.test(lower) ||
     /\b(how many|how much|total count|inquiry count|deal count|order summary|kra status|full report|aging|outstanding balance|revenue this month)\b/i.test(lower);
@@ -147,35 +182,7 @@ function getDeterministicIntentHint(text) {
     return '\n[REQUIRED TOOL CALLS THIS TURN: CALL query_my_data. You MUST call query_my_data to fetch accurate CRM data before responding.]';
   }
 
-  const isVisit = /\b(visited|visit|met|meeting|site|factory|plant|office|market visit)\b/i.test(lower);
-  const isExplicitDealCommand = /\b(create deal|create inquiry|log inquiry|add deal|generate quote|confirm order|deal won|deal lost|new deal|mark as won|mark as lost)\b/i.test(lower);
-
-  const anchors = [];
-
-  if (/\b(payment|advance|cheque|upi|neft|rtgs|invoice|balance|outstanding|baki|paid|amount received|payment collected)\b/i.test(lower)) {
-    anchors.push('CALL log_payment');
-  }
-  if (isVisit) {
-    anchors.push('CALL log_customer_visit');
-  }
-  if (/\b(complaint|defective|damaged|scratch|rust|quality|rejected|rejection|faulty)\b/i.test(lower)) {
-    anchors.push('CALL log_complaint');
-  }
-  if (/\b(order frequency|frequency|reorder days|order cycle|reassign customer|change frequency)\b/i.test(lower)) {
-    anchors.push('CALL update_customer_profile');
-  }
-  if (!isVisit || isExplicitDealCommand) {
-    if (/\b(requires|requirement|need|inquiry|quote|quotation|rfq|ton|mt|coil|plate|sheet|tmt|bar|hr|cr|ms)\b/i.test(lower)) {
-      anchors.push('CALL update_deal_stage');
-    }
-    if (/\b(won|lost|closed|confirmed|order placed|po received|deal done|finalized)\b/i.test(lower)) {
-      anchors.push('CALL update_deal_stage');
-    }
-  }
-
-  if (anchors.length === 0) return '';
-
-  return `\n[REQUIRED TOOL CALLS THIS TURN: ${anchors.join(' AND ')}. You MUST call ALL of these tools before responding. Missing any = incomplete action.]`;
+  return '';
 }
 
 /**

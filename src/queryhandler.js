@@ -18,11 +18,32 @@ function isQuery(text) {
   if (!text || typeof text !== 'string') return false;
   const lowerText = text.toLowerCase().trim();
 
+  // 1. Operational action logging patterns (inquiries, deals, visits, payments, complaints, onboarding)
+  const isOperationalAction =
+    /\b(create|log|add|new|record|enter|post)\s+(?:new\s+)?(?:deal|inquiry|requirement|rfq|quote|quotation|order)\b/i.test(lowerText) ||
+    /^(?:log\s+)?new\s+inquiry\b/i.test(lowerText) ||
+    /\b(company\s+name|material|grade\/spec|target\s+price)\s*:/i.test(lowerText) ||
+    /\b(deal won|deal lost|mark as won|mark as lost|stage update|po received|order placed|order confirmed)\b/i.test(lowerText) ||
+    /\b(visited|met with|went to|meeting at|market visit|site visit)\b/i.test(lowerText) ||
+    /\b(received payment|paid rs|paid inr|received advance|collected payment|advance of|payment received|neft done|upi done|cheque received)\b/i.test(lowerText) ||
+    /\b(complaint about|defective material|damaged material|rejected material|material rejection|rust issue|quality complaint)\b/i.test(lowerText) ||
+    /\b(new customer|add customer|onboard customer|register customer)\b/i.test(lowerText);
+
+  const isExplicitActionQuery =
+    /\b(my visits|who did i visit|visit log|show visits|visit summary)\b/i.test(lowerText) ||
+    /\b(pending payment|who hasn|overdue|payment aging|outstanding)\b/i.test(lowerText) ||
+    /\b(complaint status|show complaints|complaint summary)\b/i.test(lowerText) ||
+    /\b(customer list|my customers|which customers)\b/i.test(lowerText) ||
+    /\b(how many|how much|inquiry count|deal count|total inquiries|total sales)\b/i.test(lowerText);
+
+  if (isOperationalAction && !isExplicitActionQuery) {
+    return false;
+  }
+
   const isExplicitQuery = 
     /\b(list|show|get|filter|find|search|display|how many|which|view)\b/i.test(lowerText) ||
     lowerText.includes('orders with') ||
     lowerText.includes('deals with') ||
-    lowerText.includes('delivery location') ||
     lowerText.includes('summary') ||
     lowerText.includes('report') ||
     lowerText.includes('status');
@@ -39,23 +60,6 @@ function isQuery(text) {
     if (hasInquiryPatterns) {
       return false;
     }
-  }
-
-  // 2. Operational action logging patterns (visits, payments, complaints, onboarding, deal updates)
-  const isActionLogging = 
-    /\b(visited|met with|went to|meeting at|market visit|site visit)\b/i.test(lowerText) ||
-    /\b(received payment|paid rs|paid inr|received advance|collected payment|advance of|payment received|neft done|upi done|cheque received)\b/i.test(lowerText) ||
-    /\b(complaint about|defective material|damaged material|rejected material|material rejection|rust issue|quality complaint)\b/i.test(lowerText) ||
-    /\b(new customer|add customer|onboard customer|register customer)\b/i.test(lowerText);
-
-  const isExplicitActionQuery = 
-    /\b(my visits|who did i visit|visit log|show visits|visit summary)\b/i.test(lowerText) ||
-    /\b(pending payment|who hasn|overdue|payment aging|outstanding)\b/i.test(lowerText) ||
-    /\b(complaint status|show complaints|complaint summary)\b/i.test(lowerText) ||
-    /\b(customer list|my customers|which customers)\b/i.test(lowerText);
-
-  if (isActionLogging && !isExplicitActionQuery) {
-    return false;
   }
 
   const queryKeywords = [
@@ -2041,11 +2045,13 @@ async function handleQuery(text, senderPhone) {
 
   // 0. Filtered order listing detection (delivery location, customer filter, product filter, status listing, price/amount filter, quantity filter)
   const isOrderListingQuery = 
-    lower.includes('delivery location') ||
-    lower.includes('delivering to') ||
-    /\b(list|show|get|filter|find|search)\s+(all\s+)?(orders|deals)\b/i.test(lower) ||
-    /\b(orders|deals)\s+(with|for|in|at|by|above|below|under|over|delivering|to)\b/i.test(lower) ||
-    /\b(orders|deals)\s+(list|listing)\b/i.test(lower);
+    !isOperationalAction &&
+    (
+      lower.includes('delivering to') ||
+      /\b(list|show|get|filter|find|search)\s+(all\s+)?(orders|deals)\b/i.test(lower) ||
+      /\b(orders|deals)\s+(with|for|in|at|by|above|below|under|over|delivering|to)\b/i.test(lower) ||
+      /\b(orders|deals)\s+(list|listing)\b/i.test(lower)
+    );
 
   if (isOrderListingQuery) {
     if (!lower.includes('summary') && !lower.includes('scorecard') && !lower.includes('report card') && !lower.includes('kra status') && !lower.includes('aging')) {
