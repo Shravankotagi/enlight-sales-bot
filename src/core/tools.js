@@ -16,6 +16,7 @@ const { z }    = require('zod');
 
 function getVisitAgent()     { return require('../agents/visitAgent');     }
 function getSalesAgent()     { return require('../agents/salesAgent');     }
+function getOcrAgent()       { return require('../agents/ocrAgent');       }
 function getPaymentAgent()   { return require('../agents/paymentAgent');   }
 function getComplaintAgent() { return require('../agents/complaintAgent'); }
 function getRetentionAgent() { return require('../agents/retentionAgent'); }
@@ -168,14 +169,14 @@ function createTools(senderPhone, rawUserText = '') {
     async ({ imageBuffer, mimeType }) => {
       try {
         const buf = Buffer.from(imageBuffer, 'base64');
-        return await getSalesAgent().processSalesImage(buf, mimeType, senderPhone);
+        return await getOcrAgent().processSalesImage(buf, mimeType, senderPhone);
       } catch (err) {
-        return `Error processing PO image: ${err.message}`;
+        return `Error processing document/PO image: ${err.message}`;
       }
     },
     {
       name: 'process_sales_image',
-      description: `Use when a salesperson sends a photo of a Purchase Order, delivery challan, or order confirmation document.`,
+      description: `Use when a salesperson sends a photo or document of an Inquiry / RFQ, Purchase Order (PO), delivery challan, or order confirmation document. Handled by OCR Agent.`,
       schema: z.object({
         imageBuffer: z.string().describe('Base64-encoded image buffer'),
         mimeType: z.string().describe('MIME type e.g. image/jpeg'),

@@ -12,7 +12,8 @@ const { isComplaintReport, isComplaintResolution, handleComplaintLog, handleComp
 const { handleNewCustomerAnnouncement } = require('./kra2');
 
 // Dedicated Specialized AI Agents
-const { processSalesMessage, processSalesImage } = require('./agents/salesAgent');
+const { processSalesMessage } = require('./agents/salesAgent');
+const { processSalesImage: processOcrDocumentImage } = require('./agents/ocrAgent');
 const { processPaymentMessage, processPaymentImage } = require('./agents/paymentAgent');
 const { processCustomerMessage } = require('./agents/customerAgent');
 const { processComplaintMessage } = require('./agents/complaintAgent');
@@ -569,10 +570,10 @@ router.post('/', async (req, res) => {
               await sendTextMessage(senderPhone, paymentVisionReply);
               return;
             } else {
-              // Route to Sales & PO Vision Agent (KRA 1 & Zoho Bigin)
-              // Pass messageId so processSalesImage can save with the correct base64 image data
-              const salesVisionReply = await processSalesImage(mediaData.buffer, mediaData.mimeType, senderPhone, messageId);
-              await sendTextMessage(senderPhone, salesVisionReply);
+              // Route to dedicated OCR Agent (Inquiries Tab & Orders Tab)
+              // Pass messageId so OCR Agent can save with the correct base64 image data
+              const ocrVisionReply = await processOcrDocumentImage(mediaData.buffer, mediaData.mimeType, senderPhone, messageId);
+              await sendTextMessage(senderPhone, ocrVisionReply);
               return;
             }
           } else {
