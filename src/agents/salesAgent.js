@@ -62,6 +62,30 @@ CRITICAL EXTRACTION RULES & CONTEXT DISAMBIGUATION:
 Return ONLY the JSON object.
 `;
 
+const PRODUCT_FAMILIES = {
+  hr_coil: ['hr coil', 'hot rolled coil', 'hot rolled', 'hr sheet', 'hr plate', 'hr strip'],
+  cr_coil: ['cr coil', 'cold rolled coil', 'cold rolled'],
+  cr_sheet: ['cr sheet', 'cold rolled sheet', 'crc sheet', 'cr sheets'],
+  ms_plate: ['ms plate', 'ms plates', 'mild steel plate', 'chequered plate'],
+  ms_sheet: ['ms sheet', 'mild steel sheet'],
+  tmt_bar: ['tmt bar', 'tmt bars', 'rebars', 'tmt rebar', 'tmt'],
+  gi_sheet: ['gi sheet', 'galvanized sheet', 'gp sheet', 'gi sheets'],
+  gi_coil: ['gi coil', 'galvanized coil', 'gp coil', 'gi coils'],
+  pipe: ['pipe', 'pipes', 'erw pipe', 'seamless pipe', 'ms pipe', 'gi pipe', 'tube', 'tubing'],
+  structural: ['beam', 'beams', 'channel', 'channels', 'angle', 'angles', 'flat', 'flats', 'joist', 'column', 'section'],
+};
+
+function getProductFamily(name) {
+  if (!name || typeof name !== 'string') return null;
+  const lower = name.toLowerCase();
+  for (const [family, aliases] of Object.entries(PRODUCT_FAMILIES)) {
+    if (aliases.some((alias) => lower.includes(alias))) {
+      return family;
+    }
+  }
+  return null;
+}
+
 /**
  * Check if a product text matches existing deal line items.
  * Returns true if the new product is the SAME category/family as existing items.
@@ -76,17 +100,20 @@ async function isProductMatchForExistingDeal(dealId, newProductText) {
 
   if (!items || items.length === 0) return true; // no existing items → safe to update
 
-  const newLower = newProductText.toLowerCase();
-  const newKeywords = newLower.split(/\s+/).filter((w) => w.length > 2);
+  const newFamily = getProductFamily(newProductText);
 
   for (const item of items) {
     if (!item.sku_text) continue;
-    const existingLower = item.sku_text.toLowerCase();
-    const hasMatch = newKeywords.some((kw) => existingLower.includes(kw));
-    if (hasMatch) return true; // same product family → update existing deal
+    const existingFamily = getProductFamily(item.sku_text);
+    if (newFamily && existingFamily && newFamily === existingFamily) {
+      return true;
+    }
+    if (newProductText.toLowerCase().trim() === item.sku_text.toLowerCase().trim()) {
+      return true;
+    }
   }
 
-  // No keyword match → different product → should be a new deal
+  // No family match → different product family → should be a new deal
   return false;
 }
 
@@ -355,7 +382,21 @@ function detectInvalidUnitInMessage(text) {
     'nagpur',
     'chakan',
     'talegaon',
-    'turbhe',
+    'deal',
+    'deals',
+    'won',
+    'lost',
+    'closed',
+    'pipeline',
+    'status',
+    'corp',
+    'ltd',
+    'pvt',
+    'inc',
+    'enterprises',
+    'industries',
+    'steels',
+    'metals',
     'requirement',
     'requirements',
     'req',
@@ -552,7 +593,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       if (!data || data.confidence < 0.3) {
         // Deterministic rule-based extraction fallback
         const textRaw = text || '';
-        const textLower = textRaw.toLowerCase();
+        const textClean = textRaw.replace(/#?(?:DEAL-[A-F0-9]{4,6}|[A-F0-9]{6})\b/gi, '').replace(/\s+/g, ' ');
+        const textLower = textClean.toLowerCase();
 
         // Extract customer name (supports structured "Company Name: ..." as well as inline text)
         let ruleCustomer = null;
@@ -560,11 +602,30 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         if (structComp) {
           ruleCustomer = structComp[1].trim().replace(/^['"]|['"]$/g, '');
         } else {
-          const reqMatch = textRaw.match(/^([A-Z0-9\s&.-]{2,40}?)\s+(?:requires|require|needs|need|inquiry|rfq|po|order|want)\b/i) ||
-            textRaw.match(/(?:inquiry\s+from|order\s+from|rfq\s+from|from)\s+([A-Z0-9\s&.-]{2,40}?)(?:\s+requires|\s+needs|\s+for|\s+before|\.|$)/i) ||
-            textRaw.match(/(?:customer|company|client|pvt\.?\s*ltd\.?|ltd\.?|infra|steel|engineering|industries)\s+([A-Z0-9\s&.-]{3,35})/i);
-          if (reqMatch && reqMatch[1].trim().toLowerCase() !== 'max' && reqMatch[1].trim().toLowerCase() !== 'customer') {
-            ruleCustomer = reqMatch[1].trim();
+          const reqMatch = textClean.match(/(?:inquiry\s+for|order\s+for|deal\s+for|quote\s+for|requirement\s+for|for)\s+([A-Z0-9\s&.-]{2,40}?)(?:\s+\d+\s*(?:mt|ton|tons|tonne|kg|pcs|sheet|sheets|plate|plates|mm|coil|coils|bar|bars)|\s+requires|\s+needs|\s+before|\.|$)/i) ||
+            textClean.match(/(?:inquiry\s+from|order\s+from|rfq\s+from|from)\s+([A-Z0-9\s&.-]{2,40}?)(?:\s+requires|\s+needs|\s+for|\s+before|\.|$)/i) ||
+            textClean.match(/\b(?:mark|move|update|set|change)\s+([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|negotiation|qualified)\b/i) ||
+            textClean.match(/^(?!new\b|log\b|create\b|add\b)([A-Z0-9\s&.-]{2,40}?)\s+(?:requires|require|needs|need|inquiry|rfq|po|order|want)\b/i) ||
+            textClean.match(/(?:customer|company|client|pvt\.?\s*ltd\.?|ltd\.?|infra|steel|engineering|industries)\s+([A-Z0-9\s&.-]{3,35})/i);
+          if (reqMatch) {
+            const cand = reqMatch[1].trim();
+            if (!['new', 'log', 'create', 'add', 'a', 'the', 'customer', 'unknown', 'max'].includes(cand.toLowerCase())) {
+              ruleCustomer = cand;
+            }
+          }
+        }
+
+        // Detect action & stage
+        let ruleAction = 'inquiry';
+        let ruleStage = 'new_inquiry';
+        const stageUpdateMatch = textClean.match(/\b(?:mark|move|update|set|change)\s+([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|negotiation|qualified)\b/i) ||
+          textClean.match(/([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:is\s+|moved\s+to\s+|marked\s+as\s+)?(won|lost|quoted|negotiation|qualified)\b/i);
+
+        if (stageUpdateMatch) {
+          ruleAction = 'stage_update';
+          ruleStage = stageUpdateMatch[2].toLowerCase();
+          if (!ruleCustomer && stageUpdateMatch[1]) {
+            ruleCustomer = stageUpdateMatch[1].trim();
           }
         }
 
@@ -609,7 +670,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
         // Extract target price / rate per MT
         let ruleRate = null;
-        const structPrice = textRaw.match(/(?:target\s+price|rate|price|unit\s+price)\s*:\s*₹?\s*([\d,.]+)(?:\s*\/\s*mt)?/i) ||
+        const structPrice = textRaw.match(/(?:target\s+price|rate|price|unit\s+price)\s*(?::|is|\s)\s*₹?\s*([\d,.]+)(?:\s*\/\s*mt)?/i) ||
           textRaw.match(/@\s*₹?\s*([\d,.]+)/i);
         if (structPrice) {
           ruleRate = Number(structPrice[1].replace(/,/g, '')) || null;
@@ -633,22 +694,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         }
 
         // Extract delivery location
-        let delLoc = null;
-        const structLoc = textRaw.match(/(?:delivery\s+location|location|destination)\s*:\s*([^\n\r]+)/i);
-        if (structLoc) {
-          delLoc = structLoc[1].trim();
-        } else {
-          const locM = textRaw.match(/(?:for\s+delivery\s+to|delivery\s+to|delivery\s+at|deliver\s+karna\s+hai|location|destination)\s+([A-Za-z\s]+?)(?:\s+before|\s+by|\s+on|\s+within|\s+deliver|\.|$)/i);
-          if (locM) {
-            delLoc = locM[1].trim();
-          } else if (textLower.includes('nashik')) {
-            delLoc = 'Nashik';
-          } else if (textLower.includes('mumbai')) {
-            delLoc = 'Mumbai';
-          } else if (textLower.includes('pune')) {
-            delLoc = 'Pune';
-          }
-        }
+        let delLoc = extractDeliveryLocation(textRaw);
 
         // Extract delivery date
         let delDate = null;
@@ -683,21 +729,21 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           }
         }
 
-        if (ruleCustomer || pReq || qty > 0) {
+        if (ruleCustomer || pReq || qty > 0 || ruleAction === 'stage_update') {
           data = {
-            action: 'inquiry',
+            action: ruleAction,
             customer_name: ruleCustomer,
             contact_person: ruleContact,
-            target_stage: 'new_inquiry',
+            target_stage: ruleStage,
             customer_phone: rulePhone,
-            line_items: [
+            line_items: pReq ? [
               {
-                product_requirement: pReq || 'CR Coil',
+                product_requirement: pReq,
                 dimensions: specDim,
                 quantity_mt: qty,
                 rate_per_mt: ruleRate,
               }
-            ],
+            ] : [],
             total_amount: 0,
             delivery_location: delLoc,
             delivery_date: delDate,
@@ -833,6 +879,18 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }];
     }
 
+    // Post-LLM validation: If quantity_mt is 0 or missing but text contains a valid quantity unit, extract rule-based quantity
+    const textQtyMatch = text.match(/\b(\d+(?:\.\d+)?)\s*(?:mt|ton|tons|tonne|tonnes|metric\s+ton|kg|kgs|kilogram|sheet|sheets|plate|plates|coil|coils|pcs|piece|pieces|nos|bar|bars)\b/i);
+    if (textQtyMatch && rawItems.length > 0) {
+      const extractedQty = Number(textQtyMatch[1]) || 0;
+      rawItems = rawItems.map((item) => {
+        if (!item.quantity_mt || Number(item.quantity_mt) === 0) {
+          return { ...item, quantity_mt: extractedQty };
+        }
+        return item;
+      });
+    }
+
     let processedItems = [];
     let calculatedTotal = 0;
     let hasUnlistedMaterial = false;
@@ -889,17 +947,19 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           `Please reply with the product name (e.g. _HR Coil_, _CR Sheet_, _TMT Bar_, _MS Plates_) so I can record the requirement for your Sales Pipeline! 📈`;
       }
 
-      const lineCalc = calculateLineItem({ quantity: qty, rate });
-      const itemAmount = lineCalc.amount;
-      calculatedTotal += itemAmount;
+      if (qty > 0 && pName) {
+        const lineCalc = calculateLineItem({ quantity: qty, rate });
+        const itemAmount = lineCalc.amount;
+        calculatedTotal += itemAmount;
 
-      processedItems.push({
-        pName: pName || 'Metal Product',
-        dimensions: rawDim,
-        qty,
-        rate,
-        itemAmount,
-      });
+        processedItems.push({
+          pName,
+          dimensions: rawDim,
+          qty,
+          rate,
+          itemAmount,
+        });
+      }
     }
 
     if (hasUnlistedMaterial && calculatedTotal === 0) {
@@ -943,9 +1003,6 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       dealAmount = Number(data.total_amount);
     } else if (calculatedTotal > 0) {
       dealAmount = calculatedTotal;
-      if (targetStage === 'new_inquiry' || targetStage === 'qualified') {
-        targetStage = 'quoted';
-      }
     }
 
     const stageMap = {
@@ -1041,7 +1098,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       dealAmount = itemsTotal > 0 ? itemsTotal : Number(existingDeal.total_amount || 0);
     }
 
-    const poDate = data.po_date || new Date().toISOString().split('T')[0];
+    const poDate = data.po_date || existingDeal?.po_date || (dbStage === 'won' ? new Date().toISOString().split('T')[0] : null);
     let poNumber = existingDeal ? existingDeal.po_number : null;
 
     // PO is created ONLY after the deal is WON!
@@ -1061,9 +1118,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     // Resolve delivery location, date, terms, phone, and contact person preserving existing values
     const extractedDeliveryLoc = extractDeliveryLocation(text);
     const finalDeliveryLoc =
+      extractedDeliveryLoc ||
       data.delivery_location ||
       existingDeal?.delivery_location ||
-      extractedDeliveryLoc ||
       null;
     const finalDeliveryDate =
       data.delivery_date || existingDeal?.delivery_date || null;
@@ -1261,26 +1318,38 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       line_items: processedItems.map(pi => ({ quantity: pi.qty, rate: pi.rate, amount: pi.itemAmount })),
     });
 
+    function deriveProductForm(name) {
+      if (!name || typeof name !== 'string') return null;
+      const lower = name.toLowerCase();
+      if (lower.includes('coil')) return 'Coil';
+      if (lower.includes('sheet')) return 'Sheet';
+      if (lower.includes('plate')) return 'Plate';
+      if (lower.includes('bar') || lower.includes('rebar')) return 'Bar';
+      if (lower.includes('pipe') || lower.includes('tube')) return 'Pipe';
+      if (lower.includes('beam') || lower.includes('channel') || lower.includes('angle') || lower.includes('flat')) return 'Structural';
+      return null;
+    }
+
     // Mandatory atomic sync to inquiries table for dashboard
     try {
       const structuredExtraction = {
         customer_name: finalCustomerName,
         companyName: finalCustomerName,
-        contact_person: data.contact_person || null,
-        contactPerson: data.contact_person || null,
-        customer_phone: actualCustomerPhone,
-        customerPhone: actualCustomerPhone,
-        delivery_location: data.delivery_location || null,
-        deliveryLocation: data.delivery_location || null,
-        delivery_date: data.delivery_date || null,
-        deliveryDate: data.delivery_date || null,
-        payment_terms: data.payment_terms || null,
-        paymentTerms: data.payment_terms || null,
-        productType: processedItems[0]?.pName || 'CR Coil',
-        thickness: processedItems[0]?.dimensions || '',
-        width: '',
-        length: '',
-        productForm: 'Coil',
+        contact_person: finalContactPerson,
+        contactPerson: finalContactPerson,
+        customer_phone: actualCustomerPhone || null,
+        customerPhone: actualCustomerPhone || null,
+        delivery_location: finalDeliveryLoc,
+        deliveryLocation: finalDeliveryLoc,
+        delivery_date: finalDeliveryDate,
+        deliveryDate: finalDeliveryDate,
+        payment_terms: finalPaymentTerms,
+        paymentTerms: finalPaymentTerms,
+        productType: processedItems[0]?.pName || data.product_requirement || null,
+        thickness: processedItems[0]?.dimensions || null,
+        width: null,
+        length: null,
+        productForm: deriveProductForm(processedItems[0]?.pName || data.product_requirement),
         quantityTons: totalQty || processedItems[0]?.qty || 0,
         unitPrice: processedItems[0]?.rate || 0,
         total_amount: dealAmount || pricingSummary.subtotal,
@@ -1313,7 +1382,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             .from('inquiries')
             .update({
               sender_name: finalCustomerName,
-              sender_phone: actualCustomerPhone || senderPhone,
+              sender_phone: actualCustomerPhone || null,
               salesperson_phone: senderPhone,
               inquiry_type: 'inquiry',
               ai_extraction_json: structuredExtraction,
@@ -1330,7 +1399,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
               source_channel: 'whatsapp_text',
               raw_text: data.raw_text || text,
               sender_name: finalCustomerName || null,
-              sender_phone: actualCustomerPhone || senderPhone,
+              sender_phone: actualCustomerPhone || null,
               salesperson_phone: senderPhone,
               inquiry_type: 'inquiry',
               status: 'review',
