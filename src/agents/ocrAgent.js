@@ -44,11 +44,11 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
     const finalCustomerName = officialCustomerName || custName || null;
     const customerPhone = extraction.customer?.phone || null;
 
-    // Construct raw text representation for inquiries tab
     const itemsText = (extraction.line_items || [])
       .map(i => {
         const dimStr = i.dimensions ? ` (${i.dimensions})` : '';
-        return `${i.sku_text || 'Steel'}${dimStr} ${i.quantity || 0} MT ${i.rate ? '@ Rs ' + i.rate + '/MT' : ''}`;
+        const unitStr = i.unit || 'MT';
+        return `${i.sku_text || 'Steel'}${dimStr} ${i.quantity || 0} ${unitStr} ${i.rate ? '@ Rs ' + i.rate + '/' + unitStr : ''}`;
       })
       .join(', ');
     const rawSummary = `${itemsText}. Delivery Location: ${extraction.delivery_location || 'Warehouse'}`;
