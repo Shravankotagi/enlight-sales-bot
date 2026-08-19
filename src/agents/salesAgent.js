@@ -1134,54 +1134,54 @@ async function processSalesMessage(text, senderPhone) {
         overall_confidence: data.confidence || 0.95,
       };
 
-      const inquiryStatus = dbStage === 'won' ? 'confirmed' : 'review';
-      const inquiryType = (dbStage === 'won' || data.action === 'purchase_order') ? 'purchase_order' : 'inquiry';
-      const sourceChannel = (data.action === 'purchase_order' || dbStage === 'won') ? 'whatsapp_po' : 'whatsapp_text';
-
+      const isPurchaseOrder = dbStage === 'won' || data.action === 'purchase_order';
       let inqId = null;
-      if (recentInqs && recentInqs.length > 0) {
-        inqId = recentInqs[0].id;
-        await supabase
-          .from('inquiries')
-          .update({
-            sender_name: finalCustomerName,
-            sender_phone: actualCustomerPhone || senderPhone,
-            inquiry_type: inquiryType,
-            ai_extraction_json: structuredExtraction,
-            status: inquiryStatus,
-          })
-          .eq('id', inqId);
-      } else {
-        const { data: insertedInq, error: inqInsErr } = await supabase
-          .from('inquiries')
-          .insert({
-            source_channel: sourceChannel,
-            raw_text: text,
-            sender_name: finalCustomerName,
-            sender_phone: actualCustomerPhone || senderPhone,
-            salesperson_phone: senderPhone,
-            inquiry_type: inquiryType,
-            status: inquiryStatus,
-            ai_extraction_json: structuredExtraction,
-            overall_confidence: data.confidence || 0.95,
-            created_at: new Date().toISOString(),
-          })
-          .select()
-          .single();
 
-        if (inqInsErr) {
-          console.error('[SalesAgent] Error inserting inquiry for text message:', inqInsErr);
-        } else if (insertedInq) {
-          inqId = insertedInq.id;
-          console.log('[SalesAgent] Successfully logged inquiry record for text message:', inqId);
+      if (!isPurchaseOrder) {
+        if (recentInqs && recentInqs.length > 0) {
+          inqId = recentInqs[0].id;
+          await supabase
+            .from('inquiries')
+            .update({
+              sender_name: finalCustomerName,
+              sender_phone: actualCustomerPhone || senderPhone,
+              inquiry_type: 'inquiry',
+              ai_extraction_json: structuredExtraction,
+              status: 'review',
+            })
+            .eq('id', inqId);
+        } else {
+          const { data: insertedInq, error: inqInsErr } = await supabase
+            .from('inquiries')
+            .insert({
+              source_channel: 'whatsapp_text',
+              raw_text: text,
+              sender_name: finalCustomerName,
+              sender_phone: actualCustomerPhone || senderPhone,
+              salesperson_phone: senderPhone,
+              inquiry_type: 'inquiry',
+              status: 'review',
+              ai_extraction_json: structuredExtraction,
+              overall_confidence: data.confidence || 0.95,
+              created_at: new Date().toISOString(),
+            })
+            .select()
+            .single();
+
+          if (inqInsErr) {
+            console.error('[SalesAgent] Error inserting inquiry for text message:', inqInsErr);
+          } else if (insertedInq) {
+            inqId = insertedInq.id;
+            console.log('[SalesAgent] Successfully logged inquiry record for text message:', inqId);
+          }
         }
-      }
 
-      if (inqId && dealId) {
-        await supabase
-          .from('deals')
-          .update({ inquiry_id: inqId })
-          .eq('id', dealId);
+        if (inqId && dealId) {
+          await supabase
+            .from('deals')
+            .update({ inquiry_id: inqId })
+            .eq('id', dealId);
+        }
       }
     } catch (inqSyncErr) {
       console.error('[SalesAgent] Inquiries table sync error:', inqSyncErr.message);
