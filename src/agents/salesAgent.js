@@ -449,105 +449,17 @@ async function isKRA1AlreadyLogged(senderPhone, customerName) {
   return data && data.length > 0;
 }
 
-/**
- * Looks up price per MT from official active rate sheet for a given product text.
- */
-function extractDimensions(str) {
-  if (!str) return [];
-  const matches = str.toLowerCase().match(/\b(\d+(?:\.\d+)?\s*(?:mm|cm|m|inch|x\d+)?)\b/g);
-  if (!matches) return [];
-  return matches.filter((m) => /\d+/.test(m) && (m.includes('mm') || m.includes('x') || m.includes('cm') || m.includes('inch')));
-}
-
-function isDimensionCompatible(requestedText, skuText) {
-  const reqDims = extractDimensions(requestedText);
-  const skuDims = extractDimensions(skuText);
-
-  if (reqDims.length === 0 && skuDims.length === 0) return true;
-  // If user requested a specific mm dimension, but candidate SKU has no dimension specified:
-  // Reject so it triggers explicit price confirmation for that specific mm dimension!
-  if (reqDims.length > 0 && skuDims.length === 0) return false;
-
-  if (reqDims.length > 0 && skuDims.length > 0) {
-    for (const rd of reqDims) {
-      const rdClean = rd.replace(/\s+/g, '').toLowerCase();
-      const rdNum = rdClean.replace(/[^\d.]/g, '');
-      const skuHasMatchingDim = skuDims.some((sd) => {
-        const sdClean = sd.replace(/\s+/g, '').toLowerCase();
-        const sdNum = sdClean.replace(/[^\d.]/g, '');
-        return rdClean === sdClean || rdNum === sdNum;
-      });
-      if (!skuHasMatchingDim) return false;
-    }
-  }
-
-  return true;
-}
-
-async function lookupRateSheetPrice(productText) {
-  try {
-    if (!productText) return null;
-
-    const { data: latestSheet } = await supabase
-      .from('rate_sheets')
-      .select('id')
-      .order('date', { ascending: false })
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
-
-    if (!latestSheet) return null;
-
-    const { data: items } = await supabase
-      .from('rate_sheet_items')
-      .select('sku_text, category, price_per_mt')
-      .eq('rate_sheet_id', latestSheet.id);
-
-    if (!items || items.length === 0) return null;
-
-    const textLower = productText.toLowerCase();
-    let matched = null;
-
-    // 1. Priority 1: Match on sku_text with dimension compatibility
-    for (const i of items) {
-      const skuLower = (i.sku_text || '').toLowerCase();
-      if (!skuLower) continue;
-
-      if (textLower.includes(skuLower) || skuLower.includes(textLower)) {
-        if (isDimensionCompatible(productText, i.sku_text)) {
-          matched = i;
-          break;
-        }
-      }
-    }
-
-    // 2. Priority 2: Match on category ONLY if dimension is compatible
-    if (!matched) {
-      for (const i of items) {
-        const catLower = (i.category || '').toLowerCase();
-        if (!catLower) continue;
-
-        if (textLower.includes(catLower) || catLower.includes(textLower)) {
-          if (isDimensionCompatible(productText, i.sku_text)) {
-            matched = i;
-            break;
-          }
-        }
-      }
-    }
-
-    if (matched && Number(matched.price_per_mt) > 0) {
-      return {
-        price_per_mt: Number(matched.price_per_mt),
-        matched_sku: matched.sku_text || matched.category,
-      };
-    }
-    return null;
-  } catch (err) {
-    console.error('[SalesAgent] Rate sheet lookup error:', err.message);
-    return null;
-  }
-}
+const {
+  extractDimensions,
+  isDimensionCompatible,
+  lookupRateSheetPrice,
+  calculateLineItem,
+  calculateLineItems,
+  calculateSubtotal,
+  calculateGst,
+  calculateGrandTotal,
+  calculatePricingSummary,
+} = require('../utils/pricingEngine');
 
 /**
  * Main text message handler.
@@ -823,7 +735,8 @@ async function processSalesMessage(text, senderPhone) {
           `Please reply with the product name (e.g. _HR Coil_, _CR Sheet_, _TMT Bar_, _MS Plates_) so I can record the requirement for our Sales Achievement Card & Sales Pipeline! 📈`;
       }
 
-      const itemAmount = qty > 0 && rate > 0 ? qty * rate : 0;
+      const lineCalc = calculateLineItem({ quantity: qty, rate });
+      const itemAmount = lineCalc.amount;
       calculatedTotal += itemAmount;
 
       processedItems.push({

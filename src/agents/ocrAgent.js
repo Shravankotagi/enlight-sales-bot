@@ -12,6 +12,13 @@
 
 const { supabase, saveInquiry, verifyAndGetCustomerName } = require('../supabase');
 const { extractFromImage } = require('../gemini');
+const {
+  calculateLineItems,
+  calculateSubtotal,
+  calculateGst,
+  calculateGrandTotal,
+  calculatePricingSummary,
+} = require('../utils/pricingEngine');
 
 /**
  * Process incoming Inquiry / PO / Sales document image via Gemini Vision & OCR
@@ -74,16 +81,9 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
     const poDate = extraction.po_date || new Date().toISOString().split('T')[0];
     const inqStatus = isPo ? 'confirmed' : 'review';
 
-    let totalVal = extraction.total_amount || 0;
-    if (totalVal <= 0 && extraction.line_items && extraction.line_items.length > 0) {
-      totalVal = extraction.line_items.reduce(
-        (s, i) => s + ((Number(i.quantity) || 0) * (Number(i.rate) || 0)),
-        0
-      );
-    }
-
-    const baseAmt = extraction.basic_amount || totalVal;
-    const gstAmt = extraction.gst_amount || Math.round(baseAmt * 0.18);
+    const pricingSummary = calculatePricingSummary(extraction);
+    const baseAmt = extraction.basic_amount || pricingSummary.subtotal;
+    const gstAmt = extraction.gst_amount || pricingSummary.gstAmount;
     const grandTotal = extraction.total_amount || (baseAmt + gstAmt);
     const finalOrderAmount = grandTotal > 0 ? grandTotal : baseAmt;
 
