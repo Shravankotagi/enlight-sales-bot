@@ -208,24 +208,28 @@ function formatINR(amount) {
   return '₹' + Number(amount).toLocaleString('en-IN');
 }
 
-/**
- * Applies role-scoped salesperson phone filters to a Supabase query builder.
- * - phones === null (Admin) -> unrestricted / company-wide
- * - phones.length === 0 (Sales Manager with 0 reps) -> impossible filter
- * - phones.length === 1 -> exact equality match
- * - phones.length > 1 -> in array match
- */
 function applySalespersonFilter(query, phones, fieldName = 'salesperson_phone') {
-  if (phones === null) {
+  if (phones === null || phones === undefined) {
     return query;
   }
-  if (!phones || phones.length === 0) {
+  const list = Array.isArray(phones) ? phones : [phones];
+  if (list.length === 0) {
     return query.eq(fieldName, '__NO_ACCESSIBLE_REPS__');
   }
-  if (phones.length === 1) {
-    return query.eq(fieldName, phones[0]);
+  const variants = [];
+  for (const p of list) {
+    if (!p) continue;
+    const clean = String(p).replace(/\D/g, '');
+    const p10 = clean.slice(-10);
+    const p12 = '91' + p10;
+    const pPlus = '+91' + p10;
+    variants.push(p10, p12, pPlus, String(p));
   }
-  return query.in(fieldName, phones);
+  const unique = [...new Set(variants)];
+  if (unique.length === 1) {
+    return query.eq(fieldName, unique[0]);
+  }
+  return query.in(fieldName, unique);
 }
 
 // ── QUERY HANDLERS ────────────────────────────────────────────────────────
@@ -334,8 +338,28 @@ function isProductInquiry(inquiry) {
   const rawText = (inquiry.raw_text || '').toLowerCase().trim();
   const ai = inquiry.ai_extraction_json || {};
 
-  if (Array.isArray(ai.line_items) && ai.line_items.length > 0) return true;
-  if (Array.isArray(ai.lineItems) && ai.lineItems.length > 0) return true;
+  // 0. Exclude Purchase Orders (POs belong strictly to Orders)
+  if (
+    inquiry.inquiry_type === 'purchase_order' ||
+    inquiry.source_channel === 'whatsapp_po' ||
+    rawText.startsWith('[po document attached:')
+  ) {
+    return false;
+  }
+
+  // 1. All official genuine inquiry channels
+  if (
+    inquiry.inquiry_type === 'inquiry' ||
+    inquiry.source_channel === 'whatsapp_text' ||
+    inquiry.source_channel === 'whatsapp_image' ||
+    inquiry.source_channel === 'web_dashboard'
+  ) {
+    return true;
+  }
+
+  // 2. Extracted line items
+  const lineItemsSrc = ai.line_items || ai.lineItems || [];
+  if (Array.isArray(lineItemsSrc) && lineItemsSrc.length > 0) return true;
   if (ai.productType && ai.productType !== 'Unknown' && ai.productType !== 'Hot Rolled') return true;
   if (ai.sku_text) return true;
 
@@ -360,7 +384,7 @@ function isProductInquiry(inquiry) {
   }
 
   const hasMetalKeywords =
-    /\b(hr|cr|gi|gp|tmt|coil|sheet|plate|plates|sheets|coils|rebar|pipe|tube|steel|angle|beam|channel|mt|ton|tons|tonne|kg|kgs|mm|gauge|mtr|rate|price|quotation|rfq|po|order|require|requires|requirement|need|needs|dispatch)\b/i.test(
+    /\b(hr|cr|gi|gp|tmt|coil|sheet|plate|plates|sheets|coils|rebar|pipe|tube|steel|angle|beam|channel|mt|ton|tons|tonne|kg|kgs|mm|gauge|mtr|rate|price|quotation|rfq|require|requires|requirement|need|needs|dispatch)\b/i.test(
       rawText,
     );
 
