@@ -23,7 +23,7 @@ function isQuery(text) {
     /\b(create|log|add|new|record|enter|post)\s+(?:new\s+)?(?:deal|inquiry|requirement|rfq|quote|quotation|order)\b/i.test(lowerText) ||
     /^(?:log\s+)?new\s+inquiry\b/i.test(lowerText) ||
     /\b(company\s+name|material|grade\/spec|target\s+price)\s*:/i.test(lowerText) ||
-    /\b(deal won|deal lost|mark as won|mark as lost|stage update|po received|order placed|order confirmed)\b/i.test(lowerText) ||
+    /\b(mark\b.*?\b(won|lost)|move\b.*?\b(stage|won|lost|quoted|negotiation|pipeline)|change\b.*?\b(stage|won|lost|quoted)|.*?\b(deal|inquiry|order)\b.*?\b(won|lost|closed|negotiation|quoted|qualified)|deal\s+won|deal\s+lost|mark\s+as\s+won|mark\s+as\s+lost|stage\s+update|po\s+received|order\s+placed|order\s+confirmed)\b/i.test(lowerText) ||
     /\b(visited|met with|went to|meeting at|market visit|site visit)\b/i.test(lowerText) ||
     /\b(received payment|paid rs|paid inr|received advance|collected payment|advance of|payment received|neft done|upi done|cheque received)\b/i.test(lowerText) ||
     /\b(complaint about|defective material|damaged material|rejected material|material rejection|rust issue|quality complaint)\b/i.test(lowerText) ||

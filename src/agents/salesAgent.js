@@ -960,6 +960,13 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           `${dealsListStr}\n\n` +
           `Please reply with the **Deal ID** (e.g. _"${getDealCode(openDeals[0])}"_) or option number to specify which deal to update! 📈`;
       }
+    } else if (!existingDeal && openDeals.length === 0) {
+      if (data.action === 'stage_update' || dbStage === 'won' || dbStage === 'lost' || !data.product_requirement) {
+        const best = await findBestDeal(finalCustomerName, senderPhone);
+        if (best) {
+          existingDeal = best;
+        }
+      }
     }
 
     if (existingDeal) {
