@@ -90,6 +90,58 @@ async function isProductMatchForExistingDeal(dealId, newProductText) {
   return false;
 }
 
+const KNOWN_STEEL_CITIES = [
+  'Pune', 'Mumbai', 'Nashik', 'Chakan', 'Talegaon', 'Turbhe', 'Thane', 'Navi Mumbai',
+  'Nagpur', 'Aurangabad', 'Kolhapur', 'Solapur', 'Ahmednagar', 'Jalna',
+  'Delhi', 'Gurgaon', 'Gurugram', 'Noida', 'Faridabad', 'Ghaziabad', 'Panipat', 'Ludhiana', 'Chandigarh',
+  'Ahmedabad', 'Surat', 'Vadodara', 'Baroda', 'Rajkot', 'Bhavnagar', 'Gandhidham', 'Morbi', 'Ankleshwar',
+  'Chennai', 'Coimbatore', 'Bangalore', 'Bengaluru', 'Hyderabad', 'Secunderabad', 'Visakhapatnam', 'Vizag', 'Vijayawada', 'Kochi', 'Cochin',
+  'Kolkata', 'Calcutta', 'Durgapur', 'Rourkela', 'Jamshedpur', 'Raipur', 'Bhilai', 'Cuttack', 'Bhubaneswar',
+  'Indore', 'Bhopal', 'Jaipur', 'Bhilwara'
+];
+
+/**
+ * Extracts delivery city/location across structured forms, natural language phrases, and standalone city mentions.
+ */
+function extractDeliveryLocation(text) {
+  if (!text || typeof text !== 'string') return null;
+  const lower = text.toLowerCase();
+
+  // 1. Structured form: Delivery Location: Pune
+  const structLoc = text.match(/(?:delivery\s+location|delivery\s+address|delivery\s+city|location|destination|ship\s+to|deliver\s+to|delivery\s+at)\s*:\s*([^\n\r,]+)/i);
+  if (structLoc) {
+    return structLoc[1].trim().replace(/^['"]|['"]$/g, '');
+  }
+
+  // 2. Natural language delivery phrases:
+  const phrases = [
+    /(?:for\s+delivery\s+to|delivery\s+to|delivery\s+at|deliver\s+to|ship\s+to|destination|transport\s+to|bhejna\s+hai|deliver\s+karna\s+hai|delivering\s+to)\s+([A-Za-z\s]+?)(?:\s+before|\s+by|\s+on|\s+within|\s+deliver|\.|\n|$)/i,
+    /([A-Za-z]+)\s+(?:delivery|chahiye|mein\s+deliver|pe\s+deliver)/i
+  ];
+
+  for (const p of phrases) {
+    const m = text.match(p);
+    if (m && m[1]) {
+      const cand = m[1].trim();
+      const matchedCity = KNOWN_STEEL_CITIES.find(c => c.toLowerCase() === cand.toLowerCase());
+      if (matchedCity) return matchedCity;
+      if (cand.length >= 3 && !['the', 'and', 'with', 'metal', 'steel', 'coil', 'sheet', 'deal', 'order', 'quotation'].includes(cand.toLowerCase())) {
+        return cand;
+      }
+    }
+  }
+
+  // 3. Standalone known city lookup in text
+  for (const city of KNOWN_STEEL_CITIES) {
+    const cityRegex = new RegExp(`\\b${city}\\b`, 'i');
+    if (cityRegex.test(lower)) {
+      return city;
+    }
+  }
+
+  return null;
+}
+
 /**
  * Detects if a message contains a number with an invalid/non-steel unit (e.g. "15 apple", "20 boxes").
  */
@@ -906,15 +958,6 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     };
     const dbStage = stageMap[targetStage] || 'new_inquiry';
 
-    // Always ensure and sync customer record with latest contact person, phone, and address
-    const { ensureCustomerRecord } = require('../supabase');
-    await ensureCustomerRecord(finalCustomerName, senderPhone, {
-      customer_phone: actualCustomerPhone || data.customer_phone || null,
-      contact_person: data.contact_person || null,
-      city: data.delivery_location || null,
-    });
-    console.log(`[SalesAgent] Synced customer profile for: ${finalCustomerName}`);
-
     // MULTI-DEAL RESOLUTION: Fetch all active open deals for this client
     const openDeals = await getAllOpenDealsForCustomer(finalCustomerName, senderPhone);
     let existingDeal = null;
@@ -1015,18 +1058,86 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       poNumber = null; // Ensure PO remains null for non-won pipeline deals
     }
 
+    // Resolve delivery location, date, terms, phone, and contact person preserving existing values
+    const extractedDeliveryLoc = extractDeliveryLocation(text);
+    const finalDeliveryLoc =
+      data.delivery_location ||
+      existingDeal?.delivery_location ||
+      extractedDeliveryLoc ||
+      null;
+    const finalDeliveryDate =
+      data.delivery_date || existingDeal?.delivery_date || null;
+    const finalPaymentTerms =
+      data.payment_terms || existingDeal?.payment_terms || null;
+    const finalPhone =
+      actualCustomerPhone || data.customer_phone || existingDeal?.customer_phone || null;
+    const finalContactPerson =
+      data.contact_person || existingDeal?.contact_person || null;
+
+    // Always ensure and sync customer record with latest contact person, phone, and address
+    const { ensureCustomerRecord } = require('../supabase');
+    await ensureCustomerRecord(finalCustomerName, senderPhone, {
+      customer_phone: finalPhone,
+      contact_person: finalContactPerson,
+      city: finalDeliveryLoc,
+    });
+    console.log(`[SalesAgent] Synced customer profile for: ${finalCustomerName}`);
+
+    // MANDATORY DELIVERY LOCATION VALIDATION GATE
+    // An order cannot be confirmed or written as WON without a confirmed delivery location!
+    if (
+      (dbStage === 'won' || data.action === 'purchase_order') &&
+      (!finalDeliveryLoc || String(finalDeliveryLoc).trim() === '')
+    ) {
+      const pendingWonContext = {
+        action: 'stage_update',
+        customer_name: finalCustomerName,
+        target_stage: 'won',
+        deal_id: dealId || existingDeal?.id || null,
+        po_number: data.po_number || existingDeal?.po_number || null,
+        po_date: poDate || existingDeal?.po_date || null,
+        total_amount: dealAmount || existingDeal?.total_amount || 0,
+        customer_phone: finalPhone,
+        payment_terms: finalPaymentTerms,
+        delivery_date: finalDeliveryDate,
+        contact_person: finalContactPerson,
+        raw_text: text,
+        line_items: processedItems.map((pi) => ({
+          product_requirement: pi.pName,
+          sku_text: pi.pName,
+          dimensions: pi.dimensions || '',
+          quantity_mt: pi.qty,
+          quantity: pi.qty,
+          unit: 'MT',
+          rate_per_mt: pi.rate,
+          rate: pi.rate,
+          amount: pi.itemAmount,
+        })),
+      };
+
+      const { saveActiveSession } = require('../supabase');
+      await saveActiveSession(
+        senderPhone,
+        finalCustomerName,
+        `pending_delivery_location|${dealId || existingDeal?.id || 'null'}|${finalCustomerName}|${JSON.stringify(pendingWonContext)}`
+      );
+
+      return `📍 *Delivery Location Required Before Confirmation*\n\n` +
+        `Please provide the delivery location for **${finalCustomerName}** (e.g. reply _"Pune"_ or _"Deliver to Mumbai"_) before I can confirm this order and generate the PO.`;
+    }
+
     if (dealId) {
       // ---- UPDATE existing deal ----
       const updatePayload = {
-        customer_name: finalCustomerName,
-        customer_phone: actualCustomerPhone,
+        customer_name: finalCustomerName || existingDeal.customer_name,
+        customer_phone: finalPhone,
         stage: dbStage,
-        po_date: poDate,
-        po_number: poNumber,
-        delivery_location: data.delivery_location || null,
-        delivery_date: data.delivery_date || null,
-        payment_terms: data.payment_terms || null,
-        total_amount: dealAmount || 0,
+        po_date: poDate || existingDeal.po_date,
+        po_number: poNumber || existingDeal.po_number,
+        delivery_location: finalDeliveryLoc,
+        delivery_date: finalDeliveryDate,
+        payment_terms: finalPaymentTerms,
+        total_amount: dealAmount || existingDeal.total_amount || 0,
       };
 
       if (dbStage === 'won') updatePayload.won_at = new Date().toISOString();
@@ -1113,9 +1224,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           stage:             dbStage,
           total_amount:      dealAmount || 0,
           inquiry_type:      'inquiry',
-          delivery_location: data.delivery_location || null,
-          delivery_date:     data.delivery_date || null,
-          payment_terms:     data.payment_terms || null,
+          delivery_location: finalDeliveryLoc,
+          delivery_date:     finalDeliveryDate,
+          payment_terms:     finalPaymentTerms,
           po_date:           poDate,
           po_number:         poNumber,
           won_at:            dbStage === 'won' ? new Date().toISOString() : null,
@@ -1373,4 +1484,5 @@ module.exports = {
   findBestDeal,
   lookupRateSheetPrice,
   detectInvalidUnitInMessage,
+  extractDeliveryLocation,
 };

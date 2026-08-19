@@ -549,6 +549,39 @@ router.post('/', async (req, res) => {
             await sendTextMessage(senderPhone, reply);
             return;
           }
+
+          if (activeSession?.last_intent?.startsWith('pending_delivery_location|')) {
+            const parts = activeSession.last_intent.split('|');
+            const targetDealId = parts[1];
+            const customerName = parts[2];
+            const rawContextStr = parts.slice(3).join('|');
+
+            const cleanInput = raw_text.trim();
+            await saveActiveSession(senderPhone, customerName, 'general');
+
+            const { extractDeliveryLocation, processSalesMessage } = require('./agents/salesAgent');
+            const extractedLoc = extractDeliveryLocation(cleanInput) || cleanInput;
+
+            const { safeParseJSON } = require('./utils/jsonUtils');
+            const storedContext = safeParseJSON(rawContextStr, null);
+
+            if (storedContext) {
+              storedContext.delivery_location = extractedLoc;
+              storedContext.target_stage = 'won';
+              const reply = await processSalesMessage(
+                storedContext.raw_text || `mark ${customerName} deal as won delivery to ${extractedLoc}`,
+                senderPhone,
+                storedContext
+              );
+              await sendTextMessage(senderPhone, reply);
+              return;
+            }
+
+            const syntheticText = `mark ${customerName} deal as won delivery to ${extractedLoc}`;
+            const reply = await processSalesMessage(syntheticText, senderPhone);
+            await sendTextMessage(senderPhone, reply);
+            return;
+          }
         }
 
         // ── OPERATIONAL AGENTIC ORCHESTRATOR (LangGraph + Specialized Write Agents) ──
