@@ -310,19 +310,20 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
     if (existing && existing.length > 0) {
       const rec = existing[0];
       const updatePayload = {};
-      if (extraData.customer_phone && !rec.customer_phone) updatePayload.customer_phone = extraData.customer_phone;
-      if (extraData.customer_gst && !rec.customer_gst) updatePayload.customer_gst = extraData.customer_gst;
-      if (extraData.city && !rec.customer_address) updatePayload.customer_address = extraData.city;
-      if (extraData.contact_person && !rec.contact_person) updatePayload.contact_person = extraData.contact_person;
+      if (extraData.customer_phone && extraData.customer_phone !== rec.customer_phone) updatePayload.customer_phone = extraData.customer_phone;
+      if (extraData.customer_gst && extraData.customer_gst !== rec.customer_gst) updatePayload.customer_gst = extraData.customer_gst;
+      if (extraData.city && extraData.city !== rec.customer_address) updatePayload.customer_address = extraData.city;
+      if (extraData.contact_person && extraData.contact_person !== rec.contact_person) updatePayload.contact_person = extraData.contact_person;
       if (extraData.avg_order_frequency_days) updatePayload.avg_order_frequency_days = Number(extraData.avg_order_frequency_days);
       if (extraData.assigned_salesperson_phone && scope.isAdmin) updatePayload.assigned_salesperson_phone = extraData.assigned_salesperson_phone;
 
       if (Object.keys(updatePayload).length > 0) {
         updatePayload.updated_at = new Date().toISOString();
-        await supabase
+        const { error: updErr } = await supabase
           .from('recurring_customers')
           .update(updatePayload)
           .eq('id', rec.id);
+        if (updErr) console.error('[ensureCustomerRecord] update error:', updErr.message);
       }
       return rec;
     }

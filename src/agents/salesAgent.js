@@ -25,6 +25,7 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
 {
   "action": "stage_update|purchase_order|inquiry",
   "customer_name": "<exact company/customer name requesting material or placing order, else null>",
+  "contact_person": "<full name of customer contact person/owner/proprietor if mentioned e.g. Rajesh Mehta, else null>",
   "customer_phone": "<customer phone number ONLY if explicitly provided in text e.g. 9812345670, else null>",
   "target_stage": "new_inquiry|qualified|quoted|negotiation|won|lost",
   "line_items": [
@@ -47,15 +48,16 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
 
 CRITICAL EXTRACTION RULES & CONTEXT DISAMBIGUATION:
 1. CUSTOMER NAME: Extract the customer/company name requesting the product (e.g. from "New inquiry – company hai Suryansh Metals Pvt Ltd, 20 MT CR coil..." -> customer_name is "Suryansh Metals Pvt Ltd"). If no company is explicitly mentioned, customer_name MUST be null. NEVER output the salesperson's name as customer_name.
-2. PRODUCT & QUANTITY: Extract product quantity whenever a number is directly associated with a valid metal unit (e.g. "20 MT", "50 tons", "1500 Kg", "100 Sheets", "50 Pcs"). "20 MT CR coil chahiye 6mm" -> product_requirement: "CR Coil", quantity_mt: 20, dimensions: "6mm".
-3. SPECIFICATIONS: Extract thickness and dimensions explicitly stated (e.g. "6mm" -> dimensions: "6mm"). NEVER drop thickness/specifications when explicitly mentioned.
-4. CUSTOMER PHONE: Extract 10-digit customer mobile/phone number if provided in the text (e.g. "number 9812345670" -> "9812345670").
-5. TARGET PO DATE: When target PO date is mentioned, convert to YYYY-MM-DD format with year 2026 and assign to po_date.
-6. PAYMENT TERMS: Extract payment terms and credit duration (e.g. "30 days credit"). "30 days" in payment context is credit duration in payment_terms, NEVER product quantity.
-7. DELIVERY LOCATION: Extract exact city/location mentioned (e.g. "Nashik", "Mumbai").
+2. CONTACT PERSON: Extract the contact person, owner, or proprietor name if explicitly provided (e.g. from "Contact Person: Rajesh Mehta" or "owner Rajesh Mehta" -> contact_person is "Rajesh Mehta"). NEVER output the salesperson's name.
+3. PRODUCT & QUANTITY: Extract product quantity whenever a number is directly associated with a valid metal unit (e.g. "20 MT", "50 tons", "1500 Kg", "100 Sheets", "50 Pcs"). "20 MT CR coil chahiye 6mm" -> product_requirement: "CR Coil", quantity_mt: 20, dimensions: "6mm".
+4. SPECIFICATIONS: Extract thickness and dimensions explicitly stated (e.g. "6mm" -> dimensions: "6mm"). NEVER drop thickness/specifications when explicitly mentioned.
+5. CUSTOMER PHONE: Extract 10-digit customer mobile/phone number if provided in the text (e.g. "number 9812345670" -> "9812345670").
+6. TARGET PO DATE: When target PO date is mentioned, convert to YYYY-MM-DD format with year 2026 and assign to po_date.
+7. PAYMENT TERMS: Extract payment terms and credit duration (e.g. "30 days credit"). "30 days" in payment context is credit duration in payment_terms, NEVER product quantity.
+8. DELIVERY LOCATION: Extract exact city/location mentioned (e.g. "Nashik", "Mumbai").
 
-8. STRUCTURED FORMS: If input is a key-value template (e.g. "Company Name: Shivam Traders Pvt. Ltd.", "Material: HR coil", "Grade/Spec: 8mm", "Quantity: 40 MT", "Target Price: ₹52,000/MT"), extract each field into its corresponding JSON property.
-9. TARGET PRICE / RATE: If message specifies a target price or rate (e.g. "Target Price: ₹52,000/MT" or "rate 52000"), extract as rate_per_mt on that item.
+9. STRUCTURED FORMS: If input is a key-value template (e.g. "Company Name: Shivam Traders Pvt. Ltd.", "Contact Person: Rajesh Mehta", "Material: HR coil", "Grade/Spec: 8mm", "Quantity: 40 MT", "Target Price: ₹52,000/MT"), extract each field into its corresponding JSON property.
+10. TARGET PRICE / RATE: If message specifies a target price or rate (e.g. "Target Price: ₹52,000/MT" or "rate 52000"), extract as rate_per_mt on that item.
 
 Return ONLY the JSON object.
 `;
@@ -561,6 +563,13 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           ruleRate = Number(structPrice[1].replace(/,/g, '')) || null;
         }
 
+        // Extract contact person
+        let ruleContact = null;
+        const structContact = textRaw.match(/(?:contact\s+person|contact|owner|person|attn)\s*:\s*([^\n\r]+)/i);
+        if (structContact) {
+          ruleContact = structContact[1].trim().replace(/^['"]|['"]$/g, '');
+        }
+
         // Extract customer phone
         let rulePhone = null;
         const structPhone = textRaw.match(/(?:phone|mobile|contact\s+no|cell)\s*:\s*([6-9]\d{9})\b/i);
@@ -626,6 +635,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           data = {
             action: 'inquiry',
             customer_name: ruleCustomer,
+            contact_person: ruleContact,
             target_stage: 'new_inquiry',
             customer_phone: rulePhone,
             line_items: [
@@ -896,13 +906,14 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     };
     const dbStage = stageMap[targetStage] || 'new_inquiry';
 
-    if (!officialCustomerName) {
-      const { ensureCustomerRecord } = require('../supabase');
-      await ensureCustomerRecord(customerName, senderPhone, {
-        customer_phone: data.customer_phone || null,
-      });
-      console.log(`[SalesAgent] Auto-created new prospect: ${customerName}`);
-    }
+    // Always ensure and sync customer record with latest contact person, phone, and address
+    const { ensureCustomerRecord } = require('../supabase');
+    await ensureCustomerRecord(finalCustomerName, senderPhone, {
+      customer_phone: actualCustomerPhone || data.customer_phone || null,
+      contact_person: data.contact_person || null,
+      city: data.delivery_location || null,
+    });
+    console.log(`[SalesAgent] Synced customer profile for: ${finalCustomerName}`);
 
     // MULTI-DEAL RESOLUTION: Fetch all active open deals for this client
     const openDeals = await getAllOpenDealsForCustomer(finalCustomerName, senderPhone);
@@ -1137,6 +1148,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const structuredExtraction = {
         customer_name: finalCustomerName,
         companyName: finalCustomerName,
+        contact_person: data.contact_person || null,
+        contactPerson: data.contact_person || null,
         customer_phone: actualCustomerPhone,
         customerPhone: actualCustomerPhone,
         delivery_location: data.delivery_location || null,
