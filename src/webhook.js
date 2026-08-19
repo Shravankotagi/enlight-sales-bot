@@ -459,13 +459,33 @@ router.post('/', async (req, res) => {
           if (activeSession?.last_intent?.startsWith('pending_product_for_deal|')) {
             const parts = activeSession.last_intent.split('|');
             const customerName = parts[1];
-            const qtyNum = parts[2];
+            const qtyNum = Number(parts[2]) || 0;
             const unitStr = parts[3] || 'MT';
+            const rawContextStr = parts.slice(4).join('|');
 
             const cleanInput = raw_text.trim();
             await saveActiveSession(senderPhone, customerName, 'general');
 
+            const { safeParseJSON } = require('./utils/jsonUtils');
+            const storedContext = safeParseJSON(rawContextStr, null);
             const { processSalesMessage } = require('./agents/salesAgent');
+
+            if (storedContext) {
+              const mmM = cleanInput.match(/(\d+(?:\.\d+)?)\s*mm/i);
+              storedContext.product_requirement = cleanInput;
+              storedContext.line_items = [
+                {
+                  product_requirement: cleanInput,
+                  dimensions: mmM ? `${mmM[1]}mm` : (storedContext.dimensions || null),
+                  quantity_mt: qtyNum || storedContext.quantity_mt || 0,
+                  rate_per_mt: null,
+                }
+              ];
+              const reply = await processSalesMessage(storedContext.raw_text || raw_text, senderPhone, storedContext);
+              await sendTextMessage(senderPhone, reply);
+              return;
+            }
+
             const syntheticText = `${customerName} requirement ${qtyNum} ${unitStr} ${cleanInput}`;
             const reply = await processSalesMessage(syntheticText, senderPhone);
             await sendTextMessage(senderPhone, reply);
@@ -476,6 +496,7 @@ router.post('/', async (req, res) => {
             const parts = activeSession.last_intent.split('|');
             const customerName = parts[1];
             const materialName = parts[2];
+            const rawContextStr = parts.slice(3).join('|');
 
             const cleanInput = raw_text.trim();
             await saveActiveSession(senderPhone, customerName, 'general');
@@ -484,7 +505,28 @@ router.post('/', async (req, res) => {
             const customRate = rateMatch ? Number(rateMatch[0].replace(/,/g, '')) : 0;
 
             if (customRate > 0) {
+              const { safeParseJSON } = require('./utils/jsonUtils');
+              const storedContext = safeParseJSON(rawContextStr, null);
               const { processSalesMessage } = require('./agents/salesAgent');
+
+              if (storedContext && Array.isArray(storedContext.line_items) && storedContext.line_items.length > 0) {
+                // Merge the confirmed rate into the preserved original context
+                storedContext.line_items = storedContext.line_items.map((item) => {
+                  const reqName = (item.product_requirement || '').toLowerCase();
+                  const unlistedLower = (materialName || '').toLowerCase();
+                  if (!item.rate_per_mt && (reqName.includes(unlistedLower) || unlistedLower.includes(reqName) || storedContext.line_items.length === 1)) {
+                    return { ...item, rate_per_mt: customRate };
+                  }
+                  return item;
+                });
+                storedContext.target_stage = 'quoted';
+
+                const reply = await processSalesMessage(storedContext.raw_text || raw_text, senderPhone, storedContext);
+                await sendTextMessage(senderPhone, reply);
+                return;
+              }
+
+              // Fallback if context was not serialized
               const syntheticText = `${customerName} requirement ${materialName} rate ${customRate}`;
               const reply = await processSalesMessage(syntheticText, senderPhone);
               await sendTextMessage(senderPhone, reply);

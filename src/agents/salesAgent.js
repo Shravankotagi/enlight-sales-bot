@@ -25,18 +25,18 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
 {
   "action": "stage_update|purchase_order|inquiry",
   "customer_name": "<exact company/customer name requesting material or placing order, else null>",
-  "customer_phone": "<customer phone number ONLY if explicitly provided in text, else null>",
+  "customer_phone": "<customer phone number ONLY if explicitly provided in text e.g. 9812345670, else null>",
   "target_stage": "new_inquiry|qualified|quoted|negotiation|won|lost",
   "line_items": [
     {
-      "product_requirement": "<specific product name e.g. HR Coil 8mm, CR Sheets, MS Plates, TMT Bar>",
-      "dimensions": "<explicit dimensions if stated e.g. 8mm, else null>",
-      "quantity_mt": <numeric tonnage for this specific item e.g. 25>,
+      "product_requirement": "<specific product name e.g. CR Coil, HR Coil, CR Sheets, MS Plates, TMT Bar>",
+      "dimensions": "<explicit dimensions/thickness if stated e.g. 6mm, 8mm, 2mm, else null>",
+      "quantity_mt": <numeric tonnage for this specific item e.g. 20>,
       "rate_per_mt": <numeric per-MT price ONLY if explicitly mentioned in message, else null>
     }
   ],
   "total_amount": <numeric total deal value in rupees ONLY if explicitly mentioned in text, else 0>,
-  "delivery_location": "<exact city/location if mentioned e.g. Mumbai, else null>",
+  "delivery_location": "<exact city/location if mentioned e.g. Nashik, Mumbai, Pune, else null>",
   "delivery_date": "<delivery deadline in YYYY-MM-DD format using current year 2026 if mentioned e.g. 2026-08-25 for 'before 25 August', else null>",
   "payment_terms": "<payment terms ONLY if explicitly stated in text, else null>",
   "po_number": "<PO number if mentioned, else null>",
@@ -46,13 +46,13 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
 }
 
 CRITICAL EXTRACTION RULES & CONTEXT DISAMBIGUATION:
-1. CUSTOMER NAME: Extract the customer/company name requesting the product (e.g. from "ABC Steel requires 25 MT HR Coil..." -> customer_name is "ABC Steel"). If no company is explicitly mentioned (e.g. "They require..."), customer_name MUST be null. NEVER output the salesperson's name or your system user name as customer_name.
-2. PRODUCT & QUANTITY: Extract product quantity ONLY when a number is directly associated with a valid metal unit (e.g. "30 MT", "50 tons", "1500 Kg", "100 Sheets", "50 Pcs"). "30 MT of HR Coil" -> product_requirement: "HR Coil", quantity_mt: 30.
-3. TARGET PO DATE: When target PO date is mentioned (e.g. "target PO date of 28 August", "target PO date 28 Aug"), convert to YYYY-MM-DD format with year 2026 ("2026-08-28") and assign to po_date.
-4. PAYMENT TERMS: Extract payment terms, credit duration, and advance conditions (e.g. "30 days credit, with no advance payment", "100% advance"). "30 days" in payment context is the credit duration in payment_terms, NEVER a product quantity or quantity unit!
-5. CONTEXT SEPARATION: Numbers followed by "days", "weeks", or "months" are time durations belonging to payment terms or delivery timelines — NEVER extract them as product quantity or quantity unit. Numbers followed by months (e.g. "28 August") are dates — NEVER extract them as product quantity.
-6. SPECIFICATIONS: Extract only dimensions explicitly stated (e.g. "8mm"). NEVER infer or invent unstated dimensions like width (e.g. 1250mm) or length.
-7. DELIVERY LOCATION: Extract only the exact city/location mentioned (e.g. "Mumbai"). NEVER append "Warehouse" or extra text.
+1. CUSTOMER NAME: Extract the customer/company name requesting the product (e.g. from "New inquiry – company hai Suryansh Metals Pvt Ltd, 20 MT CR coil..." -> customer_name is "Suryansh Metals Pvt Ltd"). If no company is explicitly mentioned, customer_name MUST be null. NEVER output the salesperson's name as customer_name.
+2. PRODUCT & QUANTITY: Extract product quantity whenever a number is directly associated with a valid metal unit (e.g. "20 MT", "50 tons", "1500 Kg", "100 Sheets", "50 Pcs"). "20 MT CR coil chahiye 6mm" -> product_requirement: "CR Coil", quantity_mt: 20, dimensions: "6mm".
+3. SPECIFICATIONS: Extract thickness and dimensions explicitly stated (e.g. "6mm" -> dimensions: "6mm"). NEVER drop thickness/specifications when explicitly mentioned.
+4. CUSTOMER PHONE: Extract 10-digit customer mobile/phone number if provided in the text (e.g. "number 9812345670" -> "9812345670").
+5. TARGET PO DATE: When target PO date is mentioned, convert to YYYY-MM-DD format with year 2026 and assign to po_date.
+6. PAYMENT TERMS: Extract payment terms and credit duration (e.g. "30 days credit"). "30 days" in payment context is credit duration in payment_terms, NEVER product quantity.
+7. DELIVERY LOCATION: Extract exact city/location mentioned (e.g. "Nashik", "Mumbai").
 
 Return ONLY the JSON object.
 `;
@@ -463,116 +463,133 @@ const {
 
 /**
  * Main text message handler.
+ * Accepts optional overrideData (pre-extracted / merged context) for multi-step confirmation flows.
  */
-async function processSalesMessage(text, senderPhone) {
+async function processSalesMessage(text, senderPhone, overrideData = null) {
   try {
-    // 1. Immediately reject invalid/nonsense units (e.g. "15 apple") before processing
-    const invalidUnitCheck = detectInvalidUnitInMessage(text);
-    if (invalidUnitCheck) {
-      return `❌ *Invalid Quantity Unit*\n\n` +
-        `You specified *${invalidUnitCheck.number} ${invalidUnitCheck.invalidUnit}*.\n\n` +
-        `Metal products cannot be measured in *"${invalidUnitCheck.invalidUnit}"*.\n\n` +
-        `Please specify the quantity using a valid unit (e.g. **15 MT**, **1500 Kg**, **100 Sheets**, or **50 Pcs**).`;
-    }
+    let data = overrideData;
 
-    let data = null;
-    try {
-      const { invokeWithFallback } = require('../core/modelRouter');
-      const response = await invokeWithFallback([
-        new SystemMessage(SALES_AGENT_PROMPT),
-        new HumanMessage('Salesperson message:\n' + text),
-      ]);
-      const rawText = typeof response.content === 'string' ? response.content : JSON.stringify(response.content || '');
-      const { safeParseJSON } = require('../utils/jsonUtils');
-      data = safeParseJSON(rawText, null);
-    } catch (llmErr) {
-      console.warn('[SalesAgent] LLM extraction notice, utilizing rule-based extraction engine:', llmErr.message);
-    }
-
-    if (!data || data.confidence < 0.3) {
-      // Deterministic rule-based extraction fallback
-      const textRaw = text || '';
-      const textLower = textRaw.toLowerCase();
-
-      // Extract customer name
-      let ruleCustomer = null;
-      const reqMatch = textRaw.match(/^([A-Z0-9\s&.-]{2,40}?)\s+(?:requires|require|needs|need|inquiry|rfq|po|order|want)\b/i) ||
-        textRaw.match(/(?:inquiry\s+from|order\s+from|rfq\s+from|from)\s+([A-Z0-9\s&.-]{2,40}?)(?:\s+requires|\s+needs|\s+for|\s+before|\.|$)/i) ||
-        textRaw.match(/(?:customer|company|client|pvt\.?\s*ltd\.?|ltd\.?|infra|steel|engineering|industries)\s+([A-Z0-9\s&.-]{3,35})/i);
-      if (reqMatch && reqMatch[1].trim().toLowerCase() !== 'max' && reqMatch[1].trim().toLowerCase() !== 'customer') {
-        ruleCustomer = reqMatch[1].trim();
+    if (!data) {
+      // 1. Immediately reject invalid/nonsense units (e.g. "15 apple") before processing
+      const invalidUnitCheck = detectInvalidUnitInMessage(text);
+      if (invalidUnitCheck) {
+        return `❌ *Invalid Quantity Unit*\n\n` +
+          `You specified *${invalidUnitCheck.number} ${invalidUnitCheck.invalidUnit}*.\n\n` +
+          `Metal products cannot be measured in *"${invalidUnitCheck.invalidUnit}"*.\n\n` +
+          `Please specify the quantity using a valid unit (e.g. **15 MT**, **1500 Kg**, **100 Sheets**, or **50 Pcs**).`;
       }
 
-      // Extract quantity and product
-      const qtyMatch = textRaw.match(/(\d+(?:\.\d+)?)\s*(?:mt|ton|tons|tonne)/i);
-      const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 0;
-
-      let pReq = null;
-      if (/\b(hr\s*coil|hot\s*rolled\s*coil)\b/i.test(textLower)) {
-        const mmM = textRaw.match(/(\d+(?:\.\d+)?)\s*mm/i);
-        pReq = mmM ? `HR Coil ${mmM[1]}mm` : 'HR Coil';
-      } else if (/\b(cr\s*sheet|cold\s*rolled\s*sheet|cr\s*coil|cr)\b/i.test(textLower)) {
-        pReq = 'CR Sheets';
-      } else if (/\b(ms\s*plate|plates)\b/i.test(textLower)) {
-        pReq = 'MS Plates';
-      } else if (/\b(ms\s*sheet)\b/i.test(textLower)) {
-        pReq = 'MS Sheet 2mm';
+      try {
+        const { invokeWithFallback } = require('../core/modelRouter');
+        const response = await invokeWithFallback([
+          new SystemMessage(SALES_AGENT_PROMPT),
+          new HumanMessage('Salesperson message:\n' + text),
+        ]);
+        const rawText = typeof response.content === 'string' ? response.content : JSON.stringify(response.content || '');
+        const { safeParseJSON } = require('../utils/jsonUtils');
+        data = safeParseJSON(rawText, null);
+      } catch (llmErr) {
+        console.warn('[SalesAgent] LLM extraction notice, utilizing rule-based extraction engine:', llmErr.message);
       }
 
-      // Extract delivery location
-      let delLoc = null;
-      const locM = textRaw.match(/(?:for\s+delivery\s+to|delivery\s+to|delivery\s+at|location|destination)\s+([A-Za-z\s]+?)(?:\s+before|\s+by|\s+on|\s+within|\.|$)/i);
-      if (locM) {
-        delLoc = locM[1].trim();
-      } else if (textLower.includes('mumbai')) {
-        delLoc = 'Mumbai';
-      } else if (textLower.includes('pune')) {
-        delLoc = 'Pune';
-      }
+      if (!data || data.confidence < 0.3) {
+        // Deterministic rule-based extraction fallback
+        const textRaw = text || '';
+        const textLower = textRaw.toLowerCase();
 
-      // Extract delivery date
-      let delDate = null;
-      const dM = textRaw.match(/(?:before|by|on|delivery\s+date|delivery\s+before|delivery\s+by)\s+(\d{1,2}(?:st|nd|rd|th)?\s+(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*|\d{4}-\d{2}-\d{2}|\d{2}[-/]\d{2}[-/]\d{4})/i);
-      if (dM) {
-        const rawDateStr = dM[1].trim();
-        const monthMap = {
-          jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
-          jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
-          january: '01', february: '02', march: '03', april: '04', june: '06',
-          july: '07', august: '08', september: '09', october: '10', november: '11', december: '12'
-        };
-        const parts = rawDateStr.toLowerCase().split(/\s+/);
-        if (parts.length === 2) {
-          const day = parts[0].replace(/\D/g, '').padStart(2, '0');
-          const mKey = parts[1].replace(/[^a-z]/g, '');
-          const month = monthMap[mKey] || '08';
-          delDate = `2026-${month}-${day}`;
-        } else {
-          delDate = rawDateStr;
+        // Extract customer name
+        let ruleCustomer = null;
+        const reqMatch = textRaw.match(/^([A-Z0-9\s&.-]{2,40}?)\s+(?:requires|require|needs|need|inquiry|rfq|po|order|want)\b/i) ||
+          textRaw.match(/(?:inquiry\s+from|order\s+from|rfq\s+from|from)\s+([A-Z0-9\s&.-]{2,40}?)(?:\s+requires|\s+needs|\s+for|\s+before|\.|$)/i) ||
+          textRaw.match(/(?:customer|company|client|pvt\.?\s*ltd\.?|ltd\.?|infra|steel|engineering|industries)\s+([A-Z0-9\s&.-]{3,35})/i);
+        if (reqMatch && reqMatch[1].trim().toLowerCase() !== 'max' && reqMatch[1].trim().toLowerCase() !== 'customer') {
+          ruleCustomer = reqMatch[1].trim();
         }
-      }
 
-      if (ruleCustomer || pReq || qty > 0) {
-        data = {
-          action: 'inquiry',
-          customer_name: ruleCustomer,
-          target_stage: 'new_inquiry',
-          customer_phone: null,
-          line_items: [
-            {
-              product_requirement: pReq || 'Hot Rolled',
-              quantity_mt: qty,
-              rate_per_mt: null,
-            }
-          ],
-          total_amount: 0,
-          delivery_location: delLoc,
-          delivery_date: delDate,
-          payment_terms: null,
-          confidence: 0.9,
-        };
-      } else {
-        return `❓ I couldn't clearly understand the deal update. Could you please specify the customer name and status (e.g. "Mehta Engineering 20 MT CR sheets quote sent")?`;
+        // Extract quantity, unit, and specification
+        const qtyMatch = textRaw.match(/(\d+(?:\.\d+)?)\s*(?:mt|ton|tons|tonne)/i);
+        const qty = qtyMatch ? parseFloat(qtyMatch[1]) : 0;
+
+        const mmM = textRaw.match(/(\d+(?:\.\d+)?)\s*mm/i);
+        const specDim = mmM ? `${mmM[1]}mm` : null;
+
+        let pReq = null;
+        if (/\b(hr\s*coil|hot\s*rolled\s*coil)\b/i.test(textLower)) {
+          pReq = specDim ? `HR Coil ${specDim}` : 'HR Coil';
+        } else if (/\b(cr\s*sheet|cold\s*rolled\s*sheet)\b/i.test(textLower)) {
+          pReq = specDim ? `CR Sheets ${specDim}` : 'CR Sheets';
+        } else if (/\b(cr\s*coil|cold\s*rolled\s*coil|cr)\b/i.test(textLower)) {
+          pReq = specDim ? `CR Coil ${specDim}` : 'CR Coil';
+        } else if (/\b(ms\s*plate|plates)\b/i.test(textLower)) {
+          pReq = specDim ? `MS Plates ${specDim}` : 'MS Plates';
+        } else if (/\b(ms\s*sheet)\b/i.test(textLower)) {
+          pReq = specDim ? `MS Sheet ${specDim}` : 'MS Sheet 2mm';
+        } else if (/\b(tmt\s*bar|tmt)\b/i.test(textLower)) {
+          pReq = specDim ? `TMT Bar ${specDim}` : 'TMT Bar';
+        }
+
+        // Extract customer phone
+        const phoneMatch = textRaw.match(/(?:number|phone|mobile|contact|cell)?\s*(?:is|:|-)?\s*([6-9]\d{9})\b/i);
+        const rulePhone = phoneMatch ? phoneMatch[1] : null;
+
+        // Extract delivery location
+        let delLoc = null;
+        const locM = textRaw.match(/(?:for\s+delivery\s+to|delivery\s+to|delivery\s+at|deliver\s+karna\s+hai|location|destination)\s+([A-Za-z\s]+?)(?:\s+before|\s+by|\s+on|\s+within|\s+deliver|\.|$)/i);
+        if (locM) {
+          delLoc = locM[1].trim();
+        } else if (textLower.includes('nashik')) {
+          delLoc = 'Nashik';
+        } else if (textLower.includes('mumbai')) {
+          delLoc = 'Mumbai';
+        } else if (textLower.includes('pune')) {
+          delLoc = 'Pune';
+        }
+
+        // Extract delivery date
+        let delDate = null;
+        const dM = textRaw.match(/(?:before|by|on|delivery\s+date|delivery\s+before|delivery\s+by)\s+(\d{1,2}(?:st|nd|rd|th)?\s+(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*|\d{4}-\d{2}-\d{2}|\d{2}[-/]\d{2}[-/]\d{4})/i);
+        if (dM) {
+          const rawDateStr = dM[1].trim();
+          const monthMap = {
+            jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+            jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
+            january: '01', february: '02', march: '03', april: '04', june: '06',
+            july: '07', august: '08', september: '09', october: '10', november: '11', december: '12'
+          };
+          const parts = rawDateStr.toLowerCase().split(/\s+/);
+          if (parts.length === 2) {
+            const day = parts[0].replace(/\D/g, '').padStart(2, '0');
+            const mKey = parts[1].replace(/[^a-z]/g, '');
+            const month = monthMap[mKey] || '08';
+            delDate = `2026-${month}-${day}`;
+          } else {
+            delDate = rawDateStr;
+          }
+        }
+
+        if (ruleCustomer || pReq || qty > 0) {
+          data = {
+            action: 'inquiry',
+            customer_name: ruleCustomer,
+            target_stage: 'new_inquiry',
+            customer_phone: rulePhone,
+            line_items: [
+              {
+                product_requirement: pReq || 'CR Coil',
+                dimensions: specDim,
+                quantity_mt: qty,
+                rate_per_mt: null,
+              }
+            ],
+            total_amount: 0,
+            delivery_location: delLoc,
+            delivery_date: delDate,
+            payment_terms: null,
+            confidence: 0.9,
+          };
+        } else {
+          return `❓ I couldn't clearly understand the deal update. Could you please specify the customer name and status (e.g. "Mehta Engineering 20 MT CR sheets quote sent")?`;
+        }
       }
     }
 
@@ -630,7 +647,7 @@ async function processSalesMessage(text, senderPhone) {
     const textLower = (text || '').toLowerCase();
     const isNewReqMessage = /\b(need|requires|required|want|order|inquiry|rfq|new deal)\b/i.test(textLower);
 
-    if (customerName && isNewReqMessage) {
+    if (customerName && isNewReqMessage && !overrideData) {
       // Check if user actually wrote the company name in the text
       const nameWords = customerName.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
       const nameInText = nameWords.some((w) => textLower.includes(w));
@@ -693,6 +710,7 @@ async function processSalesMessage(text, senderPhone) {
     } else if (data.product_requirement || data.quantity_mt) {
       rawItems = [{
         product_requirement: data.product_requirement,
+        dimensions: data.dimensions || null,
         quantity_mt: data.quantity_mt,
         rate_per_mt: data.rate_per_mt,
       }];
@@ -711,13 +729,13 @@ async function processSalesMessage(text, senderPhone) {
         pName = null;
       }
 
-      const qty = Number(item.quantity_mt) || 0;
-      let rate = Number(item.rate_per_mt) || 0;
-      let autoRate = null;
+      const qty = Number(item.quantity_mt || item.quantity || item.qty || 0) || 0;
+      let rate = Number(item.rate_per_mt || item.rate || item.unitPrice || 0) || 0;
+      const rawDim = item.dimensions || (pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pName.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : (text.match(/(\d+(?:\.\d+)?)\s*mm/i) ? text.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null));
 
       if (pName) {
         if (!rate) {
-          autoRate = await lookupRateSheetPrice(pName);
+          const autoRate = await lookupRateSheetPrice(pName);
           if (autoRate) {
             rate = autoRate.price_per_mt;
             pName = autoRate.matched_sku || pName;
@@ -728,11 +746,30 @@ async function processSalesMessage(text, senderPhone) {
         }
       } else if (qty > 0) {
         // Quantity specified but NO specific metal product name was mentioned!
+        const pendingContext = {
+          action: data.action || 'inquiry',
+          customer_name: finalCustomerName,
+          customer_phone: actualCustomerPhone || data.customer_phone || null,
+          target_stage: targetStage || 'new_inquiry',
+          raw_text: data.raw_text || text,
+          delivery_location: data.delivery_location || null,
+          delivery_date: data.delivery_date || null,
+          payment_terms: data.payment_terms || null,
+          po_number: data.po_number || null,
+          po_date: data.po_date || null,
+          quantity_mt: qty,
+          unit: 'MT',
+          confidence: data.confidence || 0.95,
+        };
         const { saveActiveSession } = require('../supabase');
-        await saveActiveSession(senderPhone, finalCustomerName, `pending_product_for_deal|${finalCustomerName}|${qty}|MT`);
+        await saveActiveSession(
+          senderPhone,
+          finalCustomerName,
+          `pending_product_for_deal|${finalCustomerName}|${qty}|MT|${JSON.stringify(pendingContext)}`
+        );
         return `❓ *Which metal product is ${finalCustomerName} asking for?*\n\n` +
           `You specified a quantity of *${qty} MT*, but no specific metal product was mentioned.\n\n` +
-          `Please reply with the product name (e.g. _HR Coil_, _CR Sheet_, _TMT Bar_, _MS Plates_) so I can record the requirement for our Sales Achievement Card & Sales Pipeline! 📈`;
+          `Please reply with the product name (e.g. _HR Coil_, _CR Sheet_, _TMT Bar_, _MS Plates_) so I can record the requirement for your Sales Pipeline! 📈`;
       }
 
       const lineCalc = calculateLineItem({ quantity: qty, rate });
@@ -741,6 +778,7 @@ async function processSalesMessage(text, senderPhone) {
 
       processedItems.push({
         pName: pName || 'Metal Product',
+        dimensions: rawDim,
         qty,
         rate,
         itemAmount,
@@ -748,11 +786,39 @@ async function processSalesMessage(text, senderPhone) {
     }
 
     if (hasUnlistedMaterial && calculatedTotal === 0) {
+      const pendingContext = {
+        action: data.action || 'inquiry',
+        customer_name: finalCustomerName,
+        customer_phone: actualCustomerPhone || data.customer_phone || null,
+        target_stage: targetStage || 'new_inquiry',
+        raw_text: data.raw_text || text,
+        unlisted_material: unlistedMaterialName,
+        delivery_location: data.delivery_location || null,
+        delivery_date: data.delivery_date || null,
+        payment_terms: data.payment_terms || null,
+        po_number: data.po_number || null,
+        po_date: data.po_date || null,
+        line_items: rawItems.map((ri, idx) => {
+          const pi = processedItems[idx];
+          return {
+            product_requirement: pi?.pName || ri.product_requirement,
+            dimensions: pi?.dimensions || ri.dimensions || (text.match(/(\d+(?:\.\d+)?)\s*mm/i) ? text.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null),
+            quantity_mt: pi?.qty || ri.quantity_mt || 0,
+            rate_per_mt: pi?.rate || ri.rate_per_mt || null,
+          };
+        }),
+        confidence: data.confidence || 0.95,
+      };
+
       const { saveActiveSession } = require('../supabase');
-      await saveActiveSession(senderPhone, finalCustomerName, `pending_custom_rate|${finalCustomerName}|${unlistedMaterialName}`);
+      await saveActiveSession(
+        senderPhone,
+        finalCustomerName,
+        `pending_custom_rate|${finalCustomerName}|${unlistedMaterialName}|${JSON.stringify(pendingContext)}`
+      );
       return `⚠️ *Product Price Confirmation Required*\n\n` +
         `The material *"${unlistedMaterialName}"* is not listed in our active rate sheet.\n\n` +
-        `Please confirm the per MT rate for *${unlistedMaterialName}* (e.g. reply _"${unlistedMaterialName} rate is 54000"_) so I can calculate the deal total and update the Sales Achievement Card & Sales Pipeline! 📈`;
+        `Please confirm the per MT rate for *${unlistedMaterialName}* (e.g. reply _"54000"_ or _"${unlistedMaterialName} rate is 54000"_) so I can calculate the deal quotation and update your Sales Pipeline & Inquiries! 📈`;
     }
 
     let dealAmount = 0;
@@ -888,7 +954,6 @@ async function processSalesMessage(text, senderPhone) {
         delivery_date: data.delivery_date || null,
         payment_terms: data.payment_terms || null,
         total_amount: dealAmount || 0,
-        updated_at: new Date().toISOString(),
       };
 
       if (dbStage === 'won') updatePayload.won_at = new Date().toISOString();
@@ -912,10 +977,14 @@ async function processSalesMessage(text, senderPhone) {
         }
       }
 
-      await supabase
+      const { error: dealUpdateErr } = await supabase
         .from('deals')
         .update(updatePayload)
         .eq('id', dealId);
+
+      if (dealUpdateErr) {
+        console.error('[SalesAgent] Deal update error:', dealUpdateErr);
+      }
 
       if (processedItems.length > 0) {
         await supabase
@@ -1004,18 +1073,12 @@ async function processSalesMessage(text, senderPhone) {
     }
 
     const totalQty = processedItems.reduce((s, i) => s + i.qty, 0);
+    const pricingSummary = calculatePricingSummary({
+      line_items: processedItems.map(pi => ({ quantity: pi.qty, rate: pi.rate, amount: pi.itemAmount })),
+    });
 
-    // Sync structured inquiry extraction to inquiries table for dashboard
+    // Mandatory atomic sync to inquiries table for dashboard
     try {
-      const sixtySecAgo = new Date(Date.now() - 60 * 1000).toISOString();
-      const { data: recentInqs } = await supabase
-        .from('inquiries')
-        .select('id')
-        .eq('salesperson_phone', senderPhone)
-        .gte('created_at', sixtySecAgo)
-        .order('created_at', { ascending: false })
-        .limit(1);
-
       const structuredExtraction = {
         customer_name: finalCustomerName,
         companyName: finalCustomerName,
@@ -1027,51 +1090,60 @@ async function processSalesMessage(text, senderPhone) {
         deliveryDate: data.delivery_date || null,
         payment_terms: data.payment_terms || null,
         paymentTerms: data.payment_terms || null,
-        productType: processedItems[0]?.pName || 'Hot Rolled',
-        thickness: (processedItems[0]?.dimensions || (processedItems[0]?.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? processedItems[0]?.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : '')) || '',
+        productType: processedItems[0]?.pName || 'CR Coil',
+        thickness: processedItems[0]?.dimensions || '',
         width: '',
         length: '',
         productForm: 'Coil',
         quantityTons: totalQty || processedItems[0]?.qty || 0,
         unitPrice: processedItems[0]?.rate || 0,
-        total_amount: dealAmount || 0,
-        totalAmount: dealAmount || 0,
+        total_amount: dealAmount || pricingSummary.subtotal,
+        totalAmount: dealAmount || pricingSummary.subtotal,
+        subtotal: pricingSummary.subtotal,
+        gst_amount: pricingSummary.gstAmount,
+        grand_total: pricingSummary.grandTotal,
         line_items: processedItems.map((pi) => ({
           sku_text: pi.pName,
-          dimensions: pi.dimensions || (pi.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pi.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : ''),
+          dimensions: pi.dimensions || '',
           quantity: pi.qty,
           unit: 'MT',
           rate: pi.rate,
           amount: pi.itemAmount,
         })),
+        financialSummary: {
+          subtotal: pricingSummary.subtotal,
+          gstAmount: pricingSummary.gstAmount,
+          grandTotal: pricingSummary.grandTotal,
+        },
         overall_confidence: data.confidence || 0.95,
       };
 
       const isPurchaseOrder = dbStage === 'won' || data.action === 'purchase_order';
-      let inqId = null;
+      let inqId = existingDeal?.inquiry_id || null;
 
       if (!isPurchaseOrder) {
-        if (recentInqs && recentInqs.length > 0) {
-          inqId = recentInqs[0].id;
-          await supabase
+        if (inqId) {
+          const { error: inqUpdErr } = await supabase
             .from('inquiries')
             .update({
               sender_name: finalCustomerName,
               sender_phone: actualCustomerPhone || senderPhone,
+              salesperson_phone: senderPhone,
               inquiry_type: 'inquiry',
               ai_extraction_json: structuredExtraction,
               status: 'review',
             })
             .eq('id', inqId);
+          if (inqUpdErr) {
+            console.error('[SalesAgent] Error updating inquiry for deal:', inqUpdErr);
+          }
         } else {
           const { data: insertedInq, error: inqInsErr } = await supabase
             .from('inquiries')
             .insert({
               source_channel: 'whatsapp_text',
-              raw_text: text,
+              raw_text: data.raw_text || text,
               sender_name: finalCustomerName || null,
-              customer_name: finalCustomerName || null,
-              customer_phone: actualCustomerPhone || null,
               sender_phone: actualCustomerPhone || senderPhone,
               salesperson_phone: senderPhone,
               inquiry_type: 'inquiry',
@@ -1114,7 +1186,7 @@ async function processSalesMessage(text, senderPhone) {
       }
     }
 
-    // Edge Case 3: Log KRA 1 when deal is won
+    // Edge Case 3: Log KRA 1 ONLY when deal is won
     if (dbStage === 'won' && dealId) {
       const alreadyLogged = await isKRA1AlreadyLogged(
         senderPhone,
@@ -1154,7 +1226,6 @@ async function processSalesMessage(text, senderPhone) {
     const { getCustomerMissingInfoPrompt } = require('../supabase');
     const missingPrompt = await getCustomerMissingInfoPrompt(finalCustomerName, senderPhone);
 
-    const formattedAmount = dealAmount > 0 ? `₹${dealAmount.toLocaleString('en-IN')}` : 'To be calculated';
     const activeDeal = existingDeal || { id: dealId };
     const dealCode = getDealCode(activeDeal);
 
@@ -1174,13 +1245,21 @@ async function processSalesMessage(text, senderPhone) {
       return resultMsg;
     }
 
-    // Text Inquiry / Requirement / Non-Won Deal: Format line items WITHOUT amounts/rates
+    // Text Inquiry / Non-Won Deal / Quoted: Format line items WITH specifications & rates
     let itemsBreakdownStr = '';
     if (processedItems.length > 0) {
       itemsBreakdownStr = processedItems
-        .map((pi) => `  • *${pi.pName}*${pi.qty > 0 ? ': ' + pi.qty + ' MT' : ''}`)
+        .map((pi) => {
+          const dimStr = pi.dimensions ? ` (${pi.dimensions})` : '';
+          const rateStr = pi.rate > 0 ? ` @ ₹${Number(pi.rate).toLocaleString('en-IN')}/MT` : '';
+          const amtStr = pi.itemAmount > 0 ? ` = ₹${Number(pi.itemAmount).toLocaleString('en-IN')}` : '';
+          return `  • *${pi.pName}*${dimStr}${pi.qty > 0 ? ': ' + pi.qty + ' MT' : ''}${rateStr}${amtStr}`;
+        })
         .join('\n');
     }
+
+    const gstVal = calculateGst(dealAmount);
+    const grandTot = calculateGrandTotal(dealAmount);
 
     let resultMsg =
       `💼 *Sales Inquiry & Pipeline Logged!* 🏗️\n\n` +
@@ -1189,9 +1268,10 @@ async function processSalesMessage(text, senderPhone) {
       `Stage: *${dbStage.toUpperCase()} 📄*\n` +
       (itemsBreakdownStr ? `Line Items:\n${itemsBreakdownStr}\n` : '') +
       (totalQty > 0 ? `Total Quantity: *${totalQty} MT*\n` : '') +
+      (dealAmount > 0 ? `Quotation Subtotal: *₹${Number(dealAmount).toLocaleString('en-IN')}* + GST (₹${Number(gstVal).toLocaleString('en-IN')})\nGrand Total: *₹${Number(grandTot).toLocaleString('en-IN')}*\n` : '') +
       (data.delivery_location ? `Delivery Location: *${data.delivery_location}*\n` : '') +
       (data.delivery_date ? `Target Delivery Date: *${data.delivery_date}*\n` : '') +
-      `\nUpdated Sales Achievement Card! ✅`;
+      `\nLogged to Sales Pipeline & Inquiries! 📋`;
 
     if (missingPrompt) {
       resultMsg += `\n\n${missingPrompt}`;
