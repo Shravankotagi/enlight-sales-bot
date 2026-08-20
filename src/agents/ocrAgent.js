@@ -34,7 +34,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
     const extraction = await extractFromImage(imageBuffer, mimeType);
 
     if (!extraction || extraction.error || !extraction.customer) {
-      return `⚠️ Could not clearly extract inquiry details from the document image. Please send a clearer picture or type the details (e.g. "Delta Structural Steel 50 MT HR Coil @ 55,000 Delivery Mumbai").`;
+      return `⚠️ Could not clearly extract inquiry details from the document image. Please send a clearer picture or type the details (e.g. "Delta Structural Steel 50 MT HR Coil Delivery Mumbai").`;
     }
 
     const rawCustName = extraction.customer && extraction.customer.name ? String(extraction.customer.name).trim() : '';

@@ -120,34 +120,9 @@ Additional Rules:
 - DATE RULE: Current Year is 2026. Any date specifying month/day MUST ALWAYS use year 2026 (e.g. 2026-08-14).
 - CONFIDENCE RULE:
   * 1.0 (100%) when quantity, product, unit, AND explicit rate/price per MT are stated.
-  * 0.85 when rate is auto-derived from rate sheet.
-  * 0.75 - 0.80 when rate or customer details are missing.
+  * 0.75 - 0.85 when rate or customer details are missing.
 - Return ONLY the JSON object. No prose. No markdown. No backticks.
 `;
-
-async function getLatestActiveRatesText() {
-  try {
-    const { data: sheets } = await supabase
-      .from('rate_sheets')
-      .select('id, date, rate_sheet_items(*)')
-      .order('created_at', { ascending: false })
-      .limit(1);
-
-    if (sheets && sheets.length > 0 && sheets[0].rate_sheet_items?.length > 0) {
-      const items = sheets[0].rate_sheet_items;
-      const formatted = items
-        .map(
-          (i) =>
-            `- ${i.category || 'Steel'} (${i.grade || 'Standard'}${i.dimensions ? ` ${i.dimensions}` : ''}): ₹${Number(i.price_per_mt || 0).toLocaleString('en-IN')}/MT`,
-        )
-        .join('\n');
-      return `\nOFFICIAL ACTIVE RATE SHEET (Use these per-MT prices to calculate rate and total_amount when rate is not explicitly stated in the input):\n${formatted}\n`;
-    }
-  } catch (err) {
-    console.error('Error fetching rate sheet for Gemini:', err.message);
-  }
-  return '';
-}
 
 function postProcessExtraction(parsed) {
   if (!parsed) return parsed;
@@ -269,8 +244,7 @@ function postProcessExtraction(parsed) {
 
 async function extractFromText(text) {
   try {
-    const rateSheetInfo = await getLatestActiveRatesText();
-    const prompt = EXTRACTION_PROMPT + rateSheetInfo + '\n\nInput text:\n' + text;
+    const prompt = EXTRACTION_PROMPT + '\n\nInput text:\n' + text;
     const rawText = await callLightweightModel(prompt);
     const parsed = safeParseJSON(rawText, null);
     if (!parsed) throw new Error('Could not parse JSON extraction from Gemini response');

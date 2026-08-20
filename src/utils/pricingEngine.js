@@ -56,94 +56,6 @@ function isDimensionCompatible(requestedText, skuText) {
 }
 
 /**
- * Look up product price per MT from active or latest rate sheet.
- *
- * @param {string} productText - Product name or description (e.g. "HR Coil 8mm")
- * @param {object} [supabaseClient] - Optional Supabase client instance (defaults to shared client)
- * @returns {Promise<{ price_per_mt: number, matched_sku: string } | null>}
- */
-async function lookupRateSheetPrice(productText, supabaseClient) {
-  if (!productText) return null;
-
-  try {
-    const supabase = supabaseClient || require('../supabase').supabase;
-    const today = new Date().toISOString().split('T')[0];
-
-    // 1. Fetch today's rate sheet
-    let { data: latestSheet } = await supabase
-      .from('rate_sheets')
-      .select('id, date')
-      .eq('date', today)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
-
-    // 2. Fallback to latest available sheet
-    if (!latestSheet) {
-      const { data: recentSheet } = await supabase
-        .from('rate_sheets')
-        .select('id, date')
-        .order('date', { ascending: false })
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .single();
-      latestSheet = recentSheet;
-    }
-
-    if (!latestSheet) return null;
-
-    const { data: items } = await supabase
-      .from('rate_sheet_items')
-      .select('sku_text, category, price_per_mt')
-      .eq('rate_sheet_id', latestSheet.id);
-
-    if (!items || items.length === 0) return null;
-
-    const textLower = productText.toLowerCase();
-    let matched = null;
-
-    // Priority 1: Match on sku_text with dimension compatibility
-    for (const i of items) {
-      const skuLower = (i.sku_text || '').toLowerCase();
-      if (!skuLower) continue;
-
-      if (textLower.includes(skuLower) || skuLower.includes(textLower)) {
-        if (isDimensionCompatible(productText, i.sku_text)) {
-          matched = i;
-          break;
-        }
-      }
-    }
-
-    // Priority 2: Match on category ONLY if dimension is compatible
-    if (!matched) {
-      for (const i of items) {
-        const catLower = (i.category || '').toLowerCase();
-        if (!catLower) continue;
-
-        if (textLower.includes(catLower) || catLower.includes(textLower)) {
-          if (isDimensionCompatible(productText, i.sku_text)) {
-            matched = i;
-            break;
-          }
-        }
-      }
-    }
-
-    if (matched && Number(matched.price_per_mt) > 0) {
-      return {
-        price_per_mt: Number(matched.price_per_mt),
-        matched_sku: matched.sku_text || matched.category,
-      };
-    }
-    return null;
-  } catch (err) {
-    console.error('[PricingEngine] Rate sheet lookup error:', err.message);
-    return null;
-  }
-}
-
-/**
  * Normalizes unit string to standard casing and symbol.
  */
 function normalizeUnit(rawUnit) {
@@ -362,7 +274,6 @@ module.exports = {
   convertToMt,
   extractDimensions,
   isDimensionCompatible,
-  lookupRateSheetPrice,
   calculateLineItem,
   calculateLineItems,
   calculateSubtotal,
