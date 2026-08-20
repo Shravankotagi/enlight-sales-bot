@@ -177,13 +177,20 @@ app.get('/', (req, res) => {
       </div>
     </body>
     </html>
-  `);
+// Health check endpoint for cloud platforms & Railway
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Force Railway Deployment Trigger v1.0.1
+// Start scheduler safely
 const { startScheduler } = require('./src/scheduler');
 
-app.listen(PORT, () => {
-  console.log(`Server is listening on port ${PORT}`);
-  startScheduler();
+const HOST = '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  console.log(`Server is listening on ${HOST}:${PORT}`);
+  try {
+    startScheduler();
+  } catch (err) {
+    console.error('Scheduler startup error (non-fatal):', err.message);
+  }
 });
