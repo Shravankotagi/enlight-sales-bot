@@ -13,13 +13,10 @@ function getSupabase() {
   );
 }
 
-// Detect if message is a query or an operational action
-function isQuery(text) {
-  if (!text || typeof text !== 'string') return false;
-  const lowerText = text.toLowerCase().trim();
-
-  // 1. Operational action logging patterns (inquiries, deals, visits, payments, complaints, onboarding)
-  const isOperationalAction =
+// Operational action logging patterns (inquiries, deals, visits, payments, complaints, onboarding)
+function checkOperationalAction(lowerText) {
+  if (!lowerText) return false;
+  return (
     /\b(create|log|add|new|record|enter|post)\s+(?:new\s+)?(?:deal|inquiry|requirement|rfq|quote|quotation|order)\b/i.test(
       lowerText,
     ) ||
@@ -41,7 +38,17 @@ function isQuery(text) {
     ) ||
     /\b(new customer|add customer|onboard customer|register customer)\b/i.test(
       lowerText,
-    );
+    )
+  );
+}
+
+// Detect if message is a query or an operational action
+function isQuery(text) {
+  if (!text || typeof text !== 'string') return false;
+  const lowerText = text.toLowerCase().trim();
+
+  // 1. Operational action logging patterns
+  const isOperationalAction = checkOperationalAction(lowerText);
 
   const isExplicitActionQuery =
     /\b(my visits|who did i visit|visit log|show visits|visit summary)\b/i.test(
@@ -1344,22 +1351,9 @@ async function getCustomerList(scopeOrPhone) {
   }
 }
 
-/** Active rate sheet from DB */
+/** Active rate sheet information */
 async function getRateSheet() {
-  try {
-    const { getLatestActiveRatesText } = require('./gemini');
-    const rates = await getLatestActiveRatesText();
-    if (!rates)
-      return '❌ No active rate sheet found. Please contact your Sales Lead.';
-    const now = new Date().toLocaleDateString('en-IN', {
-      timeZone: 'Asia/Kolkata',
-      dateStyle: 'full',
-    });
-    return `💹 *Active Metal Rate Sheet*\n📅 ${now}\n\n${rates}\n\n_Rates managed by Admin via Enlight Sales OS_`;
-  } catch (err) {
-    console.error('getRateSheet error:', err.message);
-    return '❌ Could not fetch rate sheet.';
-  }
+  return `💹 *Metal Pricing Policy*\n\nRates and pricing are provided directly by the Salesperson for each specific inquiry or order.\n\nTo log an inquiry with pricing, send:\n👉 \`[Customer] [Qty MT] [Product] rate [Price] Delivery [Location]\`\n_Example: Supreme Steel 20 MT HR Coil rate 52000 Delivery Pune_`;
 }
 
 /** Customer visits list */
@@ -2782,6 +2776,7 @@ async function handleQuery(text, senderPhone) {
   }
 
   // 0. Filtered order listing detection (delivery location, customer filter, product filter, status listing, price/amount filter, quantity filter)
+  const isOperationalAction = checkOperationalAction(lower);
   const isOrderListingQuery =
     !isOperationalAction &&
     (lower.includes('delivering to') ||

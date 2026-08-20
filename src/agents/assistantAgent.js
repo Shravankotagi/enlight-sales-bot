@@ -1,6 +1,5 @@
 const { invokeWithFallback } = require('../core/modelRouter');
 const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
-const { getLatestActiveRatesText } = require('../gemini');
 const { getEmployeeByPhone } = require('../supabase');
 
 const axios = require('axios');
@@ -41,14 +40,11 @@ async function handleConversationalQuery(text, senderPhone) {
       timeStyle: 'long'
     });
     const liveDateTime = formatter.format(now);
-    
-    // Get active rate sheet
-    const activeRates = await getLatestActiveRatesText();
 
     // Role-aware blocked response for admin actions / product suggestions
     const adminBlockedMessage = isAdmin
       ? `🔗 *This action requires Dashboard access.*\n\n` +
-        `Admin operations like rate sheet management, pricing configuration, and product analytics are available on the portal:\n\n` +
+        `Admin operations and configurations are available on the portal:\n\n` +
         `👉 ${dashboardUrl}\n\n` +
         `Log in with your admin credentials to proceed.`
       : `⚠️ *I do not have the capability to perform this action.*\n\n` +
@@ -56,15 +52,15 @@ async function handleConversationalQuery(text, senderPhone) {
 
     const ASSISTANT_SYSTEM_PROMPT = `
 You are the intelligent B2B Metal Sales Assistant for "Enlight Metals".
-Your role is to help ${isAdmin ? 'Admins' : (isManager ? 'Sales Managers' : 'Salespersons')} with general conversational queries, live information checks, rate sheets, and explain policies or KRA standards.
+Your role is to help ${isAdmin ? 'Admins' : (isManager ? 'Sales Managers' : 'Salespersons')} with general conversational queries, live information checks, and explain policies or KRA standards.
 
 CONTEXT:
 - **Current Live Date & Time**: ${liveDateTime}
 - **Current User**: ${empName} (Phone: ${senderPhone}) | Role: ${roleTitle}
-${activeRates ? `- **Live Rates Info**:\n${activeRates}` : '- No active rates set currently.'}
+- **Pricing Policy**: Rates and prices are entered directly by the Salesperson per inquiry/order.
 
 CRITICAL GUARDRAILS & RESTRICTIONS (Must obey strictly):
-1. **No Administrative/Operational Actions via Bot**: You CANNOT lock, create, delete, update, edit, or modify rate sheets, metal prices, database records, employee records, or admin configurations through this chat. These must be done via the web dashboard.
+1. **No Administrative/Operational Actions via Bot**: You CANNOT lock, create, delete, update, edit, or modify database records, employee records, or admin configurations through this chat. These must be done via the web dashboard.
 2. **No Product Recommendations/Suggestions**: You CANNOT recommend or suggest which products/grades a customer should buy or what the salesperson should sell to them.
 3. If the user asks you to perform any administrative action OR asks you to suggest/recommend products for a client, your response MUST be exactly:
    "${adminBlockedMessage}"
@@ -72,11 +68,9 @@ CRITICAL GUARDRAILS & RESTRICTIONS (Must obey strictly):
 GUIDELINES:
 1. Always respond in the same language style as the user (English, Hindi, or Hinglish).
 2. If they ask about the date or time, tell them the live date and time directly.
-3. If they ask about prices, rate sheet, or metal rates, provide the rates from the context.
-4. Keep your responses concise, friendly, professional, and use emojis where appropriate.
-5. If they are trying to log a transaction (like marking a deal won, logging a payment, visit, or complaint), guide them on the correct phrasing (e.g. "To log a payment, say 'Delta paid 500000'").
-6. The bot fully supports listing and filtering live orders by delivery location, customer name, product/material, status/stage, value range, quantity, or date (e.g., "List orders with delivery location Mumbai", "Show orders for Dynamic Industries", "Orders above 10 lakhs"). Never claim the bot cannot list orders.
-7. Never make up metal prices or dates. Only use the provided context.
+3. Keep your responses concise, friendly, professional, and use emojis where appropriate.
+4. If they are trying to log a transaction (like marking a deal won, logging a payment, visit, inquiry, or complaint), guide them on the correct phrasing (e.g. "To log a new inquiry, say 'Supreme Steel 20 MT HR Coil rate 52000 Delivery Pune'").
+5. The bot fully supports listing and filtering live orders by delivery location, customer name, product/material, status/stage, value range, quantity, or date (e.g., "List orders with delivery location Mumbai", "Show orders for Dynamic Industries", "Orders above 10 lakhs"). Never claim the bot cannot list orders.
 `;
 
     const response = await invokeWithFallback([
