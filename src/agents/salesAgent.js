@@ -1040,6 +1040,15 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     const dealIdMatch = text.match(/#?(DEAL-[A-F0-9]{4,6}|[A-F0-9]{6})/i);
     const numChoiceMatch = text.trim().match(/^([1-9])$/);
 
+    const isExplicitNewInquiry =
+      !dealIdMatch &&
+      !numChoiceMatch &&
+      (
+        data.action === 'inquiry' ||
+        (targetStage === 'new_inquiry' && dbStage === 'new_inquiry' && !data.po_number && !overrideData) ||
+        /^\s*(log\s+new\s+inquiry|new\s+inquiry|new\s+deal|inquiry\s+for|requirement\s+for|company\s+name)/i.test(text)
+      );
+
     if (dealIdMatch && openDeals.length > 0) {
       const targetCode = dealIdMatch[1].toUpperCase().replace('DEAL-', '');
       existingDeal = openDeals.find(d => (d.id || '').toUpperCase().includes(targetCode) || (d.deal_number && d.deal_number.toUpperCase().includes(targetCode)));
@@ -1052,40 +1061,39 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         existingDeal = openDeals[idx];
         console.log(`[SalesAgent] Selected deal #${idx + 1} (${getDealCode(existingDeal)}) for ${finalCustomerName}`);
       }
-    }
+    } else if (!isExplicitNewInquiry) {
+      if (openDeals.length === 1) {
+        existingDeal = openDeals[0];
+      } else if (openDeals.length > 1) {
+        const isStageUpdateOrInquiry = data.action === 'stage_update' || !data.product_requirement;
+        if (isStageUpdateOrInquiry) {
+          const dealsListStr = openDeals.map((d, idx) => {
+            const code = getDealCode(d);
+            const itemsStr = (d.deal_items || []).map(i => `${i.quantity || ''} ${i.unit || 'MT'} ${i.sku_text || 'Product'}`).join(', ') || d.inquiry_type || 'Product Requirement';
+            const valStr = d.total_amount > 0 ? ` (₹${Number(d.total_amount).toLocaleString('en-IN')})` : '';
+            const stageStr = d.stage ? d.stage.toUpperCase() : 'OPEN';
+            return `${idx + 1}️⃣ *${code}* — ${itemsStr}${valStr} [Stage: ${stageStr}]`;
+          }).join('\n');
 
-    if (!existingDeal && openDeals.length === 1) {
-      existingDeal = openDeals[0];
-    } else if (!existingDeal && openDeals.length > 1) {
-      // Multiple active open deals exist for this client and no specific Deal ID was mentioned!
-      const isStageUpdateOrInquiry = data.action === 'stage_update' || !data.product_requirement;
-      if (isStageUpdateOrInquiry) {
-        const dealsListStr = openDeals.map((d, idx) => {
-          const code = getDealCode(d);
-          const itemsStr = (d.deal_items || []).map(i => `${i.quantity || ''} ${i.unit || 'MT'} ${i.sku_text || 'Product'}`).join(', ') || d.inquiry_type || 'Product Requirement';
-          const valStr = d.total_amount > 0 ? ` (₹${Number(d.total_amount).toLocaleString('en-IN')})` : '';
-          const stageStr = d.stage ? d.stage.toUpperCase() : 'OPEN';
-          return `${idx + 1}️⃣ *${code}* — ${itemsStr}${valStr} [Stage: ${stageStr}]`;
-        }).join('\n');
+          const { saveActiveSession } = require('../supabase');
+          await saveActiveSession(senderPhone, finalCustomerName, `pending_deal_choice|${finalCustomerName}|${dbStage}|${text}`);
 
-        const { saveActiveSession } = require('../supabase');
-        await saveActiveSession(senderPhone, finalCustomerName, `pending_deal_choice|${finalCustomerName}|${dbStage}|${text}`);
-
-        return `❓ *Multiple Active Deals Found for ${finalCustomerName}*\n\n` +
-          `${finalCustomerName} has *${openDeals.length} active deals* in your sales pipeline:\n\n` +
-          `${dealsListStr}\n\n` +
-          `Please reply with the **Deal ID** (e.g. _"${getDealCode(openDeals[0])}"_) or option number to specify which deal to update! 📈`;
-      }
-    } else if (!existingDeal && openDeals.length === 0) {
-      if (data.action === 'stage_update' || dbStage === 'won' || dbStage === 'lost' || !data.product_requirement) {
-        const best = await findBestDeal(finalCustomerName, senderPhone);
-        if (best) {
-          existingDeal = best;
+          return `❓ *Multiple Active Deals Found for ${finalCustomerName}*\n\n` +
+            `${finalCustomerName} has *${openDeals.length} active deals* in your sales pipeline:\n\n` +
+            `${dealsListStr}\n\n` +
+            `Please reply with the **Deal ID** (e.g. _"${getDealCode(openDeals[0])}"_) or option number to specify which deal to update! 📈`;
+        }
+      } else if (openDeals.length === 0) {
+        if (data.action === 'stage_update' || dbStage === 'won' || dbStage === 'lost' || !data.product_requirement) {
+          const best = await findBestDeal(finalCustomerName, senderPhone);
+          if (best) {
+            existingDeal = best;
+          }
         }
       }
     }
 
-    if (existingDeal) {
+    if (existingDeal && !isExplicitNewInquiry) {
       const isStageUpdateOnly =
         !data.product_requirement &&
         !data.quantity_mt &&
@@ -1107,9 +1115,13 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           `[SalesAgent] New product category detected — creating separate deal for ${finalCustomerName}`,
         );
       }
+    } else {
+      dealId = null;
+      existingDeal = null;
+      console.log(`[SalesAgent] Creating brand new inquiry and pipeline deal for ${finalCustomerName}`);
     }
 
-    if (dealAmount === 0 && dealId) {
+    if (dealAmount === 0 && dealId && existingDeal) {
       const itemsTotal = await getDealAmountFromItems(dealId);
       dealAmount = itemsTotal > 0 ? itemsTotal : Number(existingDeal.total_amount || 0);
     }
@@ -1199,6 +1211,115 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         `Please provide the delivery location for **${finalCustomerName}** (e.g. reply _"Pune"_ or _"Deliver to Mumbai"_) before I can confirm this order and generate the PO.`;
     }
 
+    const totalQty = processedItems.reduce((s, i) => s + i.qty, 0);
+    const pricingSummary = calculatePricingSummary({
+      line_items: processedItems.map(pi => ({ quantity: pi.qty, rate: pi.rate, amount: pi.itemAmount })),
+    });
+
+    function deriveProductForm(name) {
+      if (!name || typeof name !== 'string') return null;
+      const lower = name.toLowerCase();
+      if (lower.includes('coil')) return 'Coil';
+      if (lower.includes('sheet')) return 'Sheet';
+      if (lower.includes('plate')) return 'Plate';
+      if (lower.includes('bar') || lower.includes('rebar')) return 'Bar';
+      if (lower.includes('pipe') || lower.includes('tube')) return 'Pipe';
+      if (lower.includes('beam') || lower.includes('channel') || lower.includes('angle') || lower.includes('flat')) return 'Structural';
+      return null;
+    }
+
+    const structuredExtraction = {
+      customer_name: finalCustomerName,
+      companyName: finalCustomerName,
+      contact_person: finalContactPerson,
+      contactPerson: finalContactPerson,
+      customer_phone: actualCustomerPhone || null,
+      customerPhone: actualCustomerPhone || null,
+      delivery_location: finalDeliveryLoc,
+      deliveryLocation: finalDeliveryLoc,
+      delivery_date: finalDeliveryDate,
+      deliveryDate: finalDeliveryDate,
+      payment_terms: finalPaymentTerms,
+      paymentTerms: finalPaymentTerms,
+      productType: processedItems[0]?.pName || data.product_requirement || null,
+      thickness: processedItems[0]?.dimensions || null,
+      width: null,
+      length: null,
+      productForm: deriveProductForm(processedItems[0]?.pName || data.product_requirement),
+      quantityTons: totalQty || processedItems[0]?.qty || 0,
+      unitPrice: processedItems[0]?.rate || 0,
+      total_amount: dealAmount || pricingSummary.subtotal,
+      totalAmount: dealAmount || pricingSummary.subtotal,
+      subtotal: pricingSummary.subtotal,
+      gst_amount: pricingSummary.gstAmount,
+      grand_total: pricingSummary.grandTotal,
+      line_items: processedItems.map((pi) => ({
+        sku_text: pi.pName,
+        dimensions: pi.dimensions || '',
+        quantity: pi.qty,
+        unit: 'MT',
+        rate: pi.rate,
+        amount: pi.itemAmount,
+      })),
+      financialSummary: {
+        subtotal: pricingSummary.subtotal,
+        gstAmount: pricingSummary.gstAmount,
+        grandTotal: pricingSummary.grandTotal,
+      },
+      overall_confidence: data.confidence || 0.95,
+    };
+
+    let inqId = existingDeal?.inquiry_id || null;
+
+    // Create fresh Inquiry in inquiries table for new inquiry text message
+    if (!dealId || !inqId) {
+      try {
+        const { data: insertedInq, error: inqInsErr } = await supabase
+          .from('inquiries')
+          .insert({
+            source_channel: 'whatsapp_text',
+            raw_text: data.raw_text || text,
+            sender_name: finalCustomerName || null,
+            sender_phone: actualCustomerPhone || null,
+            salesperson_phone: senderPhone,
+            inquiry_type: 'inquiry',
+            status: 'review',
+            ai_extraction_json: structuredExtraction,
+            overall_confidence: data.confidence || 0.95,
+            created_at: new Date().toISOString(),
+          })
+          .select()
+          .single();
+
+        if (inqInsErr) {
+          console.error('[SalesAgent] Error inserting inquiry for text message:', inqInsErr);
+        } else if (insertedInq) {
+          inqId = insertedInq.id;
+          console.log('[SalesAgent] Successfully logged fresh inquiry record:', inqId);
+        }
+      } catch (inqErr) {
+        console.error('[SalesAgent] Inquiry insert exception:', inqErr.message);
+      }
+    } else {
+      // Update existing inquiry
+      try {
+        await supabase
+          .from('inquiries')
+          .update({
+            sender_name: finalCustomerName,
+            sender_phone: actualCustomerPhone || null,
+            salesperson_phone: senderPhone,
+            inquiry_type: 'inquiry',
+            ai_extraction_json: structuredExtraction,
+            status: 'review',
+            created_at: new Date().toISOString(),
+          })
+          .eq('id', inqId);
+      } catch (inqUpdErr) {
+        console.error('[SalesAgent] Error updating existing inquiry:', inqUpdErr.message);
+      }
+    }
+
     if (dealId) {
       // ---- UPDATE existing deal ----
       const updatePayload = {
@@ -1211,6 +1332,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         delivery_date: finalDeliveryDate,
         payment_terms: finalPaymentTerms,
         total_amount: dealAmount || existingDeal.total_amount || 0,
+        inquiry_id: inqId || existingDeal.inquiry_id,
+        created_at: new Date().toISOString(),
       };
 
       if (dbStage === 'won') updatePayload.won_at = new Date().toISOString();
@@ -1291,6 +1414,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const { data: newDeal, error: dealInsertErr } = await supabase
         .from('deals')
         .insert({
+          inquiry_id:        inqId || null,
           customer_name:     finalCustomerName,
           salesperson_phone: senderPhone,
           customer_phone:    actualCustomerPhone,
@@ -1304,6 +1428,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           po_number:         poNumber,
           won_at:            dbStage === 'won' ? new Date().toISOString() : null,
           lost_reason:       dbStage === 'lost' ? data.loss_reason : null,
+          created_at:        new Date().toISOString(),
         })
         .select()
         .single();
@@ -1327,122 +1452,6 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           });
         }
       }
-    }
-
-    const totalQty = processedItems.reduce((s, i) => s + i.qty, 0);
-    const pricingSummary = calculatePricingSummary({
-      line_items: processedItems.map(pi => ({ quantity: pi.qty, rate: pi.rate, amount: pi.itemAmount })),
-    });
-
-    function deriveProductForm(name) {
-      if (!name || typeof name !== 'string') return null;
-      const lower = name.toLowerCase();
-      if (lower.includes('coil')) return 'Coil';
-      if (lower.includes('sheet')) return 'Sheet';
-      if (lower.includes('plate')) return 'Plate';
-      if (lower.includes('bar') || lower.includes('rebar')) return 'Bar';
-      if (lower.includes('pipe') || lower.includes('tube')) return 'Pipe';
-      if (lower.includes('beam') || lower.includes('channel') || lower.includes('angle') || lower.includes('flat')) return 'Structural';
-      return null;
-    }
-
-    // Mandatory atomic sync to inquiries table for dashboard
-    try {
-      const structuredExtraction = {
-        customer_name: finalCustomerName,
-        companyName: finalCustomerName,
-        contact_person: finalContactPerson,
-        contactPerson: finalContactPerson,
-        customer_phone: actualCustomerPhone || null,
-        customerPhone: actualCustomerPhone || null,
-        delivery_location: finalDeliveryLoc,
-        deliveryLocation: finalDeliveryLoc,
-        delivery_date: finalDeliveryDate,
-        deliveryDate: finalDeliveryDate,
-        payment_terms: finalPaymentTerms,
-        paymentTerms: finalPaymentTerms,
-        productType: processedItems[0]?.pName || data.product_requirement || null,
-        thickness: processedItems[0]?.dimensions || null,
-        width: null,
-        length: null,
-        productForm: deriveProductForm(processedItems[0]?.pName || data.product_requirement),
-        quantityTons: totalQty || processedItems[0]?.qty || 0,
-        unitPrice: processedItems[0]?.rate || 0,
-        total_amount: dealAmount || pricingSummary.subtotal,
-        totalAmount: dealAmount || pricingSummary.subtotal,
-        subtotal: pricingSummary.subtotal,
-        gst_amount: pricingSummary.gstAmount,
-        grand_total: pricingSummary.grandTotal,
-        line_items: processedItems.map((pi) => ({
-          sku_text: pi.pName,
-          dimensions: pi.dimensions || '',
-          quantity: pi.qty,
-          unit: 'MT',
-          rate: pi.rate,
-          amount: pi.itemAmount,
-        })),
-        financialSummary: {
-          subtotal: pricingSummary.subtotal,
-          gstAmount: pricingSummary.gstAmount,
-          grandTotal: pricingSummary.grandTotal,
-        },
-        overall_confidence: data.confidence || 0.95,
-      };
-
-      const isPurchaseOrder = dbStage === 'won' || data.action === 'purchase_order';
-      let inqId = existingDeal?.inquiry_id || null;
-
-      if (!isPurchaseOrder) {
-        if (inqId) {
-          const { error: inqUpdErr } = await supabase
-            .from('inquiries')
-            .update({
-              sender_name: finalCustomerName,
-              sender_phone: actualCustomerPhone || null,
-              salesperson_phone: senderPhone,
-              inquiry_type: 'inquiry',
-              ai_extraction_json: structuredExtraction,
-              status: 'review',
-            })
-            .eq('id', inqId);
-          if (inqUpdErr) {
-            console.error('[SalesAgent] Error updating inquiry for deal:', inqUpdErr);
-          }
-        } else {
-          const { data: insertedInq, error: inqInsErr } = await supabase
-            .from('inquiries')
-            .insert({
-              source_channel: 'whatsapp_text',
-              raw_text: data.raw_text || text,
-              sender_name: finalCustomerName || null,
-              sender_phone: actualCustomerPhone || null,
-              salesperson_phone: senderPhone,
-              inquiry_type: 'inquiry',
-              status: 'review',
-              ai_extraction_json: structuredExtraction,
-              overall_confidence: data.confidence || 0.95,
-              created_at: new Date().toISOString(),
-            })
-            .select()
-            .single();
-
-          if (inqInsErr) {
-            console.error('[SalesAgent] Error inserting inquiry for text message:', inqInsErr);
-          } else if (insertedInq) {
-            inqId = insertedInq.id;
-            console.log('[SalesAgent] Successfully logged inquiry record for text message:', inqId);
-          }
-        }
-
-        if (inqId && dealId) {
-          await supabase
-            .from('deals')
-            .update({ inquiry_id: inqId })
-            .eq('id', dealId);
-        }
-      }
-    } catch (inqSyncErr) {
-      console.error('[SalesAgent] Inquiries table sync error:', inqSyncErr.message);
     }
 
     // Update last_order_date in recurring_customers table ONLY when deal is won
