@@ -178,14 +178,19 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
       } catch (backendErr) {
         console.error('[OCRAgent] Backend process-po-internal failed, falling back to direct Supabase:', backendErr.message);
 
-        // FALLBACK: Direct Supabase write with correct NOT IN syntax
-        const { data: openDeals, error: openDealsErr } = await supabase
+        // FALLBACK: Direct Supabase write with correct NOT IN syntax and salesperson scoping
+        let openDealsQuery = supabase
           .from('deals')
           .select('id, stage, customer_name')
           .ilike('customer_name', `%${finalCustomerName}%`)
           .not('stage', 'in', '(won,lost)')
-          .order('created_at', { ascending: false })
-          .limit(1);
+          .order('created_at', { ascending: false });
+
+        if (senderPhone) {
+          openDealsQuery = openDealsQuery.eq('salesperson_phone', senderPhone);
+        }
+
+        const { data: openDeals, error: openDealsErr } = await openDealsQuery.limit(1);
 
         if (openDealsErr) {
           console.error('[OCRAgent] openDeals query error:', openDealsErr.message);

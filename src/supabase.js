@@ -349,12 +349,28 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
     return newCustomer;
   } catch (err) {
     console.error('ensureCustomerRecord error:', err.message);
-    const { data: fallback } = await supabase
-      .from('recurring_customers')
-      .select('*')
-      .ilike('customer_name', cleanName)
-      .limit(1);
-    return fallback ? fallback[0] : null;
+    try {
+      const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+      let fallbackQuery = supabase
+        .from('recurring_customers')
+        .select('*')
+        .ilike('customer_name', cleanName)
+        .limit(1);
+
+      if (scope.phones !== null) {
+        if (scope.phones.length === 1) {
+          fallbackQuery = fallbackQuery.eq('assigned_salesperson_phone', scope.phones[0]);
+        } else if (scope.phones.length > 1) {
+          fallbackQuery = fallbackQuery.in('assigned_salesperson_phone', scope.phones);
+        } else {
+          return null;
+        }
+      }
+      const { data: fallback } = await fallbackQuery;
+      return fallback ? fallback[0] : null;
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -722,11 +738,24 @@ async function updateCustomerProfileRecord(senderPhone, customerName, updates = 
  */
 async function getCustomerMissingInfoPrompt(customerName, senderPhone) {
   try {
-    const { data } = await supabase
+    const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null };
+    let query = supabase
       .from('recurring_customers')
       .select('customer_phone, customer_gst, customer_address, contact_person')
       .ilike('customer_name', `%${customerName}%`)
       .limit(1);
+
+    if (scope.phones !== null) {
+      if (scope.phones.length === 1) {
+        query = query.eq('assigned_salesperson_phone', scope.phones[0]);
+      } else if (scope.phones.length > 1) {
+        query = query.in('assigned_salesperson_phone', scope.phones);
+      } else {
+        return '';
+      }
+    }
+
+    const { data } = await query;
 
     if (!data || data.length === 0) return '';
 

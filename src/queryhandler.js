@@ -1322,7 +1322,11 @@ async function getCustomer360(senderPhone, text, extractedName = null) {
   let customerName = extractedName;
   try {
     const supabase = getSupabase();
-    const cleanPhone = (senderPhone || '').replace(/\D/g, '').slice(-10);
+    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+
+    if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
+      return `🔍 *Customer 360*\n\nNo records found. You currently have no salespersons assigned to your team.`;
+    }
 
     if (!customerName) {
       customerName = text
@@ -1344,9 +1348,7 @@ async function getCustomer360(senderPhone, text, extractedName = null) {
       .from('recurring_customers')
       .select('*')
       .ilike('customer_name', `%${customerName}%`);
-    if (cleanPhone) {
-      custQuery = custQuery.ilike('assigned_salesperson_phone', `%${cleanPhone}%`);
-    }
+    custQuery = applySalespersonFilter(custQuery, scope.phones, 'assigned_salesperson_phone');
     const { data: profiles } = await custQuery.limit(1);
     const profile = profiles && profiles.length > 0 ? profiles[0] : null;
 
@@ -1356,9 +1358,7 @@ async function getCustomer360(senderPhone, text, extractedName = null) {
       .select('id, stage, total_amount, customer_name, customer_phone, customer_gst, customer_address, delivery_location, payment_terms, po_number, created_at, deal_items(*)')
       .ilike('customer_name', `%${customerName}%`)
       .order('created_at', { ascending: false });
-    if (cleanPhone) {
-      dealsQuery = dealsQuery.ilike('salesperson_phone', `%${cleanPhone}%`);
-    }
+    dealsQuery = applySalespersonFilter(dealsQuery, scope.phones, 'salesperson_phone');
     const { data: deals } = await dealsQuery.limit(5);
 
     // 3. Fetch payment tracking
@@ -1366,13 +1366,12 @@ async function getCustomer360(senderPhone, text, extractedName = null) {
       .from('payment_tracking')
       .select('*')
       .ilike('customer_name', `%${customerName}%`);
-    if (cleanPhone) {
-      payQuery = payQuery.ilike('salesperson_phone', `%${cleanPhone}%`);
-    }
+    payQuery = applySalespersonFilter(payQuery, scope.phones, 'salesperson_phone');
     const { data: payments } = await payQuery.limit(5);
 
     if (!profile && (!deals || deals.length === 0) && (!payments || payments.length === 0)) {
-      return `🔍 *Customer 360 - ${customerName}*\n\nNo matching records found for "${customerName}" under your salesperson account.`;
+      const scopeLabel = scope.isAdmin ? 'system' : (scope.isManager ? 'assigned team' : 'salesperson account');
+      return `🔍 *Customer 360 - ${customerName}*\n\nNo matching records found for "${customerName}" under your ${scopeLabel}.`;
     }
 
     const officialName = profile?.customer_name || deals?.[0]?.customer_name || customerName;
@@ -2151,4 +2150,4 @@ async function handleQuery(text, senderPhone) {
   return await handleConversationalQuery(text, senderPhone);
 }
 
-module.exports = { isQuery, handleQuery, getVisitSummary, getInactiveCustomers, getReorderQueue, getFilteredOrders, getInquiriesThisMonth };
+module.exports = { isQuery, handleQuery, getVisitSummary, getInactiveCustomers, getReorderQueue, getFilteredOrders, getInquiriesThisMonth, getCustomer360 };

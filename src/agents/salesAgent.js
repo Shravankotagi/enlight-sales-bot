@@ -478,13 +478,29 @@ function getDealCode(deal) {
  */
 async function getAllOpenDealsForCustomer(customerName, senderPhone) {
   if (!customerName) return [];
-  const { data } = await supabase
+  const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+  const scope = senderPhone
+    ? await getAccessibleSalespersonPhonesForBot(senderPhone)
+    : { phones: null };
+
+  let query = supabase
     .from('deals')
     .select('*, deal_items(*)')
     .ilike('customer_name', `%${customerName}%`)
     .not('stage', 'in', '("won","lost")')
     .order('created_at', { ascending: false });
 
+  if (scope.phones !== null) {
+    if (scope.phones.length === 1) {
+      query = query.eq('salesperson_phone', scope.phones[0]);
+    } else if (scope.phones.length > 1) {
+      query = query.in('salesperson_phone', scope.phones);
+    } else {
+      return [];
+    }
+  }
+
+  const { data } = await query;
   return data || [];
 }
 
