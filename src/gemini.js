@@ -489,4 +489,4 @@ async function classifyQueryType(text) {
   }
 }
 
-module.exports = { extractFromText, extractFromImage, extractFromDocument, classifyIntent, getLatestActiveRatesText, classifyQueryType };
+module.exports = { extractFromText, extractFromImage, extractFromDocument, classifyIntent, classifyQueryType };
