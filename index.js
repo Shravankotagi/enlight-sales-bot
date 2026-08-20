@@ -177,6 +177,9 @@ app.get('/', (req, res) => {
       </div>
     </body>
     </html>
+  `);
+});
+
 // Health check endpoint for cloud platforms & Railway
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
