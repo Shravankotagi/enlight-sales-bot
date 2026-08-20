@@ -401,7 +401,10 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
       itemsBreakdown = extraction.line_items
         .map(i => {
           const dimStr = i.dimensions ? ` (${i.dimensions})` : '';
-          return `  • *${i.sku_text || 'Material'}*${dimStr}: ${i.quantity || 0} MT ${i.rate ? '@ ₹' + Number(i.rate).toLocaleString('en-IN') + '/MT' : ''}`;
+          const unit = i.unit || 'MT';
+          const qtyStr = Number(i.quantity || 0).toLocaleString('en-IN');
+          const rateStr = i.rate ? ` @ ₹${Number(i.rate).toLocaleString('en-IN')}/${unit}` : '';
+          return `  • *${i.sku_text || 'Material'}*${dimStr}: ${qtyStr} ${unit}${rateStr}`;
         })
         .join('\n');
     }

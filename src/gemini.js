@@ -15,16 +15,16 @@ async function callLightweightModel(prompt) {
 
 const EXTRACTION_PROMPT = `
 You are an expert document parser for Enlight Metals, an Indian B2B metal distributor.
-Input is a photo or PDF of a business document — either a PURCHASE ORDER (PO) or a MATERIAL REQUIREMENT/INQUIRY/RFQ.
+Input is a photo, PDF, or text of a business document — either a PURCHASE ORDER (PO) or a MATERIAL REQUIREMENT/INQUIRY/RFQ.
 
 ════════════════════════════════════════════════════
 🔴 RULE #1 — PO vs INQUIRY (MOST IMPORTANT RULE):
 ════════════════════════════════════════════════════
 
 STEP 1: Scan the ENTIRE document for a field explicitly labeled:
-  "PO No", "P.O. No", "PO Number", "Purchase Order No", "Purchase Order Number", "PO Ref", "P.O. Ref"
+  "PO No", "P.O. No", "PO Number", "Purchase Order No", "Purchase Order Number", "PO Ref", "P.O. Ref", "Order No."
 
-STEP 2A — If such a label EXISTS and has a value (e.g. "PO No: 471" or "PO/2026/123"):
+STEP 2A — If such a label EXISTS and has a value (e.g. "PO No: 471" or "PO-26-27-00718"):
   → Set inquiry_type: "purchase_order"
   → Set po_number: "<that exact value>"
   → This is a CONFIRMED PURCHASE ORDER.
@@ -34,9 +34,40 @@ STEP 2B — If NO such label exists, OR the document says "Inquiry", "RFQ", "Quo
   → Set po_number: null
   → This is an INQUIRY/RFQ, NOT a purchase order.
 
-⚠️  IMPORTANT: "Ref No", "Inquiry Ref", "Quotation Ref", "Our Ref", "Your Ref" are NOT PO numbers.
-    Only fields explicitly labeled PO No / Purchase Order No qualify.
+⚠️  IMPORTANT: "Ref No", "Inquiry Ref", "Quotation Ref", "Our Ref", "Your Ref", "PR No." are NOT PO numbers.
+    Only fields explicitly labeled PO No / Purchase Order No / Order No qualify.
     When in doubt → inquiry_type: "inquiry", po_number: null.
+
+════════════════════════════════════════════════════
+🔴 RULE #2 — CUSTOMER / COMPANY NAME vs ADDRESS:
+════════════════════════════════════════════════════
+
+1. CUSTOMER COMPANY NAME (customer.name):
+   - In Purchase Orders, the Customer is the BUYER who issued the PO (found under "Invoice To:", "Bill To:", "Buyer:", "Customer:", "M/s:").
+   - The Customer Name is STRICTLY the Legal Company / Enterprise Name on the FIRST line under "Invoice To:" (e.g. "SB Scafform Technovert Pvt. Ltd.", "ABC Fabricators Pvt. Ltd.").
+   - ⚠️ CRITICAL: NEVER include the building name, commercial complex, industrial estate, plot number, road, or city name in the customer name!
+     * Example: "Akshar Business Park, Office No - 1068, 1st Floor, Turbhe Navi Mumbai" is the OFFICE/BUILDING ADDRESS, NOT the company name.
+     * Correct customer.name: "SB Scafform Technovert Pvt. Ltd."
+     * INCORRECT: "Akshar Technovart Pvt. Ltd." or "Akshar Business Park".
+   - ⚠️ CRITICAL: The Supplier / Seller is "Enlight Metals Private Limited" (our own company). NEVER set "Enlight Metals" as the customer.name!
+
+2. CUSTOMER BILLING ADDRESS (customer.address):
+   - The street/building/city address under "Invoice To:" (e.g. "Akshar Business Park, Office No - 1068, 1st Floor, U - Wing Plot No - 03, Sector - 25, Turbhe, Navi Mumbai, PIN: 400703").
+
+3. CUSTOMER GSTIN (customer.gst):
+   - The 15-character GSTIN number belonging to the customer under "Invoice To:" (e.g. "27AARCS0956R1ZB").
+
+4. DELIVERY LOCATION (delivery_location):
+   - In Purchase Orders, extract delivery_location STRICTLY from the "Delivery Address:" / "Ship To:" / "Consignee Address:" section.
+   - Format cleanly as the destination site/city (e.g. "Gat No / Plot No PAP V - 149/2, Village Vasuli, Taluka Khed, Pune, PIN: 410501").
+   - ⚠️ NEVER include Enlight Metals' supplier address, supplier PIN (411048), or billing office in the delivery_location!
+
+5. LINE ITEMS & UNITS (line_items):
+   - Extract exact quantity and EXACT UOM (unit of measure) stated in the line item table.
+   - If the document table specifies UOM as "Kg" or "KG" and Qty "5000.0", set quantity: 5000 and unit: "KG".
+   - If the document table specifies UOM as "MT" or "Tons", set unit: "MT".
+   - If the document table specifies UOM as "PCS" or "Sheets", set unit: "PCS" / "Sheets".
+   - NEVER convert unit to MT if the document table explicitly says Kg!
 ════════════════════════════════════════════════════
 
 Extract the following into ONLY a JSON object (no prose, no markdown, no backticks):
@@ -84,7 +115,6 @@ Additional Rules:
 - Subtotal / Basic Amount: Sum of line item amounts BEFORE GST. If the document shows a pre-tax total (e.g. "Total: ₹10,33,000.00"), use that exact pre-GST amount. NEVER store the PO Grand Total as subtotal or basic_amount!
 - GST Components: Extract SGST (e.g. 9%), CGST (e.g. 9%), IGST (e.g. 18%), and total GST amount as stated in the document.
 - Grand Total: The final GST-inclusive value stated in the PO document (e.g. "Grand Total: ₹12,18,940.00").
-- Quantities: normalize to MT where unit is tonnes/ton/MT; keep KG/PCS as stated
 - SKU text: preserve the customer's exact words in sku_text
 - If a field is absent return null — never invent values
 - DATE RULE: Current Year is 2026. Any date specifying month/day MUST ALWAYS use year 2026 (e.g. 2026-08-14).
@@ -146,7 +176,25 @@ function postProcessExtraction(parsed) {
     }
   }
 
-  // 2. Line Item Rate and Amount calculation (Always Pre-GST)
+  // 2. Customer Company Name vs Building/Address Cleanup
+  if (parsed.customer && typeof parsed.customer === 'object') {
+    let name = parsed.customer.name || parsed.customer_name || '';
+    if (name) {
+      // Remove address keywords from company name if mistakenly included
+      const addressPrefixRegex = /^(Akshar Business Park|Business Park|Office No|Plot No|Sector|Industrial Area|MIDC|Gat No|Survey No|Phase)[,\s\-]+/i;
+      name = name.replace(addressPrefixRegex, '').trim();
+
+      const splitOnAddress = name.split(/(?:,?\s*(?:Akshar Business Park|Office No|Plot No|Sector \d+|Janta Market|Opp\.|Turbhe|Navi Mumbai|Maharashtra|State Code|PIN|Gat No))/i);
+      if (splitOnAddress && splitOnAddress[0] && splitOnAddress[0].trim().length > 3) {
+        name = splitOnAddress[0].trim();
+      }
+
+      parsed.customer.name = name;
+      parsed.customer_name = name;
+    }
+  }
+
+  // 3. Line Item Rate and Amount calculation (Always Pre-GST)
   let totalCalculatedItemsAmount = 0;
   let hasMissingRate = false;
 
@@ -211,7 +259,7 @@ function postProcessExtraction(parsed) {
     parsed.total_amount = calculatedGrandTotal;
   }
 
-  // 3. Realistic Confidence Adjustment
+  // 4. Realistic Confidence Adjustment
   if (hasMissingRate && parsed.overall_confidence > 0.8) {
     parsed.overall_confidence = 0.8;
   }
