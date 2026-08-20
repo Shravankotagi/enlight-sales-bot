@@ -67,17 +67,25 @@ Extract the following into ONLY a JSON object (no prose, no markdown, no backtic
   "delivery_location": "",
   "delivery_date": "",
   "payment_terms": "",
+  "subtotal": 0,
   "basic_amount": 0,
+  "sgst_amount": 0,
+  "cgst_amount": 0,
+  "igst_amount": 0,
   "gst_amount": 0,
+  "grand_total": 0,
   "total_amount": 0,
   "overall_confidence": 0.0,
   "inquiry_type": "purchase_order|inquiry|visiting_card|unknown"
 }
 
 Additional Rules:
+- Line Items: Extract each line item's quantity, unit rate, and line amount separately (these are always pre-GST values).
+- Subtotal / Basic Amount: Sum of line item amounts BEFORE GST. If the document shows a pre-tax total (e.g. "Total: ₹10,33,000.00"), use that exact pre-GST amount. NEVER store the PO Grand Total as subtotal or basic_amount!
+- GST Components: Extract SGST (e.g. 9%), CGST (e.g. 9%), IGST (e.g. 18%), and total GST amount as stated in the document.
+- Grand Total: The final GST-inclusive value stated in the PO document (e.g. "Grand Total: ₹12,18,940.00").
 - Quantities: normalize to MT where unit is tonnes/ton/MT; keep KG/PCS as stated
 - SKU text: preserve the customer's exact words in sku_text
-- Basic & GST Amounts: extract basic_amount (before tax), gst_amount (18%), and total_amount (grand total including GST).
 - If a field is absent return null — never invent values
 - DATE RULE: Current Year is 2026. Any date specifying month/day MUST ALWAYS use year 2026 (e.g. 2026-08-14).
 - CONFIDENCE RULE:
@@ -138,8 +146,8 @@ function postProcessExtraction(parsed) {
     }
   }
 
-  // 2. Line Item Rate and Amount calculation
-  let totalCalculatedAmount = 0;
+  // 2. Line Item Rate and Amount calculation (Always Pre-GST)
+  let totalCalculatedItemsAmount = 0;
   let hasMissingRate = false;
 
   if (Array.isArray(parsed.line_items) && parsed.line_items.length > 0) {
@@ -162,12 +170,45 @@ function postProcessExtraction(parsed) {
         hasMissingRate = true;
       }
 
-      totalCalculatedAmount += amount;
+      totalCalculatedItemsAmount += amount;
     });
   }
 
-  if (totalCalculatedAmount > 0 && (!parsed.total_amount || parsed.total_amount === 0)) {
-    parsed.total_amount = totalCalculatedAmount;
+  // Pre-GST Subtotal
+  const preGstSubtotal = totalCalculatedItemsAmount > 0
+    ? totalCalculatedItemsAmount
+    : Number(parsed.basic_amount || parsed.subtotal || 0);
+
+  parsed.basic_amount = preGstSubtotal;
+  parsed.subtotal = preGstSubtotal;
+
+  // Stated or Calculated GST
+  const statedGst = Number(
+    parsed.gst_amount ||
+    (Number(parsed.sgst_amount || 0) + Number(parsed.cgst_amount || 0) + Number(parsed.igst_amount || 0)) ||
+    0
+  );
+  const calculatedGst = Math.round(preGstSubtotal * 0.18);
+  parsed.gst_amount = statedGst > 0 ? statedGst : calculatedGst;
+
+  // Stated or Calculated Grand Total (GST-inclusive)
+  const statedGrandTotal = Number(parsed.grand_total || parsed.total_amount || 0);
+  const calculatedGrandTotal = preGstSubtotal + parsed.gst_amount;
+
+  if (statedGrandTotal > 0 && Math.abs(statedGrandTotal - calculatedGrandTotal) <= 2) {
+    parsed.grand_total = statedGrandTotal;
+    parsed.total_amount = statedGrandTotal;
+  } else if (statedGrandTotal > 0 && Math.abs(statedGrandTotal - preGstSubtotal) <= 2) {
+    parsed.grand_total = calculatedGrandTotal;
+    parsed.total_amount = calculatedGrandTotal;
+  } else if (statedGrandTotal > 0) {
+    parsed.grand_total = statedGrandTotal;
+    parsed.total_amount = statedGrandTotal;
+    parsed.calculation_warning = `Calculated total (₹${calculatedGrandTotal.toLocaleString('en-IN')}) does not match PO document total (₹${statedGrandTotal.toLocaleString('en-IN')}) — please review`;
+    console.warn('[Gemini OCR]', parsed.calculation_warning);
+  } else {
+    parsed.grand_total = calculatedGrandTotal;
+    parsed.total_amount = calculatedGrandTotal;
   }
 
   // 3. Realistic Confidence Adjustment

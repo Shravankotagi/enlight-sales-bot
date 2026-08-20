@@ -40,6 +40,28 @@ function isComplaintResolution(text) {
 }
 
 // Extract complaint details using Google Gemini
+// Smart regex fallback to extract customer/company name from complaint description
+function fallbackExtractCustomerName(text) {
+  if (!text) return null;
+  const clean = text.trim();
+  const m1 = clean.match(/^([A-Za-z0-9\s.&'-]+?)\s+(?:complaint|issue|problem|rejection|galat|reject)/i);
+  if (m1 && m1[1] && m1[1].trim().length > 2) {
+    const candidate = m1[1].trim();
+    if (!['customer', 'client', 'reported', 'new', 'urgent', 'got', 'received', 'the', 'our', 'material'].includes(candidate.toLowerCase())) {
+      return candidate;
+    }
+  }
+  const m2 = clean.match(/(?:complaint|issue|problem|rejection)\s+(?:for|from|at|about|of)\s+([A-Za-z0-9\s.&'-]+?)(?:[:,\-]|\s+they|\s+we|\s+material|\s+received|$)/i);
+  if (m2 && m2[1] && m2[1].trim().length > 2) {
+    const candidate = m2[1].trim();
+    if (!['customer', 'client', 'reported', 'new', 'urgent', 'got', 'received', 'the', 'our', 'material'].includes(candidate.toLowerCase())) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+// Extract complaint details using Google Gemini
 async function extractComplaintDetails(text) {
   try {
     const { invokeWithFallback } = require('./core/modelRouter');
@@ -57,7 +79,7 @@ Return ONLY a JSON object, no markdown, no backticks:
 }
 
 Rules:
-- customer_name: company name if mentioned, else null
+- customer_name: company/client name if mentioned (e.g. "ABC Fabricators"), else null
 - complaint_type: one of 
   "quality|quantity|billing|delivery|size|grade|damage|other"
 - description: brief description of the complaint
@@ -77,11 +99,20 @@ Message: "${text}"
     const { safeParseJSON } = require('./utils/jsonUtils');
     const parsed = safeParseJSON(rawText, null);
     if (!parsed) throw new Error('Could not parse complaint details JSON');
+
+    if (!parsed.customer_name || parsed.customer_name === 'null' || parsed.customer_name === 'Unknown') {
+      const fallbackName = fallbackExtractCustomerName(text);
+      if (fallbackName) {
+        parsed.customer_name = fallbackName;
+      }
+    }
+
     return parsed;
   } catch (error) {
     console.error('extractComplaintDetails error:', error.message);
+    const fallbackName = fallbackExtractCustomerName(text);
     return {
-      customer_name: null,
+      customer_name: fallbackName,
       complaint_type: 'other',
       description: text,
       severity: 'medium'
@@ -93,10 +124,11 @@ Message: "${text}"
 async function saveComplaint(details, senderPhone) {
   const supabase = getSupabase();
   try {
+    const custName = details.customer_name || fallbackExtractCustomerName(details.description) || null;
     const { data, error } = await supabase
       .from('complaints')
       .insert({
-        customer_name: details.customer_name,
+        customer_name: custName,
         complaint_type: details.complaint_type,
         description: details.description,
         reported_by: senderPhone,
@@ -151,91 +183,184 @@ function buildComplaintConfirmation(details, complaint) {
     `To close: Reply *RESOLVED ${details.customer_name?.split(' ')[0]?.toUpperCase() || 'COMPLAINT'} [resolution details]*`;
 }
 
+// Notification throttling state
+const notificationThrottleState = {
+  managerLastReminded: {}, // { [managerPhone]: timestamp }
+  adminLastDigestAt: 0,    // timestamp
+  complaintLastReminded: {}, // { [complaintId]: timestamp }
+};
+
 // Check pending complaints and send reminders/escalations
 async function checkComplaints() {
   const supabase = getSupabase();
   try {
     console.log('Running Customer Complaints check...');
 
-    const { data: complaints, error } = await supabase
+    // STRICT QUERY: ONLY OPEN COMPLAINTS
+    // Status MUST NOT be 'resolved' or 'closed' and resolved_at MUST be null
+    const { data: openComplaints, error } = await supabase
       .from('complaints')
       .select('*')
-      .eq('status', 'pending')
+      .not('status', 'in', '("resolved","closed")')
+      .is('resolved_at', null)
       .order('reported_at', { ascending: true });
 
     if (error) throw error;
-    if (!complaints || complaints.length === 0) {
-      console.log('No pending complaints');
+    if (!openComplaints || openComplaints.length === 0) {
+      console.log('No open complaints found');
       return;
     }
 
-    console.log(`Checking ${complaints.length} pending complaints...`);
-    const now = new Date();
+    console.log(`Checking ${openComplaints.length} open complaints...`);
+    const now = Date.now();
+    const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+    const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
-    for (const complaint of complaints) {
+    // Fetch all employees to identify Sales Managers and Admins and their team mappings
+    const { data: employees } = await supabase
+      .from('employees')
+      .select('id, name, phone, role, manager_id');
+
+    const empList = employees || [];
+    const admins = empList.filter(e => e.role === 'admin' && e.phone);
+    const managers = empList.filter(e => (e.role === 'sales_manager' || e.role === 'manager') && e.phone);
+
+    // Map salespersons to managers
+    const managerTeamMap = {};
+    managers.forEach(m => {
+      const teamSalespersonPhones = empList.filter(e => e.manager_id === m.id).map(e => e.phone).filter(Boolean);
+      managerTeamMap[m.phone] = Array.from(new Set([m.phone, ...teamSalespersonPhones]));
+    });
+
+    // ────────────────────────────────────────────────────────────────────────
+    // 1. SALES MANAGER REMINDERS (AFTER EVERY 6 HOURS)
+    // ────────────────────────────────────────────────────────────────────────
+    for (const manager of managers) {
+      const teamPhones = managerTeamMap[manager.phone] || [manager.phone];
+      const teamComplaints = openComplaints.filter(c => teamPhones.includes(c.reported_by));
+
+      if (teamComplaints.length > 0) {
+        const lastReminded = notificationThrottleState.managerLastReminded[manager.phone] || 0;
+        if (now - lastReminded >= SIX_HOURS_MS) {
+          const count = teamComplaints.length;
+          let managerMsg = `⚠️ *Customer Complaints Reminder — Team Alert*\n\n` +
+            `Hello ${manager.name || 'Sales Manager'},\n` +
+            `You have *${count} open complaint${count > 1 ? 's' : ''}* pending resolution in your sales team:\n\n`;
+
+          teamComplaints.forEach((c, idx) => {
+            const reportedAt = new Date(c.reported_at);
+            const hrsOpen = Math.max(0, Math.round((now - reportedAt.getTime()) / (1000 * 60 * 60)));
+            const hoursLeft = Math.max(0, 48 - hrsOpen);
+            const repEmp = empList.find(e => e.phone === c.reported_by);
+            const repName = repEmp ? repEmp.name : (c.reported_by || 'Salesperson');
+
+            managerMsg += `${idx + 1}️⃣ *${c.customer_name || 'Customer'}* (Type: ${c.complaint_type || 'General'})\n` +
+              `📝 ${c.description}\n` +
+              `👤 Reported by: ${repName} (${c.reported_by})\n` +
+              `⏰ Open for: *${hrsOpen}h* ${hrsOpen >= 48 ? '🚨 *(SLA BREACHED)*' : `(⏰ ${hoursLeft}h until SLA breach)`}\n\n`;
+          });
+
+          managerMsg += `💡 *Action Required:* Please follow up with your team to resolve these complaints within the 48-hour SLA.\n` +
+            `Salesperson can reply *RESOLVED [Customer] [resolution]* on WhatsApp or mark resolved on the web dashboard.`;
+
+          await sendTextMessage(manager.phone, managerMsg);
+          notificationThrottleState.managerLastReminded[manager.phone] = now;
+          console.log(`[Complaints Notification] 6-hour team reminder sent to Sales Manager ${manager.name} (${manager.phone}) for ${count} complaints`);
+          await new Promise(r => setTimeout(r, 1000));
+        } else {
+          console.log(`[Complaints Notification] Skipping manager ${manager.name} — last reminded ${Math.round((now - lastReminded) / 60000)} mins ago (< 6 hours)`);
+        }
+      }
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // 2. ADMIN REMINDER (ONLY 1 REMINDER A DAY FOR ALL OPEN COMPLAINTS)
+    // ────────────────────────────────────────────────────────────────────────
+    const lastAdminDigest = notificationThrottleState.adminLastDigestAt || 0;
+    if (now - lastAdminDigest >= TWENTY_FOUR_HOURS_MS && admins.length > 0 && openComplaints.length > 0) {
+      const totalOpen = openComplaints.length;
+      let adminMsg = `⚠️ *Daily Customer Complaints Digest — Enlight Metals*\n\n` +
+        `There are currently *${totalOpen} unresolved complaint${totalOpen > 1 ? 's' : ''}* across all sales teams:\n\n`;
+
+      openComplaints.forEach((c, idx) => {
+        const reportedAt = new Date(c.reported_at);
+        const hrsOpen = Math.max(0, Math.round((now - reportedAt.getTime()) / (1000 * 60 * 60)));
+        const repEmp = empList.find(e => e.phone === c.reported_by);
+        const repName = repEmp ? repEmp.name : (c.reported_by || 'Salesperson');
+
+        adminMsg += `${idx + 1}️⃣ *${c.customer_name || 'Customer'}* (Type: ${c.complaint_type || 'General'})\n` +
+          `📝 ${c.description}\n` +
+          `👤 Salesperson: ${repName}\n` +
+          `⏰ Open for: *${hrsOpen}h* ${hrsOpen >= 48 ? '🚨 *(Escalated / Overdue)*' : '⏳ (Within 48h SLA)'}\n\n`;
+      });
+
+      adminMsg += `📊 Full details and status updates are available on the Enlight Sales Dashboard.`;
+
+      for (const admin of admins) {
+        await sendTextMessage(admin.phone, adminMsg);
+        console.log(`[Complaints Notification] Daily 24h digest sent to Admin ${admin.name} (${admin.phone})`);
+        await new Promise(r => setTimeout(r, 1000));
+      }
+
+      notificationThrottleState.adminLastDigestAt = now;
+    } else if (openComplaints.length > 0) {
+      console.log(`[Complaints Notification] Skipping Admin daily digest — last sent ${Math.round((now - lastAdminDigest) / (1000 * 60 * 60))} hours ago (< 24 hours)`);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // 3. INDIVIDUAL SALESPERSON 24H REMINDER & 48H ESCALATION
+    // ────────────────────────────────────────────────────────────────────────
+    for (const complaint of openComplaints) {
       const reportedAt = new Date(complaint.reported_at);
-      const hoursElapsed = (now - reportedAt) / (1000 * 60 * 60);
-
+      const hoursElapsed = (now - reportedAt.getTime()) / (1000 * 60 * 60);
       const salespersonPhone = complaint.reported_by;
       if (!salespersonPhone) continue;
 
-      // 48+ hours - escalate to Sales Lead
+      // 48+ hours - Escalate ONCE
       if (hoursElapsed >= 48 && !complaint.escalated) {
         await supabase
           .from('complaints')
           .update({ escalated: true })
           .eq('id', complaint.id);
 
-        // Notify salesperson
         const salespersonMsg =
           `🚨 *Customer Complaint Escalated*\n\n` +
           `Complaint ref: ${complaint.id.substring(0, 8)}\n` +
           `Customer: ${complaint.customer_name || 'Unknown'}\n` +
           `Type: ${complaint.complaint_type}\n` +
           `Hours open: ${Math.round(hoursElapsed)}h\n\n` +
-          `⚠️ This has been escalated to Sales Lead.\n` +
+          `⚠️ This has exceeded the 48-hour SLA and has been escalated to Management.\n` +
           `Please resolve immediately and reply:\n` +
           `*RESOLVED ${complaint.customer_name?.split(' ')[0]?.toUpperCase() || 'COMPLAINT'} [resolution]*`;
 
         await sendTextMessage(salespersonPhone, salespersonMsg);
+        notificationThrottleState.complaintLastReminded[complaint.id] = now;
+        console.log(`[Complaints Notification] Escalation notice sent to salesperson for complaint ${complaint.id}`);
+        await new Promise(r => setTimeout(r, 1000));
 
-        // Notify Sales Lead
-        const salesLeadPhone = process.env.SALES_LEAD_PHONE;
-        if (salesLeadPhone && salesLeadPhone !== salespersonPhone) {
-          const leadMsg =
-            `🚨 *Customer Complaint Escalation Alert*\n\n` +
-            `Unresolved complaint after 48 hours:\n\n` +
+      // 24+ hours - Send reminder to salesperson (cooldown 6 hours)
+      } else if (hoursElapsed >= 24 && hoursElapsed < 48) {
+        const lastComplaintReminded = notificationThrottleState.complaintLastReminded[complaint.id] || 0;
+        if (now - lastComplaintReminded >= SIX_HOURS_MS) {
+          const reminderMsg =
+            `⚠️ *Customer Complaint Reminder*\n\n` +
+            `Complaint open for ${Math.round(hoursElapsed)} hours:\n\n` +
             `Customer: ${complaint.customer_name || 'Unknown'}\n` +
             `Type: ${complaint.complaint_type}\n` +
-            `Description: ${complaint.description}\n` +
-            `Reported: ${new Date(complaint.reported_at).toLocaleString('en-IN')}\n` +
-            `Hours open: ${Math.round(hoursElapsed)}h\n\n` +
-            `Please follow up with the salesperson.`;
-          await sendTextMessage(salesLeadPhone, leadMsg);
+            `Description: ${complaint.description}\n\n` +
+            `⏰ ${Math.max(0, Math.round(48 - hoursElapsed))} hours until escalation\n\n` +
+            `Resolve and reply:\n` +
+            `*RESOLVED ${complaint.customer_name?.split(' ')[0]?.toUpperCase() || 'COMPLAINT'} [resolution]*`;
+
+          await sendTextMessage(salespersonPhone, reminderMsg);
+          notificationThrottleState.complaintLastReminded[complaint.id] = now;
+          console.log(`[Complaints Notification] 24h reminder sent to salesperson for complaint ${complaint.id}`);
+          await new Promise(r => setTimeout(r, 1000));
         }
-
-        console.log(`Complaint ${complaint.id} escalated`);
-
-      // 24 hours - send reminder
-      } else if (hoursElapsed >= 24 && hoursElapsed < 48) {
-        const reminderMsg =
-          `⚠️ *Customer Complaint Reminder*\n\n` +
-          `Complaint open for ${Math.round(hoursElapsed)} hours:\n\n` +
-          `Customer: ${complaint.customer_name || 'Unknown'}\n` +
-          `Type: ${complaint.complaint_type}\n` +
-          `Description: ${complaint.description}\n\n` +
-          `⏰ ${Math.round(48 - hoursElapsed)} hours until escalation\n\n` +
-          `Resolve and reply:\n` +
-          `*RESOLVED ${complaint.customer_name?.split(' ')[0]?.toUpperCase() || 'COMPLAINT'} [resolution]*`;
-
-        await sendTextMessage(salespersonPhone, reminderMsg);
-        console.log(`24h reminder sent for complaint ${complaint.id}`);
       }
-
-      await new Promise(r => setTimeout(r, 1000));
     }
 
-    console.log('KRA 8 check complete');
+    console.log('Customer complaints check complete');
   } catch (error) {
     console.error('checkComplaints error:', error.message);
   }
@@ -293,27 +418,33 @@ async function handleComplaintResolution(text, senderPhone) {
     const resolutionActions = ['RESOLVED', 'RESOLVE', 'CLOSED', 'CLOSE', 'FIXED', 'FIX'];
     const matchedAction = resolutionActions.find(a => upper.startsWith(a)) || 'RESOLVED';
 
-    // 1. Fetch all pending complaints for this salesperson to match customer name dynamically
+    // 1. Fetch all OPEN complaints for this salesperson
     const { data: openComplaints } = await supabase
       .from('complaints')
       .select('*')
       .eq('reported_by', senderPhone)
-      .eq('status', 'pending');
+      .not('status', 'in', '("resolved","closed")')
+      .is('resolved_at', null)
+      .order('reported_at', { ascending: false });
 
     let complaint = null;
     let customerKeyword = '';
     let resolution = '';
 
     if (openComplaints && openComplaints.length > 0) {
-      // Find a complaint whose customer name is mentioned in the text (case-insensitive)
+      // Find a complaint whose customer name or description matches keywords in the text
       complaint = openComplaints.find(c => {
-        if (!c.customer_name) return false;
-        const nameLower = c.customer_name.toLowerCase();
-        // Check if full customer name is in the message
-        if (text.toLowerCase().includes(nameLower)) return true;
-        // Check if any word of length > 3 of the customer name is in the message (e.g. "Balaji")
-        const words = nameLower.split(/\s+/);
-        return words.some(word => word.length > 3 && text.toLowerCase().includes(word));
+        if (c.customer_name) {
+          const nameLower = c.customer_name.toLowerCase();
+          if (text.toLowerCase().includes(nameLower)) return true;
+          const words = nameLower.split(/\s+/);
+          if (words.some(word => word.length > 3 && text.toLowerCase().includes(word))) return true;
+        }
+        if (c.description) {
+          const descWords = c.description.toLowerCase().split(/[\s,:-]+/);
+          if (descWords.some(w => w.length > 4 && text.toLowerCase().includes(w))) return true;
+        }
+        return false;
       });
 
       // Fuzzy match fallback using Gemini if no literal match is found
@@ -321,28 +452,29 @@ async function handleComplaintResolution(text, senderPhone) {
         console.log('No literal complaint customer match, trying fuzzy matching...');
         const { fuzzyMatchCustomer } = require('./supabase');
         const customerList = openComplaints.map(c => c.customer_name).filter(Boolean);
-        const matchedName = await fuzzyMatchCustomer(text, customerList);
-        if (matchedName) {
-          console.log(`Fuzzy matched complaint customer: ${matchedName}`);
-          complaint = openComplaints.find(c => c.customer_name === matchedName);
+        if (customerList.length > 0) {
+          const matchedName = await fuzzyMatchCustomer(text, customerList);
+          if (matchedName) {
+            console.log(`Fuzzy matched complaint customer: ${matchedName}`);
+            complaint = openComplaints.find(c => c.customer_name === matchedName);
+          }
         }
+      }
+
+      // If only 1 open complaint exists for this salesperson, match it directly!
+      if (!complaint && openComplaints.length === 1) {
+        complaint = openComplaints[0];
       }
     }
 
     if (complaint) {
-      customerKeyword = complaint.customer_name;
-      // Clean resolution text (remove action, customer name, and fillers)
+      customerKeyword = complaint.customer_name || fallbackExtractCustomerName(complaint.description) || 'Customer';
       let tempResolution = text;
       const regexAction = new RegExp(`^${matchedAction}\\s*(complaint|issue|problem|ticket)*\\s*(for|about|of|on)*\\s*`, 'i');
       tempResolution = tempResolution.replace(regexAction, '');
       
-      if (tempResolution.toLowerCase().includes(complaint.customer_name.toLowerCase())) {
+      if (complaint.customer_name && tempResolution.toLowerCase().includes(complaint.customer_name.toLowerCase())) {
         tempResolution = tempResolution.replace(new RegExp(complaint.customer_name, 'gi'), '');
-      } else {
-        const firstWord = complaint.customer_name.split(' ')[0];
-        if (firstWord.length > 3) {
-          tempResolution = tempResolution.replace(new RegExp(firstWord, 'gi'), '');
-        }
       }
       resolution = tempResolution.replace(/^[\s:,\-]+/, '').trim() || 'Resolved';
     } else {
@@ -356,14 +488,14 @@ async function handleComplaintResolution(text, senderPhone) {
       customerKeyword = parts[0] || '';
       resolution = cleanText.replace(new RegExp(`^${customerKeyword}`, 'i'), '').replace(/^[\s:,\-]+/, '').trim() || 'Resolved';
 
-      // Fallback DB query using keyword
-      if (customerKeyword) {
+      if (customerKeyword && customerKeyword.length > 2) {
         const { data: complaints } = await supabase
           .from('complaints')
           .select('*')
           .eq('reported_by', senderPhone)
-          .eq('status', 'pending')
-          .ilike('customer_name', `%${customerKeyword}%`)
+          .not('status', 'in', '("resolved","closed")')
+          .is('resolved_at', null)
+          .or(`customer_name.ilike.%${customerKeyword}%,description.ilike.%${customerKeyword}%`)
           .order('reported_at', { ascending: false })
           .limit(1);
         complaint = complaints?.[0];
@@ -371,8 +503,8 @@ async function handleComplaintResolution(text, senderPhone) {
     }
 
     if (!complaint) {
-      console.log(`No active pending complaint found for customer keyword: ${customerKeyword}`);
-      return `⚠️ *Resolution Update Declined*\n\nCould not find an active pending complaint matching *"${customerKeyword || 'this customer'}"*.\n\nPlease check the dashboard to verify the customer name or if the complaint was already marked as resolved.`;
+      console.log(`No active open complaint found for customer keyword: ${customerKeyword}`);
+      return `⚠️ *Resolution Update Declined*\n\nCould not find an active open complaint matching *"${customerKeyword || 'this customer'}"*.\n\nPlease check the dashboard to verify the customer name or if the complaint was already marked as resolved.`;
     }
 
     const reportedAt = new Date(complaint.reported_at);
@@ -381,14 +513,34 @@ async function handleComplaintResolution(text, senderPhone) {
       (resolvedAt - reportedAt) / (1000 * 60 * 60)
     );
 
+    const resolvedCustomerName = complaint.customer_name || fallbackExtractCustomerName(complaint.description) || customerKeyword || 'Customer';
+
+    // Mark the matched complaint resolved
     await supabase
       .from('complaints')
       .update({
+        customer_name: resolvedCustomerName,
         status: 'resolved',
         resolved_at: resolvedAt.toISOString(),
         resolution_time_hrs: resolutionHrs
       })
       .eq('id', complaint.id);
+
+    // Also resolve any other open duplicates for this customer and salesperson
+    if (resolvedCustomerName && resolvedCustomerName !== 'Customer') {
+      await supabase
+        .from('complaints')
+        .update({
+          customer_name: resolvedCustomerName,
+          status: 'resolved',
+          resolved_at: resolvedAt.toISOString(),
+          resolution_time_hrs: resolutionHrs
+        })
+        .eq('reported_by', senderPhone)
+        .not('status', 'in', '("resolved","closed")')
+        .is('resolved_at', null)
+        .or(`customer_name.ilike.%${resolvedCustomerName}%,description.ilike.%${resolvedCustomerName}%`);
+    }
 
     // Log to KRA 8
     await supabase.from('kra_logs').insert({
@@ -396,14 +548,14 @@ async function handleComplaintResolution(text, senderPhone) {
       kra_number: 8,
       kra_type: 'complaint_resolved',
       description: `Resolved in ${resolutionHrs}h: ${resolution}`,
-      customer_name: complaint.customer_name,
+      customer_name: resolvedCustomerName,
       month: new Date().getMonth() + 1,
       year: new Date().getFullYear()
     });
 
     const withinTarget = resolutionHrs <= 48;
     return `✅ *Complaint Resolved*\n\n` +
-      `Customer: ${complaint.customer_name}\n` +
+      `Customer: ${resolvedCustomerName}\n` +
       `Resolution: ${resolution}\n` +
       `Time taken: ${resolutionHrs} hours\n` +
       `${withinTarget ? '✅ Within 48-hour target!' : '⚠️ Exceeded 48-hour target'}\n\n` +
@@ -498,5 +650,7 @@ module.exports = {
   handleComplaintLog,
   handleComplaintResolution,
   checkComplaints,
-  getComplaintSummary
+  getComplaintSummary,
+  extractComplaintDetails,
+  fallbackExtractCustomerName,
 };

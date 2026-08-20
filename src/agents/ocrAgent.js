@@ -82,10 +82,34 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
     const inqStatus = isPo ? 'confirmed' : 'review';
 
     const pricingSummary = calculatePricingSummary(extraction);
-    const baseAmt = extraction.basic_amount || pricingSummary.subtotal;
-    const gstAmt = extraction.gst_amount || pricingSummary.gstAmount;
-    const grandTotal = extraction.total_amount || (baseAmt + gstAmt);
+    const baseAmt = pricingSummary.subtotal;
+    const gstAmt = pricingSummary.gstAmount;
+    const grandTotal = pricingSummary.grandTotal;
     const finalOrderAmount = grandTotal > 0 ? grandTotal : baseAmt;
+
+    const structuredExtraction = {
+      ...extraction,
+      subtotal: baseAmt,
+      basic_amount: baseAmt,
+      gst_amount: gstAmt,
+      grand_total: grandTotal,
+      total_amount: grandTotal,
+      financialSummary: {
+        subtotal: baseAmt,
+        gstAmount: gstAmt,
+        grandTotal: grandTotal,
+        gstRate: pricingSummary.gstRate,
+      },
+      calculation_warning: pricingSummary.calculationWarning || extraction.calculation_warning || null,
+      line_items: pricingSummary.lineItems.map(item => ({
+        sku_text: item.sku_text || item.product_name || item.description || null,
+        dimensions: item.dimensions || null,
+        quantity: item.quantity,
+        unit: item.unit || 'MT',
+        rate: item.rate,
+        amount: item.amount,
+      })),
+    };
 
     let savedInq = null;
     if (!isPo) {
@@ -103,7 +127,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         status: inqStatus,
         inquiry_type: 'inquiry',
         overall_confidence: extraction.overall_confidence || 0.98,
-        ai_extraction_json: extraction,
+        ai_extraction_json: structuredExtraction,
       });
     } else {
       // For Purchase Orders: Save media attachment linked with inquiry_type 'purchase_order'
@@ -120,7 +144,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         status: 'order_created',
         inquiry_type: 'purchase_order',
         overall_confidence: extraction.overall_confidence || 0.98,
-        ai_extraction_json: extraction,
+        ai_extraction_json: structuredExtraction,
       });
     }
 
@@ -149,7 +173,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
           inquiry_id: savedInq?.id || null,
           media_urls: [base64Data],
           overall_confidence: extraction.overall_confidence || 0.98,
-          line_items: (extraction.line_items || []).map(item => ({
+          line_items: pricingSummary.lineItems.map(item => ({
             sku_text: item.sku_text || item.product_name || item.description || null,
             dimensions: item.dimensions || null,
             quantity: Number(item.quantity) || null,

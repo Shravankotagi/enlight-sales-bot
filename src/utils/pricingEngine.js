@@ -306,9 +306,41 @@ function calculatePricingSummary(input, options = {}) {
       : `${totalQuantityMt.toLocaleString('en-IN')} MT`;
   }
 
-  const subtotal = explicitBase > 0 ? explicitBase : itemsSubtotal;
-  const gstAmount = calculateGst(subtotal, gstRate);
+  // Line-item derived subtotal always takes strict priority when line items exist
+  let subtotal = 0;
+  if (itemsSubtotal > 0) {
+    subtotal = itemsSubtotal;
+  } else if (explicitBase > 0) {
+    subtotal = explicitBase;
+  } else if (input && typeof input === 'object') {
+    const rawTotal = Number(input.total_amount || input.totalAmount || input.grand_total || input.grandTotal || 0);
+    if (rawTotal > 0) {
+      subtotal = rawTotal;
+    }
+  }
+
+  // Handle explicit GST components from PO documents (SGST + CGST / IGST)
+  let explicitGst = 0;
+  if (input && typeof input === 'object') {
+    const sgst = Number(input.sgst_amount || 0);
+    const cgst = Number(input.cgst_amount || 0);
+    const igst = Number(input.igst_amount || 0);
+    const statedGst = Number(input.gst_amount ?? input.gstAmount ?? 0);
+    explicitGst = statedGst > 0 ? statedGst : (sgst + cgst + igst);
+  }
+
+  const calculatedGst = calculateGst(subtotal, gstRate);
+  const gstAmount = explicitGst > 0 && Math.abs(explicitGst - calculatedGst) <= 5 ? explicitGst : calculatedGst;
   const grandTotal = subtotal + gstAmount;
+
+  // Cross-verification against stated PO Grand Total
+  let calculationWarning = null;
+  if (input && typeof input === 'object') {
+    const statedGrand = Number(input.grand_total || input.grandTotal || 0);
+    if (statedGrand > 0 && Math.abs(statedGrand - grandTotal) > 2) {
+      calculationWarning = `Calculated total (₹${grandTotal.toLocaleString('en-IN')}) does not match PO document total (₹${statedGrand.toLocaleString('en-IN')}) — please review`;
+    }
+  }
 
   return {
     lineItems: processedItems,
@@ -320,6 +352,7 @@ function calculatePricingSummary(input, options = {}) {
     gstAmount,
     grandTotal,
     gstRate,
+    calculationWarning,
   };
 }
 
