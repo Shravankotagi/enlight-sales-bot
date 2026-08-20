@@ -5,7 +5,7 @@
  * Flow:
  *   [START] → [agent_node] → (tool calls?) → [tool_node] → [agent_node] → ... → [END]
  *
- * Primary Model: Google Gemini (gemini-3.1-flash-lite)
+ * Primary Model: Google Gemini (gemini-3.5-flash-lite)
  */
 
 const { StateGraph, START, END, Annotation, MessagesAnnotation } = require('@langchain/langgraph');
