@@ -30,16 +30,19 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
   "target_stage": "new_inquiry|qualified|quoted|negotiation|won|lost",
   "line_items": [
     {
-      "product_requirement": "<specific product name e.g. CR Coil, HR Coil, CR Sheets, MS Plates, TMT Bar>",
-      "dimensions": "<explicit dimensions/thickness if stated e.g. 6mm, 8mm, 2mm, else null>",
-      "quantity_mt": <numeric tonnage for this specific item e.g. 20>,
-      "rate_per_mt": <numeric per-MT price ONLY if explicitly mentioned in message, else null>
+      "product_requirement": "<specific product name e.g. CR Sheet, HR Sheet, CR Coil, HR Coil, MS Plates, TMT Bar>",
+      "dimensions": "<explicit dimensions/thickness if stated e.g. 1mm 1250x2500, 1.2mm 1250x2500, 1.6mm 1250x2500, 6mm, 8mm, 2mm, else null>",
+      "quantity": <numeric quantity e.g. 300, 200, 20>,
+      "quantity_mt": <numeric quantity in MT or same as quantity>,
+      "unit": "<exact unit mentioned: nos, pcs, sheets, kg, MT, etc, default MT>",
+      "rate_per_mt": <numeric per-MT or unit price ONLY if explicitly mentioned in message, else null>
     }
   ],
   "total_amount": <numeric total deal value in rupees ONLY if explicitly mentioned in text, else 0>,
-  "delivery_location": "<exact city/location if mentioned e.g. Nashik, Mumbai, Pune, else null>",
+  "delivery_location": "<full exact address/city/location if mentioned e.g. Hunsal Village, Khopoli, Raigad, Maharashtra - 410203, Pune, else null>",
   "delivery_date": "<delivery deadline in YYYY-MM-DD format using current year 2026 if mentioned e.g. 2026-08-25 for 'before 25 August', else null>",
-  "payment_terms": "<payment terms ONLY if explicitly stated in text, else null>",
+  "payment_terms": "<payment terms e.g. 45 days, 30 days credit, else null>",
+  "preferred_make": "<preferred make/brand if stated e.g. Tata, JSW, SAIL, else null>",
   "po_number": "<PO number if mentioned, else null>",
   "po_date": "<PO date / target PO date in YYYY-MM-DD format using year 2026 e.g. 2026-08-28 for '28 August', else null>",
   "loss_reason": "<inferred reason if deal was lost, else null>",
@@ -47,17 +50,16 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
 }
 
 CRITICAL EXTRACTION RULES & CONTEXT DISAMBIGUATION:
-1. CUSTOMER NAME: Extract the customer/company name requesting the product (e.g. from "New inquiry – company hai Suryansh Metals Pvt Ltd, 20 MT CR coil..." -> customer_name is "Suryansh Metals Pvt Ltd"). If no company is explicitly mentioned, customer_name MUST be null. NEVER output the salesperson's name as customer_name.
-2. CONTACT PERSON: Extract the contact person, owner, or proprietor name if explicitly provided (e.g. from "Contact Person: Rajesh Mehta" or "owner Rajesh Mehta" -> contact_person is "Rajesh Mehta"). NEVER output the salesperson's name.
-3. PRODUCT & QUANTITY: Extract product quantity whenever a number is directly associated with a valid metal unit (e.g. "20 MT", "50 tons", "1500 Kg", "100 Sheets", "50 Pcs"). "20 MT CR coil chahiye 6mm" -> product_requirement: "CR Coil", quantity_mt: 20, dimensions: "6mm".
-4. SPECIFICATIONS: Extract thickness and dimensions explicitly stated (e.g. "6mm" -> dimensions: "6mm"). NEVER drop thickness/specifications when explicitly mentioned.
-5. CUSTOMER PHONE: Extract 10-digit customer mobile/phone number if provided in the text (e.g. "number 9812345670" -> "9812345670").
+1. CUSTOMER NAME: Extract the customer/company name requesting the product (e.g. from "Traders Pvt Ltd..." -> customer_name is "Traders Pvt Ltd"). If no company is explicitly mentioned, customer_name MUST be null. NEVER output the salesperson's name as customer_name.
+2. CONTACT PERSON: Extract the contact person, owner, or proprietor name if explicitly provided (e.g. from "Contact Person: Rajesh Mehta" -> contact_person is "Rajesh Mehta"). NEVER output the salesperson's name.
+3. MULTIPLE LINE ITEMS: If the message lists multiple products (e.g. "CR 1mm 1250x2500 - 300 nos, CR 1.2mm 1250x2500 - 200 nos, HR 1.6mm 1250x2500 - 200 nos"), extract each as a SEPARATE object in the line_items array with its own product name, dimensions, quantity, and unit.
+4. SPECIFICATIONS: Extract thickness and full dimensions explicitly stated (e.g. "1mm 1250x2500" -> dimensions: "1mm 1250x2500"). NEVER drop dimensions.
+5. CUSTOMER PHONE: Extract 10-digit customer mobile/phone number if provided in the text.
 6. TARGET PO DATE: When target PO date is mentioned, convert to YYYY-MM-DD format with year 2026 and assign to po_date.
-7. PAYMENT TERMS: Extract payment terms and credit duration (e.g. "30 days credit"). "30 days" in payment context is credit duration in payment_terms, NEVER product quantity.
-8. DELIVERY LOCATION: Extract exact city/location mentioned (e.g. "Nashik", "Mumbai").
-
-9. STRUCTURED FORMS: If input is a key-value template (e.g. "Company Name: Shivam Traders Pvt. Ltd.", "Contact Person: Rajesh Mehta", "Material: HR coil", "Grade/Spec: 8mm", "Quantity: 40 MT", "Target Price: ₹52,000/MT"), extract each field into its corresponding JSON property.
-10. TARGET PRICE / RATE: If message specifies a target price or rate (e.g. "Target Price: ₹52,000/MT" or "rate 52000"), extract as rate_per_mt on that item.
+7. PAYMENT TERMS: Extract payment terms and credit duration (e.g. "Payment terms 45 days" -> "45 days"). "45 days" in payment context is credit duration in payment_terms, NEVER product quantity.
+8. DELIVERY LOCATION: Extract the full address and delivery destination (e.g. "Hunsal Village, Khopoli, Raigad, Maharashtra - 410203"). Include all details and pincode.
+9. PREFERRED MAKE / BRAND: Extract preferred manufacturer if mentioned (e.g. "Preferred Make: Tata" -> preferred_make: "Tata").
+10. TARGET PRICE / RATE IS OPTIONAL: If the salesperson explicitly provided a rate (e.g. "rate 52000" or "@ ₹50/kg"), extract it as rate_per_mt. If NO rate is given (or "rates required" / "rates needed" is stated), rate_per_mt MUST be null. Under NO circumstances require a rate or ask for a rate. The inquiry will be logged directly to the Inquiries tab with blank/null rates.
 
 Return ONLY the JSON object.
 `;
@@ -133,6 +135,15 @@ const KNOWN_STEEL_CITIES = [
 function extractDeliveryLocation(text) {
   if (!text || typeof text !== 'string') return null;
   const lower = text.toLowerCase();
+
+  // 0. Line containing an Indian address with 6-digit PIN code e.g. "Hunsal Village, Khopoli, Raigad, Maharashtra - 410203"
+  const lines = text.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/\b\d{6}\b/.test(trimmed) && !/phone|mobile|contact\s+no|payment|preferred|pvt|ltd|gst/i.test(trimmed)) {
+      return trimmed.replace(/^📍\s*/, '').replace(/^(?:delivery(?:\s+address|\s+location)?\s*[:\-]?\s*)/i, '');
+    }
+  }
 
   // 1. Structured form: Delivery Location: Pune
   const structLoc = text.match(/(?:delivery\s+location|delivery\s+address|delivery\s+city|location|destination|ship\s+to|deliver\s+to|delivery\s+at)\s*:\s*([^\n\r,]+)/i);
@@ -881,35 +892,33 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     let targetStage = data.target_stage || 'new_inquiry';
 
-    // Multi-item extraction and rate sheet price calculation
+    // Multi-item extraction and rate calculation
     let rawItems = [];
     if (Array.isArray(data.line_items) && data.line_items.length > 0) {
       rawItems = data.line_items;
-    } else if (data.product_requirement || data.quantity_mt) {
+    } else if (data.product_requirement || data.quantity_mt || data.quantity) {
       rawItems = [{
         product_requirement: data.product_requirement,
         dimensions: data.dimensions || null,
-        quantity_mt: data.quantity_mt,
-        rate_per_mt: data.rate_per_mt,
+        quantity: data.quantity || data.quantity_mt || 0,
+        quantity_mt: data.quantity_mt || data.quantity || 0,
+        unit: data.unit || 'MT',
+        rate_per_mt: data.rate_per_mt || null,
       }];
     }
 
-    // Post-LLM validation: If quantity_mt is 0 or missing but text contains a valid quantity unit, extract rule-based quantity
-    const textQtyMatch = text.match(/\b(\d+(?:\.\d+)?)\s*(?:mt|ton|tons|tonne|tonnes|metric\s+ton|kg|kgs|kilogram|sheet|sheets|plate|plates|coil|coils|pcs|piece|pieces|nos|bar|bars)\b/i);
-    if (textQtyMatch && rawItems.length > 0) {
-      const extractedQty = Number(textQtyMatch[1]) || 0;
-      rawItems = rawItems.map((item) => {
-        if (!item.quantity_mt || Number(item.quantity_mt) === 0) {
-          return { ...item, quantity_mt: extractedQty };
-        }
-        return item;
-      });
+    // Post-LLM validation: If quantity is 0 or missing on single item but text contains a valid quantity unit, extract rule-based quantity
+    if (rawItems.length === 1 && (!rawItems[0].quantity && !rawItems[0].quantity_mt)) {
+      const textQtyMatch = text.match(/\b(\d+(?:\.\d+)?)\s*(?:mt|ton|tons|tonne|tonnes|metric\s+ton|kg|kgs|kilogram|sheet|sheets|plate|plates|coil|coils|pcs|piece|pieces|nos|bar|bars)\b/i);
+      if (textQtyMatch) {
+        const extractedQty = Number(textQtyMatch[1]) || 0;
+        rawItems[0].quantity = extractedQty;
+        rawItems[0].quantity_mt = extractedQty;
+      }
     }
 
     let processedItems = [];
     let calculatedTotal = 0;
-    let hasUnlistedMaterial = false;
-    let unlistedMaterialName = '';
 
     const GENERIC_PRODUCT_REGEX = /^(steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined)$/i;
 
@@ -919,16 +928,13 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         pName = null;
       }
 
-      const qty = Number(item.quantity_mt || item.quantity || item.qty || 0) || 0;
-      let rate = Number(item.rate_per_mt || item.rate || item.unitPrice || 0) || 0;
+      const qty = Number(item.quantity || item.quantity_mt || item.qty || 0) || 0;
+      const unit = item.unit || 'MT';
+      const rawRate = item.rate_per_mt !== undefined && item.rate_per_mt !== null && item.rate_per_mt !== '' ? Number(item.rate_per_mt) : (item.rate ? Number(item.rate) : null);
+      const rate = rawRate && rawRate > 0 ? rawRate : null;
       const rawDim = item.dimensions || (pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pName.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : (text.match(/(\d+(?:\.\d+)?)\s*mm/i) ? text.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null));
 
-      if (pName) {
-        if (!rate && (qty > 0 || data.action === 'purchase_order')) {
-          hasUnlistedMaterial = true;
-          unlistedMaterialName = pName;
-        }
-      } else if (qty > 0) {
+      if (!pName && qty > 0) {
         // Quantity specified but NO specific metal product name was mentioned!
         const pendingContext = {
           action: data.action || 'inquiry',
@@ -942,68 +948,46 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           po_number: data.po_number || null,
           po_date: data.po_date || null,
           quantity_mt: qty,
-          unit: 'MT',
+          unit: unit,
           confidence: data.confidence || 0.95,
         };
         const { saveActiveSession } = require('../supabase');
         await saveActiveSession(
           senderPhone,
           finalCustomerName,
-          `pending_product_for_deal|${finalCustomerName}|${qty}|MT|${JSON.stringify(pendingContext)}`
+          `pending_product_for_deal|${finalCustomerName}|${qty}|${unit}|${JSON.stringify(pendingContext)}`
         );
         return `❓ *Which metal product is ${finalCustomerName} asking for?*\n\n` +
-          `You specified a quantity of *${qty} MT*, but no specific metal product was mentioned.\n\n` +
+          `You specified a quantity of *${qty} ${unit}*, but no specific metal product was mentioned.\n\n` +
           `Please reply with the product name (e.g. _HR Coil_, _CR Sheet_, _TMT Bar_, _MS Plates_) so I can record the requirement for your Sales Pipeline! 📈`;
       }
 
-      if (qty > 0 && pName && rate > 0) {
-        const lineCalc = calculateLineItem({ quantity: qty, rate });
-        const itemAmount = lineCalc.amount;
-        calculatedTotal += itemAmount;
+      if (pName || qty > 0) {
+        const itemPName = pName || 'Product Requirement';
+        if (qty > 0 && rate && rate > 0) {
+          const lineCalc = calculateLineItem({ quantity: qty, rate, unit });
+          const itemAmount = lineCalc.amount;
+          calculatedTotal += itemAmount;
 
-        processedItems.push({
-          pName,
-          dimensions: rawDim,
-          qty,
-          rate,
-          itemAmount,
-        });
+          processedItems.push({
+            pName: itemPName,
+            dimensions: rawDim,
+            qty,
+            unit,
+            rate,
+            itemAmount,
+          });
+        } else {
+          processedItems.push({
+            pName: itemPName,
+            dimensions: rawDim,
+            qty,
+            unit,
+            rate: null,
+            itemAmount: null,
+          });
+        }
       }
-    }
-
-    if (hasUnlistedMaterial && calculatedTotal === 0) {
-      const pendingContext = {
-        action: data.action || 'inquiry',
-        customer_name: finalCustomerName,
-        customer_phone: actualCustomerPhone || data.customer_phone || null,
-        target_stage: targetStage || 'new_inquiry',
-        raw_text: data.raw_text || text,
-        unlisted_material: unlistedMaterialName,
-        delivery_location: data.delivery_location || null,
-        delivery_date: data.delivery_date || null,
-        payment_terms: data.payment_terms || null,
-        po_number: data.po_number || null,
-        po_date: data.po_date || null,
-        line_items: rawItems.map((ri, idx) => {
-          const pi = processedItems[idx];
-          return {
-            product_requirement: pi?.pName || ri.product_requirement,
-            dimensions: pi?.dimensions || ri.dimensions || (text.match(/(\d+(?:\.\d+)?)\s*mm/i) ? text.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null),
-            quantity_mt: pi?.qty || ri.quantity_mt || 0,
-            rate_per_mt: pi?.rate || ri.rate_per_mt || null,
-          };
-        }),
-        confidence: data.confidence || 0.95,
-      };
-
-      const { saveActiveSession } = require('../supabase');
-      await saveActiveSession(
-        senderPhone,
-        finalCustomerName,
-        `pending_custom_rate|${finalCustomerName}|${unlistedMaterialName}|${JSON.stringify(pendingContext)}`
-      );
-      return `⚠️ *Rate Required*\n\n` +
-        `Please provide the rate per MT for *${unlistedMaterialName}* (e.g. reply _"54000"_ or _"${unlistedMaterialName} rate 54000"_) so I can calculate the quotation and update your Sales Pipeline! 📈`;
     }
 
     let dealAmount = 0;
@@ -1239,25 +1223,27 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       length: null,
       productForm: deriveProductForm(processedItems[0]?.pName || data.product_requirement),
       quantityTons: totalQty || processedItems[0]?.qty || 0,
-      unitPrice: processedItems[0]?.rate || 0,
-      total_amount: dealAmount || pricingSummary.subtotal,
-      totalAmount: dealAmount || pricingSummary.subtotal,
-      subtotal: pricingSummary.subtotal,
-      gst_amount: pricingSummary.gstAmount,
-      grand_total: pricingSummary.grandTotal,
+      unitPrice: processedItems[0]?.rate > 0 ? processedItems[0]?.rate : null,
+      total_amount: dealAmount > 0 ? dealAmount : (pricingSummary.subtotal > 0 ? pricingSummary.subtotal : null),
+      totalAmount: dealAmount > 0 ? dealAmount : (pricingSummary.subtotal > 0 ? pricingSummary.subtotal : null),
+      subtotal: pricingSummary.subtotal > 0 ? pricingSummary.subtotal : null,
+      gst_amount: pricingSummary.gstAmount > 0 ? pricingSummary.gstAmount : null,
+      grand_total: pricingSummary.grandTotal > 0 ? pricingSummary.grandTotal : null,
       line_items: processedItems.map((pi) => ({
         sku_text: pi.pName,
         dimensions: pi.dimensions || '',
         quantity: pi.qty,
-        unit: 'MT',
-        rate: pi.rate,
-        amount: pi.itemAmount,
+        unit: pi.unit || 'MT',
+        rate: pi.rate > 0 ? pi.rate : null,
+        amount: pi.itemAmount > 0 ? pi.itemAmount : null,
       })),
       financialSummary: {
-        subtotal: pricingSummary.subtotal,
-        gstAmount: pricingSummary.gstAmount,
-        grandTotal: pricingSummary.grandTotal,
+        subtotal: pricingSummary.subtotal > 0 ? pricingSummary.subtotal : null,
+        gstAmount: pricingSummary.gstAmount > 0 ? pricingSummary.gstAmount : null,
+        grandTotal: pricingSummary.grandTotal > 0 ? pricingSummary.grandTotal : null,
       },
+      preferred_make: data.preferred_make || null,
+      preferredMake: data.preferred_make || null,
       overall_confidence: data.confidence || 0.95,
     };
 
@@ -1370,7 +1356,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             sku_text: pItem.pName,
             dimensions: pItem.dimensions || (pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null),
             quantity: pItem.qty > 0 ? pItem.qty : null,
-            unit: 'MT',
+            unit: pItem.unit || 'MT',
             rate: pItem.rate > 0 ? pItem.rate : null,
             amount: pItem.itemAmount > 0 ? pItem.itemAmount : null,
             created_at: new Date().toISOString(),
@@ -1437,7 +1423,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             sku_text: pItem.pName,
             dimensions: pItem.dimensions || (pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null),
             quantity: pItem.qty > 0 ? pItem.qty : null,
-            unit: 'MT',
+            unit: pItem.unit || 'MT',
             rate: pItem.rate > 0 ? pItem.rate : null,
             amount: pItem.itemAmount > 0 ? pItem.itemAmount : null,
             created_at: new Date().toISOString(),
@@ -1523,9 +1509,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       itemsBreakdownStr = processedItems
         .map((pi) => {
           const dimStr = pi.dimensions ? ` (${pi.dimensions})` : '';
-          const rateStr = pi.rate > 0 ? ` @ ₹${Number(pi.rate).toLocaleString('en-IN')}/MT` : '';
+          const unitStr = pi.unit || 'MT';
+          const qtyStr = pi.qty > 0 ? `: ${pi.qty} ${unitStr}` : '';
+          const rateStr = pi.rate > 0 ? ` @ ₹${Number(pi.rate).toLocaleString('en-IN')}/${unitStr}` : '';
           const amtStr = pi.itemAmount > 0 ? ` = ₹${Number(pi.itemAmount).toLocaleString('en-IN')}` : '';
-          return `  • *${pi.pName}*${dimStr}${pi.qty > 0 ? ': ' + pi.qty + ' MT' : ''}${rateStr}${amtStr}`;
+          return `  • *${pi.pName}*${dimStr}${qtyStr}${rateStr}${amtStr}`;
         })
         .join('\n');
     }
@@ -1539,10 +1527,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       `Deal ID: *${dealCode}*\n` +
       `Stage: *${dbStage.toUpperCase()} 📄*\n` +
       (itemsBreakdownStr ? `Line Items:\n${itemsBreakdownStr}\n` : '') +
-      (totalQty > 0 ? `Total Quantity: *${totalQty} MT*\n` : '') +
-      (dealAmount > 0 ? `Quotation Subtotal: *₹${Number(dealAmount).toLocaleString('en-IN')}* + GST (₹${Number(gstVal).toLocaleString('en-IN')})\nGrand Total: *₹${Number(grandTot).toLocaleString('en-IN')}*\n` : '') +
-      (data.delivery_location ? `Delivery Location: *${data.delivery_location}*\n` : '') +
+      (data.preferred_make ? `Preferred Make: *${data.preferred_make}*\n` : '') +
+      (finalDeliveryLoc ? `Delivery Location: *${finalDeliveryLoc}*\n` : '') +
+      (finalPaymentTerms ? `Payment Terms: *${finalPaymentTerms}*\n` : '') +
       (data.delivery_date ? `Target Delivery Date: *${data.delivery_date}*\n` : '') +
+      (dealAmount > 0 ? `Quotation Subtotal: *₹${Number(dealAmount).toLocaleString('en-IN')}* + GST (₹${Number(gstVal).toLocaleString('en-IN')})\nGrand Total: *₹${Number(grandTot).toLocaleString('en-IN')}*\n` : '') +
       `\nLogged to Sales Pipeline & Inquiries! 📋`;
 
     if (missingPrompt) {

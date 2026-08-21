@@ -492,47 +492,7 @@ router.post('/', async (req, res) => {
             return;
           }
 
-          if (activeSession?.last_intent?.startsWith('pending_custom_rate|')) {
-            const parts = activeSession.last_intent.split('|');
-            const customerName = parts[1];
-            const materialName = parts[2];
-            const rawContextStr = parts.slice(3).join('|');
 
-            const cleanInput = raw_text.trim();
-            await saveActiveSession(senderPhone, customerName, 'general');
-
-            const rateMatch = cleanInput.match(/\d[\d,.]*/);
-            const customRate = rateMatch ? Number(rateMatch[0].replace(/,/g, '')) : 0;
-
-            if (customRate > 0) {
-              const { safeParseJSON } = require('./utils/jsonUtils');
-              const storedContext = safeParseJSON(rawContextStr, null);
-              const { processSalesMessage } = require('./agents/salesAgent');
-
-              if (storedContext && Array.isArray(storedContext.line_items) && storedContext.line_items.length > 0) {
-                // Merge the confirmed rate into the preserved original context
-                storedContext.line_items = storedContext.line_items.map((item) => {
-                  const reqName = (item.product_requirement || '').toLowerCase();
-                  const unlistedLower = (materialName || '').toLowerCase();
-                  if (!item.rate_per_mt && (reqName.includes(unlistedLower) || unlistedLower.includes(reqName) || storedContext.line_items.length === 1)) {
-                    return { ...item, rate_per_mt: customRate };
-                  }
-                  return item;
-                });
-                storedContext.target_stage = 'quoted';
-
-                const reply = await processSalesMessage(storedContext.raw_text || raw_text, senderPhone, storedContext);
-                await sendTextMessage(senderPhone, reply);
-                return;
-              }
-
-              // Fallback if context was not serialized
-              const syntheticText = `${customerName} requirement ${materialName} rate ${customRate}`;
-              const reply = await processSalesMessage(syntheticText, senderPhone);
-              await sendTextMessage(senderPhone, reply);
-              return;
-            }
-          }
 
           if (activeSession?.last_intent?.startsWith('pending_deal_choice|')) {
             const parts = activeSession.last_intent.split('|');
