@@ -62,14 +62,21 @@ create table if not exists complaints (
   id uuid default gen_random_uuid() primary key,
   customer_name text,
   complaint_type text,
+  affected_product text,
   description text,
   reported_by text,
   reported_at timestamptz default now(),
+  sla_due_at timestamptz,
   resolved_at timestamptz,
+  resolution_notes text,
   resolution_time_hrs numeric,
   status text default 'pending',
   escalated boolean default false
 );
+
+ALTER TABLE complaints ADD COLUMN IF NOT EXISTS affected_product text;
+ALTER TABLE complaints ADD COLUMN IF NOT EXISTS sla_due_at timestamptz;
+ALTER TABLE complaints ADD COLUMN IF NOT EXISTS resolution_notes text;
 
 -- Payment tracking (KRA 5)
 create table if not exists payment_tracking (
