@@ -43,11 +43,11 @@ async function handleConversationalQuery(text, senderPhone) {
 
     // Role-aware blocked response for admin actions / product suggestions
     const adminBlockedMessage = isAdmin
-      ? `🔗 *This action requires Dashboard access.*\n\n` +
+      ? `*This action requires Dashboard access.*\n\n` +
         `Admin operations and configurations are available on the portal:\n\n` +
-        `👉 ${dashboardUrl}\n\n` +
+        `${dashboardUrl}\n\n` +
         `Log in with your admin credentials to proceed.`
-      : `⚠️ *I do not have the capability to perform this action.*\n\n` +
+      : `*I do not have the capability to perform this action.*\n\n` +
         `This action or recommendation is not supported by the assistant. Please contact your Sales Lead or Admin.`;
 
     const ASSISTANT_SYSTEM_PROMPT = `
@@ -70,7 +70,7 @@ CRITICAL GUARDRAILS & RESTRICTIONS (Must obey strictly):
 GUIDELINES:
 1. Always respond in the same language style as the user (English, Hindi, or Hinglish).
 2. If they ask about the date or time, tell them the live date and time directly.
-3. Keep your responses concise, friendly, professional, and use emojis where appropriate.
+3. Keep your responses concise, clear, professional, and NEVER use emojis.
 4. If they are trying to log a transaction (like marking a deal won, logging a payment, visit, inquiry, or complaint), guide them on the correct phrasing (e.g. "To log a new inquiry, say 'Supreme Steel 20 MT HR Coil rate 52000 Delivery Pune'").
 5. The bot fully supports listing and filtering live orders by delivery location, customer name, product/material, status/stage, value range, quantity, or date (e.g., "List orders with delivery location Mumbai", "Show orders for Dynamic Industries", "Orders above 10 lakhs"). Never claim the bot cannot list orders.
 `;
@@ -88,7 +88,7 @@ GUIDELINES:
     return reply;
   } catch (error) {
     console.error('Conversational assistant error:', error.message);
-    return `⚠️ Sorry, I encountered an error answering your question: ${error.message}`;
+    return `Sorry, I encountered an error answering your question: ${error.message}`;
   }
 }
 

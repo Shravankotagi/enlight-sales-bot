@@ -761,15 +761,17 @@ async function getCustomerMissingInfoPrompt(customerName, senderPhone) {
 
     const customer = data[0];
     const missing = [];
-    if (!customer.customer_phone)   missing.push('• 📱 *Mobile Number*');
-    if (!customer.contact_person)   missing.push('• 👤 *Contact Person / Owner*');
-    if (!customer.customer_address)  missing.push('• 📍 *City / Location*');
-    if (!customer.customer_gst)      missing.push('• 🧾 *GSTIN* (optional)');
+    if (!customer.customer_phone) missing.push('• *Mobile Number*');
+    if (!customer.contact_person) missing.push('• *Contact Person / Owner*');
+    if (!customer.customer_address) missing.push('• *City / Location*');
+    if (!customer.customer_gst) missing.push('• *GSTIN* (optional)');
 
     if (missing.length > 0) {
-      return `\n\n📌 *Missing profile details for ${customerName}:*\n` +
+      return (
+        `\n\n*Missing profile details for ${customerName}:*\n` +
         missing.join('\n') +
-        `\n\n_(You can update these details anytime by simply replying in your own words, e.g. "Supreme Steel phone is 9876543210 owner Mr. Kapoor" or "Supreme location is Nashik")_`;
+        `\n\n_(You can update these details anytime by simply replying in your own words, e.g. "Supreme Steel phone is 9876543210 owner Mr. Kapoor" or "Supreme location is Nashik")_`
+      );
     }
   } catch (err) {
     console.error('getCustomerMissingInfoPrompt error:', err.message);

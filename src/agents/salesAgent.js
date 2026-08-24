@@ -597,10 +597,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       // 1. Immediately reject invalid/nonsense units (e.g. "15 apple") before processing
       const invalidUnitCheck = detectInvalidUnitInMessage(text);
       if (invalidUnitCheck) {
-        return `❌ *Invalid Quantity Unit*\n\n` +
+        return `*Invalid Quantity Unit*\n\n` +
           `You specified *${invalidUnitCheck.number} ${invalidUnitCheck.invalidUnit}*.\n\n` +
           `Metal products cannot be measured in *"${invalidUnitCheck.invalidUnit}"*.\n\n` +
-          `Please specify the quantity using a valid unit (e.g. **15 MT**, **1500 Kg**, **100 Sheets**, or **50 Pcs**).`;
+          `Please specify the quantity using a valid unit (e.g. *15 MT*, *1500 Kg*, *100 Sheets*, or *50 Pcs*).`;
       }
 
       try {
@@ -1183,8 +1183,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         `pending_delivery_location|${dealId || existingDeal?.id || 'null'}|${finalCustomerName}|${JSON.stringify(pendingWonContext)}`
       );
 
-      return `📍 *Delivery Location Required Before Confirmation*\n\n` +
-        `Please provide the delivery location for **${finalCustomerName}** (e.g. reply _"Pune"_ or _"Deliver to Mumbai"_) before I can confirm this order and generate the PO.`;
+      return `*Delivery Location Required Before Confirmation*\n\n` +
+        `Please provide the delivery location for *${finalCustomerName}* (e.g. reply "Pune" or "Deliver to Mumbai") before I can confirm this order and generate the PO.`;
     }
 
     const totalQty = processedItems.reduce((s, i) => s + i.qty, 0);
@@ -1322,16 +1322,16 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         } else {
           const { saveActiveSession } = require('../supabase');
           await saveActiveSession(senderPhone, finalCustomerName, `pending_loss_reason|${dealId}|${finalCustomerName}`);
-          return `❌ *Marking Deal as Lost: ${finalCustomerName}*\n\n` +
+          return `*Marking Deal as Lost: ${finalCustomerName}*\n\n` +
             `Please reply with the reason for rejection (reply with a number or type your own reason):\n\n` +
-            `1️⃣ Price too high\n` +
-            `2️⃣ Credit terms / Payment terms mismatch\n` +
-            `3️⃣ Delivery timeline delay\n` +
-            `4️⃣ Material unavailable / Out of stock\n` +
-            `5️⃣ Spec mismatch\n` +
-            `6️⃣ Competitor relationship\n` +
-            `7️⃣ Customer silent / No response\n` +
-            `8️⃣ Cancelled by customer`;
+            `1. Price too high\n` +
+            `2. Credit terms / Payment terms mismatch\n` +
+            `3. Delivery timeline delay\n` +
+            `4. Material unavailable / Out of stock\n` +
+            `5. Spec mismatch\n` +
+            `6. Competitor relationship\n` +
+            `7. Customer silent / No response\n` +
+            `8. Cancelled by customer`;
         }
       }
 
@@ -1376,16 +1376,16 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             `pending_loss_reason|null|${finalCustomerName}`,
           );
 
-          return `❓ *Deal Marked as Lost — Reason Required*\n\n` +
+          return `*Deal Marked as Lost — Reason Required*\n\n` +
             `Please specify why the deal for *${finalCustomerName}* was lost:\n\n` +
-            `1️⃣ Price too high\n` +
-            `2️⃣ Payment/Credit terms mismatch\n` +
-            `3️⃣ Delivery timeline issue\n` +
-            `4️⃣ Material unavailable / Out of stock\n` +
-            `5️⃣ Spec mismatch\n` +
-            `6️⃣ Competitor relationship\n` +
-            `7️⃣ Customer silent / No response\n` +
-            `8️⃣ Cancelled by customer`;
+            `1. Price too high\n` +
+            `2. Payment/Credit terms mismatch\n` +
+            `3. Delivery timeline issue\n` +
+            `4. Material unavailable / Out of stock\n` +
+            `5. Spec mismatch\n` +
+            `6. Competitor relationship\n` +
+            `7. Customer silent / No response\n` +
+            `8. Cancelled by customer`;
         }
       }
 
@@ -1458,10 +1458,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           kra_type: 'sales_achievement',
           metric_name: 'won_deal_value',
           value: dealAmount,
-          notes: `Won deal for ${finalCustomerName}: ₹${dealAmount.toLocaleString('en-IN')}`,
+          notes: `Won deal for ${finalCustomerName}: Rs. ${dealAmount.toLocaleString('en-IN')}`,
           created_at: new Date().toISOString(),
         });
-        console.log(`[SalesAgent] Logged Sales Achievement for won deal: ${finalCustomerName} = ₹${dealAmount}`);
+        console.log(`[SalesAgent] Logged Sales Achievement for won deal: ${finalCustomerName} = Rs. ${dealAmount}`);
       }
     }
 
@@ -1489,13 +1489,13 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     if (dbStage === 'won') {
       let resultMsg =
-        `🎉 *DEAL WON & ORDER CONFIRMED!* 🏆\n\n` +
+        `*DEAL WON & ORDER CONFIRMED!*\n\n` +
         `Customer: *${finalCustomerName}*\n` +
         `Deal ID: *${dealCode}*\n` +
-        `Official PO Number: *${poNumber}* 📄\n` +
-        `Total Value: *₹${Number(dealAmount).toLocaleString('en-IN')}* + GST\n` +
+        `Official PO Number: *${poNumber}*\n` +
+        `Total Value: *Rs. ${Number(dealAmount).toLocaleString('en-IN')}* + GST\n` +
         (poDate ? `PO Date: *${poDate}*\n` : '') +
-        `\nUpdated Sales Achievement Card! ✅`;
+        `\nUpdated Sales Achievement Card!`;
 
       if (missingPrompt) {
         resultMsg += `\n\n${missingPrompt}`;
@@ -1511,8 +1511,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           const dimStr = pi.dimensions ? ` (${pi.dimensions})` : '';
           const unitStr = pi.unit || 'MT';
           const qtyStr = pi.qty > 0 ? `: ${pi.qty} ${unitStr}` : '';
-          const rateStr = pi.rate > 0 ? ` @ ₹${Number(pi.rate).toLocaleString('en-IN')}/${unitStr}` : '';
-          const amtStr = pi.itemAmount > 0 ? ` = ₹${Number(pi.itemAmount).toLocaleString('en-IN')}` : '';
+          const rateStr = pi.rate > 0 ? ` @ Rs. ${Number(pi.rate).toLocaleString('en-IN')}/${unitStr}` : '';
+          const amtStr = pi.itemAmount > 0 ? ` = Rs. ${Number(pi.itemAmount).toLocaleString('en-IN')}` : '';
           return `  • *${pi.pName}*${dimStr}${qtyStr}${rateStr}${amtStr}`;
         })
         .join('\n');
@@ -1522,17 +1522,17 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     const grandTot = calculateGrandTotal(dealAmount);
 
     let resultMsg =
-      `💼 *Sales Inquiry & Pipeline Logged!* 🏗️\n\n` +
+      `*Sales Inquiry & Pipeline Logged!*\n\n` +
       `Customer: *${finalCustomerName}*\n` +
       `Deal ID: *${dealCode}*\n` +
-      `Stage: *${dbStage.toUpperCase()} 📄*\n` +
+      `Stage: *${dbStage.toUpperCase()}*\n` +
       (itemsBreakdownStr ? `Line Items:\n${itemsBreakdownStr}\n` : '') +
       (data.preferred_make ? `Preferred Make: *${data.preferred_make}*\n` : '') +
       (finalDeliveryLoc ? `Delivery Location: *${finalDeliveryLoc}*\n` : '') +
       (finalPaymentTerms ? `Payment Terms: *${finalPaymentTerms}*\n` : '') +
       (data.delivery_date ? `Target Delivery Date: *${data.delivery_date}*\n` : '') +
-      (dealAmount > 0 ? `Quotation Subtotal: *₹${Number(dealAmount).toLocaleString('en-IN')}* + GST (₹${Number(gstVal).toLocaleString('en-IN')})\nGrand Total: *₹${Number(grandTot).toLocaleString('en-IN')}*\n` : '') +
-      `\nLogged to Sales Pipeline & Inquiries! 📋`;
+      (dealAmount > 0 ? `Quotation Subtotal: *Rs. ${Number(dealAmount).toLocaleString('en-IN')}* + GST (Rs. ${Number(gstVal).toLocaleString('en-IN')})\nGrand Total: *Rs. ${Number(grandTot).toLocaleString('en-IN')}*\n` : '') +
+      `\nLogged to Sales Pipeline & Inquiries!`;
 
     if (missingPrompt) {
       resultMsg += `\n\n${missingPrompt}`;
@@ -1541,7 +1541,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     return resultMsg;
   } catch (error) {
     console.error('[SalesAgent] Error processing sales message:', error);
-    return `⚠️ Error updating deal: ${error.message}`;
+    return `Error updating deal: ${error.message}`;
   }
 }
 

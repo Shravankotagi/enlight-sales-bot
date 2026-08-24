@@ -9,6 +9,51 @@ const httpsAgent = new https.Agent({
 });
 
 /**
+ * Formats text for WhatsApp display:
+ * 1. Strips all emojis for clean B2B professional presentation.
+ * 2. Normalizes list bullets (*, -, + at start of line) to clean bullet points (• ).
+ * 3. Converts markdown headers (# Title) to bold *Title*.
+ * 4. Converts markdown bold (**text** or ***text***) to WhatsApp bold (*text*).
+ * 5. Cleans up stray formatting, extra asterisks, and redundant line breaks.
+ */
+function formatForWhatsApp(text) {
+  if (!text || typeof text !== 'string') return '';
+  let out = text;
+
+  // 1. Remove all emojis (user directive: no emojis)
+  out = out.replace(
+    /[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F1E6}-\u{1F1FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA70}-\u{1FAFF}\u{200D}\u{FE0F}]/gu,
+    '',
+  );
+  out = out.replace(/[ \t]{2,}/g, ' ');
+
+  // 2. Convert markdown bullet lists (* item, - item, + item) to bullet symbol (• item)
+  // Must run BEFORE bold conversions so "* item" is not treated as unclosed bold formatting
+  out = out.replace(/^(\s*)[*\-+]\s+/gm, '$1• ');
+
+  // 3. Convert markdown headers (### Header) to WhatsApp bold (*Header*)
+  out = out.replace(/^#{1,6}\s+(.+)$/gm, '*$1*');
+
+  // 4. Convert markdown bold/italic combos ***text*** to *text*
+  out = out.replace(/\*\*\*([^*]+)\*\*\*/g, '*$1*');
+
+  // 5. Convert markdown bold **text** to WhatsApp bold *text*
+  out = out.replace(/\*\*([^*]+)\*\*/g, '*$1*');
+
+  // 6. Clean citation tags [Source: Document]
+  out = out.replace(/\[Source:\s*([^\]]+)\]/g, '\n(Source: $1)');
+
+  // 7. Clean up multiple empty lines and trailing whitespace
+  out = out.replace(/\n{3,}/g, '\n\n');
+  out = out
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .join('\n');
+
+  return out.trim();
+}
+
+/**
  * Sends a text message to a user on WhatsApp via Meta Cloud API with retries and IPv4 binding.
  * @param {string} to - The recipient's phone number with country code.
  * @param {string} message - The text message body.
@@ -19,6 +64,12 @@ async function sendTextMessage(to, message) {
 
   if (!token || !phoneNumberId) {
     console.error("Missing WHATSAPP_TOKEN or WHATSAPP_PHONE_NUMBER_ID in environment variables");
+    return null;
+  }
+
+  const formattedMessage = formatForWhatsApp(message);
+  if (!formattedMessage) {
+    console.warn("Message body was empty after formatting; skipping WhatsApp send.");
     return null;
   }
 
@@ -34,7 +85,7 @@ async function sendTextMessage(to, message) {
           recipient_type: "individual",
           to: to,
           type: "text",
-          text: { body: message }
+          text: { body: formattedMessage }
         },
         {
           headers: {
