@@ -12,6 +12,8 @@ function logBotActivity({ salesperson_name, salesperson_phone, description, modu
       description,
       module,
       customer_name: customer_name || null,
+      source: 'bot',
+      action_type: 'activity',
     };
 
     Promise.resolve(
