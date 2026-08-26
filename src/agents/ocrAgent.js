@@ -12,6 +12,7 @@
 
 const { supabase, saveInquiry, verifyAndGetCustomerName } = require('../supabase');
 const { extractFromImage } = require('../gemini');
+const { logBotActivity } = require('../utils/activityLogger');
 const {
   calculateLineItems,
   calculateSubtotal,
@@ -394,6 +395,27 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
       } catch (payErr) {
         console.warn('[OCRAgent] Payment tracking notice:', payErr.message);
       }
+    }
+
+    // Log to activity_logs
+    try {
+      if (isPo) {
+        logBotActivity({
+          salesperson_phone: senderPhone,
+          description: `New order created for ${finalCustomerName}${poNumber ? ` (PO: ${poNumber})` : ''}`,
+          module: 'Orders',
+          customer_name: finalCustomerName,
+        });
+      } else {
+        logBotActivity({
+          salesperson_phone: senderPhone,
+          description: `New inquiry received from ${finalCustomerName} via WhatsApp Document`,
+          module: 'Inquiries',
+          customer_name: finalCustomerName,
+        });
+      }
+    } catch (actErr) {
+      console.warn('[OCRAgent] Non-blocking activity log notice:', actErr?.message);
     }
 
     let itemsBreakdown = '';

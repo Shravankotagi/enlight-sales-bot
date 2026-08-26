@@ -14,6 +14,7 @@
 const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
 const { supabase, verifyAndGetCustomerName, saveActiveSession } = require('../supabase');
 const { syncActivity } = require('./biginSyncAgent');
+const { logBotActivity } = require('../utils/activityLogger');
 
 const SALES_AGENT_PROMPT = `
 You are the Specialized Sales Achievement & Pipeline Agent for Enlight Metals (B2B Steel Distributor).
@@ -1472,6 +1473,34 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         });
         console.log(`[SalesAgent] Logged Sales Achievement for won deal: ${finalCustomerName} = Rs. ${dealAmount}`);
       }
+    }
+
+    // Log to activity_logs
+    try {
+      if (dbStage === 'won') {
+        logBotActivity({
+          salesperson_phone: senderPhone,
+          description: `New order created for ${finalCustomerName}${poNumber ? ` (PO: ${poNumber})` : ''}`,
+          module: 'Orders',
+          customer_name: finalCustomerName,
+        });
+      } else if (dbStage === 'new_inquiry' || data.action === 'inquiry') {
+        logBotActivity({
+          salesperson_phone: senderPhone,
+          description: `New inquiry received from ${finalCustomerName} via WhatsApp`,
+          module: 'Inquiries',
+          customer_name: finalCustomerName,
+        });
+      } else {
+        logBotActivity({
+          salesperson_phone: senderPhone,
+          description: `Order for ${finalCustomerName} updated to ${dbStage}`,
+          module: 'Orders',
+          customer_name: finalCustomerName,
+        });
+      }
+    } catch (actErr) {
+      console.warn('[SalesAgent] Non-blocking activity log notice:', actErr?.message);
     }
 
     // Trigger Zoho Bigin Sync
