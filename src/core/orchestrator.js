@@ -122,6 +122,7 @@ Logged to Sales Pipeline & Inquiries!
 - **CROSS-SALESPERSON REQUESTS**: If a salesperson (NOT an Admin) asks about ANOTHER salesperson's performance by name, respond: "You can only view your own performance data. Please contact your Sales Lead for team reports." Do NOT retrieve data for other salespersons.
 - **TOOL QUESTIONS / WARNINGS**: If a tool returns an interactive question or warning, YOU MUST FORWARD THAT EXACT QUESTION / PROMPT TO THE USER! Do NOT claim a deal was recorded or updated if the tool returned a confirmation prompt or warning!
 - **ALWAYS INCLUDE DEAL ID**: Whenever a tool output includes a Deal ID (e.g. #DEAL-B8018B or #DEAL-3FBBB0), YOU MUST EXPLICITLY INCLUDE THAT EXACT DEAL ID IN YOUR RESPONSE TEXT!
+- **STANDALONE COMPANY NAMES / SEARCH LOOKUPS**: If the user sends only a company/customer name (e.g. "XYZ steel", "Radhe Ispat Industries", "ABC Metals") without any product quantities, dimensions, or inquiry verbs (need/inquiry/quote/order), ALWAYS call \`query_my_data\` to check their customer profile and past records. DO NOT call \`update_deal_stage\` or create an inquiry for a standalone company name.
 - **CUSTOMER DISAMBIGUATION**: Do NOT assume or carry forward a previous customer name from conversation history for a new requirement/inquiry (starting with 'Need...', 'Requires...', 'New inquiry...') unless the user explicitly names the customer in their message or is directly replying to a multi-deal choice option!`;
 
 // ── State Definition ──────────────────────────────────────────────────────
@@ -153,6 +154,25 @@ function getDeterministicIntentHint(text) {
   const isComplaint = /\b(complaint|defective|damaged|scratch|rust|quality|rejected|rejection|faulty)\b/i.test(lower);
   const isProfileUpdate = /\b(order frequency|frequency|reorder days|order cycle|reassign customer|change frequency)\b/i.test(lower);
 
+  const hasInquiryVerb = /\b(requires|requirement|need|needs|inquiry|rfq|quote|quotation|rates?|order|chahiye|mangwa)\b/i.test(lower);
+  const hasQuantityUnit = /\b\d+(?:\.\d+)?\s*(?:ton|tons|tonne|tonnes|mt|kg|kgs|sheet|sheets|plate|plates|coil|coils|bar|bars|pcs|nos)\b/i.test(lower);
+
+  // Standalone company name lookup: Short message with no operational verbs or quantities
+  const cleanTokens = lower.replace(/[^\w\s]/g, '').trim().split(/\s+/).filter(Boolean);
+  const isBareCompanyName =
+    cleanTokens.length <= 5 &&
+    !isExplicitDealCommand &&
+    !isVisit &&
+    !isPayment &&
+    !isComplaint &&
+    !isProfileUpdate &&
+    !hasInquiryVerb &&
+    !hasQuantityUnit;
+
+  if (isBareCompanyName) {
+    return '\n[REQUIRED TOOL CALLS THIS TURN: CALL query_my_data. The message is a customer/company lookup. Check customer records and profile first before performing any action.]';
+  }
+
   const anchors = [];
 
   if (isPayment) {
@@ -168,7 +188,7 @@ function getDeterministicIntentHint(text) {
     anchors.push('CALL update_customer_profile');
   }
   if (!isVisit || isExplicitDealCommand) {
-    if (isExplicitDealCommand || /\b(requires|requirement|need|inquiry|quote|quotation|rfq|ton|mt|coil|plate|sheet|tmt|bar|hr|cr|ms)\b/i.test(lower)) {
+    if (isExplicitDealCommand || hasInquiryVerb || hasQuantityUnit) {
       anchors.push('CALL update_deal_stage');
     }
   }

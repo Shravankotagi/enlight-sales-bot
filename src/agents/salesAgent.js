@@ -990,6 +990,15 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
     }
 
+    if (processedItems.length === 0 && (targetStage === 'new_inquiry' || data.action === 'inquiry') && !overrideData) {
+      const isExplicitInquiryPhrase = /\b(inquiry|requirement|rfq|quote|quotation|rates?|order|needed|need|requires?|want|chahiye|mangwa)\b/i.test(text);
+      const hasAnyProductWord = /\b(hr|cr|ms|gi|gp|tmt|coil|coils|sheet|sheets|plate|plates|bar|bars|pipe|pipes|beam|beams|angle|angles|channel|channels)\b/i.test(text);
+      if (!isExplicitInquiryPhrase && !hasAnyProductWord) {
+        return `❓ *Inquiry Details Needed for ${finalCustomerName}*\n\n` +
+          `Please specify the metal requirement and quantity (e.g. _"${finalCustomerName} - 25 MT HR Coil"_ or _"Need rates for 10 MT CR Sheet"_).`;
+      }
+    }
+
     let dealAmount = 0;
     if (data.total_amount && Number(data.total_amount) > 0) {
       dealAmount = Number(data.total_amount);
