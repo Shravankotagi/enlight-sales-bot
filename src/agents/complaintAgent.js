@@ -27,6 +27,7 @@
 
 const { supabase } = require('../supabase');
 const { syncActivity } = require('./biginSyncAgent');
+const { logBotActivity } = require('../utils/activityLogger');
 
 const COMPLAINT_AGENT_PROMPT = `
 You are the Specialized Quality & Complaint AI Agent (KRA 7 & KRA 8) for Enlight Metals.
@@ -193,6 +194,18 @@ async function processComplaintMessage(text, senderPhone) {
           console.warn('[ComplaintAgent] Bigin sync notice:', e.message);
         }
 
+        // Log to activity_logs
+        try {
+          logBotActivity({
+            salesperson_phone: senderPhone,
+            description: `Complaint resolved for ${finalCustomerName}`,
+            module: 'Complaints',
+            customer_name: finalCustomerName,
+          });
+        } catch (actErr) {
+          console.warn('[ComplaintAgent] Non-blocking activity log notice:', actErr?.message);
+        }
+
         const { getCustomerMissingInfoPrompt } = require('../supabase');
         const missingPrompt = await getCustomerMissingInfoPrompt(finalCustomerName, senderPhone);
 
@@ -282,6 +295,18 @@ async function processComplaintMessage(text, senderPhone) {
       month: new Date().getMonth() + 1,
       year:  new Date().getFullYear(),
     });
+
+    // Log to activity_logs
+    try {
+      logBotActivity({
+        salesperson_phone: targetPhone || senderPhone,
+        description: `New complaint logged for ${finalCustomerName}`,
+        module: 'Complaints',
+        customer_name: finalCustomerName,
+      });
+    } catch (actErr) {
+      console.warn('[ComplaintAgent] Non-blocking activity log notice:', actErr?.message);
+    }
 
     // Edge Case 7: Alert the assigned salesperson if complaint came from a different sender
     if (targetPhone !== senderPhone) {

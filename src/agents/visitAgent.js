@@ -24,6 +24,7 @@
 
 const { supabase } = require('../supabase');
 const { syncActivity } = require('./biginSyncAgent');
+const { logBotActivity } = require('../utils/activityLogger');
 
 const VISIT_AGENT_PROMPT = `
 You are the Specialized Site Visit & Meeting AI Agent (KRA 9) for Enlight Metals, a B2B metal distributor.
@@ -280,6 +281,27 @@ async function processVisitMessage(text, senderPhone) {
       } catch (fErr) {
         console.error('[VisitAgent] Follow-up task creation notice:', fErr.message);
       }
+    }
+
+    // Log to activity_logs
+    try {
+      logBotActivity({
+        salesperson_phone: senderPhone,
+        description: `Site visit logged for ${finalCustomerName} at ${city || 'Client Site'}`,
+        module: 'Visits',
+        customer_name: finalCustomerName,
+      });
+
+      if (visitOutcome === 'positive' && interestProducts) {
+        logBotActivity({
+          salesperson_phone: senderPhone,
+          description: `Follow-up scheduled with ${finalCustomerName} for next ${data.followup_days || 4} days`,
+          module: 'Visits',
+          customer_name: finalCustomerName,
+        });
+      }
+    } catch (actErr) {
+      console.warn('[VisitAgent] Non-blocking activity log notice:', actErr?.message);
     }
 
     // Count ALL visits this month
