@@ -1,30 +1,32 @@
 /**
  * KRA 1 - Sales Achievement & Pipeline Agent
- * Version: 2026.08.13-v2 (Production Build Fix)
+ * Version: 2026.08.27 (Form Completion Rules & Multi-Scenario Optimization)
  *
  * DESIGN PRINCIPLES:
- * - One deal per customer inquiry. Stage updates modify THAT deal, never create a new one.
- * - A "won" event logs to KRA 1. A "lost" event logs to KRA 4 loss analytics.
- * - KRA 5 (Payment) is NEVER touched here. Payment is explicitly separate.
- * - PO images mark the existing deal as won, never create a duplicate deal.
- * - Multi-item requirements (e.g. 20 MT CR Sheets + 10 MT MS Plates) extract as SEPARATE line items,
- *   match each against the rate sheet individually, and compute exact total.
+ * - A New Inquiry requires at minimum: Customer/Company Name AND at least one Product Name.
+ * - Non-product fields alone (rate, delivery, payment terms) are treated as deal updates or require deal context.
+ * - Missing mandatory fields (Company, Product, Qty+Unit, Rate, Delivery Location, Payment Terms) are tracked.
+ * - Incomplete inquiries stay in "new_inquiry" stage and list remaining required fields with Deal ID.
+ * - Complete inquiries confirm all fields are present.
+ * - Updates using Deal ID or unique active deal merge fields without duplicate creation.
  */
 
 const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
 const { supabase, verifyAndGetCustomerName, saveActiveSession } = require('../supabase');
 const { syncActivity } = require('./biginSyncAgent');
 const { logBotActivity } = require('../utils/activityLogger');
+const { detectHsnCode } = require('../utils/hsnDetector');
 
 const SALES_AGENT_PROMPT = `
 You are the Specialized Sales Achievement & Pipeline Agent for Enlight Metals (B2B Steel Distributor).
-Your job is to analyze salesperson messages reporting sales actions, deal status updates, stage changes, or customer product requirements/inquiries.
+Your job is to analyze salesperson messages reporting sales actions, deal status updates, stage changes, customer product requirements/inquiries, or updates to existing deals.
 
 Input message can be English, Hindi, or Hinglish.
 
 Extract into ONLY a JSON object (no markdown, no prose, no backticks):
 {
-  "action": "stage_update|purchase_order|inquiry",
+  "action": "stage_update|purchase_order|inquiry|deal_update",
+  "deal_id": "<deal ID if mentioned e.g. #DEAL-C538B6, DEAL-C538B6, or C538B6, else null>",
   "customer_name": "<exact company/customer name requesting material or placing order, else null>",
   "contact_person": "<full name of customer contact person/owner/proprietor if mentioned e.g. Rajesh Mehta, else null>",
   "customer_phone": "<customer phone number ONLY if explicitly provided in text e.g. 9812345670, else null>",
@@ -42,7 +44,7 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
   "total_amount": <numeric total deal value in rupees ONLY if explicitly mentioned in text, else 0>,
   "delivery_location": "<full exact address/city/location if mentioned e.g. Hunsal Village, Khopoli, Raigad, Maharashtra - 410203, Pune, else null>",
   "delivery_date": "<delivery deadline in YYYY-MM-DD format using current year 2026 if mentioned e.g. 2026-08-25 for 'before 25 August', else null>",
-  "payment_terms": "<payment terms e.g. 45 days, 30 days credit, else null>",
+  "payment_terms": "<payment terms e.g. 45 days, 30 days credit, 100% advance, else null>",
   "preferred_make": "<preferred make/brand if stated e.g. Tata, JSW, SAIL, else null>",
   "po_number": "<PO number if mentioned, else null>",
   "po_date": "<PO date / target PO date in YYYY-MM-DD format using year 2026 e.g. 2026-08-28 for '28 August', else null>",
@@ -50,17 +52,35 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
   "confidence": <float 0.0 to 1.0>
 }
 
-CRITICAL EXTRACTION RULES & CONTEXT DISAMBIGUATION:
-1. CUSTOMER NAME: Extract the customer/company name requesting the product (e.g. from "Traders Pvt Ltd..." -> customer_name is "Traders Pvt Ltd"). If no company is explicitly mentioned, customer_name MUST be null. NEVER output the salesperson's name as customer_name.
-2. CONTACT PERSON: Extract the contact person, owner, or proprietor name if explicitly provided (e.g. from "Contact Person: Rajesh Mehta" -> contact_person is "Rajesh Mehta"). NEVER output the salesperson's name.
-3. MULTIPLE LINE ITEMS: If the message lists multiple products (e.g. "CR 1mm 1250x2500 - 300 nos, CR 1.2mm 1250x2500 - 200 nos, HR 1.6mm 1250x2500 - 200 nos"), extract each as a SEPARATE object in the line_items array with its own product name, dimensions, quantity, and unit.
-4. SPECIFICATIONS: Extract thickness and full dimensions explicitly stated (e.g. "1mm 1250x2500" -> dimensions: "1mm 1250x2500"). NEVER drop dimensions.
-5. CUSTOMER PHONE: Extract 10-digit customer mobile/phone number if provided in the text.
-6. TARGET PO DATE: When target PO date is mentioned, convert to YYYY-MM-DD format with year 2026 and assign to po_date.
-7. PAYMENT TERMS: Extract payment terms and credit duration (e.g. "Payment terms 45 days" -> "45 days"). "45 days" in payment context is credit duration in payment_terms, NEVER product quantity.
-8. DELIVERY LOCATION: Extract the full address and delivery destination (e.g. "Hunsal Village, Khopoli, Raigad, Maharashtra - 410203"). Include all details and pincode.
-9. PREFERRED MAKE / BRAND: Extract preferred manufacturer if mentioned (e.g. "Preferred Make: Tata" -> preferred_make: "Tata").
-10. TARGET PRICE / RATE IS OPTIONAL: If the salesperson explicitly provided a rate (e.g. "rate 52000" or "@ ₹50/kg"), extract it as rate_per_mt. If NO rate is given (or "rates required" / "rates needed" is stated), rate_per_mt MUST be null. Under NO circumstances require a rate or ask for a rate. The inquiry will be logged directly to the Inquiries tab with blank/null rates.
+CRITICAL EXTRACTION & FORM COMPLETION RULES:
+1. WHAT MAKES A VALID NEW INQUIRY:
+   - A New Inquiry requires at minimum: CUSTOMER/COMPANY NAME AND AT LEAST ONE PRODUCT NAME (e.g. HR Coil, CR Sheet, MS Plate, TMT Bar).
+   - Company name alone, delivery location alone, rate alone, or payment terms alone do NOT constitute a New Inquiry.
+   - If ONLY supporting fields (delivery, rate, payment terms, or quantity) are provided without a product name, action MUST be "deal_update" (not "inquiry").
+
+2. MANDATORY FIELDS FOR INQUIRY COMPLETION:
+   - Company Name ✱
+   - Product Description / SKU ✱
+   - Quantity and Unit ✱
+   - Rate (₹) ✱
+   - HSN/SAC ✱ (auto-detected)
+   - Delivery Location / Address ✱
+   - Payment Terms ✱
+
+3. DEAL ID & EXISTING DEAL UPDATES:
+   - If the salesperson mentions a Deal ID (e.g. "#DEAL-C538B6", "DEAL-C538B6", or "C538B6"), extract it into deal_id.
+   - When deal_id is provided or inferred, update only the provided fields on that specific deal and never create a duplicate.
+
+4. MULTIPLE LINE ITEMS:
+   - Extract each item as a separate object in line_items array with product name, dimensions, quantity, unit, and rate.
+   - Never drop dimensions (e.g. "1mm 1250x2500").
+
+5. PAYMENT TERMS & DELIVERY:
+   - "45 days" or "30 days" in credit context is payment_terms, never product quantity.
+   - Extract full delivery location/address and city.
+
+6. TARGET RATE:
+   - If given, extract as rate_per_mt. If no rate is mentioned, rate_per_mt MUST be null.
 
 Return ONLY the JSON object.
 `;
@@ -89,19 +109,15 @@ function getProductFamily(name) {
   return null;
 }
 
-/**
- * Check if a product text matches existing deal line items.
- * Returns true if the new product is the SAME category/family as existing items.
- */
 async function isProductMatchForExistingDeal(dealId, newProductText) {
-  if (!newProductText || !dealId) return true; // no product info → assume stage update
+  if (!newProductText || !dealId) return true;
 
   const { data: items } = await supabase
     .from('deal_items')
     .select('sku_text')
     .eq('deal_id', dealId);
 
-  if (!items || items.length === 0) return true; // no existing items → safe to update
+  if (!items || items.length === 0) return true;
 
   const newFamily = getProductFamily(newProductText);
 
@@ -116,7 +132,6 @@ async function isProductMatchForExistingDeal(dealId, newProductText) {
     }
   }
 
-  // No family match → different product family → should be a new deal
   return false;
 }
 
@@ -127,17 +142,13 @@ const KNOWN_STEEL_CITIES = [
   'Ahmedabad', 'Surat', 'Vadodara', 'Baroda', 'Rajkot', 'Bhavnagar', 'Gandhidham', 'Morbi', 'Ankleshwar',
   'Chennai', 'Coimbatore', 'Bangalore', 'Bengaluru', 'Hyderabad', 'Secunderabad', 'Visakhapatnam', 'Vizag', 'Vijayawada', 'Kochi', 'Cochin',
   'Kolkata', 'Calcutta', 'Durgapur', 'Rourkela', 'Jamshedpur', 'Raipur', 'Bhilai', 'Cuttack', 'Bhubaneswar',
-  'Indore', 'Bhopal', 'Jaipur', 'Bhilwara'
+  'Indore', 'Bhopal', 'Jaipur', 'Bhilwara', 'Khopoli'
 ];
 
-/**
- * Extracts delivery city/location across structured forms, natural language phrases, and standalone city mentions.
- */
 function extractDeliveryLocation(text) {
   if (!text || typeof text !== 'string') return null;
   const lower = text.toLowerCase();
 
-  // 0. Line containing an Indian address with 6-digit PIN code e.g. "Hunsal Village, Khopoli, Raigad, Maharashtra - 410203"
   const lines = text.split(/\r?\n/);
   for (const line of lines) {
     const trimmed = line.trim();
@@ -146,13 +157,11 @@ function extractDeliveryLocation(text) {
     }
   }
 
-  // 1. Structured form: Delivery Location: Pune
-  const structLoc = text.match(/(?:delivery\s+location|delivery\s+address|delivery\s+city|location|destination|ship\s+to|deliver\s+to|delivery\s+at)\s*:\s*([^\n\r,]+)/i);
+  const structLoc = text.match(/(?:delivery\s+location|delivery\s+address|delivery\s+city|location|destination|ship\s+to|deliver\s+to|delivery\s+at)\s*[:=-]\s*([^\n\r,]+)/i);
   if (structLoc) {
     return structLoc[1].trim().replace(/^['"]|['"]$/g, '');
   }
 
-  // 2. Natural language delivery phrases:
   const phrases = [
     /(?:for\s+delivery\s+to|delivery\s+to|delivery\s+at|deliver\s+to|ship\s+to|destination|transport\s+to|bhejna\s+hai|deliver\s+karna\s+hai|delivering\s+to)\s+([A-Za-z\s]+?)(?:\s+before|\s+by|\s+on|\s+within|\s+deliver|\.|\n|$)/i,
     /([A-Za-z]+)\s+(?:delivery|chahiye|mein\s+deliver|pe\s+deliver)/i
@@ -164,13 +173,12 @@ function extractDeliveryLocation(text) {
       const cand = m[1].trim();
       const matchedCity = KNOWN_STEEL_CITIES.find(c => c.toLowerCase() === cand.toLowerCase());
       if (matchedCity) return matchedCity;
-      if (cand.length >= 3 && !['the', 'and', 'with', 'metal', 'steel', 'coil', 'sheet', 'deal', 'order', 'quotation'].includes(cand.toLowerCase())) {
+      if (cand.length >= 3 && !['the', 'and', 'with', 'metal', 'steel', 'coil', 'sheet', 'deal', 'order', 'quotation', 'rate', 'price'].includes(cand.toLowerCase())) {
         return cand;
       }
     }
   }
 
-  // 3. Standalone known city lookup in text
   for (const city of KNOWN_STEEL_CITIES) {
     const cityRegex = new RegExp(`\\b${city}\\b`, 'i');
     if (cityRegex.test(lower)) {
@@ -181,303 +189,66 @@ function extractDeliveryLocation(text) {
   return null;
 }
 
-/**
- * Detects if a message contains a number with an invalid/non-steel unit (e.g. "15 apple", "20 boxes").
- */
 function detectInvalidUnitInMessage(text) {
   if (!text) return null;
-  // Remove commas inside numbers (e.g. "58,000" -> "58000")
   const cleanText = text.replace(/(\d+),(\d+)/g, '$1$2');
 
   const VALID_STEEL_UNITS = [
-    // Commercial Billing & Mass Units
-    'mt',
-    'ton',
-    'tons',
-    'tonne',
-    'tonnes',
-    'metric ton',
-    'metric tons',
-    'kg',
-    'kgs',
-    'kilogram',
-    'kilograms',
-    'cwt',
-    'hundredweight',
-
-    // Flat Rolled Steel Shape & Physical Ordering Units (Sheets, Plates, Coils)
-    'sheet',
-    'sheets',
-    'plate',
-    'plates',
-    'coil',
-    'coils',
-    'ga',
-    'gauge',
-
-    // Long & Structural Products (Rebar, Bars, Beams, Channels, Angles, Pipe)
-    'pcs',
-    'piece',
-    'pieces',
-    'nos',
-    'number',
-    'numbers',
-    'bar',
-    'bars',
-    'length',
-    'lengths',
-    'bundle',
-    'bundles',
-    'rmtr',
-    'rm',
-    'running meter',
-    'running meters',
-    'pipe',
-    'pipes',
-    'tube',
-    'tubes',
-    'sch',
-    'schedule',
-    'meter',
-    'meters',
-    'm',
-    'ft',
-    'feet',
-    'inch',
-    'inches',
+    'mt', 'ton', 'tons', 'tonne', 'tonnes', 'metric ton', 'metric tons',
+    'kg', 'kgs', 'kilogram', 'kilograms', 'cwt', 'hundredweight',
+    'sheet', 'sheets', 'plate', 'plates', 'coil', 'coils', 'ga', 'gauge',
+    'pcs', 'piece', 'pieces', 'nos', 'number', 'numbers', 'bar', 'bars',
+    'length', 'lengths', 'bundle', 'bundles', 'rmtr', 'rm', 'running meter',
+    'pipe', 'pipes', 'tube', 'tubes', 'sch', 'schedule', 'meter', 'meters',
+    'm', 'ft', 'feet', 'inch', 'inches'
   ];
 
-  // If the message contains at least one valid metal quantity unit (e.g. 30 MT, 50 tons, 1500 kg),
-  // then do NOT fail the message on auxiliary dates, durations, or payment terms!
   const hasValidSteelUnit = VALID_STEEL_UNITS.some((u) => {
     const regex = new RegExp(`\\b\\d+(?:\\.\\d+)?\\s*${u}\\b`, 'i');
     return regex.test(cleanText);
   });
 
   const SKIP_WORDS = [
-    // Ordinals, dimensions, and technical specs
-    'th',
-    'st',
-    'nd',
-    'rd',
-    'mm',
-    'cm',
-    'm',
-    'km',
-    'sqm',
-    'sqft',
-    'ga',
-    'sch',
-    'dia',
-    'diameter',
-    'grade',
-    'grades',
-    'e250',
-    'e350',
-    'fe500',
-    'fe500d',
-    'fe550',
-    'fe550d',
-    'is2062',
-    'is513',
-    'is277',
-    'is3589',
-
-    // Time durations, deadlines, and dates
-    'day',
-    'days',
-    'd',
-    'week',
-    'weeks',
-    'wk',
-    'wks',
-    'month',
-    'months',
-    'mo',
-    'mos',
-    'year',
-    'years',
-    'yr',
-    'yrs',
-    'hour',
-    'hours',
-    'hr',
-    'hrs',
-    'min',
-    'mins',
-    'minute',
-    'minutes',
-    'am',
-    'pm',
-    'jan',
-    'january',
-    'feb',
-    'february',
-    'mar',
-    'march',
-    'apr',
-    'april',
-    'may',
-    'jun',
-    'june',
-    'jul',
-    'july',
-    'aug',
-    'august',
-    'sep',
-    'sept',
-    'september',
-    'oct',
-    'october',
-    'nov',
-    'november',
-    'dec',
-    'december',
-
-    // Payment, credit, financial, and percentage terms
-    'credit',
-    'advance',
-    'payment',
-    'terms',
-    'cash',
-    'cheque',
-    'rtgs',
-    'neft',
-    'pdc',
-    'lc',
-    'cad',
-    'net',
-    'percent',
-    'percentage',
-    'pct',
-    'pr',
-    'lakh',
-    'lakhs',
-    'k',
-    'cr',
-    'crore',
-    'crores',
-    'rs',
-    'rupees',
-    'inr',
-    'rate',
-    'price',
-    'val',
-    'value',
-    'total',
-    'subtotal',
-    'amount',
-    'tax',
-    'gst',
-
-    // Prepositions, connectors, entity types, and locations
-    'of',
-    'to',
-    'for',
-    'in',
-    'and',
-    'per',
-    'at',
-    'by',
-    'with',
-    'on',
-    'before',
-    'after',
-    'target',
-    'pune',
-    'mumbai',
-    'delhi',
-    'ahmedabad',
-    'chennai',
-    'hyderabad',
-    'kolkata',
-    'nagpur',
-    'chakan',
-    'talegaon',
-    'deal',
-    'deals',
-    'won',
-    'lost',
-    'closed',
-    'pipeline',
-    'status',
-    'corp',
-    'ltd',
-    'pvt',
-    'inc',
-    'enterprises',
-    'industries',
-    'steels',
-    'metals',
-    'requirement',
-    'requirements',
-    'req',
-    'reqs',
-    'inquiry',
-    'inquiries',
-    'quotation',
-    'quotations',
-    'quote',
-    'quotes',
-    'order',
-    'orders',
-    'po',
-    'ref',
-    'no',
-    'num',
-    'number',
-    'item',
-    'items',
-    'spec',
-    'specs',
-    'specification',
-    'specifications',
-    'delivery',
-    'location',
-    'destination',
-    'address',
-    'date',
-    'dated',
-    'vendor',
-    'code',
-    'page',
-    'id',
-    'thickness',
-    'width',
-    'length',
-    'size',
-    'weight',
-    'warehouse',
+    'th', 'st', 'nd', 'rd', 'mm', 'cm', 'm', 'km', 'sqm', 'sqft', 'ga', 'sch',
+    'dia', 'diameter', 'grade', 'grades', 'e250', 'e350', 'fe500', 'fe500d',
+    'fe550', 'fe550d', 'is2062', 'is513', 'is277', 'is3589', 'day', 'days',
+    'd', 'week', 'weeks', 'wk', 'wks', 'month', 'months', 'mo', 'mos',
+    'year', 'years', 'yr', 'yrs', 'hour', 'hours', 'hr', 'hrs', 'min',
+    'mins', 'minute', 'minutes', 'am', 'pm', 'jan', 'january', 'feb',
+    'february', 'mar', 'march', 'apr', 'april', 'may', 'jun', 'june', 'jul',
+    'july', 'aug', 'august', 'sep', 'sept', 'september', 'oct', 'october',
+    'nov', 'november', 'dec', 'december', 'credit', 'advance', 'payment',
+    'terms', 'cash', 'cheque', 'rtgs', 'neft', 'pdc', 'lc', 'cad', 'net',
+    'percent', 'percentage', 'rs', 'rupees', 'inr', 'lakh', 'lakhs', 'crore',
+    'crores', 'cr', 'k', 'quote', 'quotation', 'rate', 'price', 'rates',
+    'prices', 'target', 'deal', 'deals', 'order', 'orders', 'inquiry',
+    'inquiries', 'rfq', 'item', 'items', 'line', 'lines', 'no', 'nos',
+    'number', 'po', 'so', 'invoice', 'bill', 'challan', 'lr', 'gr',
+    'delivery', 'dispatch', 'valid', 'validity', 'point', 'points',
+    'grade', 'size', 'spec', 'dimension', 'thickness', 'width', 'length',
+    'radius', 'weight', 'density', 'load', 'capacity', 'gst', 'gstin',
+    'tax', 'hsn', 'sac', 'pan', 'tan', 'cin', 'arn', 'e-way', 'eway'
   ];
 
-  const matches = cleanText.match(/(\d+(?:\.\d+)?)\s*([a-zA-Z]+)/g);
-  if (!matches) return null;
+  const genericQtyRegex = /\b(\d+(?:\\.\d+)?)\s+([a-zA-Z]{3,15})\b/g;
+  let match;
+  while ((match = genericQtyRegex.exec(cleanText)) !== null) {
+    const num = match[1];
+    const unitCandidate = match[2].toLowerCase();
 
-  for (const m of matches) {
-    const parts = m.trim().split(/\s+/);
-    if (parts.length === 2) {
-      const num = parts[0];
-      const unit = parts[1].toLowerCase();
+    if (VALID_STEEL_UNITS.includes(unitCandidate)) continue;
+    if (SKIP_WORDS.includes(unitCandidate)) continue;
+    if (hasValidSteelUnit) continue;
 
-      if (SKIP_WORDS.includes(unit)) continue;
-      if (VALID_STEEL_UNITS.includes(unit)) continue;
-
-      // If message already has a confirmed valid steel quantity (e.g. 30 MT), don't flag unknown auxiliary words
-      if (hasValidSteelUnit) continue;
-
-      return {
-        number: num,
-        invalidUnit: parts[1],
-      };
-    }
+    return {
+      number: num,
+      invalidUnit: match[2],
+    };
   }
 
   return null;
 }
 
-/**
- * Gets human-readable Deal Code e.g. #DEAL-B8018B
- */
 function getDealCode(deal) {
   if (!deal) return '#DEAL-UNKNOWN';
   if (deal.deal_number) return `#${deal.deal_number}`;
@@ -485,9 +256,28 @@ function getDealCode(deal) {
   return `#DEAL-${code}`;
 }
 
-/**
- * Fetch ALL open/active (non-won, non-lost) deals for a customer.
- */
+async function findDealByCodeOrId(codeOrId, senderPhone) {
+  if (!codeOrId) return null;
+  const clean = codeOrId.replace(/^#?DEAL-?/i, '').trim().toUpperCase();
+  if (clean.length < 4) return null;
+
+  const { data: deals } = await supabase
+    .from('deals')
+    .select('*, deal_items(*)')
+    .order('created_at', { ascending: false })
+    .limit(200);
+
+  if (deals && deals.length > 0) {
+    const found = deals.find(
+      (d) =>
+        (d.id || '').toUpperCase().startsWith(clean) ||
+        (d.deal_number && d.deal_number.toUpperCase().includes(clean))
+    );
+    return found || null;
+  }
+  return null;
+}
+
 async function getAllOpenDealsForCustomer(customerName, senderPhone) {
   if (!customerName) return [];
   const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
@@ -516,14 +306,10 @@ async function getAllOpenDealsForCustomer(customerName, senderPhone) {
   return data || [];
 }
 
-/**
- * Finds the best matching existing deal for a customer.
- * Priority: salesperson's own deals → active stages first → most recent.
- */
 async function findBestDeal(customerName, senderPhone) {
   const { data: ownActive } = await supabase
     .from('deals')
-    .select('*')
+    .select('*, deal_items(*)')
     .ilike('customer_name', `%${customerName}%`)
     .eq('salesperson_phone', senderPhone)
     .not('stage', 'in', '("won","lost")')
@@ -534,7 +320,7 @@ async function findBestDeal(customerName, senderPhone) {
 
   const { data: ownAny } = await supabase
     .from('deals')
-    .select('*')
+    .select('*, deal_items(*)')
     .ilike('customer_name', `%${customerName}%`)
     .eq('salesperson_phone', senderPhone)
     .order('created_at', { ascending: false })
@@ -543,9 +329,6 @@ async function findBestDeal(customerName, senderPhone) {
   return ownAny && ownAny.length > 0 ? ownAny[0] : null;
 }
 
-/**
- * Gets deal item amounts to compute total_amount if not explicitly stated.
- */
 async function getDealAmountFromItems(dealId) {
   const { data: items } = await supabase
     .from('deal_items')
@@ -560,9 +343,6 @@ async function getDealAmountFromItems(dealId) {
   }, 0);
 }
 
-/**
- * Checks if KRA 1 was already logged for a specific deal.
- */
 async function isKRA1AlreadyLogged(senderPhone, customerName) {
   const { data } = await supabase
     .from('kra_logs')
@@ -577,7 +357,6 @@ async function isKRA1AlreadyLogged(senderPhone, customerName) {
 
 const {
   extractDimensions,
-  isDimensionCompatible,
   calculateLineItem,
   calculateLineItems,
   calculateSubtotal,
@@ -587,15 +366,54 @@ const {
 } = require('../utils/pricingEngine');
 
 /**
+ * Evaluates mandatory fields for inquiry completion.
+ */
+function evaluateMandatoryFields({ customerName, lineItems, deliveryLocation, paymentTerms, totalAmount }) {
+  const missing = [];
+
+  const hasCompany = !!(customerName && customerName.trim().length >= 2 && customerName !== 'Unknown');
+  if (!hasCompany) missing.push('Company Name');
+
+  const items = Array.isArray(lineItems) ? lineItems : [];
+  const validItems = items.filter(i => {
+    const pName = (i.pName || i.sku_text || i.product_requirement || '').trim();
+    return pName.length > 0 && !/^(steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined)$/i.test(pName);
+  });
+  const hasProduct = validItems.length > 0;
+  if (!hasProduct) missing.push('Product Description');
+
+  const hasQty = validItems.some(i => (Number(i.qty || i.quantity || i.quantity_mt) > 0));
+  if (!hasQty) missing.push('Quantity & Unit');
+
+  const hasRate = validItems.some(i => (Number(i.rate || i.rate_per_mt) > 0)) || (Number(totalAmount) > 0);
+  if (!hasRate) missing.push('Rate (₹)');
+
+  const hasDelivery = !!(deliveryLocation && String(deliveryLocation).trim().length >= 2);
+  if (!hasDelivery) missing.push('Delivery Location');
+
+  const hasPayment = !!(paymentTerms && String(paymentTerms).trim().length >= 2);
+  if (!hasPayment) missing.push('Payment Terms');
+
+  return {
+    isComplete: missing.length === 0,
+    missingFields: missing,
+    hasProduct,
+    hasCompany,
+    hasQty,
+    hasRate,
+    hasDelivery,
+    hasPayment,
+  };
+}
+
+/**
  * Main text message handler.
- * Accepts optional overrideData (pre-extracted / merged context) for multi-step confirmation flows.
  */
 async function processSalesMessage(text, senderPhone, overrideData = null) {
   try {
     let data = overrideData;
 
     if (!data) {
-      // 1. Immediately reject invalid/nonsense units (e.g. "15 apple") before processing
       const invalidUnitCheck = detectInvalidUnitInMessage(text);
       if (invalidUnitCheck) {
         return `*Invalid Quantity Unit*\n\n` +
@@ -614,18 +432,22 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         const { safeParseJSON } = require('../utils/jsonUtils');
         data = safeParseJSON(rawText, null);
       } catch (llmErr) {
-        console.warn('[SalesAgent] LLM extraction notice, utilizing rule-based extraction engine:', llmErr.message);
+        console.warn('[SalesAgent] LLM extraction notice, utilizing rule-based engine:', llmErr.message);
       }
 
       if (!data || data.confidence < 0.3) {
-        // Deterministic rule-based extraction fallback
         const textRaw = text || '';
         const textClean = textRaw.replace(/#?(?:DEAL-[A-F0-9]{4,6}|[A-F0-9]{6})\b/gi, '').replace(/\s+/g, ' ');
         const textLower = textClean.toLowerCase();
 
-        // Extract customer name (supports structured "Company Name: ..." as well as inline text)
+        let ruleDealId = null;
+        const dealIdMatch = textRaw.match(/#?(DEAL-[A-F0-9]{4,6}|[A-F0-9]{6})/i);
+        if (dealIdMatch) {
+          ruleDealId = dealIdMatch[1].toUpperCase();
+        }
+
         let ruleCustomer = null;
-        const structComp = textRaw.match(/(?:company\s+name|customer\s+name|client\s+name)\s*:\s*([^\n\r]+)/i);
+        const structComp = textRaw.match(/(?:company\s+name|customer\s+name|client\s+name)\s*[:=-]\s*([^\n\r]+)/i);
         if (structComp) {
           ruleCustomer = structComp[1].trim().replace(/^['"]|['"]$/g, '');
         } else {
@@ -642,7 +464,6 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           }
         }
 
-        // Detect action & stage
         let ruleAction = 'inquiry';
         let ruleStage = 'new_inquiry';
         const stageUpdateMatch = textClean.match(/\b(?:mark|move|update|set|change)\s+([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|negotiation|qualified)\b/i) ||
@@ -656,28 +477,31 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           }
         }
 
-        // Extract quantity, unit, and specification
         let qty = 0;
-        const structQty = textRaw.match(/quantity\s*:\s*(\d+(?:\.\d+)?)\s*(?:mt|ton|tons|tonne)?/i);
+        let unit = 'MT';
+        const structQty = textRaw.match(/(?:quantity|qty)\s*[:=-]\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]+)?/i);
         if (structQty) {
           qty = parseFloat(structQty[1]);
+          if (structQty[2]) unit = structQty[2];
         } else {
-          const qtyMatch = textRaw.match(/(\d+(?:\.\d+)?)\s*(?:mt|ton|tons|tonne)/i);
-          qty = qtyMatch ? parseFloat(qtyMatch[1]) : 0;
+          const qtyMatch = textRaw.match(/(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|kgs|pcs|piece|pieces|nos|sheet|sheets|plate|plates|coil|coils|bar|bars)/i);
+          if (qtyMatch) {
+            qty = parseFloat(qtyMatch[1]);
+            unit = qtyMatch[2];
+          }
         }
 
         let specDim = null;
-        const structSpec = textRaw.match(/(?:grade\/spec|spec|dimensions?|thickness|size)\s*:\s*([^\n\r]+)/i);
+        const structSpec = textRaw.match(/(?:grade\/spec|spec|dimensions?|thickness|size)\s*[:=-]\s*([^\n\r]+)/i);
         if (structSpec) {
           specDim = structSpec[1].trim();
         } else {
-          const mmM = textRaw.match(/(\d+(?:\.\d+)?)\s*mm/i);
-          specDim = mmM ? `${mmM[1]}mm` : null;
+          const mmM = textRaw.match(/(\d+(?:\.\d+)?)\s*mm(?:\s*x\s*\d+(?:\s*x\s*\d+)?)?/i);
+          specDim = mmM ? mmM[0] : null;
         }
 
-        // Extract material / product requirement
         let pReq = null;
-        const structMat = textRaw.match(/material\s*:\s*([^\n\r]+)/i);
+        const structMat = textRaw.match(/(?:material|product(?:\s+name)?|product(?:\s+description)?|item)\s*[:=-]\s*([^\n\r]+)/i);
         if (structMat) {
           const mVal = structMat[1].trim();
           pReq = specDim && !mVal.toLowerCase().includes(specDim.toLowerCase()) ? `${mVal} ${specDim}` : mVal;
@@ -693,26 +517,38 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           pReq = specDim ? `MS Sheet ${specDim}` : 'MS Sheet 2mm';
         } else if (/\b(tmt\s*bar|tmt)\b/i.test(textLower)) {
           pReq = specDim ? `TMT Bar ${specDim}` : 'TMT Bar';
+        } else if (/\b(gi\s*sheet|gi\s*coil)\b/i.test(textLower)) {
+          pReq = specDim ? `GI Sheet ${specDim}` : 'GI Sheet';
+        } else if (/\b(pipe|pipes|tube|tubes)\b/i.test(textLower)) {
+          pReq = specDim ? `Steel Pipe ${specDim}` : 'Steel Pipe';
         }
 
-        // Extract target price / rate per MT
         let ruleRate = null;
-        const structPrice = textRaw.match(/(?:target\s+price|rate|price|unit\s+price)\s*(?::|is|\s)\s*₹?\s*([\d,.]+)(?:\s*\/\s*mt)?/i) ||
+        const structPrice = textRaw.match(/(?:target\s+price|rate|price|unit\s+price)\s*(?::|is|=|-|\s)\s*₹?\s*([\d,.]+)(?:\s*\/\s*[a-zA-Z]+)?/i) ||
           textRaw.match(/@\s*₹?\s*([\d,.]+)/i);
         if (structPrice) {
           ruleRate = Number(structPrice[1].replace(/,/g, '')) || null;
         }
 
-        // Extract contact person
+        let rulePayment = null;
+        const structPay = textRaw.match(/(?:payment\s*terms?|payment|credit\s*terms?)\s*[:=-]\s*([^\n\r,]+)/i);
+        if (structPay) {
+          rulePayment = structPay[1].trim();
+        } else if (/\b(?:30|45|60|90)\s*days?\s*(?:credit)?\b/i.test(textRaw)) {
+          const matchDays = textRaw.match(/\b(30|45|60|90)\s*days?\s*(?:credit)?\b/i);
+          rulePayment = `${matchDays[1]} Days Credit`;
+        } else if (/\b100%\s*advance|advance\b/i.test(textRaw)) {
+          rulePayment = '100% Advance';
+        }
+
         let ruleContact = null;
-        const structContact = textRaw.match(/(?:contact\s+person|contact|owner|person|attn)\s*:\s*([^\n\r]+)/i);
+        const structContact = textRaw.match(/(?:contact\s+person|contact|owner|person|attn)\s*[:=-]\s*([^\n\r]+)/i);
         if (structContact) {
           ruleContact = structContact[1].trim().replace(/^['"]|['"]$/g, '');
         }
 
-        // Extract customer phone
         let rulePhone = null;
-        const structPhone = textRaw.match(/(?:phone|mobile|contact\s+no|cell)\s*:\s*([6-9]\d{9})\b/i);
+        const structPhone = textRaw.match(/(?:phone|mobile|contact\s+no|cell)\s*[:=-]\s*([6-9]\d{9})\b/i);
         if (structPhone) {
           rulePhone = structPhone[1];
         } else {
@@ -720,66 +556,31 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           rulePhone = phoneMatch ? phoneMatch[1] : null;
         }
 
-        // Extract delivery location
         let delLoc = extractDeliveryLocation(textRaw);
 
-        // Extract delivery date
-        let delDate = null;
-        const structDate = textRaw.match(/(?:expected\s+delivery\s+date|delivery\s+date|target\s+date)\s*:\s*([^\n\r]+)/i);
-        if (structDate) {
-          const dStr = structDate[1].trim();
-          const ddmmyyyy = dStr.match(/(\d{2})[-/](\d{2})[-/](\d{4})/);
-          if (ddmmyyyy) {
-            delDate = `${ddmmyyyy[3]}-${ddmmyyyy[2]}-${ddmmyyyy[1]}`;
-          } else {
-            delDate = dStr;
-          }
-        } else {
-          const dM = textRaw.match(/(?:before|by|on|delivery\s+date|delivery\s+before|delivery\s+by)\s+(\d{1,2}(?:st|nd|rd|th)?\s+(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*|\d{4}-\d{2}-\d{2}|\d{2}[-/]\d{2}[-/]\d{4})/i);
-          if (dM) {
-            const rawDateStr = dM[1].trim();
-            const monthMap = {
-              jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
-              jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
-              january: '01', february: '02', march: '03', april: '04', june: '06',
-              july: '07', august: '08', september: '09', october: '10', november: '11', december: '12'
-            };
-            const parts = rawDateStr.toLowerCase().split(/\s+/);
-            if (parts.length === 2) {
-              const day = parts[0].replace(/\D/g, '').padStart(2, '0');
-              const mKey = parts[1].replace(/[^a-z]/g, '');
-              const month = monthMap[mKey] || '08';
-              delDate = `2026-${month}-${day}`;
-            } else {
-              delDate = rawDateStr;
+        data = {
+          action: ruleAction,
+          deal_id: ruleDealId,
+          customer_name: ruleCustomer,
+          contact_person: ruleContact,
+          target_stage: ruleStage,
+          customer_phone: rulePhone,
+          line_items: pReq ? [
+            {
+              product_requirement: pReq,
+              dimensions: specDim,
+              quantity_mt: qty,
+              quantity: qty,
+              unit: unit,
+              rate_per_mt: ruleRate,
             }
-          }
-        }
-
-        if (ruleCustomer || pReq || qty > 0 || ruleAction === 'stage_update') {
-          data = {
-            action: ruleAction,
-            customer_name: ruleCustomer,
-            contact_person: ruleContact,
-            target_stage: ruleStage,
-            customer_phone: rulePhone,
-            line_items: pReq ? [
-              {
-                product_requirement: pReq,
-                dimensions: specDim,
-                quantity_mt: qty,
-                rate_per_mt: ruleRate,
-              }
-            ] : [],
-            total_amount: 0,
-            delivery_location: delLoc,
-            delivery_date: delDate,
-            payment_terms: null,
-            confidence: 0.9,
-          };
-        } else {
-          return `❓ I couldn't clearly understand the deal update. Could you please specify the customer name and status (e.g. "Mehta Engineering 20 MT CR sheets quote sent")?`;
-        }
+          ] : [],
+          total_amount: 0,
+          delivery_location: delLoc,
+          payment_terms: rulePayment,
+          delivery_date: null,
+          confidence: 0.9,
+        };
       }
     }
 
@@ -829,33 +630,212 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       return false;
     }
 
+    // ── CHECK 1: Deal ID Explicitly Provided in Message (Scenario 4) ────────
+    const explicitDealIdMatch = text.match(/#?(DEAL-[A-F0-9]{4,6}|[A-F0-9]{6})/i);
+    let targetExplicitDeal = null;
+    if (explicitDealIdMatch || data.deal_id) {
+      const dealCodeToFind = (explicitDealIdMatch ? explicitDealIdMatch[1] : data.deal_id);
+      targetExplicitDeal = await findDealByCodeOrId(dealCodeToFind, senderPhone);
+    }
+
     let customerName = data.customer_name;
     if (isInvalidCustomerName(customerName)) {
       customerName = null;
     }
 
-    const textLower = (text || '').toLowerCase();
-    const isNewReqMessage = /\b(need|requires|required|want|order|inquiry|rfq|new deal)\b/i.test(textLower);
-
-    if (customerName && isNewReqMessage && !overrideData) {
-      // Check if user actually wrote the company name in the text
-      const nameWords = customerName.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
-      const nameInText = nameWords.some((w) => textLower.includes(w));
-      if (!nameInText) {
-        customerName = null; // Ignore LLM history hallucination for new inquiries
-      }
+    if (!customerName && targetExplicitDeal) {
+      customerName = targetExplicitDeal.customer_name;
     }
 
-    if (!customerName || customerName.length < 2) {
-      if (!isNewReqMessage) {
-        const { getActiveSession } = require('../supabase');
-        const activeCust = await getActiveSession(senderPhone);
-        if (activeCust && activeCust !== 'Unknown' && !isInvalidCustomerName(activeCust)) {
-          customerName = activeCust;
+    // Check line items & product name extraction
+    let rawItems = [];
+    if (Array.isArray(data.line_items) && data.line_items.length > 0) {
+      rawItems = data.line_items;
+    } else if (data.product_requirement || data.quantity_mt || data.quantity) {
+      rawItems = [{
+        product_requirement: data.product_requirement,
+        dimensions: data.dimensions || null,
+        quantity: data.quantity || data.quantity_mt || 0,
+        quantity_mt: data.quantity_mt || data.quantity || 0,
+        unit: data.unit || 'MT',
+        rate_per_mt: data.rate_per_mt || null,
+      }];
+    }
+
+    const GENERIC_PRODUCT_REGEX = /^(steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined)$/i;
+
+    let processedItems = [];
+    let calculatedTotal = 0;
+
+    for (const item of rawItems) {
+      let pName = item.product_requirement ? item.product_requirement.trim() : null;
+      if (pName && GENERIC_PRODUCT_REGEX.test(pName)) {
+        pName = null;
+      }
+
+      const qty = Number(item.quantity || item.quantity_mt || item.qty || 0) || 0;
+      const unit = item.unit || 'MT';
+      const rawRate = item.rate_per_mt !== undefined && item.rate_per_mt !== null && item.rate_per_mt !== '' ? Number(item.rate_per_mt) : (item.rate ? Number(item.rate) : null);
+      const rate = rawRate && rawRate > 0 ? rawRate : null;
+      const rawDim = item.dimensions || (pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pName.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : (text.match(/(\d+(?:\.\d+)?)\s*mm/i) ? text.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null));
+
+      if (pName) {
+        if (qty > 0 && rate && rate > 0) {
+          const lineCalc = calculateLineItem({ quantity: qty, rate, unit });
+          calculatedTotal += lineCalc.amount;
+          processedItems.push({
+            pName,
+            dimensions: rawDim,
+            qty,
+            unit,
+            rate,
+            itemAmount: lineCalc.amount,
+          });
+        } else {
+          processedItems.push({
+            pName,
+            dimensions: rawDim,
+            qty,
+            unit,
+            rate: rate || null,
+            itemAmount: null,
+          });
         }
       }
     }
 
+    const hasAnyProductName = processedItems.length > 0;
+    const extractedDeliveryLoc = extractDeliveryLocation(text);
+    const hasDeliveryUpdate = !!(extractedDeliveryLoc || data.delivery_location);
+    const hasPaymentUpdate = !!data.payment_terms;
+    const hasRateUpdate = !!(data.line_items?.some(i => i.rate_per_mt > 0) || (data.total_amount && data.total_amount > 0));
+    const hasQtyUpdate = !!(rawItems.some(i => (i.quantity > 0 || i.quantity_mt > 0)));
+
+    // ── SCENARIO 3: PARTIAL UPDATE WITHOUT PRODUCT NAME ────────────────────────
+    // If NO product name is provided AND not explicitly a stage_update with a customer name:
+    if (!hasAnyProductName && data.action !== 'stage_update' && data.target_stage !== 'won' && data.target_stage !== 'lost') {
+      if (targetExplicitDeal) {
+        // Handled below via Deal ID update path
+      } else if (customerName) {
+        const openDeals = await getAllOpenDealsForCustomer(customerName, senderPhone);
+        if (openDeals.length === 1) {
+          // Exactly 1 active open deal for this customer -> auto-assume that deal!
+          targetExplicitDeal = openDeals[0];
+          console.log(`[SalesAgent] Auto-assuming single active deal ${getDealCode(targetExplicitDeal)} for ${customerName}`);
+        } else if (openDeals.length > 1) {
+          return `Which deal is this update for? Please provide the Deal ID (e.g. ${getDealCode(openDeals[0])}) or company name.`;
+        } else {
+          return `Which deal or inquiry is this update for? Please provide the Deal ID (e.g. #DEAL-XXXXXX) or company name.`;
+        }
+      } else {
+        // No product name and no customer name
+        return `Which deal or inquiry is this for? Please provide the Deal ID (e.g. #DEAL-XXXXXX).`;
+      }
+    }
+
+    // ── SCENARIO 4: UPDATE TO EXISTING DEAL (WITH DEAL ID OR AUTO-ASSUMED) ─────
+    if (targetExplicitDeal && (!hasAnyProductName || data.action === 'deal_update')) {
+      const dealId = targetExplicitDeal.id;
+      const dealCode = getDealCode(targetExplicitDeal);
+      const company = targetExplicitDeal.customer_name;
+
+      const updateFields = {};
+      const updatedLabels = [];
+
+      if (extractedDeliveryLoc || data.delivery_location) {
+        updateFields.delivery_location = extractedDeliveryLoc || data.delivery_location;
+        updatedLabels.push(`Delivery Location (*${updateFields.delivery_location}*)`);
+      }
+
+      if (data.payment_terms) {
+        updateFields.payment_terms = data.payment_terms;
+        updatedLabels.push(`Payment Terms (*${updateFields.payment_terms}*)`);
+      }
+
+      if (data.delivery_date) {
+        updateFields.delivery_date = data.delivery_date;
+        updatedLabels.push(`Delivery Date (*${updateFields.delivery_date}*)`);
+      }
+
+      if (data.contact_person) {
+        updateFields.contact_person = data.contact_person;
+        updatedLabels.push(`Contact Person (*${updateFields.contact_person}*)`);
+      }
+
+      if (data.customer_phone) {
+        updateFields.customer_phone = data.customer_phone;
+      }
+
+      if (data.total_amount && Number(data.total_amount) > 0) {
+        updateFields.total_amount = Number(data.total_amount);
+        updatedLabels.push(`Total Rate (Rs. *${Number(data.total_amount).toLocaleString('en-IN')}*)`);
+      }
+
+      // Update rate or qty on existing line items if provided
+      const existingItems = targetExplicitDeal.deal_items || [];
+      if (existingItems.length > 0 && (hasRateUpdate || hasQtyUpdate)) {
+        const firstRate = data.line_items?.[0]?.rate_per_mt;
+        const firstQty = data.line_items?.[0]?.quantity || data.line_items?.[0]?.quantity_mt;
+
+        for (const itm of existingItems) {
+          const itemUpdates = {};
+          if (firstRate && firstRate > 0) {
+            itemUpdates.rate = firstRate;
+            updatedLabels.push(`Rate (*Rs. ${Number(firstRate).toLocaleString('en-IN')}*)`);
+          }
+          if (firstQty && firstQty > 0) {
+            itemUpdates.quantity = firstQty;
+            updatedLabels.push(`Quantity (*${firstQty} ${itm.unit || 'MT'}*)`);
+          }
+          if (Object.keys(itemUpdates).length > 0) {
+            if (itemUpdates.rate && (itemUpdates.quantity || itm.quantity)) {
+              itemUpdates.amount = Number(itemUpdates.rate) * Number(itemUpdates.quantity || itm.quantity);
+              updateFields.total_amount = itemUpdates.amount;
+            }
+            await supabase.from('deal_items').update(itemUpdates).eq('id', itm.id);
+          }
+        }
+      }
+
+      if (Object.keys(updateFields).length > 0) {
+        await supabase.from('deals').update(updateFields).eq('id', dealId);
+      }
+
+      // Refetch updated deal to check field completeness
+      const { data: refreshedDealArr } = await supabase
+        .from('deals')
+        .select('*, deal_items(*)')
+        .eq('id', dealId)
+        .limit(1);
+
+      const refreshedDeal = refreshedDealArr?.[0] || targetExplicitDeal;
+      const completeness = evaluateMandatoryFields({
+        customerName: refreshedDeal.customer_name,
+        lineItems: refreshedDeal.deal_items || [],
+        deliveryLocation: refreshedDeal.delivery_location,
+        paymentTerms: refreshedDeal.payment_terms,
+        totalAmount: refreshedDeal.total_amount,
+      });
+
+      const updatedStr = updatedLabels.length > 0 ? `Updated: ${updatedLabels.join(', ')}\n` : '';
+
+      if (completeness.isComplete) {
+        return `*Deal Updated & Complete — ${dealCode}*\n\n` +
+          `Customer: *${company}*\n` +
+          `Stage: *${(refreshedDeal.stage || 'NEW INQUIRY').toUpperCase()}*\n` +
+          updatedStr +
+          `\nAll mandatory fields complete. Ready to progress to Qualified / Quoted! 📈`;
+      } else {
+        return `*Deal Updated — ${dealCode}*\n\n` +
+          `Customer: *${company}*\n` +
+          updatedStr +
+          `\n*Still needed to complete:*\n` +
+          completeness.missingFields.map(f => `• ${f}`).join('\n') +
+          `\n\nLogged to Sales Pipeline & Inquiries!`;
+      }
+    }
+
+    // ── SCENARIO 1 & 2: NEW INQUIRY CREATION (Customer + Product Name) ────────
     if (!customerName || customerName.length < 2 || isInvalidCustomerName(customerName)) {
       const { saveActiveSession } = require('../supabase');
       await saveActiveSession(senderPhone, 'Unknown', 'pending_customer_for_deal');
@@ -873,12 +853,12 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       .select('customer_phone')
       .ilike('customer_name', `%${finalCustomerName}%`)
       .limit(1);
+
     let actualCustomerPhone =
       custRecord && custRecord.length > 0
         ? custRecord[0].customer_phone
         : data.customer_phone || null;
 
-    // Strict safety check: Under no circumstance should any salesperson's / employee's phone ever be used as customer phone
     const cleanActualPhone = String(actualCustomerPhone || '').replace(/\D/g, '').slice(-10);
     const cleanSenderPhone = String(senderPhone || '').replace(/\D/g, '').slice(-10);
 
@@ -892,121 +872,6 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     }
 
     let targetStage = data.target_stage || 'new_inquiry';
-
-    // Multi-item extraction and rate calculation
-    let rawItems = [];
-    if (Array.isArray(data.line_items) && data.line_items.length > 0) {
-      rawItems = data.line_items;
-    } else if (data.product_requirement || data.quantity_mt || data.quantity) {
-      rawItems = [{
-        product_requirement: data.product_requirement,
-        dimensions: data.dimensions || null,
-        quantity: data.quantity || data.quantity_mt || 0,
-        quantity_mt: data.quantity_mt || data.quantity || 0,
-        unit: data.unit || 'MT',
-        rate_per_mt: data.rate_per_mt || null,
-      }];
-    }
-
-    // Post-LLM validation: If quantity is 0 or missing on single item but text contains a valid quantity unit, extract rule-based quantity
-    if (rawItems.length === 1 && (!rawItems[0].quantity && !rawItems[0].quantity_mt)) {
-      const textQtyMatch = text.match(/\b(\d+(?:\.\d+)?)\s*(?:mt|ton|tons|tonne|tonnes|metric\s+ton|kg|kgs|kilogram|sheet|sheets|plate|plates|coil|coils|pcs|piece|pieces|nos|bar|bars)\b/i);
-      if (textQtyMatch) {
-        const extractedQty = Number(textQtyMatch[1]) || 0;
-        rawItems[0].quantity = extractedQty;
-        rawItems[0].quantity_mt = extractedQty;
-      }
-    }
-
-    let processedItems = [];
-    let calculatedTotal = 0;
-
-    const GENERIC_PRODUCT_REGEX = /^(steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined)$/i;
-
-    for (const item of rawItems) {
-      let pName = item.product_requirement ? item.product_requirement.trim() : null;
-      if (pName && GENERIC_PRODUCT_REGEX.test(pName)) {
-        pName = null;
-      }
-
-      const qty = Number(item.quantity || item.quantity_mt || item.qty || 0) || 0;
-      const unit = item.unit || 'MT';
-      const rawRate = item.rate_per_mt !== undefined && item.rate_per_mt !== null && item.rate_per_mt !== '' ? Number(item.rate_per_mt) : (item.rate ? Number(item.rate) : null);
-      const rate = rawRate && rawRate > 0 ? rawRate : null;
-      const rawDim = item.dimensions || (pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pName.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : (text.match(/(\d+(?:\.\d+)?)\s*mm/i) ? text.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null));
-
-      if (!pName && qty > 0) {
-        // Quantity specified but NO specific metal product name was mentioned!
-        const pendingContext = {
-          action: data.action || 'inquiry',
-          customer_name: finalCustomerName,
-          customer_phone: actualCustomerPhone || data.customer_phone || null,
-          target_stage: targetStage || 'new_inquiry',
-          raw_text: data.raw_text || text,
-          delivery_location: data.delivery_location || null,
-          delivery_date: data.delivery_date || null,
-          payment_terms: data.payment_terms || null,
-          po_number: data.po_number || null,
-          po_date: data.po_date || null,
-          quantity_mt: qty,
-          unit: unit,
-          confidence: data.confidence || 0.95,
-        };
-        const { saveActiveSession } = require('../supabase');
-        await saveActiveSession(
-          senderPhone,
-          finalCustomerName,
-          `pending_product_for_deal|${finalCustomerName}|${qty}|${unit}|${JSON.stringify(pendingContext)}`
-        );
-        return `❓ *Which metal product is ${finalCustomerName} asking for?*\n\n` +
-          `You specified a quantity of *${qty} ${unit}*, but no specific metal product was mentioned.\n\n` +
-          `Please reply with the product name (e.g. _HR Coil_, _CR Sheet_, _TMT Bar_, _MS Plates_) so I can record the requirement for your Sales Pipeline! 📈`;
-      }
-
-      if (pName || qty > 0) {
-        const itemPName = pName || 'Product Requirement';
-        if (qty > 0 && rate && rate > 0) {
-          const lineCalc = calculateLineItem({ quantity: qty, rate, unit });
-          const itemAmount = lineCalc.amount;
-          calculatedTotal += itemAmount;
-
-          processedItems.push({
-            pName: itemPName,
-            dimensions: rawDim,
-            qty,
-            unit,
-            rate,
-            itemAmount,
-          });
-        } else {
-          processedItems.push({
-            pName: itemPName,
-            dimensions: rawDim,
-            qty,
-            unit,
-            rate: null,
-            itemAmount: null,
-          });
-        }
-      }
-    }
-
-    if (processedItems.length === 0 && (targetStage === 'new_inquiry' || data.action === 'inquiry') && !overrideData) {
-      const isExplicitInquiryPhrase = /\b(inquiry|requirement|rfq|quote|quotation|rates?|order|needed|need|requires?|want|chahiye|mangwa)\b/i.test(text);
-      const hasAnyProductWord = /\b(hr|cr|ms|gi|gp|tmt|coil|coils|sheet|sheets|plate|plates|bar|bars|pipe|pipes|beam|beams|angle|angles|channel|channels)\b/i.test(text);
-      if (!isExplicitInquiryPhrase && !hasAnyProductWord) {
-        return `❓ *Inquiry Details Needed for ${finalCustomerName}*\n\n` +
-          `Please specify the metal requirement and quantity (e.g. _"${finalCustomerName} - 25 MT HR Coil"_ or _"Need rates for 10 MT CR Sheet"_).`;
-      }
-    }
-
-    let dealAmount = 0;
-    if (data.total_amount && Number(data.total_amount) > 0) {
-      dealAmount = Number(data.total_amount);
-    } else if (calculatedTotal > 0) {
-      dealAmount = calculatedTotal;
-    }
-
     const stageMap = {
       new_inquiry: 'new_inquiry',
       qualified: 'qualified',
@@ -1017,12 +882,17 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     };
     const dbStage = stageMap[targetStage] || 'new_inquiry';
 
-    // MULTI-DEAL RESOLUTION: Fetch all active open deals for this client
+    let dealAmount = 0;
+    if (data.total_amount && Number(data.total_amount) > 0) {
+      dealAmount = Number(data.total_amount);
+    } else if (calculatedTotal > 0) {
+      dealAmount = calculatedTotal;
+    }
+
     const openDeals = await getAllOpenDealsForCustomer(finalCustomerName, senderPhone);
     let existingDeal = null;
     let dealId = null;
 
-    // Check if salesperson explicitly specified a Deal ID/Code in raw message e.g. #DEAL-B8018B or DEAL-B8018B or B8018B or index 1/2
     const dealIdMatch = text.match(/#?(DEAL-[A-F0-9]{4,6}|[A-F0-9]{6})/i);
     const numChoiceMatch = text.trim().match(/^([1-9])$/);
 
@@ -1038,84 +908,44 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     if (dealIdMatch && openDeals.length > 0) {
       const targetCode = dealIdMatch[1].toUpperCase().replace('DEAL-', '');
       existingDeal = openDeals.find(d => (d.id || '').toUpperCase().includes(targetCode) || (d.deal_number && d.deal_number.toUpperCase().includes(targetCode)));
-      if (existingDeal) {
-        console.log(`[SalesAgent] Explicitly targeted deal ${getDealCode(existingDeal)} for ${finalCustomerName}`);
-      }
-    } else if (numChoiceMatch && openDeals.length > 0) {
-      const idx = parseInt(numChoiceMatch[1], 10) - 1;
-      if (openDeals[idx]) {
-        existingDeal = openDeals[idx];
-        console.log(`[SalesAgent] Selected deal #${idx + 1} (${getDealCode(existingDeal)}) for ${finalCustomerName}`);
-      }
     } else if (!isExplicitNewInquiry) {
       if (openDeals.length === 1) {
         existingDeal = openDeals[0];
-      } else if (openDeals.length > 1) {
-        const isStageUpdateOrInquiry = data.action === 'stage_update' || !data.product_requirement;
-        if (isStageUpdateOrInquiry) {
-          const dealsListStr = openDeals.map((d, idx) => {
-            const code = getDealCode(d);
-            const itemsStr = (d.deal_items || []).map(i => `${i.quantity || ''} ${i.unit || 'MT'} ${i.sku_text || 'Product'}`).join(', ') || d.inquiry_type || 'Product Requirement';
-            const valStr = d.total_amount > 0 ? ` (₹${Number(d.total_amount).toLocaleString('en-IN')})` : '';
-            const stageStr = d.stage ? d.stage.toUpperCase() : 'OPEN';
-            return `${idx + 1}️⃣ *${code}* — ${itemsStr}${valStr} [Stage: ${stageStr}]`;
-          }).join('\n');
-
-          const { saveActiveSession } = require('../supabase');
-          await saveActiveSession(senderPhone, finalCustomerName, `pending_deal_choice|${finalCustomerName}|${dbStage}|${text}`);
-
-          return `❓ *Multiple Active Deals Found for ${finalCustomerName}*\n\n` +
-            `${finalCustomerName} has *${openDeals.length} active deals* in your sales pipeline:\n\n` +
-            `${dealsListStr}\n\n` +
-            `Please reply with the **Deal ID** (e.g. _"${getDealCode(openDeals[0])}"_) or option number to specify which deal to update! 📈`;
-        }
-      } else if (openDeals.length === 0) {
-        if (data.action === 'stage_update' || dbStage === 'won' || dbStage === 'lost' || !data.product_requirement) {
-          const best = await findBestDeal(finalCustomerName, senderPhone);
-          if (best) {
-            existingDeal = best;
-          }
-        }
       }
     }
 
     if (existingDeal && !isExplicitNewInquiry) {
-      const isStageUpdateOnly =
-        !data.product_requirement &&
-        !data.quantity_mt &&
-        rawItems.length === 0;
-      const productMatchesExisting = await isProductMatchForExistingDeal(
-        existingDeal.id,
-        data.product_requirement ||
-          (rawItems.length > 0 ? rawItems[0].product_requirement : null),
-      );
-
-      if (isStageUpdateOnly || productMatchesExisting) {
-        dealId = existingDeal.id;
-        console.log(
-          `[SalesAgent] Updating existing deal ${getDealCode(existingDeal)} for ${finalCustomerName}`,
-        );
-      } else {
-        dealId = null;
-        console.log(
-          `[SalesAgent] New product category detected — creating separate deal for ${finalCustomerName}`,
-        );
-      }
-    } else {
-      dealId = null;
-      existingDeal = null;
-      console.log(`[SalesAgent] Creating brand new inquiry and pipeline deal for ${finalCustomerName}`);
+      dealId = existingDeal.id;
     }
 
-    if (dealAmount === 0 && dealId && existingDeal) {
-      const itemsTotal = await getDealAmountFromItems(dealId);
-      dealAmount = itemsTotal > 0 ? itemsTotal : Number(existingDeal.total_amount || 0);
-    }
+    const finalDeliveryLoc =
+      extractedDeliveryLoc ||
+      data.delivery_location ||
+      existingDeal?.delivery_location ||
+      null;
+
+    const finalDeliveryDate =
+      data.delivery_date || existingDeal?.delivery_date || null;
+
+    const finalPaymentTerms =
+      data.payment_terms || existingDeal?.payment_terms || null;
+
+    const finalPhone =
+      actualCustomerPhone || data.customer_phone || existingDeal?.customer_phone || null;
+
+    const finalContactPerson =
+      data.contact_person || existingDeal?.contact_person || null;
+
+    const { ensureCustomerRecord } = require('../supabase');
+    await ensureCustomerRecord(finalCustomerName, senderPhone, {
+      customer_phone: finalPhone,
+      contact_person: finalContactPerson,
+      city: finalDeliveryLoc,
+    });
 
     const poDate = data.po_date || existingDeal?.po_date || (dbStage === 'won' ? new Date().toISOString().split('T')[0] : null);
     let poNumber = existingDeal ? existingDeal.po_number : null;
 
-    // PO is created ONLY after the deal is WON!
     if (dbStage === 'won') {
       const explicitPo = data.po_number || data.poNumber;
       if (explicitPo && explicitPo !== 'null' && explicitPo !== 'None' && String(explicitPo).trim().length > 2) {
@@ -1126,75 +956,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         poNumber = `PO-${todayStr}-${randomNum}`;
       }
     } else {
-      poNumber = null; // Ensure PO remains null for non-won pipeline deals
-    }
-
-    // Resolve delivery location, date, terms, phone, and contact person preserving existing values
-    const extractedDeliveryLoc = extractDeliveryLocation(text);
-    const finalDeliveryLoc =
-      extractedDeliveryLoc ||
-      data.delivery_location ||
-      existingDeal?.delivery_location ||
-      null;
-    const finalDeliveryDate =
-      data.delivery_date || existingDeal?.delivery_date || null;
-    const finalPaymentTerms =
-      data.payment_terms || existingDeal?.payment_terms || null;
-    const finalPhone =
-      actualCustomerPhone || data.customer_phone || existingDeal?.customer_phone || null;
-    const finalContactPerson =
-      data.contact_person || existingDeal?.contact_person || null;
-
-    // Always ensure and sync customer record with latest contact person, phone, and address
-    const { ensureCustomerRecord } = require('../supabase');
-    await ensureCustomerRecord(finalCustomerName, senderPhone, {
-      customer_phone: finalPhone,
-      contact_person: finalContactPerson,
-      city: finalDeliveryLoc,
-    });
-    console.log(`[SalesAgent] Synced customer profile for: ${finalCustomerName}`);
-
-    // MANDATORY DELIVERY LOCATION VALIDATION GATE
-    // An order cannot be confirmed or written as WON without a confirmed delivery location!
-    if (
-      (dbStage === 'won' || data.action === 'purchase_order') &&
-      (!finalDeliveryLoc || String(finalDeliveryLoc).trim() === '')
-    ) {
-      const pendingWonContext = {
-        action: 'stage_update',
-        customer_name: finalCustomerName,
-        target_stage: 'won',
-        deal_id: dealId || existingDeal?.id || null,
-        po_number: data.po_number || existingDeal?.po_number || null,
-        po_date: poDate || existingDeal?.po_date || null,
-        total_amount: dealAmount || existingDeal?.total_amount || 0,
-        customer_phone: finalPhone,
-        payment_terms: finalPaymentTerms,
-        delivery_date: finalDeliveryDate,
-        contact_person: finalContactPerson,
-        raw_text: text,
-        line_items: processedItems.map((pi) => ({
-          product_requirement: pi.pName,
-          sku_text: pi.pName,
-          dimensions: pi.dimensions || '',
-          quantity_mt: pi.qty,
-          quantity: pi.qty,
-          unit: 'MT',
-          rate_per_mt: pi.rate,
-          rate: pi.rate,
-          amount: pi.itemAmount,
-        })),
-      };
-
-      const { saveActiveSession } = require('../supabase');
-      await saveActiveSession(
-        senderPhone,
-        finalCustomerName,
-        `pending_delivery_location|${dealId || existingDeal?.id || 'null'}|${finalCustomerName}|${JSON.stringify(pendingWonContext)}`
-      );
-
-      return `*Delivery Location Required Before Confirmation*\n\n` +
-        `Please provide the delivery location for *${finalCustomerName}* (e.g. reply "Pune" or "Deliver to Mumbai") before I can confirm this order and generate the PO.`;
+      poNumber = null;
     }
 
     const totalQty = processedItems.reduce((s, i) => s + i.qty, 0);
@@ -1202,64 +964,35 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       line_items: processedItems.map(pi => ({ quantity: pi.qty, rate: pi.rate, amount: pi.itemAmount })),
     });
 
-    function deriveProductForm(name) {
-      if (!name || typeof name !== 'string') return null;
-      const lower = name.toLowerCase();
-      if (lower.includes('coil')) return 'Coil';
-      if (lower.includes('sheet')) return 'Sheet';
-      if (lower.includes('plate')) return 'Plate';
-      if (lower.includes('bar') || lower.includes('rebar')) return 'Bar';
-      if (lower.includes('pipe') || lower.includes('tube')) return 'Pipe';
-      if (lower.includes('beam') || lower.includes('channel') || lower.includes('angle') || lower.includes('flat')) return 'Structural';
-      return null;
-    }
-
     const structuredExtraction = {
       customer_name: finalCustomerName,
       companyName: finalCustomerName,
       contact_person: finalContactPerson,
-      contactPerson: finalContactPerson,
       customer_phone: actualCustomerPhone || null,
-      customerPhone: actualCustomerPhone || null,
       delivery_location: finalDeliveryLoc,
       deliveryLocation: finalDeliveryLoc,
       delivery_date: finalDeliveryDate,
-      deliveryDate: finalDeliveryDate,
       payment_terms: finalPaymentTerms,
       paymentTerms: finalPaymentTerms,
       productType: processedItems[0]?.pName || data.product_requirement || null,
-      thickness: processedItems[0]?.dimensions || null,
-      width: null,
-      length: null,
-      productForm: deriveProductForm(processedItems[0]?.pName || data.product_requirement),
       quantityTons: totalQty || processedItems[0]?.qty || 0,
       unitPrice: processedItems[0]?.rate > 0 ? processedItems[0]?.rate : null,
       total_amount: dealAmount > 0 ? dealAmount : (pricingSummary.subtotal > 0 ? pricingSummary.subtotal : null),
-      totalAmount: dealAmount > 0 ? dealAmount : (pricingSummary.subtotal > 0 ? pricingSummary.subtotal : null),
-      subtotal: pricingSummary.subtotal > 0 ? pricingSummary.subtotal : null,
-      gst_amount: pricingSummary.gstAmount > 0 ? pricingSummary.gstAmount : null,
-      grand_total: pricingSummary.grandTotal > 0 ? pricingSummary.grandTotal : null,
       line_items: processedItems.map((pi) => ({
         sku_text: pi.pName,
         dimensions: pi.dimensions || '',
+        hsn_code: detectHsnCode(pi.pName),
         quantity: pi.qty,
         unit: pi.unit || 'MT',
         rate: pi.rate > 0 ? pi.rate : null,
         amount: pi.itemAmount > 0 ? pi.itemAmount : null,
       })),
-      financialSummary: {
-        subtotal: pricingSummary.subtotal > 0 ? pricingSummary.subtotal : null,
-        gstAmount: pricingSummary.gstAmount > 0 ? pricingSummary.gstAmount : null,
-        grandTotal: pricingSummary.grandTotal > 0 ? pricingSummary.grandTotal : null,
-      },
       preferred_make: data.preferred_make || null,
-      preferredMake: data.preferred_make || null,
       overall_confidence: data.confidence || 0.95,
     };
 
     let inqId = existingDeal?.inquiry_id || null;
 
-    // Create fresh Inquiry in inquiries table for new inquiry text message
     if (!dealId || !inqId) {
       try {
         const { data: insertedInq, error: inqInsErr } = await supabase
@@ -1279,93 +1012,41 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           .select()
           .single();
 
-        if (inqInsErr) {
-          console.error('[SalesAgent] Error inserting inquiry for text message:', inqInsErr);
-        } else if (insertedInq) {
+        if (insertedInq) {
           inqId = insertedInq.id;
-          console.log('[SalesAgent] Successfully logged fresh inquiry record:', inqId);
         }
       } catch (inqErr) {
         console.error('[SalesAgent] Inquiry insert exception:', inqErr.message);
       }
-    } else {
-      // Update existing inquiry
-      try {
-        await supabase
-          .from('inquiries')
-          .update({
-            sender_name: finalCustomerName,
-            sender_phone: actualCustomerPhone || null,
-            salesperson_phone: senderPhone,
-            inquiry_type: 'inquiry',
-            ai_extraction_json: structuredExtraction,
-            status: 'review',
-            created_at: new Date().toISOString(),
-          })
-          .eq('id', inqId);
-      } catch (inqUpdErr) {
-        console.error('[SalesAgent] Error updating existing inquiry:', inqUpdErr.message);
-      }
     }
 
+    let activeDealObj = null;
+
     if (dealId) {
-      // ---- UPDATE existing deal ----
       const updatePayload = {
-        customer_name: finalCustomerName || existingDeal.customer_name,
+        customer_name: finalCustomerName,
         customer_phone: finalPhone,
         stage: dbStage,
-        po_date: poDate || existingDeal.po_date,
-        po_number: poNumber || existingDeal.po_number,
         delivery_location: finalDeliveryLoc,
         delivery_date: finalDeliveryDate,
         payment_terms: finalPaymentTerms,
-        total_amount: dealAmount || existingDeal.total_amount || 0,
-        inquiry_id: inqId || existingDeal.inquiry_id,
+        total_amount: dealAmount || 0,
+        inquiry_id: inqId,
         created_at: new Date().toISOString(),
       };
 
       if (dbStage === 'won') updatePayload.won_at = new Date().toISOString();
 
-      if (dbStage === 'lost') {
-        if (data.loss_reason && data.loss_reason !== 'Not specified' && data.loss_reason.length > 2) {
-          updatePayload.lost_reason = data.loss_reason;
-        } else {
-          const { saveActiveSession } = require('../supabase');
-          await saveActiveSession(senderPhone, finalCustomerName, `pending_loss_reason|${dealId}|${finalCustomerName}`);
-          return `*Marking Deal as Lost: ${finalCustomerName}*\n\n` +
-            `Please reply with the reason for rejection (reply with a number or type your own reason):\n\n` +
-            `1. Price too high\n` +
-            `2. Credit terms / Payment terms mismatch\n` +
-            `3. Delivery timeline delay\n` +
-            `4. Material unavailable / Out of stock\n` +
-            `5. Spec mismatch\n` +
-            `6. Competitor relationship\n` +
-            `7. Customer silent / No response\n` +
-            `8. Cancelled by customer`;
-        }
-      }
-
-      const { error: dealUpdateErr } = await supabase
-        .from('deals')
-        .update(updatePayload)
-        .eq('id', dealId);
-
-      if (dealUpdateErr) {
-        console.error('[SalesAgent] Deal update error:', dealUpdateErr);
-      }
+      await supabase.from('deals').update(updatePayload).eq('id', dealId);
 
       if (processedItems.length > 0) {
-        await supabase
-          .from('deal_items')
-          .delete()
-          .eq('deal_id', dealId);
-
+        await supabase.from('deal_items').delete().eq('deal_id', dealId);
         for (const pItem of processedItems) {
           await supabase.from('deal_items').insert({
             deal_id: dealId,
             sku_text: pItem.pName,
             dimensions: pItem.dimensions || (pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null),
-            quantity: pItem.qty > 0 ? pItem.qty : null,
+                        quantity: pItem.qty > 0 ? pItem.qty : null,
             unit: pItem.unit || 'MT',
             rate: pItem.rate > 0 ? pItem.rate : null,
             amount: pItem.itemAmount > 0 ? pItem.itemAmount : null,
@@ -1373,32 +1054,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           });
         }
       }
+      activeDealObj = { id: dealId, ...updatePayload };
     } else {
-      if (dbStage === 'lost' && !data.loss_reason) {
-        const { getFullActiveSession, saveActiveSession } = require('../supabase');
-        const session = await getFullActiveSession(senderPhone);
-        const isLossReasonPrompted = session?.last_intent?.startsWith('pending_loss_reason|');
-
-        if (!isLossReasonPrompted) {
-          await saveActiveSession(
-            senderPhone,
-            finalCustomerName,
-            `pending_loss_reason|null|${finalCustomerName}`,
-          );
-
-          return `*Deal Marked as Lost — Reason Required*\n\n` +
-            `Please specify why the deal for *${finalCustomerName}* was lost:\n\n` +
-            `1. Price too high\n` +
-            `2. Payment/Credit terms mismatch\n` +
-            `3. Delivery timeline issue\n` +
-            `4. Material unavailable / Out of stock\n` +
-            `5. Spec mismatch\n` +
-            `6. Competitor relationship\n` +
-            `7. Customer silent / No response\n` +
-            `8. Cancelled by customer`;
-        }
-      }
-
       const { data: newDeal, error: dealInsertErr } = await supabase
         .from('deals')
         .insert({
@@ -1421,18 +1078,15 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         .select()
         .single();
 
-      if (dealInsertErr) {
-        console.error('[SalesAgent] Fatal deals insert error:', dealInsertErr);
-      }
-
       if (newDeal) {
         dealId = newDeal.id;
+        activeDealObj = newDeal;
         for (const pItem of processedItems) {
           await supabase.from('deal_items').insert({
             deal_id: dealId,
             sku_text: pItem.pName,
             dimensions: pItem.dimensions || (pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null),
-            quantity: pItem.qty > 0 ? pItem.qty : null,
+                        quantity: pItem.qty > 0 ? pItem.qty : null,
             unit: pItem.unit || 'MT',
             rate: pItem.rate > 0 ? pItem.rate : null,
             amount: pItem.itemAmount > 0 ? pItem.itemAmount : null,
@@ -1442,88 +1096,27 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
     }
 
-    // Update last_order_date in recurring_customers table ONLY when deal is won
-    if (dbStage === 'won') {
-      try {
-        await supabase
-          .from('recurring_customers')
-          .update({ last_order_date: new Date().toISOString() })
-          .ilike('customer_name', `%${finalCustomerName}%`);
-      } catch (err) {
-        console.error('[SalesAgent] Failed to update last_order_date:', err.message);
-      }
-    }
-
-    // Edge Case 3: Log KRA 1 ONLY when deal is won
-    if (dbStage === 'won' && dealId) {
-      const alreadyLogged = await isKRA1AlreadyLogged(
-        senderPhone,
-        finalCustomerName,
-      );
-      if (!alreadyLogged) {
-        await supabase.from('kra_logs').insert({
-          salesperson_phone: senderPhone,
-          customer_name: finalCustomerName,
-          kra_number: 1,
-          kra_type: 'sales_achievement',
-          metric_name: 'won_deal_value',
-          value: dealAmount,
-          notes: `Won deal for ${finalCustomerName}: Rs. ${dealAmount.toLocaleString('en-IN')}`,
-          created_at: new Date().toISOString(),
-        });
-        console.log(`[SalesAgent] Logged Sales Achievement for won deal: ${finalCustomerName} = Rs. ${dealAmount}`);
-      }
-    }
-
-    // Log to activity_logs
     try {
-      if (dbStage === 'won') {
-        logBotActivity({
-          salesperson_phone: senderPhone,
-          description: `New order created for ${finalCustomerName}${poNumber ? ` (PO: ${poNumber})` : ''}`,
-          module: 'Orders',
-          customer_name: finalCustomerName,
-        });
-      } else if (dbStage === 'new_inquiry' || data.action === 'inquiry') {
-        logBotActivity({
-          salesperson_phone: senderPhone,
-          description: `New inquiry received from ${finalCustomerName} via WhatsApp`,
-          module: 'Inquiries',
-          customer_name: finalCustomerName,
-        });
-      } else {
-        logBotActivity({
-          salesperson_phone: senderPhone,
-          description: `Order for ${finalCustomerName} updated to ${dbStage}`,
-          module: 'Orders',
-          customer_name: finalCustomerName,
-        });
-      }
-    } catch (actErr) {
-      console.warn('[SalesAgent] Non-blocking activity log notice:', actErr?.message);
-    }
-
-    // Trigger Zoho Bigin Sync
-    try {
-      const syncType = dbStage === 'won' ? 'deal_won' : dbStage === 'lost' ? 'deal_lost' : 'deal_stage';
-      syncActivity(syncType, {
-        customerName: finalCustomerName,
-        dealId,
-        amount: dealAmount,
-        stage: dbStage,
-        poNumber,
-        paymentTerms: data.payment_terms,
-        senderPhone,
+      logBotActivity({
+        salesperson_phone: senderPhone,
+        description: `New inquiry received from ${finalCustomerName} via WhatsApp`,
+        module: 'Inquiries',
+        customer_name: finalCustomerName,
       });
-    } catch (e) {
-      console.warn('[SalesAgent] Bigin sync trigger notice:', e.message);
+    } catch (actErr) {
+      console.warn('[SalesAgent] Activity log notice:', actErr?.message);
     }
 
-    const { getCustomerMissingInfoPrompt } = require('../supabase');
-    const missingPrompt = await getCustomerMissingInfoPrompt(finalCustomerName, senderPhone);
+    const dealCode = getDealCode(activeDealObj || { id: dealId });
 
-    const activeDeal = existingDeal || { id: dealId };
-    const dealCode = getDealCode(activeDeal);
+    // EVALUATE MANDATORY FIELD COMPLETENESS
+    const completeness = evaluateMandatoryFields({
+      customerName: finalCustomerName,
+      lineItems: processedItems,
+      deliveryLocation: finalDeliveryLoc,
+      paymentTerms: finalPaymentTerms,
+      totalAmount: dealAmount,
+    });
 
     if (dbStage === 'won') {
       let resultMsg =
@@ -1534,17 +1127,12 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         `Total Value: *Rs. ${Number(dealAmount).toLocaleString('en-IN')}* + GST\n` +
         (poDate ? `PO Date: *${poDate}*\n` : '') +
         `\nUpdated Sales Achievement Card!`;
-
-      if (missingPrompt) {
-        resultMsg += `\n\n${missingPrompt}`;
-      }
       return resultMsg;
     }
 
-    // Text Inquiry / Non-Won Deal / Quoted: Format line items WITH specifications & rates
-    let itemsBreakdownStr = '';
-    if (processedItems.length > 0) {
-      itemsBreakdownStr = processedItems
+    // SCENARIO 2: ALL MANDATORY FIELDS COMPLETE
+    if (completeness.isComplete) {
+      let itemsBreakdownStr = processedItems
         .map((pi) => {
           const dimStr = pi.dimensions ? ` (${pi.dimensions})` : '';
           const unitStr = pi.unit || 'MT';
@@ -1554,38 +1142,45 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           return `  • *${pi.pName}*${dimStr}${qtyStr}${rateStr}${amtStr}`;
         })
         .join('\n');
+
+      const gstVal = calculateGst(dealAmount);
+      const grandTot = calculateGrandTotal(dealAmount);
+
+      return `*Inquiry Logged & Complete — ${dealCode}*\n\n` +
+        `Customer: *${finalCustomerName}*\n` +
+        `Stage: *NEW INQUIRY*\n` +
+        `Line Items:\n${itemsBreakdownStr}\n` +
+        (data.preferred_make ? `Preferred Make: *${data.preferred_make}*\n` : '') +
+        `Delivery Location: *${finalDeliveryLoc}*\n` +
+        `Payment Terms: *${finalPaymentTerms}*\n` +
+        (dealAmount > 0 ? `Quotation Subtotal: *Rs. ${Number(dealAmount).toLocaleString('en-IN')}* + GST (Rs. ${Number(gstVal).toLocaleString('en-IN')})\nGrand Total: *Rs. ${Number(grandTot).toLocaleString('en-IN')}*\n` : '') +
+        `\nAll mandatory fields complete. Logged to Sales Pipeline & Inquiries!`;
     }
 
-    const gstVal = calculateGst(dealAmount);
-    const grandTot = calculateGrandTotal(dealAmount);
+    // SCENARIO 1: MINIMUM VIABLE INQUIRY (Some mandatory fields missing)
+    let itemSummary = processedItems
+      .map((pi) => {
+        const dimStr = pi.dimensions ? ` (${pi.dimensions})` : '';
+        const qtyStr = pi.qty > 0 ? ` - ${pi.qty} ${pi.unit || 'MT'}` : '';
+        const rateStr = pi.rate > 0 ? ` @ Rs. ${Number(pi.rate).toLocaleString('en-IN')}` : '';
+        return `• *${pi.pName}*${dimStr}${qtyStr}${rateStr}`;
+      })
+      .join('\n');
 
-    let resultMsg =
-      `*Sales Inquiry & Pipeline Logged!*\n\n` +
+    return `*Inquiry Logged — Deal ID: ${dealCode}*\n\n` +
       `Customer: *${finalCustomerName}*\n` +
-      `Deal ID: *${dealCode}*\n` +
-      `Stage: *${dbStage.toUpperCase()}*\n` +
-      (itemsBreakdownStr ? `Line Items:\n${itemsBreakdownStr}\n` : '') +
-      (data.preferred_make ? `Preferred Make: *${data.preferred_make}*\n` : '') +
+      `Product Requirement:\n${itemSummary}\n` +
       (finalDeliveryLoc ? `Delivery Location: *${finalDeliveryLoc}*\n` : '') +
       (finalPaymentTerms ? `Payment Terms: *${finalPaymentTerms}*\n` : '') +
-      (data.delivery_date ? `Target Delivery Date: *${data.delivery_date}*\n` : '') +
-      (dealAmount > 0 ? `Quotation Subtotal: *Rs. ${Number(dealAmount).toLocaleString('en-IN')}* + GST (Rs. ${Number(gstVal).toLocaleString('en-IN')})\nGrand Total: *Rs. ${Number(grandTot).toLocaleString('en-IN')}*\n` : '') +
-      `\nLogged to Sales Pipeline & Inquiries!`;
-
-    if (missingPrompt) {
-      resultMsg += `\n\n${missingPrompt}`;
-    }
-
-    return resultMsg;
+      `\n*Still needed to complete:*\n` +
+      completeness.missingFields.map((f) => `• ${f}`).join('\n') +
+      `\n\nLogged to Sales Pipeline & Inquiries!`;
   } catch (error) {
     console.error('[SalesAgent] Error processing sales message:', error);
     return `Error updating deal: ${error.message}`;
   }
 }
 
-/**
- * Process incoming PO / Sales document image via dedicated OCR Agent
- */
 async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) {
   const { processSalesImage: ocrProcess } = require('./ocrAgent');
   return await ocrProcess(imageBuffer, mimeType, senderPhone, messageId);
@@ -1595,6 +1190,8 @@ module.exports = {
   processSalesMessage,
   processSalesImage,
   findBestDeal,
+  findDealByCodeOrId,
   detectInvalidUnitInMessage,
   extractDeliveryLocation,
+  evaluateMandatoryFields,
 };
