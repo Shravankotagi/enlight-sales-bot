@@ -382,6 +382,9 @@ function evaluateMandatoryFields({ customerName, lineItems, deliveryLocation, pa
   const hasProduct = validItems.length > 0;
   if (!hasProduct) missing.push('Product Description');
 
+  const hasSpec = validItems.some(i => (i.dimensions && String(i.dimensions).trim().length > 0));
+  if (!hasSpec) missing.push('Specification / Dimensions');
+
   const hasQty = validItems.some(i => (Number(i.qty || i.quantity || i.quantity_mt) > 0));
   if (!hasQty) missing.push('Quantity & Unit');
 
@@ -398,6 +401,7 @@ function evaluateMandatoryFields({ customerName, lineItems, deliveryLocation, pa
     isComplete: missing.length === 0,
     missingFields: missing,
     hasProduct,
+    hasSpec,
     hasCompany,
     hasQty,
     hasRate,
