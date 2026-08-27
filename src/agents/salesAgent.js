@@ -1,18 +1,19 @@
 /**
  * KRA 1 - Sales Achievement & Pipeline Agent
- * Version: 2026.08.27 (Form Completion Rules & Multi-Scenario Optimization)
+ * Version: 2026.08.27 (Form Completion Rules, Context Awareness & Stage Updates)
  *
  * DESIGN PRINCIPLES:
  * - A New Inquiry requires at minimum: Customer/Company Name AND at least one Product Name.
+ * - Stage updates (e.g. "mark the deal as quoted", "deal is won") maintain session/active deal context.
  * - Non-product fields alone (rate, delivery, payment terms) are treated as deal updates or require deal context.
- * - Missing mandatory fields (Company, Product, Qty+Unit, Rate, Delivery Location, Payment Terms) are tracked.
+ * - Missing mandatory fields (Company, Product, Spec, Qty+Unit, Rate, Delivery Location, Payment Terms) are tracked.
  * - Incomplete inquiries stay in "new_inquiry" stage and list remaining required fields with Deal ID.
  * - Complete inquiries confirm all fields are present.
  * - Updates using Deal ID or unique active deal merge fields without duplicate creation.
  */
 
 const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
-const { supabase, verifyAndGetCustomerName, saveActiveSession } = require('../supabase');
+const { supabase, verifyAndGetCustomerName, saveActiveSession, getActiveSession } = require('../supabase');
 const { syncActivity } = require('./biginSyncAgent');
 const { logBotActivity } = require('../utils/activityLogger');
 const { detectHsnCode } = require('../utils/hsnDetector');
@@ -53,33 +54,38 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
 }
 
 CRITICAL EXTRACTION & FORM COMPLETION RULES:
-1. WHAT MAKES A VALID NEW INQUIRY:
+1. STAGE UPDATES & DEAL PROGRESSION:
+   - When the user asks to mark a deal as quoted, won, lost, qualified, or negotiation (e.g. "mark the deal as quoted", "deal is quoted", "move to won", "deal won"), action MUST be "stage_update" and target_stage MUST be the matching stage.
+   - If no company name is in the message (e.g. "mark the deal as quoted"), leave customer_name as null so the system uses the active conversation deal context!
+
+2. WHAT MAKES A VALID NEW INQUIRY:
    - A New Inquiry requires at minimum: CUSTOMER/COMPANY NAME AND AT LEAST ONE PRODUCT NAME (e.g. HR Coil, CR Sheet, MS Plate, TMT Bar).
    - Company name alone, delivery location alone, rate alone, or payment terms alone do NOT constitute a New Inquiry.
    - If ONLY supporting fields (delivery, rate, payment terms, or quantity) are provided without a product name, action MUST be "deal_update" (not "inquiry").
 
-2. MANDATORY FIELDS FOR INQUIRY COMPLETION:
+3. MANDATORY FIELDS FOR INQUIRY COMPLETION:
    - Company Name ✱
    - Product Description / SKU ✱
+   - Specification / Dimensions (e.g. 2mm, 1250x2500)
    - Quantity and Unit ✱
    - Rate (₹) ✱
    - HSN/SAC ✱ (auto-detected)
    - Delivery Location / Address ✱
    - Payment Terms ✱
 
-3. DEAL ID & EXISTING DEAL UPDATES:
+4. DEAL ID & EXISTING DEAL UPDATES:
    - If the salesperson mentions a Deal ID (e.g. "#DEAL-C538B6", "DEAL-C538B6", or "C538B6"), extract it into deal_id.
    - When deal_id is provided or inferred, update only the provided fields on that specific deal and never create a duplicate.
 
-4. MULTIPLE LINE ITEMS:
+5. MULTIPLE LINE ITEMS:
    - Extract each item as a separate object in line_items array with product name, dimensions, quantity, unit, and rate.
    - Never drop dimensions (e.g. "1mm 1250x2500").
 
-5. PAYMENT TERMS & DELIVERY:
+6. PAYMENT TERMS & DELIVERY:
    - "45 days" or "30 days" in credit context is payment_terms, never product quantity.
    - Extract full delivery location/address and city.
 
-6. TARGET RATE:
+7. TARGET RATE:
    - If given, extract as rate_per_mt. If no rate is mentioned, rate_per_mt MUST be null.
 
 Return ONLY the JSON object.
@@ -457,12 +463,12 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         } else {
           const reqMatch = textClean.match(/(?:inquiry\s+for|order\s+for|deal\s+for|quote\s+for|requirement\s+for|for)\s+([A-Z0-9\s&.-]{2,40}?)(?:\s+\d+\s*(?:mt|ton|tons|tonne|kg|pcs|sheet|sheets|plate|plates|mm|coil|coils|bar|bars)|\s+requires|\s+needs|\s+before|\.|$)/i) ||
             textClean.match(/(?:inquiry\s+from|order\s+from|rfq\s+from|from)\s+([A-Z0-9\s&.-]{2,40}?)(?:\s+requires|\s+needs|\s+for|\s+before|\.|$)/i) ||
-            textClean.match(/\b(?:mark|move|update|set|change)\s+([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|negotiation|qualified)\b/i) ||
+            textClean.match(/\b(?:mark|move|update|set|change)\s+(?:the\s+|this\s+)?([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|negotiation|qualified)\b/i) ||
             textClean.match(/^(?!new\b|log\b|create\b|add\b)([A-Z0-9\s&.-]{2,40}?)\s+(?:requires|require|needs|need|inquiry|rfq|po|order|want)\b/i) ||
             textClean.match(/(?:customer|company|client|pvt\.?\s*ltd\.?|ltd\.?|infra|steel|engineering|industries)\s+([A-Z0-9\s&.-]{3,35})/i);
           if (reqMatch) {
             const cand = reqMatch[1].trim();
-            if (!['new', 'log', 'create', 'add', 'a', 'the', 'customer', 'unknown', 'max'].includes(cand.toLowerCase())) {
+            if (!['new', 'log', 'create', 'add', 'a', 'the', 'this', 'that', 'deal', 'customer', 'unknown', 'max'].includes(cand.toLowerCase())) {
               ruleCustomer = cand;
             }
           }
@@ -470,15 +476,13 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
         let ruleAction = 'inquiry';
         let ruleStage = 'new_inquiry';
-        const stageUpdateMatch = textClean.match(/\b(?:mark|move|update|set|change)\s+([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|negotiation|qualified)\b/i) ||
-          textClean.match(/([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:is\s+|moved\s+to\s+|marked\s+as\s+)?(won|lost|quoted|negotiation|qualified)\b/i);
+        const stageUpdateMatch = textClean.match(/\b(?:mark|move|update|set|change)\s+(?:the\s+|this\s+)?(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|negotiation|qualified)\b/i) ||
+          textClean.match(/\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+)?(won|lost|quoted|negotiation|qualified)\b/i) ||
+          textClean.match(/\b(won|lost|quoted|negotiation|qualified)\b/i);
 
         if (stageUpdateMatch) {
           ruleAction = 'stage_update';
-          ruleStage = stageUpdateMatch[2].toLowerCase();
-          if (!ruleCustomer && stageUpdateMatch[1]) {
-            ruleCustomer = stageUpdateMatch[1].trim();
-          }
+          ruleStage = stageUpdateMatch[1].toLowerCase();
         }
 
         let qty = 0;
@@ -602,7 +606,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       'rishabh', 'rishabh makwana', 'max', 'akruti', 'salesperson',
       'sales rep', 'dhananjay goel', 'rahul sharma', 'suresh sharma',
       'kumar varma', 'john', 'andrew', 'test', 'customer', 'client',
-      'the customer', 'customer inquiry', 'web customer', 'unknown', 'self'
+      'the customer', 'customer inquiry', 'web customer', 'unknown', 'self',
+      'the deal', 'this deal', 'that deal', 'deal', 'the', 'this', 'that'
     ];
 
     const SYSTEM_EMPLOYEE_PHONES = new Set([
@@ -634,7 +639,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       return false;
     }
 
-    // ── CHECK 1: Deal ID Explicitly Provided in Message (Scenario 4) ────────
+    // ── CONTEXT RESOLUTION FOR EXPLICIT DEAL ID & ACTIVE SESSIONS ──────────
     const explicitDealIdMatch = text.match(/#?(DEAL-[A-F0-9]{4,6}|[A-F0-9]{6})/i);
     let targetExplicitDeal = null;
     if (explicitDealIdMatch || data.deal_id) {
@@ -649,6 +654,27 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     if (!customerName && targetExplicitDeal) {
       customerName = targetExplicitDeal.customer_name;
+    }
+
+    // If still no customer name in message, check active conversation session or recent active deal
+    if (!customerName) {
+      const activeSessionCustomer = await getActiveSession(senderPhone);
+      if (activeSessionCustomer && !isInvalidCustomerName(activeSessionCustomer)) {
+        customerName = activeSessionCustomer;
+      } else {
+        const { data: recentDeals } = await supabase
+          .from('deals')
+          .select('*, deal_items(*)')
+          .eq('salesperson_phone', senderPhone)
+          .not('stage', 'in', '("won","lost")')
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (recentDeals && recentDeals.length > 0) {
+          targetExplicitDeal = recentDeals[0];
+          customerName = recentDeals[0].customer_name;
+        }
+      }
     }
 
     // Check line items & product name extraction
@@ -715,9 +741,80 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     const hasRateUpdate = !!(data.line_items?.some(i => i.rate_per_mt > 0) || (data.total_amount && data.total_amount > 0));
     const hasQtyUpdate = !!(rawItems.some(i => (i.quantity > 0 || i.quantity_mt > 0)));
 
+    // ── STAGE UPDATE HANDLER (e.g. "mark the deal as quoted", "deal is won") ───
+    if (data.action === 'stage_update') {
+      const stageMap = {
+        new_inquiry: 'new_inquiry',
+        qualified: 'qualified',
+        quoted: 'quoted',
+        negotiation: 'negotiation',
+        won: 'won',
+        lost: 'lost',
+      };
+      const dbStage = stageMap[data.target_stage] || 'qualified';
+
+      let dealToUpdate = targetExplicitDeal;
+      if (!dealToUpdate && customerName) {
+        const openDeals = await getAllOpenDealsForCustomer(customerName, senderPhone);
+        if (openDeals.length > 0) {
+          dealToUpdate = openDeals[0];
+        }
+      }
+
+      if (!dealToUpdate) {
+        return `Which deal would you like to mark as *${dbStage.toUpperCase()}*? Please provide the Deal ID (e.g. #DEAL-XXXXXX) or customer name.`;
+      }
+
+      const updatePayload = {
+        stage: dbStage,
+      };
+      if (dbStage === 'won') {
+        updatePayload.won_at = new Date().toISOString();
+        if (data.po_number) updatePayload.po_number = data.po_number;
+      }
+      if (dbStage === 'lost' && data.loss_reason) {
+        updatePayload.lost_reason = data.loss_reason;
+      }
+
+      await supabase.from('deals').update(updatePayload).eq('id', dealToUpdate.id);
+
+      if (dealToUpdate.inquiry_id && ['qualified', 'quoted', 'won'].includes(dbStage)) {
+        await supabase.from('inquiries').update({ status: 'confirmed' }).eq('id', dealToUpdate.inquiry_id);
+      }
+
+      await saveActiveSession(senderPhone, dealToUpdate.customer_name, 'deal_stage_update');
+
+      const dealCode = getDealCode(dealToUpdate);
+
+      try {
+        logBotActivity({
+          salesperson_phone: senderPhone,
+          description: `Deal ${dealCode} for ${dealToUpdate.customer_name} moved to ${dbStage.toUpperCase()}`,
+          module: 'Pipeline',
+          customer_name: dealToUpdate.customer_name,
+        });
+      } catch (actErr) {
+        console.warn('[SalesAgent] Activity log notice:', actErr?.message);
+      }
+
+      if (dbStage === 'won') {
+        return `*DEAL WON & ORDER CONFIRMED!*\n\n` +
+          `Customer: *${dealToUpdate.customer_name}*\n` +
+          `Deal ID: *${dealCode}*\n` +
+          (dealToUpdate.po_number ? `Official PO Number: *${dealToUpdate.po_number}*\n` : '') +
+          `Total Value: *Rs. ${Number(dealToUpdate.total_amount || 0).toLocaleString('en-IN')}*\n\n` +
+          `Updated Sales Achievement Card! 🏆`;
+      }
+
+      return `*Deal Updated — ${dealCode}*\n\n` +
+        `Customer: *${dealToUpdate.customer_name}*\n` +
+        `Stage: *${dbStage.toUpperCase()}*\n\n` +
+        `Deal successfully moved to *${dbStage.toUpperCase()}* in Sales Pipeline! 📈`;
+    }
+
     // ── SCENARIO 3: PARTIAL UPDATE WITHOUT PRODUCT NAME ────────────────────────
-    // If NO product name is provided AND not explicitly a stage_update with a customer name:
-    if (!hasAnyProductName && data.action !== 'stage_update' && data.target_stage !== 'won' && data.target_stage !== 'lost') {
+    // If NO product name is provided AND not explicitly a stage_update:
+    if (!hasAnyProductName && data.action !== 'stage_update') {
       if (targetExplicitDeal) {
         // Handled below via Deal ID update path
       } else if (customerName) {
@@ -804,6 +901,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       if (Object.keys(updateFields).length > 0) {
         await supabase.from('deals').update(updateFields).eq('id', dealId);
       }
+
+      await saveActiveSession(senderPhone, company, 'deal_update');
 
       // Refetch updated deal to check field completeness
       const { data: refreshedDealArr } = await supabase
@@ -1050,7 +1149,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             deal_id: dealId,
             sku_text: pItem.pName,
             dimensions: pItem.dimensions || (pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null),
-                        quantity: pItem.qty > 0 ? pItem.qty : null,
+            quantity: pItem.qty > 0 ? pItem.qty : null,
             unit: pItem.unit || 'MT',
             rate: pItem.rate > 0 ? pItem.rate : null,
             amount: pItem.itemAmount > 0 ? pItem.itemAmount : null,
@@ -1090,7 +1189,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             deal_id: dealId,
             sku_text: pItem.pName,
             dimensions: pItem.dimensions || (pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null),
-                        quantity: pItem.qty > 0 ? pItem.qty : null,
+            quantity: pItem.qty > 0 ? pItem.qty : null,
             unit: pItem.unit || 'MT',
             rate: pItem.rate > 0 ? pItem.rate : null,
             amount: pItem.itemAmount > 0 ? pItem.itemAmount : null,
@@ -1099,6 +1198,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         }
       }
     }
+
+    await saveActiveSession(senderPhone, finalCustomerName, 'deal_inquiry');
 
     try {
       logBotActivity({
@@ -1174,8 +1275,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     return `*Inquiry Logged — Deal ID: ${dealCode}*\n\n` +
       `Customer: *${finalCustomerName}*\n` +
       `Product Requirement:\n${itemSummary}\n` +
-      (finalDeliveryLoc ? `Delivery Location: *${finalDeliveryLoc}*\n` : '') +
-      (finalPaymentTerms ? `Payment Terms: *${finalPaymentTerms}*\n` : '') +
+      (finalDeliveryLoc ? `Delivery Location: *\${finalDeliveryLoc}*\n` : '') +
+      (finalPaymentTerms ? `Payment Terms: *\${finalPaymentTerms}*\n` : '') +
       `\n*Still needed to complete:*\n` +
       completeness.missingFields.map((f) => `• ${f}`).join('\n') +
       `\n\nLogged to Sales Pipeline & Inquiries!`;
