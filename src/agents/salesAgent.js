@@ -264,7 +264,7 @@ function getDealCode(deal) {
 
 async function findDealByCodeOrId(codeOrId, senderPhone) {
   if (!codeOrId) return null;
-  const clean = codeOrId.replace(/^#?DEAL-?/i, '').trim().toUpperCase();
+  const clean = codeOrId.replace(/^#?(?:DEAL|INQ)-?/i, '').trim().toUpperCase();
   if (clean.length < 4) return null;
 
   const { data: deals } = await supabase
@@ -277,6 +277,7 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
     const found = deals.find(
       (d) =>
         (d.id || '').toUpperCase().startsWith(clean) ||
+        (d.inquiry_id || '').toUpperCase().startsWith(clean) ||
         (d.deal_number && d.deal_number.toUpperCase().includes(clean))
     );
     return found || null;
@@ -627,6 +628,12 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const words = clean.split(/\s+/).filter((w) => w.length > 0);
       if (words.length === 1 && PRODUCT_KEYWORDS.includes(words[0])) {
         return true;
+      }
+
+      // If name contains company indicators, treat as valid company name
+      const hasCompanyIndicator = /\b(pvt|ltd|limited|industries|industry|infra|infrastructure|enterprises|enterprise|corp|corporation|works|steel|metals|engineering|engineers|associates|traders|trading|buildcon|fab|fabricators|co|company)\b/i.test(name);
+      if (hasCompanyIndicator) {
+        return false;
       }
 
       const allWordsProduct = words.every((w) =>

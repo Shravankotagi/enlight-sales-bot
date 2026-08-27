@@ -93,8 +93,14 @@ function convertToMt(quantity, rawUnit) {
 function calculateLineItem(item) {
   if (!item) return { quantity: 0, rate: 0, amount: 0, unit: 'MT' };
   const quantity = Number(item.quantity || item.quantity_mt || item.qty || 0) || 0;
-  const rate = Number(item.rate || item.rate_per_mt || item.price_per_mt || item.unitPrice || 0) || 0;
+  let rawRate = Number(item.rate || item.rate_per_mt || item.price_per_mt || item.unitPrice || 0) || 0;
   const unit = normalizeUnit(item.unit);
+
+  // If unit is MT/Ton and rate <= 250 (e.g. 52 or 54.5 representing Rs/Kg in Indian steel market), normalize to Rs/MT
+  let rate = rawRate;
+  if (['MT', 'TON', 'TONS'].includes(unit.toUpperCase()) && rawRate > 0 && rawRate <= 250) {
+    rate = rawRate * 1000;
+  }
 
   let amount = item.amount && Number(item.amount) > 0 ? Number(item.amount) : 0;
   if (!amount && quantity > 0 && rate > 0) {

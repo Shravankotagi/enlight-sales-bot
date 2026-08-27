@@ -110,10 +110,10 @@ async function getAccessibleSalespersonPhonesForBot(senderPhone) {
       return false;
     });
 
-    const teamPhones = Array.from(new Set(assigned.map((a) => a.phone).filter(Boolean)));
+    const teamPhones = Array.from(new Set([employee.phone || senderPhone, ...assigned.map((a) => a.phone)].filter(Boolean)));
     return {
       role: 'sales_manager',
-      phones: teamPhones, // empty array [] if 0 assigned salespersons
+      phones: teamPhones,
       employee,
       isManager: true,
       isAdmin: false,
