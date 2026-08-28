@@ -1060,13 +1060,13 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     if (dealIdMatch && openDeals.length > 0) {
       const targetCode = dealIdMatch[1].toUpperCase().replace(/^(?:DEAL|INQ)-?/, '');
       existingDeal = openDeals.find(d => (d.id || '').toUpperCase().includes(targetCode) || (d.inquiry_id || '').toUpperCase().includes(targetCode) || (d.deal_number && d.deal_number.toUpperCase().includes(targetCode)));
-    } else if (!isExplicitNewInquiry) {
-      if (openDeals.length === 1) {
-        existingDeal = openDeals[0];
-      } else if (openDeals.length > 1) {
-        const candidateProductNames = processedItems.map(pi => pi.pName).filter(Boolean);
+    } else if (!isExplicitNewInquiry && openDeals.length > 0) {
+      const candidateProductNames = processedItems.map(pi => pi.pName).filter(Boolean);
+      if (candidateProductNames.length > 0) {
         const matchingDeal = openDeals.find(d => isDealProductMatch(d, candidateProductNames));
-        existingDeal = matchingDeal || openDeals[0];
+        existingDeal = matchingDeal || null;
+      } else if (openDeals.length === 1) {
+        existingDeal = openDeals[0];
       }
     }
 
