@@ -32,7 +32,7 @@ Input message can be English, Hindi, or Hinglish.
 
 Extract into ONLY a JSON object (no markdown, no prose, no backticks):
 {
-  "action": "stage_update|purchase_order|inquiry|deal_update",
+  "action": "inquiry|stage_update|purchase_order|deal_update", // Use "inquiry" for ALL customer requirements, notes, RFQs, quotes (even if dash-separated or including credit terms). Use "purchase_order" ONLY if text explicitly contains "PO", "PO-...", "Purchase order", "Order confirmed", "Order placed", or "Won".
   "deal_id": "<deal ID if mentioned e.g. #DEAL-C538B6, DEAL-C538B6, or C538B6, else null>",
   "customer_name": "<exact company/customer name requesting material or placing order, else null>",
   "contact_person": "<full name of customer contact person/owner/proprietor if mentioned e.g. Rajesh Mehta, else null>",
@@ -173,15 +173,35 @@ function extractDeliveryLocation(text) {
     }
   }
 
-  const structLoc = text.match(/(?:delivery\s+location|delivery\s+address|delivery\s+city|location|destination|ship\s+to|deliver\s+to|delivery\s+at)\s*[:=-]\s*([^\n\r,]+)/i);
-  if (structLoc) {
-    return structLoc[1].trim().replace(/^['"]|['"]$/g, '');
+  // 1. Check for Known Steel Cities in text first
+  for (const city of KNOWN_STEEL_CITIES) {
+    const cityRegex = new RegExp(`\\b${city}\\b`, 'i');
+    if (cityRegex.test(lower)) {
+      return city;
+    }
   }
 
+  // 2. Structured location label (e.g. "Location: Pune" or "Delivery Location: Mumbai")
+  const structLoc = text.match(/(?:delivery\s+location|delivery\s+address|delivery\s+city|delivery\s+site|location|destination|ship\s+to|deliver\s+to|delivery\s+at|site\s+delivery)\s*[:=-]\s*([^\n\r,]+)/i);
+  if (structLoc) {
+    const cand = structLoc[1].trim().replace(/^['"]|['"]$/g, '');
+    if (cand.length >= 2 && !['site', 'credit', 'advance', 'days', 'payment', 'terms'].includes(cand.toLowerCase())) {
+      return cand;
+    }
+  }
+
+  // 3. Phrasing matches with delivery prepositions (e.g. "delivery to Pune", "deliver to Chakan", "delivery Pune")
   const phrases = [
-    /(?:for\s+delivery\s+to|delivery\s+to|delivery\s+at|deliver\s+to|ship\s+to|destination|transport\s+to|bhejna\s+hai|deliver\s+karna\s+hai|delivering\s+to)\s+([A-Za-z\s]+?)(?:\s+before|\s+by|\s+on|\s+within|\s+deliver|\.|\n|$)/i,
-    /([A-Za-z]+)\s+(?:delivery|chahiye|mein\s+deliver|pe\s+deliver)/i
+    /(?:for\s+delivery\s+to|delivery\s+to|delivery\s+at|deliver\s+to|ship\s+to|destination|transport\s+to|bhejna\s+hai|deliver\s+karna\s+hai|delivering\s+to|delivery|deliver)\s+([A-Za-z\s]+?)(?:\s+before|\s+by|\s+on|\s+within|\s+payment|\s+credit|\s+rate|\s+price|\.|\n|$)/i,
+    /([A-Za-z]+)\s+(?:delivery|mein\s+deliver|pe\s+deliver)/i
   ];
+
+  const INVALID_LOC_WORDS = new Set([
+    'the', 'and', 'with', 'metal', 'steel', 'coil', 'coils', 'sheet', 'sheets', 'plate', 'plates',
+    'deal', 'order', 'quotation', 'rate', 'price', 'bar', 'bars', 'pipe', 'pipes', 'tube', 'tubes',
+    'tmt', 'angle', 'angles', 'channel', 'channels', 'beam', 'beams', 'chahiye', 'hai', 'karna',
+    'credit', 'advance', 'payment', 'days', 'day', 'site', 'inquiry', 'requirement', 'kg', 'mt', 'ton'
+  ]);
 
   for (const p of phrases) {
     const m = text.match(p);
@@ -189,16 +209,9 @@ function extractDeliveryLocation(text) {
       const cand = m[1].trim();
       const matchedCity = KNOWN_STEEL_CITIES.find(c => c.toLowerCase() === cand.toLowerCase());
       if (matchedCity) return matchedCity;
-      if (cand.length >= 3 && !['the', 'and', 'with', 'metal', 'steel', 'coil', 'sheet', 'deal', 'order', 'quotation', 'rate', 'price'].includes(cand.toLowerCase())) {
+      if (cand.length >= 3 && !INVALID_LOC_WORDS.has(cand.toLowerCase())) {
         return cand;
       }
-    }
-  }
-
-  for (const city of KNOWN_STEEL_CITIES) {
-    const cityRegex = new RegExp(`\\b${city}\\b`, 'i');
-    if (cityRegex.test(lower)) {
-      return city;
     }
   }
 
