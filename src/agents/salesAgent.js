@@ -130,29 +130,24 @@ function getProductFamily(name) {
   return null;
 }
 
-async function isProductMatchForExistingDeal(dealId, newProductText) {
-  if (!newProductText || !dealId) return true;
+function isDealProductMatch(deal, newProductNames) {
+  if (!deal || !newProductNames || newProductNames.length === 0) return true;
+  const items = deal.deal_items || [];
+  if (items.length === 0) return true;
 
-  const { data: items } = await supabase
-    .from('deal_items')
-    .select('sku_text')
-    .eq('deal_id', dealId);
-
-  if (!items || items.length === 0) return true;
-
-  const newFamily = getProductFamily(newProductText);
-
-  for (const item of items) {
-    if (!item.sku_text) continue;
-    const existingFamily = getProductFamily(item.sku_text);
-    if (newFamily && existingFamily && newFamily === existingFamily) {
-      return true;
-    }
-    if (newProductText.toLowerCase().trim() === item.sku_text.toLowerCase().trim()) {
-      return true;
+  for (const newP of newProductNames) {
+    const newFamily = getProductFamily(newP);
+    for (const item of items) {
+      if (!item.sku_text) continue;
+      const existingFamily = getProductFamily(item.sku_text);
+      if (newFamily && existingFamily && newFamily === existingFamily) {
+        return true;
+      }
+      if (newP.toLowerCase().trim() === item.sku_text.toLowerCase().trim()) {
+        return true;
+      }
     }
   }
-
   return false;
 }
 
@@ -695,7 +690,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     }
 
     // ── CONTEXT RESOLUTION FOR EXPLICIT DEAL ID & ACTIVE SESSIONS ──────────
-    const explicitDealIdMatch = text.match(/#?(DEAL-[A-F0-9]{4,6}|INQ-[A-F0-9]{4,6}|[A-F0-9]{6})/i);
+    const explicitDealIdMatch = text.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,6})\b/i) || text.match(/#([A-F0-9]{6})\b/i);
     let targetExplicitDeal = null;
     if (explicitDealIdMatch || data.deal_id) {
       const dealCodeToFind = (explicitDealIdMatch ? explicitDealIdMatch[1] : data.deal_id);
@@ -1048,15 +1043,17 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     let existingDeal = null;
     let dealId = null;
 
-    const dealIdMatch = text.match(/#?(DEAL-[A-F0-9]{4,6}|INQ-[A-F0-9]{4,6}|[A-F0-9]{6})/i);
+    const dealIdMatch = text.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,6})\b/i) || text.match(/#([A-F0-9]{6})\b/i);
     const numChoiceMatch = text.trim().match(/^([1-9])$/);
 
     const isExplicitNewInquiry =
       !dealIdMatch &&
       !numChoiceMatch &&
+      !data.po_number &&
+      dbStage !== 'won' &&
+      data.action !== 'purchase_order' &&
       (
-        data.action === 'inquiry' ||
-        (targetStage === 'new_inquiry' && dbStage === 'new_inquiry' && !data.po_number && !overrideData) ||
+        (targetStage === 'new_inquiry' && dbStage === 'new_inquiry' && !overrideData) ||
         /^\s*(log\s+new\s+inquiry|new\s+inquiry|new\s+deal|inquiry\s+for|requirement\s+for|company\s+name)/i.test(text)
       );
 
@@ -1066,6 +1063,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     } else if (!isExplicitNewInquiry) {
       if (openDeals.length === 1) {
         existingDeal = openDeals[0];
+      } else if (openDeals.length > 1) {
+        const candidateProductNames = processedItems.map(pi => pi.pName).filter(Boolean);
+        const matchingDeal = openDeals.find(d => isDealProductMatch(d, candidateProductNames));
+        existingDeal = matchingDeal || openDeals[0];
       }
     }
 
@@ -1186,6 +1187,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         delivery_date: finalDeliveryDate,
         payment_terms: finalPaymentTerms,
         total_amount: dealAmount || 0,
+        po_number: poNumber,
+        po_date: poDate,
         inquiry_id: inqId,
         created_at: new Date().toISOString(),
       };
