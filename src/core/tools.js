@@ -236,7 +236,26 @@ function createTools(senderPhone, rawUserText = '') {
     }
   );
 
+  const getDealIdsTool = tool(
+    async ({ company_name, text }) => {
+      try {
+        return await getQueryHandler().getDealIdsForCompany(senderPhone, text || rawUserText || '', company_name || null);
+      } catch (err) {
+        return `Error fetching deal IDs: ${err.message}`;
+      }
+    },
+    {
+      name: 'get_deal_ids',
+      description: `Use this tool when the salesperson asks for the Deal ID(s) or inquiry code(s) for a company (e.g. "What is the deal ID for Radhe Ispat?", "Deal ID for Apex Steel", "Give me deal ID", "Deal ID"). If company name is not provided in message, pass company_name as null so the system uses the active customer session or asks for the company name.`,
+      schema: z.object({
+        company_name: z.string().nullable().optional().describe('The customer/company name if mentioned, else null'),
+        text: z.string().optional().describe('The user query text'),
+      }),
+    }
+  );
+
   return [
+    getDealIdsTool,
     logCustomerVisitTool,
     updateDealStageTool,
     logPaymentTool,

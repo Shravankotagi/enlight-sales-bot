@@ -459,6 +459,7 @@ DATA & RBAC QUERIES:
 - "loss_analytics": Questions asking for lost deal analysis or why deals were lost.
 - "team_pipeline": Questions from managers/admins asking for overall team pipeline or subordinates' deals.
 - "inactive_customers": Questions asking for inactive recurring customer accounts.
+- "deal_id_lookup": Questions asking for the Deal ID, deal IDs, deal numbers, or active inquiry codes for a company or asking "What is the deal ID?" (e.g. "What is the deal ID for Radhe Ispat?", "Deal ID for Apex Steel", "Give me deal ID", "Deal ID", "Show deal IDs", "Find deal ID for Supreme Steel", "Deal code of Mehta").
 - "dashboard_link", "sales_summary", "kra_status", "visit_summary", "payment_summary", "complaint_summary", "full_report", "deals_this_week", "pending_deals", "pending_inquiries", "new_customers_summary", "won_customers", "active_deals_detail", "customer_list", "rate_sheet", "visit_list", "payment_aging", "lost_deals"
 
 ASSISTANT QUERIES: "general"

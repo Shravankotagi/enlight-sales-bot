@@ -542,6 +542,15 @@ router.post('/', async (req, res) => {
             await sendTextMessage(senderPhone, reply);
             return;
           }
+
+          if (activeSession?.last_intent === 'pending_company_for_deal_lookup') {
+            const cleanCompany = raw_text.trim();
+            await saveActiveSession(senderPhone, cleanCompany, 'deal_inquiry');
+            const { getDealIdsForCompany } = require('./queryhandler');
+            const reply = await getDealIdsForCompany(senderPhone, cleanCompany, cleanCompany);
+            await sendTextMessage(senderPhone, reply);
+            return;
+          }
         }
 
         // ── OPERATIONAL AGENTIC ORCHESTRATOR (LangGraph + Specialized Write Agents) ──

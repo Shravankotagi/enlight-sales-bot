@@ -502,6 +502,128 @@ async function getSalesThisMonth(scopeOrPhone, text = '') {
   }
 }
 
+
+async function getDealIdsForCompany(scopeOrPhone, text = '', explicitCustomer = null) {
+  try {
+    const supabase = getSupabase();
+    const scope =
+      typeof scopeOrPhone === 'object' && scopeOrPhone !== null
+        ? scopeOrPhone
+        : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
+
+    const senderPhone = typeof scopeOrPhone === 'string' ? scopeOrPhone : (scope.phones && scope.phones[0]);
+
+    // Extract customer name if not explicitly passed
+    let customerName = explicitCustomer;
+    if (!customerName && text) {
+      // 1. "deal id for <Company>" or "deal id of <Company>" or "inquiries for <Company>"
+      const matchForOf = text.match(/(?:deal\s*(?:ids?|numbers?|codes?)|deals?|inquiries|inquiry)\s+(?:for|of|from)\s+([A-Za-z0-9\s&.-]{2,40})/i);
+      if (matchForOf && matchForOf[1]) {
+        const cand = matchForOf[1].trim();
+        if (!['the', 'this', 'that', 'any', 'my', 'all', 'a', 'an', 'company', 'customer', 'me', 'us', 'today', 'please'].includes(cand.toLowerCase())) {
+          customerName = cand;
+        }
+      }
+
+      // 2. "<Company> deal id" (e.g. "Radhe Ispat deal id" or "What is Radhe Ispat deal ID?")
+      if (!customerName) {
+        const matchBefore = text.match(/([A-Za-z0-9\s&.-]{2,40})\s+(?:deal\s*(?:ids?|numbers?|codes?)|deals)/i);
+        if (matchBefore && matchBefore[1]) {
+          let cand = matchBefore[1].replace(/^(?:what\s+is\s+(?:the\s+)?|give\s+me\s+(?:the\s+)?|show\s+(?:me\s+)?(?:the\s+)?|get\s+(?:the\s+)?|tell\s+me\s+(?:the\s+)?|find\s+(?:the\s+)?|please\s+|can\s+you\s+(?:give\s+|show\s+|tell\s+)?(?:me\s+)?)/i, '').trim();
+          if (cand.length >= 2 && !['the', 'this', 'that', 'any', 'my', 'all', 'a', 'an', 'company', 'customer', 'me', 'us'].includes(cand.toLowerCase())) {
+            customerName = cand;
+          }
+        }
+      }
+
+      // 3. "deal id <Company>" (e.g. "deal id Radhe Ispat")
+      if (!customerName) {
+        const matchAfter = text.match(/deal\s*(?:ids?|numbers?|codes?)\s+([A-Za-z0-9\s&.-]{2,40})/i);
+        if (matchAfter && matchAfter[1]) {
+          const cand = matchAfter[1].trim();
+          if (!['the', 'this', 'that', 'any', 'my', 'all', 'a', 'an', 'company', 'customer', 'me', 'us', 'please', 'for', 'of', 'from'].includes(cand.toLowerCase())) {
+            customerName = cand;
+          }
+        }
+      }
+    }
+
+    // If still no customer name in message, check active conversation session
+    if (!customerName && senderPhone) {
+      const { getActiveSession } = require('./supabase');
+      const activeCust = await getActiveSession(senderPhone);
+      if (activeCust && activeCust !== 'Unknown' && activeCust.length >= 2) {
+        customerName = activeCust;
+      }
+    }
+
+    // If still no company name, prompt the user
+    if (!customerName || customerName.trim().length < 2) {
+      if (senderPhone) {
+        const { saveActiveSession } = require('./supabase');
+        await saveActiveSession(senderPhone, 'Unknown', 'pending_company_for_deal_lookup');
+      }
+      return `❓ Which company's Deal ID would you like to retrieve? Please reply with the customer/company name (e.g. _"Deal ID for Radhe Ispat"_).`;
+    }
+
+    let query = supabase
+      .from('deals')
+      .select('*, deal_items(*)')
+      .ilike('customer_name', `%${customerName.trim()}%`)
+      .order('created_at', { ascending: false })
+      .limit(10);
+
+    query = applySalespersonFilter(query, scope.phones, 'salesperson_phone');
+
+    const { data: deals, error } = await query;
+    if (error) throw error;
+
+    if (!deals || deals.length === 0) {
+      return `📋 *No Deals Found*\n\nNo deals or inquiries found for *${customerName}* in your pipeline.`;
+    }
+
+    const { saveActiveSession } = require('./supabase');
+    if (senderPhone && deals[0].customer_name) {
+      await saveActiveSession(senderPhone, deals[0].customer_name, 'deal_inquiry');
+    }
+
+    const dealCards = deals.map((d, i) => {
+      const dealCode = d.deal_number ? `#${d.deal_number}` : (d.id ? `#DEAL-${d.id.substring(0, 6).toUpperCase()}` : '#DEAL-UNKNOWN');
+      const stageStr = (d.stage || 'new_inquiry').toUpperCase();
+      const items = d.deal_items || [];
+      let itemStr = '';
+      if (items.length > 0) {
+        const itemLines = items.map(it => {
+          const name = it.sku_text || 'Steel Item';
+          const dim = it.dimensions ? ` (${it.dimensions})` : '';
+          const qty = it.quantity ? ` - ${it.quantity} ${it.unit || 'MT'}` : '';
+          const rate = it.rate ? ` @ Rs. ${Number(it.rate).toLocaleString('en-IN')}` : '';
+          return `   • *${name}*${dim}${qty}${rate}`;
+        });
+        itemStr = itemLines.join('\n');
+      } else {
+        itemStr = `   • Product: *${d.inquiry_type || 'Steel Requirement'}*`;
+      }
+
+      const poStr = d.po_number ? `\n   • PO: *${d.po_number}*` : '';
+      const amountStr = d.total_amount && Number(d.total_amount) > 0 ? `\n   • Total Value: *Rs. ${Number(d.total_amount).toLocaleString('en-IN')}*` : '';
+
+      return `${i + 1}. *${dealCode}*\n` +
+             `   Stage: *${stageStr}*${amountStr}${poStr}\n` +
+             itemStr;
+    });
+
+    const displayCustName = deals[0].customer_name || customerName;
+
+    return `📋 *Active Deals & Inquiries — ${displayCustName}* (${deals.length} found)\n\n` +
+           dealCards.join('\n\n') +
+           `\n\n💡 *Tip:* To update any deal, reply with the Deal ID (e.g. _"${deals[0].id ? '#DEAL-' + deals[0].id.substring(0,6).toUpperCase() : '#DEAL-XXXXXX'} mark as quoted"_).`;
+  } catch (error) {
+    console.error('getDealIdsForCompany error:', error);
+    return `❌ Could not fetch deal IDs: ${error.message}`;
+  }
+}
+
 async function getPendingDeals(scopeOrPhone) {
   try {
     const supabase = getSupabase();
@@ -2597,6 +2719,9 @@ async function routeToHandler(category, text, scope, supabase, extra = {}) {
       return await generateFullKRAReport(scope, getMonthRangeFromQuery(text));
     case 'deals_this_week':
       return await getDealsThisWeek(scope);
+    case 'deal_id_lookup':
+    case 'deal_ids':
+      return await getDealIdsForCompany(scope, text, extra.customer_name);
     case 'pending_deals':
       return await getPendingDeals(scope);
     case 'pending_inquiries':
@@ -2636,6 +2761,14 @@ async function handleQuery(text, senderPhone) {
   // 1. Resolve role and access scope for sender
   const userScope = await getAccessibleSalespersonPhonesForBot(senderPhone);
   let effectiveScope = { ...userScope };
+
+  // Fast path for Deal ID / Deal Code retrieval
+  if (
+    /\b(?:deal\s*(?:ids?|numbers?|codes?)|deals?\s*(?:for|of))\b/i.test(lower) ||
+    /^(?:get\s+|show\s+|what\s+is\s+|give\s+me\s+)?deal\s*ids?\b/i.test(lower)
+  ) {
+    return await getDealIdsForCompany(effectiveScope, text);
+  }
 
   // 2. Fetch all employees to check if query mentions a salesperson by name
   let targetSalespersonName = null;
@@ -2742,6 +2875,14 @@ async function handleQuery(text, senderPhone) {
   }
 
   // 5. Keyword fallback (backup for low-confidence semantic router)
+  // Deal ID lookup for company or prompt
+  if (
+    /\b(deal\s*(?:ids?|numbers?|codes?)|deals?\s*(?:for|of|from))\b/i.test(lower) ||
+    /^(?:get\s+|show\s+|what\s+is\s+|give\s+me\s+)?deal\s*ids?\b/i.test(lower)
+  ) {
+    return await getDealIdsForCompany(effectiveScope, text);
+  }
+
   // Customer 360 / Profile
   if (
     lower.includes('360') ||
@@ -2989,4 +3130,5 @@ module.exports = {
   getFilteredOrders,
   getInquiriesThisMonth,
   getCustomer360,
+  getDealIdsForCompany,
 };
