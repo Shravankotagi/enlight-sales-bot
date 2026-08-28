@@ -513,42 +513,70 @@ async function getDealIdsForCompany(scopeOrPhone, text = '', explicitCustomer = 
 
     const senderPhone = typeof scopeOrPhone === 'string' ? scopeOrPhone : (scope.phones && scope.phones[0]);
 
-    // Extract customer name if not explicitly passed
+    // 1. Resolve Customer Name from explicit arg or natural language text
     let customerName = explicitCustomer;
+
+    const INVALID_COMPANY_TOKENS = new Set([
+      'the', 'this', 'that', 'any', 'my', 'all', 'a', 'an', 'company', 'customer',
+      'me', 'us', 'today', 'please', 'kya', 'hai', 'chahiye', 'bhai', 'mujhe',
+      'code', 'codes', 'id', 'ids', 'number', 'numbers', 'no', 'details', 'deal', 'deals',
+      'inquiry', 'inquiries', 'order', 'orders', 'share', 'give', 'tell', 'show', 'ref',
+      'which', 'what', 'how', 'who', 'where', 'why', 'when', 'is', 'was', 'are', 'were'
+    ]);
+
+    function isValidCompanyName(name) {
+      if (!name || name.trim().length < 2) return false;
+      const lower = name.toLowerCase().trim();
+      if (INVALID_COMPANY_TOKENS.has(lower)) return false;
+      const tokens = lower.split(/\s+/);
+      const nonInvalidTokens = tokens.filter(t => !INVALID_COMPANY_TOKENS.has(t));
+      return nonInvalidTokens.length > 0;
+    }
+
     if (!customerName && text) {
-      // 1. "deal id for <Company>" or "deal id of <Company>" or "inquiries for <Company>"
-      const matchForOf = text.match(/(?:deal\s*(?:ids?|numbers?|codes?)|deals?|inquiries|inquiry)\s+(?:for|of|from)\s+([A-Za-z0-9\s&.-]{2,40})/i);
-      if (matchForOf && matchForOf[1]) {
-        const cand = matchForOf[1].trim();
-        if (!['the', 'this', 'that', 'any', 'my', 'all', 'a', 'an', 'company', 'customer', 'me', 'us', 'today', 'please'].includes(cand.toLowerCase())) {
+      const cleanText = text.trim();
+
+      // Check for "<Company> deal (id/code/number)" e.g. "radhe ispat deal code" or "radhe ispat ka deal number"
+      const matchBefore = cleanText.match(/([A-Za-z0-9\s&.-]{2,40}?)\s+(?:ka|ki|ke)?\s*(?:deal|inquiry|order|reference)\s*(?:ids?|numbers?|codes?|no)/i);
+      if (matchBefore && matchBefore[1]) {
+        let cand = matchBefore[1].replace(/^(?:which\s+|what\s+is\s+(?:the\s+)?|what\s+|where\s+is\s+(?:the\s+)?|give\s+me\s+(?:the\s+)?|show\s+(?:me\s+)?(?:the\s+)?|get\s+(?:the\s+)?|tell\s+me\s+(?:the\s+)?|find\s+(?:the\s+)?|please\s+|can\s+you\s+(?:give\s+|show\s+|tell\s+|share\s+)?(?:me\s+)?(?:with\s+me\s+)?|bhai\s+|mujhe\s+)/i, '').trim();
+        cand = cand.replace(/\b(ka|ki|ke|kya|hai|batao|dena|de\s*do)\b/gi, '').trim();
+        if (isValidCompanyName(cand)) {
           customerName = cand;
         }
       }
 
-      // 2. "<Company> deal id" (e.g. "Radhe Ispat deal id" or "What is Radhe Ispat deal ID?")
+      // Check for "deal (id/code/number) [verbs/prepositions] <Company>" e.g. "deal id was created for radhe ispat" or "deal id for radhe ispat"
       if (!customerName) {
-        const matchBefore = text.match(/([A-Za-z0-9\s&.-]{2,40})\s+(?:deal\s*(?:ids?|numbers?|codes?)|deals)/i);
-        if (matchBefore && matchBefore[1]) {
-          let cand = matchBefore[1].replace(/^(?:what\s+is\s+(?:the\s+)?|give\s+me\s+(?:the\s+)?|show\s+(?:me\s+)?(?:the\s+)?|get\s+(?:the\s+)?|tell\s+me\s+(?:the\s+)?|find\s+(?:the\s+)?|please\s+|can\s+you\s+(?:give\s+|show\s+|tell\s+)?(?:me\s+)?)/i, '').trim();
-          if (cand.length >= 2 && !['the', 'this', 'that', 'any', 'my', 'all', 'a', 'an', 'company', 'customer', 'me', 'us'].includes(cand.toLowerCase())) {
+        const matchForOf = cleanText.match(/(?:deal|inquiry|order|reference)\s*(?:ids?|numbers?|codes?|no)?(?:\s+(?:was|is|created|generated|given|assigned|for|of|from|to|ka|ki|ke|de|dena|batao))+\s+([A-Za-z0-9\s&.-]{2,40})/i);
+        if (matchForOf && matchForOf[1]) {
+          let cand = matchForOf[1].replace(/\b(kya\s*hai|hai|batao|dena|de\s*do|please|bhai|chahiye)\b/gi, '').trim();
+          cand = cand.replace(/^(?:for|of|from|to|in|at)\s+/i, '').trim();
+          if (isValidCompanyName(cand)) {
             customerName = cand;
           }
         }
       }
 
-      // 3. "deal id <Company>" (e.g. "deal id Radhe Ispat")
-      if (!customerName) {
-        const matchAfter = text.match(/deal\s*(?:ids?|numbers?|codes?)\s+([A-Za-z0-9\s&.-]{2,40})/i);
-        if (matchAfter && matchAfter[1]) {
-          const cand = matchAfter[1].trim();
-          if (!['the', 'this', 'that', 'any', 'my', 'all', 'a', 'an', 'company', 'customer', 'me', 'us', 'please', 'for', 'of', 'from'].includes(cand.toLowerCase())) {
-            customerName = cand;
+      // LLM semantic entity extraction fallback for complex/colloquial phrasing
+      if (!customerName && cleanText.split(/\s+/).length >= 2) {
+        try {
+          const { callLightweightModel } = require('./gemini');
+          const prompt = `Extract the customer or company name from this sales message if present. If no company is mentioned, return "NONE".
+Message: "${cleanText}"
+Return ONLY the company name or "NONE":`;
+          const ans = await callLightweightModel(prompt);
+          const cleanAns = ans.replace(/["'\n\r]/g, '').trim();
+          if (isValidCompanyName(cleanAns) && cleanAns !== 'NONE') {
+            customerName = cleanAns;
           }
+        } catch (llmErr) {
+          // ignore
         }
       }
     }
 
-    // If still no customer name in message, check active conversation session
+    // 2. If no customer name found in message, check active conversation session
     if (!customerName && senderPhone) {
       const { getActiveSession } = require('./supabase');
       const activeCust = await getActiveSession(senderPhone);
@@ -557,7 +585,7 @@ async function getDealIdsForCompany(scopeOrPhone, text = '', explicitCustomer = 
       }
     }
 
-    // If still no company name, prompt the user
+    // 3. If still no company name, prompt the user for the company name
     if (!customerName || customerName.trim().length < 2) {
       if (senderPhone) {
         const { saveActiveSession } = require('./supabase');
@@ -566,6 +594,7 @@ async function getDealIdsForCompany(scopeOrPhone, text = '', explicitCustomer = 
       return `❓ Which company's Deal ID would you like to retrieve? Please reply with the customer/company name (e.g. _"Deal ID for Radhe Ispat"_).`;
     }
 
+    // 4. Query deals in Supabase
     let query = supabase
       .from('deals')
       .select('*, deal_items(*)')
@@ -575,8 +604,27 @@ async function getDealIdsForCompany(scopeOrPhone, text = '', explicitCustomer = 
 
     query = applySalespersonFilter(query, scope.phones, 'salesperson_phone');
 
-    const { data: deals, error } = await query;
+    let { data: deals, error } = await query;
     if (error) throw error;
+
+    // If no deals found with exact substring, try word token matching (e.g. "Radhe" -> "Radhe Ispat")
+    if (!deals || deals.length === 0) {
+      const words = customerName.trim().split(/\s+/).filter(w => w.length > 2 && !['pvt', 'ltd', 'steel', 'company', 'enterprises', 'industries'].includes(w.toLowerCase()));
+      if (words.length > 0) {
+        const orClause = words.map(w => `customer_name.ilike.%${w}%`).join(',');
+        let wordQuery = supabase
+          .from('deals')
+          .select('*, deal_items(*)')
+          .or(orClause)
+          .order('created_at', { ascending: false })
+          .limit(10);
+        wordQuery = applySalespersonFilter(wordQuery, scope.phones, 'salesperson_phone');
+        const { data: wordDeals } = await wordQuery;
+        if (wordDeals && wordDeals.length > 0) {
+          deals = wordDeals;
+        }
+      }
+    }
 
     if (!deals || deals.length === 0) {
       return `📋 *No Deals Found*\n\nNo deals or inquiries found for *${customerName}* in your pipeline.`;
