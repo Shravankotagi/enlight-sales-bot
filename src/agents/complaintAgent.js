@@ -136,7 +136,16 @@ async function isKRA8AlreadyLogged(senderPhone, customerName) {
  * Process a single complaint object.
  */
 async function processSingleComplaint(data, originalText, senderPhone) {
-  // Missing customer name check
+  const { verifyAndGetCustomerName, saveActiveSession, getActiveSession } = require('../supabase');
+
+  // Missing customer name check - try active session first
+  if (!data.customer_name) {
+    const activeCustomer = await getActiveSession(senderPhone);
+    if (activeCustomer && activeCustomer.toLowerCase() !== 'unknown' && activeCustomer.toLowerCase() !== 'null') {
+      data.customer_name = activeCustomer;
+    }
+  }
+
   if (!data.customer_name) {
     const dealIdMatch = originalText.match(/#?DEAL-([A-F0-9]{6})/i);
     if (dealIdMatch) {
@@ -161,7 +170,6 @@ async function processSingleComplaint(data, originalText, senderPhone) {
   const customerName = data.customer_name.trim();
 
   // Verify and get official customer name
-  const { verifyAndGetCustomerName } = require('../supabase');
   let officialCustomerName = await verifyAndGetCustomerName(customerName, senderPhone);
 
   if (!officialCustomerName) {
@@ -254,6 +262,8 @@ async function processSingleComplaint(data, originalText, senderPhone) {
         ? `PO: *${openComplaint.po_number}* (#DEAL-${(openComplaint.deal_id || '').substring(0, 6).toUpperCase()})`
         : openComplaint.deal_id ? `Deal: *#DEAL-${openComplaint.deal_id.substring(0, 6).toUpperCase()}*` : '';
 
+      await saveActiveSession(senderPhone, finalCustomerName, 'complaint_resolved');
+
       return `✅ *Customer Complaint Resolved!*\n\n` +
         `Customer: *${finalCustomerName}*\n` +
         (orderRef ? `Linked Order: ${orderRef}\n` : '') +
@@ -281,6 +291,8 @@ async function processSingleComplaint(data, originalText, senderPhone) {
         resolution_time_hrs: 0,
         escalated: false,
       });
+
+      await saveActiveSession(senderPhone, finalCustomerName, 'complaint_resolved');
 
       return `✅ *Customer Complaint Resolved!*\n\n` +
         `Customer: *${finalCustomerName}*\n` +
@@ -370,6 +382,8 @@ async function processSingleComplaint(data, originalText, senderPhone) {
 
       const poDisplay = d.po_number ? `PO: *${d.po_number}* (${d.deal_code})` : `*${d.deal_code}*`;
 
+      await saveActiveSession(senderPhone, finalCustomerName, 'complaint_confirm_deal');
+
       return `🔍 *Confirm Linked Order for Complaint*\n\n` +
         `Customer: *${finalCustomerName}*\n` +
         `Found 1 won order in pipeline:\n` +
@@ -389,6 +403,8 @@ async function processSingleComplaint(data, originalText, senderPhone) {
       }).join('\n');
 
       const samplePo = activeDeals[0].po_number || activeDeals[0].deal_code;
+
+      await saveActiveSession(senderPhone, finalCustomerName, 'complaint_confirm_deal');
 
       return `⚠️ *Multiple Won Orders Found for ${finalCustomerName}*\n\n` +
         `Please specify which order or PO this complaint is about:\n\n` +
@@ -432,6 +448,8 @@ async function processSingleComplaint(data, originalText, senderPhone) {
   if (insertError) {
     console.error('[ComplaintAgent] Error inserting complaint:', insertError);
   }
+
+  await saveActiveSession(senderPhone, finalCustomerName, 'complaint_logged');
 
   // Log KRA 7
   await supabase.from('kra_logs').insert({

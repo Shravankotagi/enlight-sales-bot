@@ -157,7 +157,9 @@ function getDeterministicIntentHint(text) {
   const isVisit = /\b(visited|met with|meeting at|site visit|factory visit|plant visit|market visit)\b/i.test(lower);
   const isPayment = /\b(received payment|paid rs|paid inr|received advance|collected payment|advance of|payment received|neft done|upi done|cheque received)\b/i.test(lower);
   const isComplaint = /\b(complaint|defective|damaged|scratch|rust|quality|rejected|rejection|faulty|crack|cracks|bending issue|thickness variation)\b/i.test(lower);
-  const isProfileUpdate = /\b(order frequency|frequency|reorder days|order cycle|reassign customer|change frequency)\b/i.test(lower);
+  const isProfileUpdate =
+    /\b(location|city|address|gst|gstin|gst number|contact person|owner|phone|mobile|phone number|mobile number|order frequency|frequency|reorder days|order cycle|reassign customer|change frequency)\b/i.test(lower) ||
+    /^(?:location\s*[-:]|gst\s*(?:no|number)?\s*[-:]|phone\s*[-:]|owner\s*[-:])/i.test(lower);
 
   const hasInquiryVerb = /\b(requires|requirement|need|needs|inquiry|rfq|quote|quotation|rates?|chahiye|mangwa)\b/i.test(lower);
   const hasQuantityUnit = /\b\d+(?:\.\d+)?\s*(?:ton|tons|tonne|tonnes|mt|kg|kgs|sheet|sheets|plate|plates|coil|coils|bar|bars|pcs|nos)\b/i.test(lower);
@@ -266,7 +268,7 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
       );
       const intentAnchor = hasToolResultsAlready ? '' : getDeterministicIntentHint(userText);
       const activeContextPrompt = await getActiveContextPrompt(sp);
-      const historyMessages = getChatHistory(sp);
+      const historyMessages = await getChatHistory(sp);
 
       const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
       const userScope = await getAccessibleSalespersonPhonesForBot(sp);
@@ -359,7 +361,7 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
     for (const m of allMessages) {
       const content = typeof m.content === 'string' ? m.content : '';
       if (content.startsWith('❌') || content.startsWith('⚠️') || content.startsWith('❓')) {
-        addChatHistory(senderPhone, text, content);
+        await addChatHistory(senderPhone, text, content);
         console.log(`[Orchestrator] Direct tool warning/error forwarded (${content.length} chars)`);
         return content;
       }
@@ -389,7 +391,7 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
       }
     }
 
-    addChatHistory(senderPhone, text, reply);
+    await addChatHistory(senderPhone, text, reply);
 
     console.log(`[Orchestrator] Reply ready (${reply.length} chars)`);
     return reply;

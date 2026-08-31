@@ -1,29 +1,70 @@
 /**
- * memory.js - Multi-turn Context Window & Session Memory for WhatsApp Bot
+ * memory.js - Persistent Multi-turn Context Window & Session Memory for WhatsApp Bot
  *
  * Maintains a persistent sliding window of conversation history (HumanMessage / AIMessage)
- * per salesperson phone number, and retrieves active customer context from Supabase.
+ * per salesperson phone number backed by Supabase `conversation_sessions.chat_history`,
+ * with an in-memory fallback cache.
+ *
+ * Guaranteed isolation: Each WhatsApp account (salesperson phone) has its own independent
+ * last 5 conversation turns (10 messages max) and active customer context.
  */
 
 const { HumanMessage, AIMessage } = require('@langchain/core/messages');
 const { supabase } = require('../supabase');
 
-// In-memory sliding window cache per salesperson phone
+// Fast in-memory cache per salesperson phone
 const chatHistoryMap = new Map();
-const MAX_HISTORY_TURNS = 10;
+const MAX_TURNS = 5; // Keep exact last 5 conversations (10 messages: 5 human, 5 AI)
 
 /**
  * Get recent chat history messages for a salesperson.
+ * Fetches from in-memory cache or PostgreSQL `conversation_sessions`.
  */
-function getChatHistory(senderPhone) {
+async function getChatHistory(senderPhone) {
+  if (!senderPhone) return [];
+
+  // Check in-memory cache first
+  if (chatHistoryMap.has(senderPhone)) {
+    return chatHistoryMap.get(senderPhone);
+  }
+
+  // Load from Supabase conversation_sessions
+  try {
+    const { data: session } = await supabase
+      .from('conversation_sessions')
+      .select('chat_history')
+      .eq('salesperson_phone', senderPhone)
+      .limit(1);
+
+    if (session && session.length > 0 && Array.isArray(session[0].chat_history)) {
+      const rawList = session[0].chat_history;
+      const history = rawList.slice(-MAX_TURNS * 2).map(m => {
+        if (m.role === 'human') return new HumanMessage(m.content);
+        return new AIMessage(m.content);
+      });
+      chatHistoryMap.set(senderPhone, history);
+      return history;
+    }
+  } catch (err) {
+    console.error('[Memory] Error loading chat history from DB:', err.message);
+  }
+
+  return [];
+}
+
+/**
+ * Synchronous getter for when caller cannot await (returns in-memory cache).
+ */
+function getChatHistorySync(senderPhone) {
   if (!senderPhone) return [];
   return chatHistoryMap.get(senderPhone) || [];
 }
 
 /**
  * Append a human message and AI message to the salesperson's chat history.
+ * Persists to both memory cache and PostgreSQL `conversation_sessions`.
  */
-function addChatHistory(senderPhone, humanText, aiReplyText) {
+async function addChatHistory(senderPhone, humanText, aiReplyText) {
   if (!senderPhone) return;
 
   let history = chatHistoryMap.get(senderPhone) || [];
@@ -35,12 +76,47 @@ function addChatHistory(senderPhone, humanText, aiReplyText) {
     history.push(new AIMessage(aiReplyText));
   }
 
-  // Keep only the most recent N turns (max 20 messages total)
-  if (history.length > MAX_HISTORY_TURNS * 2) {
-    history = history.slice(-MAX_HISTORY_TURNS * 2);
+  // Keep exact last 5 turns (max 10 messages)
+  if (history.length > MAX_TURNS * 2) {
+    history = history.slice(-MAX_TURNS * 2);
   }
 
   chatHistoryMap.set(senderPhone, history);
+
+  // Format serializable JSON list
+  const serialized = history.map(m => ({
+    role: (m._getType?.() === 'human' || m.constructor?.name === 'HumanMessage') ? 'human' : 'ai',
+    content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+  }));
+
+  // Persist to Supabase conversation_sessions asynchronously
+  try {
+    const { data: existing } = await supabase
+      .from('conversation_sessions')
+      .select('salesperson_phone')
+      .eq('salesperson_phone', senderPhone)
+      .limit(1);
+
+    if (existing && existing.length > 0) {
+      await supabase
+        .from('conversation_sessions')
+        .update({
+          chat_history: serialized,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('salesperson_phone', senderPhone);
+    } else {
+      await supabase
+        .from('conversation_sessions')
+        .insert({
+          salesperson_phone: senderPhone,
+          chat_history: serialized,
+          updated_at: new Date().toISOString(),
+        });
+    }
+  } catch (err) {
+    console.error('[Memory] Error persisting chat history to DB:', err.message);
+  }
 }
 
 /**
@@ -89,15 +165,16 @@ async function getActiveContextPrompt(senderPhone) {
 - Missing Fields: ${missing.length > 0 ? missing.join(', ') : 'None (Fully Complete)'}`;
     }
 
-    return `\n\n## ACTIVE CONTEXT WINDOW (Memory)
+    return `\n\n## ACTIVE CONTEXT WINDOW (Memory for this Salesperson)
 - Currently Active Customer: "${activeCustomer}"
 - Last Action/Intent: ${lastIntent}${profileSummary}
 
 INSTRUCTIONS FOR PROFILE UPDATES & MEMORY:
-1. If the salesperson provides any profile info (mobile phone, owner name, location, or GST) WITHOUT specifying a company name, attribute it to the active customer "${activeCustomer}"!
-2. Immediately call onboard_new_customer tool to update the customer's missing/blank fields.
-3. NEVER ask "which company" if an active customer is present in this context window.
-4. If a message specifies a quantity or requirement (e.g. "Need 25 MT", "change it to 30 MT", "wants HR Coil") WITHOUT repeating the customer name, assume it refers to "${activeCustomer}" and pass "${activeCustomer}" into tool call parameters!`;
+1. If the salesperson provides any profile info (location/city, GST number, mobile phone, contact person/owner) WITHOUT naming a company, it refers to the active customer "${activeCustomer}"!
+2. Call update_customer_profile with customer_name: "${activeCustomer}" and the provided details (address_or_city, gst, phone, contact_person).
+3. NEVER ask "which company" or treat location/GST replies as order searches when an active customer "${activeCustomer}" is in this context window!
+4. If a message specifies a requirement or quantity (e.g. "Need 25 MT", "wants HR Coil", "create deal") WITHOUT repeating the customer name, assume it refers to "${activeCustomer}".
+5. If the salesperson replies "Yes", "Confirm", "sahi hai", or gives a PO Number/Deal ID to a previous confirmation prompt, associate it with "${activeCustomer}".`;
   } catch (err) {
     console.error('[Memory] Error getting active context prompt:', err.message);
     return '';
@@ -106,6 +183,7 @@ INSTRUCTIONS FOR PROFILE UPDATES & MEMORY:
 
 module.exports = {
   getChatHistory,
+  getChatHistorySync,
   addChatHistory,
   getActiveContextPrompt,
 };
