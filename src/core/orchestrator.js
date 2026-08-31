@@ -357,11 +357,50 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
 
     const allMessages = finalState.messages;
 
+    // Extract metadata for 7-message context window
+    let turnAgent = 'orchestrator';
+    let turnDealId = null;
+    let turnCustomerName = null;
+
+    for (const m of allMessages) {
+      if (m.tool_calls && m.tool_calls.length > 0) {
+        for (const tc of m.tool_calls) {
+          const toolName = tc.name;
+          if (toolName === 'update_deal_stage') turnAgent = 'sales';
+          else if (toolName === 'log_customer_visit') turnAgent = 'visit';
+          else if (toolName === 'log_complaint') turnAgent = 'complaint';
+          else if (toolName === 'log_payment') turnAgent = 'payment';
+          else if (toolName === 'onboard_new_customer' || toolName === 'update_customer_profile') turnAgent = 'customer';
+          else if (toolName === 'query_my_data' || toolName === 'get_deal_ids') turnAgent = 'query';
+          else if (toolName === 'process_sales_image') turnAgent = 'ocr';
+          else if (toolName === 'log_retention_followup') turnAgent = 'retention';
+
+          if (tc.args?.customer_name) turnCustomerName = tc.args.customer_name;
+          if (tc.args?.company_name) turnCustomerName = tc.args.company_name;
+          if (tc.args?.deal_id) turnDealId = tc.args.deal_id;
+        }
+      }
+
+      const tmContent = typeof m.content === 'string' ? m.content : '';
+      const dealMatch = tmContent.match(/#?DEAL-([A-F0-9]{4,8})/i);
+      if (dealMatch && !turnDealId) {
+        turnDealId = dealMatch[1].toUpperCase();
+      }
+      const custMatch = tmContent.match(/(?:Customer|Company):\s*\*?([A-Za-z0-9\s&.,-]+?)\*?(?:\n|$|,)/i);
+      if (custMatch && !turnCustomerName && custMatch[1].trim() !== 'Customer') {
+        turnCustomerName = custMatch[1].trim();
+      }
+    }
+
     // Direct Forwarding: If any tool returned a direct prompt or error (starting with ❌, ⚠️, or ❓), forward it directly
     for (const m of allMessages) {
       const content = typeof m.content === 'string' ? m.content : '';
       if (content.startsWith('❌') || content.startsWith('⚠️') || content.startsWith('❓')) {
-        await addChatHistory(senderPhone, text, content);
+        await addChatHistory(senderPhone, text, content, {
+          agent: turnAgent,
+          deal_id: turnDealId,
+          customer_name: turnCustomerName,
+        });
         console.log(`[Orchestrator] Direct tool warning/error forwarded (${content.length} chars)`);
         return content;
       }
@@ -391,7 +430,11 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
       }
     }
 
-    await addChatHistory(senderPhone, text, reply);
+    await addChatHistory(senderPhone, text, reply, {
+      agent: turnAgent,
+      deal_id: turnDealId,
+      customer_name: turnCustomerName,
+    });
 
     console.log(`[Orchestrator] Reply ready (${reply.length} chars)`);
     return reply;

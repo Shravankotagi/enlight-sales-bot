@@ -299,6 +299,14 @@ async function upsertPaymentTracking({
     });
   }
 
+  // Auto-resolve any pending follow-up tasks for this customer
+  try {
+    const { resolveCustomerFollowupTasks } = require('../kra3');
+    await resolveCustomerFollowupTasks(customerName, senderPhone, 'payment_logged');
+  } catch (rErr) {
+    console.warn('[PaymentAgent] Follow-up auto-resolution notice:', rErr.message);
+  }
+
   return {
     finalCollected,
     finalOutstanding,
@@ -321,7 +329,7 @@ async function processPaymentMessage(text, senderPhone) {
       .replace(/(\d+\.?\d*)\s*[Kk]/g, (_, n) => String(Math.round(parseFloat(n) * 1000)));
 
     const { invokeWithFallback } = require('../core/modelRouter');
-    const historyMessages = getChatHistory(senderPhone);
+    const historyMessages = await getChatHistory(senderPhone);
 
     const response = await invokeWithFallback([
       new SystemMessage(PAYMENT_AGENT_PROMPT),

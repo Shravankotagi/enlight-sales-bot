@@ -264,6 +264,14 @@ async function processSingleComplaint(data, originalText, senderPhone) {
 
       await saveActiveSession(senderPhone, finalCustomerName, 'complaint_resolved');
 
+      // Auto-resolve open follow-up tasks for this customer
+      try {
+        const { resolveCustomerFollowupTasks } = require('../kra3');
+        await resolveCustomerFollowupTasks(finalCustomerName, senderPhone, 'complaint_resolved', openComplaint.deal_id);
+      } catch (rErr) {
+        console.warn('[ComplaintAgent] Follow-up auto-resolution notice:', rErr.message);
+      }
+
       return `✅ *Customer Complaint Resolved!*\n\n` +
         `Customer: *${finalCustomerName}*\n` +
         (orderRef ? `Linked Order: ${orderRef}\n` : '') +
@@ -473,6 +481,14 @@ async function processSingleComplaint(data, originalText, senderPhone) {
     });
   } catch (actErr) {
     console.warn('[ComplaintAgent] Activity log notice:', actErr?.message);
+  }
+
+  // Auto-resolve pending follow-up tasks for this customer
+  try {
+    const { resolveCustomerFollowupTasks } = require('../kra3');
+    await resolveCustomerFollowupTasks(finalCustomerName, senderPhone, 'complaint_logged', targetDealId);
+  } catch (rErr) {
+    console.warn('[ComplaintAgent] Follow-up auto-resolution notice:', rErr.message);
   }
 
   const cleanCode = targetDealId ? (targetDealId.startsWith('DEAL-') ? targetDealId.replace(/^DEAL-/, '') : targetDealId.substring(0, 6).toUpperCase()) : '';

@@ -1,20 +1,28 @@
 /**
- * memory.js - Persistent Multi-turn Context Window & Session Memory for WhatsApp Bot
+ * memory.js - Persistent Multi-turn Context Window & Cross-Agent Session Memory for WhatsApp Bot
  *
- * Maintains a persistent sliding window of conversation history (HumanMessage / AIMessage)
- * per salesperson phone number backed by Supabase `conversation_sessions.chat_history`,
- * with an in-memory fallback cache.
+ * Maintains a persistent rolling window of the exact last 7 messages per salesperson phone number
+ * backed by Supabase `conversation_sessions.chat_history`, with an in-memory fast cache.
+ *
+ * Each message stores:
+ * - role: 'user' | 'assistant'
+ * - content: text message or image/document OCR action summary
+ * - timestamp: ISO timestamp string
+ * - agent: which agent handled it ('sales', 'visit', 'ocr', 'complaint', 'payment', 'retention', 'query')
+ * - deal_id: any active deal ID or null
+ * - customer_name: any active customer name or null
  *
  * Guaranteed isolation: Each WhatsApp account (salesperson phone) has its own independent
- * last 5 conversation turns (10 messages max) and active customer context.
+ * 7-message window and active customer/deal context (zero cross-talk).
  */
 
 const { HumanMessage, AIMessage } = require('@langchain/core/messages');
 const { supabase } = require('../supabase');
 
 // Fast in-memory cache per canonical 10-digit salesperson phone
-const chatHistoryMap = new Map();
-const MAX_TURNS = 5; // Keep exact last 5 conversations (10 messages: 5 human, 5 AI)
+// Stores array of raw message objects: [{ role, content, timestamp, agent, deal_id, customer_name }]
+const rawHistoryMap = new Map();
+const MAX_MESSAGES = 7; // Rolling 7-message window
 
 function getCanonicalPhoneKey(phone) {
   if (!phone) return '';
@@ -31,18 +39,34 @@ function getCanonicalPhoneVariants(phone) {
 }
 
 /**
- * Get recent chat history messages for a salesperson.
- * Fetches from in-memory cache or PostgreSQL `conversation_sessions`.
- * Strict 1-to-1 partitioning: Never accesses other salespeople's histories.
+ * Normalizes a stored item into a standard 7-message item object.
  */
-async function getChatHistory(senderPhone) {
+function normalizeMessageObj(item) {
+  if (!item) return null;
+  const role = (item.role === 'human' || item.role === 'user') ? 'user' : 'assistant';
+  const content = typeof item.content === 'string' ? item.content : JSON.stringify(item.content || '');
+  return {
+    role,
+    content,
+    timestamp: item.timestamp || new Date().toISOString(),
+    agent: item.agent || (role === 'user' ? 'salesperson' : 'general'),
+    deal_id: item.deal_id || item.dealId || null,
+    customer_name: item.customer_name || item.customerName || null,
+  };
+}
+
+/**
+ * Get raw recent chat history objects (up to 7 messages) for a salesperson.
+ * Fetches from in-memory cache or PostgreSQL `conversation_sessions.chat_history`.
+ */
+async function getRawChatHistory(senderPhone) {
   if (!senderPhone) return [];
   const pKey = getCanonicalPhoneKey(senderPhone);
   if (!pKey) return [];
 
   // Check in-memory cache first
-  if (chatHistoryMap.has(pKey)) {
-    return chatHistoryMap.get(pKey);
+  if (rawHistoryMap.has(pKey)) {
+    return rawHistoryMap.get(pKey);
   }
 
   // Load from Supabase conversation_sessions
@@ -56,13 +80,13 @@ async function getChatHistory(senderPhone) {
       .limit(1);
 
     if (session && session.length > 0 && Array.isArray(session[0].chat_history)) {
-      const rawList = session[0].chat_history;
-      const history = rawList.slice(-MAX_TURNS * 2).map(m => {
-        if (m.role === 'human') return new HumanMessage(m.content);
-        return new AIMessage(m.content);
-      });
-      chatHistoryMap.set(pKey, history);
-      return history;
+      const rawList = session[0].chat_history
+        .map(normalizeMessageObj)
+        .filter(Boolean)
+        .slice(-MAX_MESSAGES);
+
+      rawHistoryMap.set(pKey, rawList);
+      return rawList;
     }
   } catch (err) {
     console.error('[Memory] Error loading chat history from DB:', err.message);
@@ -72,77 +96,173 @@ async function getChatHistory(senderPhone) {
 }
 
 /**
+ * Get recent chat history as LangChain messages (up to 7 messages) for a salesperson.
+ */
+async function getChatHistory(senderPhone) {
+  const rawList = await getRawChatHistory(senderPhone);
+  return rawList.map(m => {
+    if (m.role === 'user') return new HumanMessage(m.content);
+    return new AIMessage(m.content);
+  });
+}
+
+/**
  * Synchronous getter for when caller cannot await (returns in-memory cache).
  */
 function getChatHistorySync(senderPhone) {
   if (!senderPhone) return [];
   const pKey = getCanonicalPhoneKey(senderPhone);
-  return chatHistoryMap.get(pKey) || [];
+  const list = rawHistoryMap.get(pKey) || [];
+  return list.map(m => {
+    if (m.role === 'user') return new HumanMessage(m.content);
+    return new AIMessage(m.content);
+  });
 }
 
 /**
- * Append a human message and AI message to the salesperson's chat history.
- * Persists to both memory cache and PostgreSQL `conversation_sessions`.
- * Strict isolation: Persisted strictly under this salesperson's phone identifier.
+ * Append a single message or multiple messages to the 7-message context window.
+ * Drops the oldest messages if count exceeds MAX_MESSAGES (7).
+ * Persists to memory and PostgreSQL `conversation_sessions`.
  */
-async function addChatHistory(senderPhone, humanText, aiReplyText) {
-  if (!senderPhone) return;
+async function addChatMessage(senderPhone, messageObj) {
+  if (!senderPhone || !messageObj) return;
   const pKey = getCanonicalPhoneKey(senderPhone);
   if (!pKey) return;
 
-  let history = chatHistoryMap.get(pKey) || [];
+  const normalized = normalizeMessageObj(messageObj);
+  if (!normalized) return;
 
-  if (humanText) {
-    history.push(new HumanMessage(humanText));
-  }
-  if (aiReplyText) {
-    history.push(new AIMessage(aiReplyText));
-  }
+  let history = await getRawChatHistory(senderPhone);
+  history.push(normalized);
 
-  // Keep exact last 5 turns (max 10 messages)
-  if (history.length > MAX_TURNS * 2) {
-    history = history.slice(-MAX_TURNS * 2);
+  // Maintain strict rolling 7-message window
+  if (history.length > MAX_MESSAGES) {
+    history = history.slice(-MAX_MESSAGES);
   }
 
-  chatHistoryMap.set(pKey, history);
+  rawHistoryMap.set(pKey, history);
 
-  // Format serializable JSON list
-  const serialized = history.map(m => ({
-    role: (m._getType?.() === 'human' || m.constructor?.name === 'HumanMessage') ? 'human' : 'ai',
-    content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-  }));
-
-  // Persist to Supabase conversation_sessions asynchronously
+  // Persist to Supabase conversation_sessions
   try {
     const variants = getCanonicalPhoneVariants(senderPhone);
     const { data: existing } = await supabase
       .from('conversation_sessions')
-      .select('salesperson_phone')
+      .select('salesperson_phone, active_customer_name')
       .in('salesperson_phone', variants)
       .limit(1);
 
     const primaryPhone = `91${pKey}`;
+    const updatePayload = {
+      chat_history: history,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (normalized.customer_name) {
+      updatePayload.active_customer_name = normalized.customer_name;
+    }
 
     if (existing && existing.length > 0) {
       await supabase
         .from('conversation_sessions')
-        .update({
-          chat_history: serialized,
-          updated_at: new Date().toISOString(),
-        })
+        .update(updatePayload)
         .eq('salesperson_phone', existing[0].salesperson_phone);
     } else {
       await supabase
         .from('conversation_sessions')
         .insert({
           salesperson_phone: primaryPhone,
-          chat_history: serialized,
-          updated_at: new Date().toISOString(),
+          ...updatePayload,
         });
     }
   } catch (err) {
     console.error('[Memory] Error persisting chat history to DB:', err.message);
   }
+}
+
+/**
+ * Backward-compatible helper to append human message & assistant reply with metadata.
+ */
+async function addChatHistory(senderPhone, humanText, aiReplyText, meta = {}) {
+  if (!senderPhone) return;
+  const now = new Date().toISOString();
+  const customerName = meta.customer_name || meta.customerName || null;
+  const dealId = meta.deal_id || meta.dealId || null;
+  const agent = meta.agent || 'orchestrator';
+
+  if (humanText) {
+    await addChatMessage(senderPhone, {
+      role: 'user',
+      content: humanText,
+      timestamp: now,
+      agent: 'salesperson',
+      customer_name: customerName,
+      deal_id: dealId,
+    });
+  }
+
+  if (aiReplyText) {
+    await addChatMessage(senderPhone, {
+      role: 'assistant',
+      content: aiReplyText,
+      timestamp: new Date().toISOString(),
+      agent,
+      customer_name: customerName,
+      deal_id: dealId,
+    });
+  }
+}
+
+/**
+ * Returns structured cross-agent context for prompt injection across all agents.
+ */
+async function getCrossAgentContext(senderPhone) {
+  const history = await getRawChatHistory(senderPhone);
+  if (!history || history.length === 0) {
+    return {
+      messages: [],
+      activeCustomer: null,
+      activeDealId: null,
+      lastAgent: null,
+      formattedHistory: '',
+    };
+  }
+
+  // Extract most recent active customer and deal ID from history
+  let activeCustomer = null;
+  let activeDealId = null;
+  let lastAgent = null;
+
+  for (let i = history.length - 1; i >= 0; i--) {
+    const item = history[i];
+    if (!activeCustomer && item.customer_name) {
+      activeCustomer = item.customer_name;
+    }
+    if (!activeDealId && item.deal_id) {
+      activeDealId = item.deal_id;
+    }
+    if (!lastAgent && item.agent && item.agent !== 'salesperson') {
+      lastAgent = item.agent;
+    }
+  }
+
+  // Format 7-message transcript
+  const transcriptLines = history.map((m, idx) => {
+    const roleTag = m.role === 'user' ? 'Salesperson' : `Assistant (${m.agent || 'Bot'})`;
+    const metaTag = [
+      m.customer_name ? `Customer: ${m.customer_name}` : null,
+      m.deal_id ? `Deal: #${m.deal_id}` : null,
+    ].filter(Boolean).join(', ');
+
+    return `[Msg ${idx + 1}/${history.length}] ${roleTag}${metaTag ? ` [${metaTag}]` : ''}: "${m.content.replace(/\n+/g, ' ')}"`;
+  });
+
+  return {
+    messages: history,
+    activeCustomer,
+    activeDealId,
+    lastAgent,
+    formattedHistory: transcriptLines.join('\n'),
+  };
 }
 
 /**
@@ -163,12 +283,19 @@ async function getActiveContextPrompt(senderPhone) {
       .order('updated_at', { ascending: false })
       .limit(1);
 
-    if (!session || session.length === 0 || !session[0].active_customer_name) {
-      return '';
+    const crossCtx = await getCrossAgentContext(senderPhone);
+    const activeCustomer = session?.[0]?.active_customer_name || crossCtx.activeCustomer;
+    const lastIntent = session?.[0]?.last_intent || 'general';
+
+    let historySection = '';
+    if (crossCtx.formattedHistory) {
+      historySection = `\n\n## ROLLING CONVERSATION HISTORY (Last ${crossCtx.messages.length} Messages across all agents):
+${crossCtx.formattedHistory}`;
     }
 
-    const activeCustomer = session[0].active_customer_name;
-    const lastIntent = session[0].last_intent || 'general';
+    if (!activeCustomer) {
+      return historySection;
+    }
 
     const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
     const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
@@ -207,13 +334,16 @@ async function getActiveContextPrompt(senderPhone) {
 - Missing Fields: ${missing.length > 0 ? missing.join(', ') : 'None (Fully Complete)'}`;
     }
 
-    return `\n\n## ACTIVE CONTEXT WINDOW (Memory for this Salesperson)
+    return `${historySection}
+
+## ACTIVE CONTEXT WINDOW (Memory for this Salesperson)
 - Currently Active Customer: "${activeCustomer}"
+- Active Deal ID: ${crossCtx.activeDealId ? `#${crossCtx.activeDealId}` : 'None'}
 - Last Action/Intent: ${lastIntent}${profileSummary}
 
-INSTRUCTIONS FOR PROFILE UPDATES & MEMORY:
-1. If the salesperson provides any profile info (location/city, GST number, mobile phone, contact person/owner) WITHOUT naming a company, it refers to the active customer "${activeCustomer}"!
-2. Call update_customer_profile with customer_name: "${activeCustomer}" and the provided details (address_or_city, gst, phone, contact_person).
+INSTRUCTIONS FOR CROSS-AGENT MEMORY & CONTEXT RESOLUTION:
+1. If the salesperson refers to "that deal", "the deal", "this customer", "the same customer", "update it", or provides details without naming the customer, resolve it to "${activeCustomer}" and Deal ${crossCtx.activeDealId ? `#${crossCtx.activeDealId}` : 'active in context'}!
+2. If profile info (location/city, GST number, mobile phone, contact person/owner) is provided WITHOUT naming a company, attribute it to "${activeCustomer}" and call update_customer_profile.
 3. NEVER ask "which company" or treat location/GST replies as order searches when an active customer "${activeCustomer}" is in this context window!
 4. If a message specifies a requirement or quantity (e.g. "Need 25 MT", "wants HR Coil", "create deal") WITHOUT repeating the customer name, assume it refers to "${activeCustomer}".
 5. If the salesperson replies "Yes", "Confirm", "sahi hai", or gives a PO Number/Deal ID to a previous confirmation prompt, associate it with "${activeCustomer}".`;
@@ -224,8 +354,13 @@ INSTRUCTIONS FOR PROFILE UPDATES & MEMORY:
 }
 
 module.exports = {
+  MAX_MESSAGES,
+  getRawChatHistory,
   getChatHistory,
   getChatHistorySync,
+  addChatMessage,
   addChatHistory,
+  getCrossAgentContext,
   getActiveContextPrompt,
 };
+

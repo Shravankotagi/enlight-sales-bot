@@ -259,11 +259,20 @@ async function processVisitMessage(text, senderPhone) {
     // Save active session for context retention (follow-up messages will know this customer)
     await saveActiveSession(senderPhone, finalCustomerName, 'visit_logged');
 
+    // Auto-resolve any previous pending follow-ups for this customer
+    try {
+      const { resolveCustomerFollowupTasks } = require('../kra3');
+      await resolveCustomerFollowupTasks(finalCustomerName, senderPhone, 'site_visit_logged');
+    } catch (rErr) {
+      console.warn('[VisitAgent] Follow-up task auto-resolution notice:', rErr.message);
+    }
+
     // Schedule Condition 2 - Visit Interest Follow-up Task if product interest was shown
     const interestProducts = productInterests || materialRequirement;
     if (visitOutcome === 'positive' && interestProducts) {
       try {
-        const promisedDays = Number(data.followup_days) || 4;
+        const { extractFollowupDays } = require('../kra3');
+        const promisedDays = extractFollowupDays(text, Number(data.followup_days) || 3);
         const visitDueDate = new Date(Date.now() + promisedDays * 24 * 60 * 60 * 1000).toISOString();
 
         await supabase.from('followup_tasks').insert({
@@ -274,6 +283,7 @@ async function processVisitMessage(text, senderPhone) {
           due_date: visitDueDate,
           status: 'pending',
           reminder_sent_at: null,
+          escalated_at: null,
           follow_up_count: 0,
           resolution_notes: `Visit Interest Follow-up: Customer showed interest in ${interestProducts}. Promised decision timeframe: ${promisedDays} days. Notes: ${remarks}`,
         });

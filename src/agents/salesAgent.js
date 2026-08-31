@@ -977,8 +977,13 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         lineItems: refreshedDeal.deal_items || [],
         deliveryLocation: refreshedDeal.delivery_location,
         paymentTerms: refreshedDeal.payment_terms,
-        totalAmount: refreshedDeal.total_amount,
-      });
+      // Auto-resolve pending follow-ups for this customer
+      try {
+        const { resolveCustomerFollowupTasks } = require('../kra3');
+        await resolveCustomerFollowupTasks(company, senderPhone, 'deal_update', dealId);
+      } catch (rErr) {
+        console.warn('[SalesAgent] Follow-up auto-resolution notice:', rErr.message);
+      }
 
       const updatedStr = updatedLabels.length > 0 ? `Updated: ${updatedLabels.join(', ')}\n` : '';
 
@@ -1268,6 +1273,14 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     }
 
     await saveActiveSession(senderPhone, finalCustomerName, 'deal_inquiry');
+
+    // Auto-resolve pending follow-ups for this customer
+    try {
+      const { resolveCustomerFollowupTasks } = require('../kra3');
+      await resolveCustomerFollowupTasks(finalCustomerName, senderPhone, 'deal_created', dealId);
+    } catch (rErr) {
+      console.warn('[SalesAgent] Follow-up auto-resolution notice:', rErr.message);
+    }
 
     try {
       logBotActivity({
