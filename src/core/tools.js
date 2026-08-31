@@ -1,9 +1,9 @@
 /**
- * tools.js — All LangGraph Tool Definitions
+ * tools.js - All LangGraph Tool Definitions
  *
  * Each tool wraps an existing agent function or Supabase query.
  * The LLM (orchestrator) uses these tools to perform any action.
- * Tools are the ONLY way the LLM touches the database — no hardcoded routing.
+ * Tools are the ONLY way the LLM touches the database - no hardcoded routing.
  *
  * Tool factory `createTools(senderPhone)` pre-binds the salesperson's phone
  * so the LLM does not need to guess or pass senderPhone in tool arguments.
@@ -103,7 +103,7 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'log_retention_followup',
-      description: `Use this ONLY for explicit follow-up calls or check-ins with existing customers on past orders. Do NOT use for new requirements — use update_deal_stage instead.`,
+      description: `Use this ONLY for explicit follow-up calls or check-ins with existing customers on past orders. Do NOT use for new requirements - use update_deal_stage instead.`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
       }),

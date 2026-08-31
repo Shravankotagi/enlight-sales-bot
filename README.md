@@ -1,4 +1,4 @@
-# 🤖 Enlight Metals WhatsApp AI Bot — Operations Manual
+# 🤖 Enlight Metals WhatsApp AI Bot - Operations Manual
 
 Welcome! This is the **WhatsApp AI Sales Bot** for Enlight Metals.
 

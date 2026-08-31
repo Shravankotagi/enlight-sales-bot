@@ -1,5 +1,5 @@
 /**
- * orchestrator.js — LangGraph Agentic Orchestrator
+ * orchestrator.js - LangGraph Agentic Orchestrator
  *
  * This is the central brain of the WhatsApp bot.
  * Flow:
@@ -14,7 +14,7 @@ const { createTools }        = require('./tools');
 const { invokeWithFallback } = require('./modelRouter');
 const { getChatHistory, addChatHistory, getActiveContextPrompt } = require('./memory');
 
-// ── System Prompt — Senior Sales Operations Manager Persona & Few-Shot Examples ──
+// ── System Prompt - Senior Sales Operations Manager Persona & Few-Shot Examples ──
 
 const SYSTEM_PROMPT = `You are the Senior Sales Operations Manager & Intelligence Assistant for "Enlight Metals".
 
@@ -46,7 +46,7 @@ Your role is to manage and support salespersons on WhatsApp with their daily B2B
 
 ## STRICT CARD NAMING RULES (MANDATORY)
 Always strictly use the official Card name when referencing updates, metrics, or logs:
-- **Sales Achievement Card** (for WON deals and PO confirmations ONLY — NEVER at inquiry creation stage)
+- **Sales Achievement Card** (for WON deals and PO confirmations ONLY - NEVER at inquiry creation stage)
 - **Sales Pipeline & Inquiries** (for new inquiries, quotations, and pipeline stage updates)
 - **New Customer Acquisition Card** (for new client onboardings and customer master)
 - **Customer Retention Card** (for re-orders, recurring customer follow-ups)
@@ -114,7 +114,7 @@ Logged to Sales Pipeline & Inquiries!
 
 ## Critical Rules
 - **DEAL ID & INQUIRY LOOKUPS**: When the salesperson asks for the Deal ID(s), deal code(s), reference numbers, or active inquiry details for any customer (or asks "What is the deal ID?", "Deal ID kya hai?", "Give me deal ID", "inquiry code", "reference ID" in ANY phrasing, style, or natural language):
-  - Call `get_deal_ids`. If a company is mentioned, pass `company_name: "<company_name>"`. If no company is mentioned, pass `company_name: null` so the system automatically uses active session or prompts the user. Output the tool response directly to the user.
+  - Call get_deal_ids. If a company is mentioned, pass company_name: "<company_name>". If no company is mentioned, pass company_name: null so the system automatically uses active session or prompts the user. Output the tool response directly to the user.
 - **VISIT VS DEAL LOGGING**: Customer site visits, meetings, and in-person check-ins MUST ONLY call \`log_customer_visit\`. NEVER call \`update_deal_stage\` or create a deal for a visit report. A visit report must ONLY update the **Customer Visits Card** (never Sales Achievement Card). Positive customer interest or requirements discussed during a visit are visit context and must NOT trigger automatic deal creation.
 - **ADMIN PRIVILEGES**: When the user is an Admin, they have full unrestricted read and write permissions across all data, customers, salespeople, and deals. When Admin asks to change or update a customer (e.g. "Change supreme steel order frequency to 45 days", "Max customer - Change supreme steel order frequency to 45 days"), you MUST execute the update immediately using update_customer_profile tool.
 - **CUSTOMER PROFILE & ORDER FREQUENCY UPDATES**: When a user requests to update a customer's order frequency (e.g. "Change [customer] order frequency to X days", "set frequency to 45 days"), reassign a customer to a salesperson (e.g. "reassign [customer] to Max"), or update contact details, CALL update_customer_profile. Do NOT call onboard_new_customer for updating an existing customer's order frequency.
@@ -229,7 +229,7 @@ function shouldContinue(state) {
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /**
- * Main entry point — called from webhook.js for every incoming message.
+ * Main entry point - called from webhook.js for every incoming message.
  */
 async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
   let text = typeof textOrParams === 'string' ? textOrParams : textOrParams?.text;
@@ -302,7 +302,7 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
       return { messages: [response] };
     };
 
-    // Request-scoped Tool Node — returns ToolMessages to allow agent synthesis
+    // Request-scoped Tool Node - returns ToolMessages to allow agent synthesis
     const inlineToolNode = async (state) => {
       const { messages } = state;
       const lastAIMsg = [...messages].reverse().find(m => m._getType?.() === 'ai' || m.constructor?.name === 'AIMessage');

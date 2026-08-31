@@ -27,7 +27,7 @@ You are the Specialized Customer Onboarding & Profile AI Agent for Enlight Metal
 Your job is to parse customer onboarding, profile updates, and order cycle configurations.
 
 The salesperson or admin message may be informal, in Hinglish, or missing expected keywords.
-Understand the meaning and context — do not look for specific words.
+Understand the meaning and context - do not look for specific words.
 
 Input message can be English, Hindi, or Hinglish.
 
@@ -149,7 +149,7 @@ async function processCustomerMessage(text, senderPhone) {
           `Once I have that, I'll get their profile updated right away!`;
       }
 
-      return `⚠️ *Customer Agent — Company Name Missing*\n\nPlease specify the *Customer / Company Name*.\nExample: _"Supreme Steel phone 9812345678 owner Mr Mehta order frequency 45 days"_`;
+      return `⚠️ *Customer Agent - Company Name Missing*\n\nPlease specify the *Customer / Company Name*.\nExample: _"Supreme Steel phone 9812345678 owner Mr Mehta order frequency 45 days"_`;
     }
 
     const customerName = data.customer_name.trim();
@@ -271,7 +271,7 @@ async function processCustomerMessage(text, senderPhone) {
           (data.city           ? `Location: *${data.city}*\n` : '') +
           `\n_Profile updated in Enlight Sales OS._ ✅`;
       } else {
-        // Genuinely brand new customer — only create if valid customerName
+        // Genuinely brand new customer - only create if valid customerName
         const { ensureCustomerRecord } = require('../supabase');
         await ensureCustomerRecord(customerName, senderPhone, {
           customer_phone: data.phone || null,

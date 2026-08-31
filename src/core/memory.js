@@ -1,5 +1,5 @@
 /**
- * memory.js — Multi-turn Context Window & Session Memory for WhatsApp Bot
+ * memory.js - Multi-turn Context Window & Session Memory for WhatsApp Bot
  *
  * Maintains a persistent sliding window of conversation history (HumanMessage / AIMessage)
  * per salesperson phone number, and retrieves active customer context from Supabase.

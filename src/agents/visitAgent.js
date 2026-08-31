@@ -6,7 +6,7 @@
  * - Never reject a visit because the customer isn't registered yet.
  * - New prospects are auto-onboarded from the visit message itself.
  * - All extracted data (product interests, follow-up, person met, outcome) is persisted.
- * - No placeholder values ever stored — null if not mentioned.
+ * - No placeholder values ever stored - null if not mentioned.
  *
  * EDGE CASES HANDLED:
  * 1.  Normal visit (existing customer) → log visit + update KRA 9
@@ -31,7 +31,7 @@ You are the Specialized Site Visit & Meeting AI Agent (KRA 9) for Enlight Metals
 Your job is to parse salesperson customer site visit reports, prospect meetings, or field activity logs.
 
 The salesperson message may be informal, in Hinglish, or missing expected keywords.
-Understand the meaning and context — do not look for specific words.
+Understand the meaning and context - do not look for specific words.
 
 Input message can be English, Hindi, or Hinglish.
 
@@ -61,7 +61,7 @@ Rules:
 - "material_requirement": Extract any steel product requirement, future consumption, or product need discussed (e.g. "discussed next HR Coil requirement and future monthly consumption" → "HR Coil / future monthly requirement", "need 50 MT HR Coil" → "50 MT HR Coil"). NEVER leave as null when requirements or future consumption are mentioned.
 - "follow_up_action": When the message discusses potential requirements, next steps, or when information is needed to prepare a quote, capture a clear follow-up action (e.g. "Collect required quantity, expected PO/delivery date, and customer details", "Send quotation by tomorrow", "Follow up for technical specifications"). NEVER return null when next steps or future discussions are implied.
 - "remarks": Must be specific and business-relevant.
-- "contact_no": ONLY if a phone number is explicitly stated. Otherwise null — never invent.
+- "contact_no": ONLY if a phone number is explicitly stated. Otherwise null - never invent.
 - "city": Extract the city or location of the visit/office if mentioned (e.g. "Mumbai office" → "Mumbai", "in Pune" → "Pune"). NEVER leave as null when location/city is stated.
 
 Return ONLY the JSON object.
@@ -105,9 +105,9 @@ async function processVisitMessage(text, senderPhone) {
     const data = safeParseJSON(cleaned, null);
     if (!data) throw new Error('Could not parse visit JSON from LLM response');
 
-    // Missing customer name — must ask
+    // Missing customer name - must ask
     if (!data.customer_name) {
-      return `⚠️ *Visit Agent — Customer Name Missing*\n\nPlease specify the *Customer/Company* you visited.\nExample: _"Visited Mehta Engineering in Pune today, met Purchase Manager, interested in CR Sheets"_`;
+      return `⚠️ *Visit Agent - Customer Name Missing*\n\nPlease specify the *Customer/Company* you visited.\nExample: _"Visited Mehta Engineering in Pune today, met Purchase Manager, interested in CR Sheets"_`;
     }
 
     const customerName = data.customer_name.trim();
@@ -155,7 +155,7 @@ async function processVisitMessage(text, senderPhone) {
         `Updated Customer Visits Card! ✅`;
     }
 
-    // Extract all fields — NEVER use placeholder values
+    // Extract all fields - NEVER use placeholder values
     const city                = data.city               || null;
     const remarks             = data.remarks            || 'On-site meeting';
     const personMet           = data.person_met         || null;
@@ -259,7 +259,7 @@ async function processVisitMessage(text, senderPhone) {
     // Save active session for context retention (follow-up messages will know this customer)
     await saveActiveSession(senderPhone, finalCustomerName, 'visit_logged');
 
-    // Schedule Condition 2 — Visit Interest Follow-up Task if product interest was shown
+    // Schedule Condition 2 - Visit Interest Follow-up Task if product interest was shown
     const interestProducts = productInterests || materialRequirement;
     if (visitOutcome === 'positive' && interestProducts) {
       try {

@@ -135,9 +135,9 @@ function checkAmountDiscrepancy(amountPaid, explicitPending, dealTotal) {
           `Deal Total on Record: *${dealTotalFormatted}*\n` +
           `You reported: Paid *${paidFormatted}* + Pending *${pendingFormatted}* = *${reportedTotalFormatted}*\n\n` +
           `These don't add up to the deal total. Please confirm:\n\n` +
-          `1️⃣ *Use deal total* — Paid ${paidFormatted}, Pending *₹${correctedPending.toLocaleString('en-IN')}* (correct based on deal)\n` +
-          `2️⃣ *Use my numbers* — Paid ${paidFormatted}, Pending ${pendingFormatted} (override)\n` +
-          `3️⃣ *Cancel* — I'll re-check and resend\n\n` +
+          `1️⃣ *Use deal total* - Paid ${paidFormatted}, Pending *₹${correctedPending.toLocaleString('en-IN')}* (correct based on deal)\n` +
+          `2️⃣ *Use my numbers* - Paid ${paidFormatted}, Pending ${pendingFormatted} (override)\n` +
+          `3️⃣ *Cancel* - I'll re-check and resend\n\n` +
           `Reply *1*, *2*, or *3* to proceed.`,
         correctedPending,
       };
@@ -153,8 +153,8 @@ function checkAmountDiscrepancy(amountPaid, explicitPending, dealTotal) {
           `Deal Total on Record: *₹${Number(dealTotal).toLocaleString('en-IN')}*\n` +
           `Amount you reported: *₹${Number(amountPaid).toLocaleString('en-IN')}*\n\n` +
           `The payment exceeds the deal value. Please confirm:\n\n` +
-          `1️⃣ *Correct, overpayment received* — log as-is\n` +
-          `2️⃣ *Cancel* — I'll re-check and resend`,
+          `1️⃣ *Correct, overpayment received* - log as-is\n` +
+          `2️⃣ *Cancel* - I'll re-check and resend`,
         correctedPending: 0,
       };
     }
@@ -226,7 +226,7 @@ async function upsertPaymentTracking({
     finalInvoiceAmount = dealTotal || priorInvoice || (priorCollected + (Number(existing.outstanding) || 0));
 
     if (isModeUpdateOnly || (newAmountPaid <= 0 && explicitPending <= 0 && !isFullPayment)) {
-      // Payment mode update only — preserve existing collected and outstanding amounts!
+      // Payment mode update only - preserve existing collected and outstanding amounts!
       finalCollected = priorCollected;
       finalOutstanding = Number(existing.outstanding) || (finalInvoiceAmount > finalCollected ? finalInvoiceAmount - finalCollected : 0);
       finalStatus = finalOutstanding <= 0 ? 'collected' : 'partial';
@@ -236,7 +236,7 @@ async function upsertPaymentTracking({
       finalPaymentType = 'full_settlement';
       finalStatus = 'collected';
     } else if (paymentType === 'advance' && priorCollected >= newAmountPaid && newAmountPaid > 0) {
-      // Re-stating or clarifying advance payment — preserve existing collected amount!
+      // Re-stating or clarifying advance payment - preserve existing collected amount!
       finalCollected = priorCollected;
       finalOutstanding = finalInvoiceAmount > 0 ? Math.max(0, finalInvoiceAmount - finalCollected) : explicitPending;
       finalStatus = finalOutstanding <= 0 ? 'collected' : 'partial';
@@ -343,7 +343,7 @@ async function processPaymentMessage(text, senderPhone) {
     }
 
     if (!customerName) {
-      return `⚠️ *Payment Agent — Customer Missing*\n\nPlease specify the *Customer/Company Name* for this payment record.`;
+      return `⚠️ *Payment Agent - Customer Missing*\n\nPlease specify the *Customer/Company Name* for this payment record.`;
     }
 
     const amountPaid       = Math.max(0, Number(data.amount_paid    || 0));
@@ -397,8 +397,8 @@ async function processPaymentMessage(text, senderPhone) {
           `Stage: *${stageLabel}*\n` +
           `Deal Value: *${dealValue}*\n\n` +
           `Before logging this payment of *₹${amountPaid.toLocaleString('en-IN')}*, please confirm:\n\n` +
-          `1️⃣ *Yes, log payment* — deal will remain at ${stageLabel}\n` +
-          `2️⃣ *Mark deal as Won first* — then payment will be logged automatically\n\n` +
+          `1️⃣ *Yes, log payment* - deal will remain at ${stageLabel}\n` +
+          `2️⃣ *Mark deal as Won first* - then payment will be logged automatically\n\n` +
           `Reply *1* or *2* to proceed.`
         );
       }
@@ -442,7 +442,7 @@ async function processPaymentMessage(text, senderPhone) {
     }
 
     if (amountPaid <= 0 && amountPending <= 0 && !isFullPayment) {
-      return `⚠️ *Payment Agent — Amount Missing*\n\nPlease specify the *Payment Amount* or *Outstanding Pending Amount* for *${finalCustomerName}*.`;
+      return `⚠️ *Payment Agent - Amount Missing*\n\nPlease specify the *Payment Amount* or *Outstanding Pending Amount* for *${finalCustomerName}*.`;
     }
 
     const paymentType = data.payment_type || (amountPaid > 0 ? 'advance' : 'outstanding_update');

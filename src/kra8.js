@@ -243,7 +243,7 @@ async function checkComplaints() {
         const lastReminded = notificationThrottleState.managerLastReminded[manager.phone] || 0;
         if (now - lastReminded >= SIX_HOURS_MS) {
           const count = teamComplaints.length;
-          let managerMsg = `⚠️ *Customer Complaints Reminder — Team Alert*\n\n` +
+          let managerMsg = `⚠️ *Customer Complaints Reminder - Team Alert*\n\n` +
             `Hello ${manager.name || 'Sales Manager'},\n` +
             `You have *${count} open complaint${count > 1 ? 's' : ''}* pending resolution in your sales team:\n\n`;
 
@@ -268,7 +268,7 @@ async function checkComplaints() {
           console.log(`[Complaints Notification] 6-hour team reminder sent to Sales Manager ${manager.name} (${manager.phone}) for ${count} complaints`);
           await new Promise(r => setTimeout(r, 1000));
         } else {
-          console.log(`[Complaints Notification] Skipping manager ${manager.name} — last reminded ${Math.round((now - lastReminded) / 60000)} mins ago (< 6 hours)`);
+          console.log(`[Complaints Notification] Skipping manager ${manager.name} - last reminded ${Math.round((now - lastReminded) / 60000)} mins ago (< 6 hours)`);
         }
       }
     }
@@ -279,7 +279,7 @@ async function checkComplaints() {
     const lastAdminDigest = notificationThrottleState.adminLastDigestAt || 0;
     if (now - lastAdminDigest >= TWENTY_FOUR_HOURS_MS && admins.length > 0 && openComplaints.length > 0) {
       const totalOpen = openComplaints.length;
-      let adminMsg = `⚠️ *Daily Customer Complaints Digest — Enlight Metals*\n\n` +
+      let adminMsg = `⚠️ *Daily Customer Complaints Digest - Enlight Metals*\n\n` +
         `There are currently *${totalOpen} unresolved complaint${totalOpen > 1 ? 's' : ''}* across all sales teams:\n\n`;
 
       openComplaints.forEach((c, idx) => {
@@ -304,7 +304,7 @@ async function checkComplaints() {
 
       notificationThrottleState.adminLastDigestAt = now;
     } else if (openComplaints.length > 0) {
-      console.log(`[Complaints Notification] Skipping Admin daily digest — last sent ${Math.round((now - lastAdminDigest) / (1000 * 60 * 60))} hours ago (< 24 hours)`);
+      console.log(`[Complaints Notification] Skipping Admin daily digest - last sent ${Math.round((now - lastAdminDigest) / (1000 * 60 * 60))} hours ago (< 24 hours)`);
     }
 
     // ────────────────────────────────────────────────────────────────────────

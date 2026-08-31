@@ -663,7 +663,7 @@ Return ONLY the company name or "NONE":`;
 
     const displayCustName = deals[0].customer_name || customerName;
 
-    return `📋 *Active Deals & Inquiries — ${displayCustName}* (${deals.length} found)\n\n` +
+    return `📋 *Active Deals & Inquiries - ${displayCustName}* (${deals.length} found)\n\n` +
            dealCards.join('\n\n') +
            `\n\n💡 *Tip:* To update any deal, reply with the Deal ID (e.g. _"${deals[0].id ? '#DEAL-' + deals[0].id.substring(0,6).toUpperCase() : '#DEAL-XXXXXX'} mark as quoted"_).`;
   } catch (error) {
@@ -1400,7 +1400,7 @@ async function getWonCustomers(scopeOrPhone, text = '') {
           : 'Won Deals';
 
     return (
-      `🏆 *${title} — ${monthName} ${year}* (${deals.length} won orders)\n\n` +
+      `🏆 *${title} - ${monthName} ${year}* (${deals.length} won orders)\n\n` +
       lines.join('\n\n') +
       `\n\n💰 *Total Won Revenue: ${formatINR(totalValue)}*` +
       (totalTonnage > 0
@@ -1572,7 +1572,7 @@ async function getVisitList(scopeOrPhone, text = '') {
           : 'Customer Visits';
 
     return (
-      `📍 *${title} — ${monthName} ${year}* (${visits.length} visits)\n\n` +
+      `📍 *${title} - ${monthName} ${year}* (${visits.length} visits)\n\n` +
       lines.join('\n\n')
     );
   } catch (err) {
@@ -1987,7 +1987,7 @@ async function getLostDeals(scopeOrPhone, text = '') {
           : 'Lost Deals';
 
     return (
-      `❌ *${title} — ${monthName} ${year}* (${deals.length})\n\n` +
+      `❌ *${title} - ${monthName} ${year}* (${deals.length})\n\n` +
       lines.join('\n\n') +
       `\n\n📉 *Total Lost Value: ${formatINR(totalLost)}*`
     );
@@ -2113,7 +2113,7 @@ async function getCustomer360(senderPhone, text, extractedName = null) {
           const out = p.total_amount_pending
             ? `Pending: ₹${Number(p.total_amount_pending).toLocaleString('en-IN')}`
             : 'Paid in full';
-          return `• *Invoice:* ${p.invoice_number || 'N/A'} — ${out} (Status: ${p.status || 'active'})`;
+          return `• *Invoice:* ${p.invoice_number || 'N/A'} - ${out} (Status: ${p.status || 'active'})`;
         })
         .join('\n');
     }

@@ -1,5 +1,5 @@
 /**
- * ocrAgent.js — Dedicated OCR & Document Vision Agent
+ * ocrAgent.js - Dedicated OCR & Document Vision Agent
  *
  * Specializes in extracting, interpreting, and structuring data from images,
  * scanned PDFs, and document uploads (Inquiry RFQs, Purchase Orders, Delivery Challans).
@@ -333,7 +333,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         kra_type: 'sales_achievement',
         metric_name: 'won_deal_value',
         value: finalOrderAmount,
-        notes: `PO Received: ${poNumber} for ${finalCustomerName} — ₹${finalOrderAmount.toLocaleString('en-IN')}`,
+        notes: `PO Received: ${poNumber} for ${finalCustomerName} - ₹${finalOrderAmount.toLocaleString('en-IN')}`,
         created_at: new Date().toISOString(),
       });
 
@@ -434,7 +434,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
     if (isPo) {
       return (
         `🎉 *PURCHASE ORDER RECEIVED & DEAL WON!* 🏆\n\n` +
-        `Customer: *${finalCustomerName || '—'}*\n` +
+        `Customer: *${finalCustomerName || '-'}*\n` +
         `PO Number: *${poNumber}* 📄\n` +
         `PO Date: *${poDate}*\n` +
         `Stage: *WON / DELIVERED 🎉*\n\n` +
@@ -452,7 +452,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
 
     return (
       `📄 *INQUIRY / SALES DEAL LOGGED!* 🏗️\n\n` +
-      `Customer: *${finalCustomerName || '—'}*\n` +
+      `Customer: *${finalCustomerName || '-'}*\n` +
       `Stage: *REVIEW 📄*\n` +
       (itemsBreakdown ? `Line Items:\n${itemsBreakdown}\n` : '') +
       (baseAmt > 0 ? `Product Amount: *₹${baseAmt.toLocaleString('en-IN')}*\nGST (18%): *₹${gstAmt.toLocaleString('en-IN')}*\n*Grand Total: ₹${grandTotal.toLocaleString('en-IN')}*\n` : '') +

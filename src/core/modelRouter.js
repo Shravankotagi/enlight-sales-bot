@@ -1,5 +1,5 @@
 /**
- * modelRouter.js — Smart Dual-Tier Google Gemini Model Router
+ * modelRouter.js - Smart Dual-Tier Google Gemini Model Router
  *
  * TIER 1 (PAID API KEY - High Accuracy & Vision/OCR):
  * - Used exclusively for:

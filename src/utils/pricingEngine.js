@@ -4,7 +4,7 @@
  * Responsibilities:
  * - Rate lookup from active/latest rate sheets with dimension compatibility check
  * - Line item amount calculation (quantity * rate)
- * - Strict Forward GST calculation (baseAmount * 0.18) — never reverse calculated
+ * - Strict Forward GST calculation (baseAmount * 0.18) - never reverse calculated
  * - Subtotal calculation (sum of line item amounts)
  * - Grand Total calculation (subtotal + forward GST)
  * - Full quotation & deal financial breakdown aggregation
@@ -146,7 +146,7 @@ function calculateSubtotal(lineItems) {
 }
 
 /**
- * Strict Forward GST calculation: always forward on line amount — never reverse calculated.
+ * Strict Forward GST calculation: always forward on line amount - never reverse calculated.
  *
  * @param {number} baseAmount - Base material amount (excl. GST)
  * @param {number} [gstRate=0.18] - Applicable GST rate (default: 0.18 / 18%)
@@ -256,7 +256,7 @@ function calculatePricingSummary(input, options = {}) {
   if (input && typeof input === 'object') {
     const statedGrand = Number(input.grand_total || input.grandTotal || 0);
     if (statedGrand > 0 && Math.abs(statedGrand - grandTotal) > 2) {
-      calculationWarning = `Calculated total (₹${grandTotal.toLocaleString('en-IN')}) does not match PO document total (₹${statedGrand.toLocaleString('en-IN')}) — please review`;
+      calculationWarning = `Calculated total (₹${grandTotal.toLocaleString('en-IN')}) does not match PO document total (₹${statedGrand.toLocaleString('en-IN')}) - please review`;
     }
   }
 

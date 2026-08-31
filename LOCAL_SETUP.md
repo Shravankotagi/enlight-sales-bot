@@ -1,4 +1,4 @@
-# 🚀 Enlight Sales OS — Complete Local Setup & Architecture Guide
+# 🚀 Enlight Sales OS - Complete Local Setup & Architecture Guide
 
 Welcome to **Enlight Sales OS**! This comprehensive guide provides step-by-step instructions for setting up, running, and managing the entire platform on your local computer or server.
 

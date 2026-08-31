@@ -19,8 +19,8 @@ function formatINR(val) {
 /**
  * Main Follow-up Orchestrator:
  * Executes ONLY the two valid follow-up alert conditions:
- * 1. Condition 1 — Order Frequency Follow-up
- * 2. Condition 2 — Visit Interest Follow-up
+ * 1. Condition 1 - Order Frequency Follow-up
+ * 2. Condition 2 - Visit Interest Follow-up
  */
 async function checkRecurringCustomers() {
   const supabase = getSupabase();
@@ -40,7 +40,7 @@ async function checkRecurringCustomers() {
 }
 
 /**
- * CONDITION 1 — Order Frequency Follow-up
+ * CONDITION 1 - Order Frequency Follow-up
  * - Customer has previously placed an order.
  * - Configured order frequency days have elapsed since their last order.
  * - Customer has not placed a new order or responded after the frequency period.
@@ -76,7 +76,7 @@ async function checkOrderFrequencyFollowups(supabase) {
 
       // Prerequisite: Customer MUST have previously placed an order
       if (!lastOrderDateStr) {
-        // Customer has never ordered before — does NOT qualify for order frequency follow-up
+        // Customer has never ordered before - does NOT qualify for order frequency follow-up
         continue;
       }
 
@@ -88,7 +88,7 @@ async function checkOrderFrequencyFollowups(supabase) {
 
       // Check if frequency has elapsed
       if (daysSinceOrder <= freqDays) {
-        // Still within healthy order frequency window — NO ALERT
+        // Still within healthy order frequency window - NO ALERT
         continue;
       }
 
@@ -181,7 +181,7 @@ async function checkOrderFrequencyFollowups(supabase) {
 }
 
 /**
- * CONDITION 2 — Visit Interest Follow-up
+ * CONDITION 2 - Visit Interest Follow-up
  * - A visit was logged where customer showed interest in a product.
  * - Customer mentioned they will think and decide within a few days (follow-up date reached).
  * - No order received from that customer since the visit.
@@ -206,7 +206,7 @@ async function checkVisitInterestFollowups(supabase) {
 
       const dueDate = task.due_date ? new Date(task.due_date) : null;
       if (!dueDate || now < dueDate) {
-        // Scheduled follow-up date has not arrived yet — DO NOT ALERT YET
+        // Scheduled follow-up date has not arrived yet - DO NOT ALERT YET
         continue;
       }
 

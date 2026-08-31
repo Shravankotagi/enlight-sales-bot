@@ -869,7 +869,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           `Updated Sales Achievement Card! 🏆`;
       }
 
-      return `*Deal Updated — ${dealCode}*\n\n` +
+      return `*Deal Updated - ${dealCode}*\n\n` +
         `Customer: *${dealToUpdate.customer_name}*\n` +
         `Stage: *${dbStage.toUpperCase()}*\n\n` +
         `Deal successfully moved to *${dbStage.toUpperCase()}* in Sales Pipeline! 📈`;
@@ -983,13 +983,13 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const updatedStr = updatedLabels.length > 0 ? `Updated: ${updatedLabels.join(', ')}\n` : '';
 
       if (completeness.isComplete) {
-        return `*Deal Updated & Complete — ${dealCode}*\n\n` +
+        return `*Deal Updated & Complete - ${dealCode}*\n\n` +
           `Customer: *${company}*\n` +
           `Stage: *${(refreshedDeal.stage || 'NEW INQUIRY').toUpperCase()}*\n` +
           updatedStr +
           `\nAll mandatory fields complete. Ready to progress to Qualified / Quoted! 📈`;
       } else {
-        return `*Deal Updated — ${dealCode}*\n\n` +
+        return `*Deal Updated - ${dealCode}*\n\n` +
           `Customer: *${company}*\n` +
           updatedStr +
           `\n*Still needed to complete:*\n` +
@@ -1150,7 +1150,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       line_items: processedItems.map((pi) => ({
         sku_text: pi.pName,
         dimensions: pi.dimensions || '',
-        hsn_code: detectHsnCode(pi.pName),
+        hsn_code: detectHsnCode(pi.pName, pi.dimensions),
         quantity: pi.qty,
         unit: pi.unit || 'MT',
         rate: pi.rate > 0 ? pi.rate : null,
@@ -1319,7 +1319,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const gstVal = calculateGst(dealAmount);
       const grandTot = calculateGrandTotal(dealAmount);
 
-      return `*Inquiry Logged & Complete — ${dealCode}*\n\n` +
+      return `*Inquiry Logged & Complete - ${dealCode}*\n\n` +
         `Customer: *${finalCustomerName}*\n` +
         `Stage: *NEW INQUIRY*\n` +
         `Line Items:\n${itemsBreakdownStr}\n` +
@@ -1340,7 +1340,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       })
       .join('\n');
 
-    return `*Inquiry Logged — Deal ID: ${dealCode}*\n\n` +
+    return `*Inquiry Logged - Deal ID: ${dealCode}*\n\n` +
       `Customer: *${finalCustomerName}*\n` +
       `Product Requirement:\n${itemSummary}\n` +
       (finalDeliveryLoc ? `Delivery Location: *${finalDeliveryLoc}*\n` : '') +

@@ -43,7 +43,7 @@ async function migrate() {
   if (error) {
     console.error('Verification failed:', error.message);
   } else {
-    console.log('\n✅ Migration complete. Sample columns:', data.length > 0 ? Object.keys(data[0]) : 'No rows yet — table is ready');
+    console.log('\n✅ Migration complete. Sample columns:', data.length > 0 ? Object.keys(data[0]) : 'No rows yet - table is ready');
   }
 }
 

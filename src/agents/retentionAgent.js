@@ -3,7 +3,7 @@
  *
  * DESIGN PRINCIPLES:
  * - Each follow-up is logged to KRA 3 (each activity counts).
- * - followup_tasks table tracks open follow-ups per customer — updated, never duplicated.
+ * - followup_tasks table tracks open follow-ups per customer - updated, never duplicated.
  * - ALL AI-extracted data is persisted to DB (no data is shown in chat but lost from storage).
  * - Follow-up date, order timeline, linked deal, and status ALL stored and in sync.
  *
@@ -30,20 +30,20 @@ You are the Specialized Customer Retention AI Agent (KRA 3) for Enlight Metals, 
 Your job is to parse customer follow-up reports, re-order inquiries, or client check-in notes.
 
 The salesperson message may be informal, in Hinglish, or missing expected keywords.
-Understand the meaning and context — do not look for specific words.
+Understand the meaning and context - do not look for specific words.
 
 Input message can be English, Hindi, or Hinglish.
 
 Extract into ONLY a JSON object (no prose, no markdown, no backticks):
 {
   "customer_name": "<customer/company name, else null>",
-  "followup_summary": "<detailed 2-3 line summary of the discussion, what was said, and the outcome — do NOT use generic text like 'Routine check-in'>",
+  "followup_summary": "<detailed 2-3 line summary of the discussion, what was said, and the outcome - do NOT use generic text like 'Routine check-in'>",
   "followup_status": "<one of: reviewing_quotation | awaiting_decision | reorder_confirmed | price_negotiation | site_visit_pending | payment_pending | churned | routine_checkin>",
   "reorder_expected": <true if customer indicated they will order soon, else false>,
   "order_expected_timeline": "<when the customer expects to confirm/order, e.g. 'next week', 'by Friday', 'within 2 weeks', else null>",
   "previous_quotation_mentioned": <true if the customer mentioned reviewing a quote/quotation/PO, else false>,
   "is_churned": <true if customer clearly said they won't order anymore or switching supplier, else false>,
-  "followup_days": <number of days after which to follow up — 3 for hot leads, 7 for warm, 14 for cold, default 7>,
+  "followup_days": <number of days after which to follow up - 3 for hot leads, 7 for warm, 14 for cold, default 7>,
   "confidence": <float 0.0 to 1.0>
 }
 
@@ -122,7 +122,7 @@ async function processRetentionMessage(text, senderPhone) {
 
     // Edge Case 4: Missing customer name
     if (!data.customer_name) {
-      return `⚠️ *Retention Agent — Customer Name Missing*\n\nPlease specify the *Customer/Company Name* for this follow-up update.\nExample: _"Called Mehta Industries, they are planning a reorder next month"_`;
+      return `⚠️ *Retention Agent - Customer Name Missing*\n\nPlease specify the *Customer/Company Name* for this follow-up update.\nExample: _"Called Mehta Industries, they are planning a reorder next month"_`;
     }
 
     const customerName = data.customer_name.trim();
@@ -204,14 +204,14 @@ async function processRetentionMessage(text, senderPhone) {
         kra_number:        3,
         kra_type:          'customer_churned',
         customer_name:     finalCustomerName,
-        description:       `Churn Detected: ${finalCustomerName} — ${followupSummary}`,
+        description:       `Churn Detected: ${finalCustomerName} - ${followupSummary}`,
         month: new Date().getMonth() + 1,
         year:  new Date().getFullYear(),
       });
 
       return `⚠️ *KRA 3 - Churn Signal Logged*\n\n` +
         `Customer: *${finalCustomerName}*\n` +
-        `Status: *Marked Inactive — No Further Orders Expected*\n` +
+        `Status: *Marked Inactive - No Further Orders Expected*\n` +
         (followupSummary ? `Note: ${followupSummary}\n` : '') +
         `\nCustomer flagged in Retention Dashboard. 📉`;
     }
@@ -231,7 +231,7 @@ async function processRetentionMessage(text, senderPhone) {
     const existingTask = await getExistingFollowupTask(finalCustomerName, senderPhone);
 
     if (existingTask) {
-      // Update existing task — increment follow_up_count, try with new columns first
+      // Update existing task - increment follow_up_count, try with new columns first
       const updateResult = await supabase
         .from('followup_tasks')
         .update({
@@ -250,7 +250,7 @@ async function processRetentionMessage(text, senderPhone) {
         }).eq('id', existingTask.id);
       }
     } else {
-      // Create new task — try with all new columns first
+      // Create new task - try with all new columns first
       const insertResult = await supabase.from('followup_tasks').insert({
         task_type:                reorderExpected ? 'reorder_followup' : 'retention_followup',
         customer_name:            finalCustomerName,

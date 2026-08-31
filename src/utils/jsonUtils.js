@@ -1,5 +1,5 @@
 /**
- * jsonUtils.js — Resilient JSON Parser for LLM Outputs
+ * jsonUtils.js - Resilient JSON Parser for LLM Outputs
  *
  * Prevents SyntaxError crashes across all agent modules when LLMs
  * return JSON wrapped in markdown codeblocks, XML tags, or conversational text.

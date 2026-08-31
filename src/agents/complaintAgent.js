@@ -8,7 +8,7 @@
  * - One complaint row per incident in the `complaints` table.
  * - Resolution updates the EXISTING open complaint, never creates a duplicate.
  * - KRA 7 log fires on new complaint.
- * - KRA 8 log fires ONLY on resolution — and only if not already resolved.
+ * - KRA 8 log fires ONLY on resolution - and only if not already resolved.
  * - SLA compliance tracked in hours (target: ≤ 48 hours).
  * - If customer reports a complaint that is already resolved, inform the salesperson.
  *
@@ -34,7 +34,7 @@ You are the Specialized Quality & Complaint AI Agent (KRA 7 & KRA 8) for Enlight
 Your job is to parse quality complaints, material rejection reports, or complaint resolution updates.
 
 The salesperson message may be informal, in Hinglish, or missing expected keywords.
-Understand the meaning and context — do not look for specific words.
+Understand the meaning and context - do not look for specific words.
 
 Input message can be English, Hindi, or Hinglish.
 
@@ -43,12 +43,12 @@ Extract into ONLY a JSON object (no prose, no markdown, no backticks):
   "action": "report|resolve",
   "customer_name": "<customer/company name, else null>",
   "complaint_type": "quality|delivery|billing|specification|other",
-  "affected_product": "<specific product/material affected e.g. 'HR Coil 8mm', 'TMT Bars', 'MS Sheets' — else null>",
+  "affected_product": "<specific product/material affected e.g. 'HR Coil 8mm', 'TMT Bars', 'MS Sheets' - else null>",
   "description": "<brief description of complaint or resolution, else null>",
   "confidence": <float 0.0 to 1.0>
 }
 
-Rules — understand meaning, not keywords:
+Rules - understand meaning, not keywords:
 - "action": "report" → new problem, quality issue, material rejection, wrong delivery, billing dispute.
 - "action": "resolve" → complaint fixed, settled, customer accepted, issue sorted, resolved.
 - "affected_product": Extract the specific steel product/material affected (e.g. 'HR Coil', 'TMT Bar 10mm', 'MS Plate'). null if not mentioned.
@@ -110,12 +110,12 @@ async function processComplaintMessage(text, senderPhone) {
 
     // Edge Case 5: Missing customer name
     if (!data.customer_name) {
-      return `⚠️ *Quality Agent — Customer Name Missing*\n\nPlease specify the *Customer/Company Name* for this complaint.\nExample: _"Quality complaint from Delta Structural Steel — wrong material delivered"_`;
+      return `⚠️ *Quality Agent - Customer Name Missing*\n\nPlease specify the *Customer/Company Name* for this complaint.\nExample: _"Quality complaint from Delta Structural Steel - wrong material delivered"_`;
     }
 
     const customerName   = data.customer_name.trim();
 
-    // Verify and get official customer name — auto-create if not found
+    // Verify and get official customer name - auto-create if not found
     const { verifyAndGetCustomerName } = require('../supabase');
     let officialCustomerName = await verifyAndGetCustomerName(customerName, senderPhone);
 
@@ -173,7 +173,7 @@ async function processComplaintMessage(text, senderPhone) {
             kra_number:        8,
             kra_type:          'complaint_resolved',
             customer_name:     finalCustomerName,
-            description:       `Complaint Resolved: ${finalCustomerName} (${resolutionTimeHrs}h — ${isSlaCompliant ? 'Within SLA ✅' : 'SLA BREACHED ⚠️'})`,
+            description:       `Complaint Resolved: ${finalCustomerName} (${resolutionTimeHrs}h - ${isSlaCompliant ? 'Within SLA ✅' : 'SLA BREACHED ⚠️'})`,
             month: new Date().getMonth() + 1,
             year:  new Date().getFullYear(),
           });
@@ -213,7 +213,7 @@ async function processComplaintMessage(text, senderPhone) {
           `Customer: *${finalCustomerName}*\n` +
           `Complaint Type: *${complaintType.toUpperCase()}*\n` +
           `Resolution Time: *${resolutionTimeHrs} Hours*\n` +
-          `SLA Target (48h): *${isSlaCompliant ? '✅ Achieved — Within Target!' : '⚠️ Breached — Escalated!'}*\n\n` +
+          `SLA Target (48h): *${isSlaCompliant ? '✅ Achieved - Within Target!' : '⚠️ Breached - Escalated!'}*\n\n` +
           `Updated Customer Complaints Card! ✅` + (missingPrompt || '');
 
       } else {
@@ -291,7 +291,7 @@ async function processComplaintMessage(text, senderPhone) {
       kra_number:        7,
       kra_type:          'quality_complaint',
       customer_name:     finalCustomerName,
-      description:       `Complaint Logged: ${finalCustomerName} — ${complaintType}: ${description}`,
+      description:       `Complaint Logged: ${finalCustomerName} - ${complaintType}: ${description}`,
       month: new Date().getMonth() + 1,
       year:  new Date().getFullYear(),
     });
@@ -314,7 +314,7 @@ async function processComplaintMessage(text, senderPhone) {
         const { sendTextMessage } = require('../whatsapp');
         await sendTextMessage(
           targetPhone,
-          `🚨 *URGENT COMPLAINT ALERT — ${finalCustomerName}*\n\n` +
+          `🚨 *URGENT COMPLAINT ALERT - ${finalCustomerName}*\n\n` +
           `Type: *${complaintType.toUpperCase()}*\n` +
           `Issue: ${description}\n` +
           `SLA Target: *Resolve within 48 Hours ⏱️*\n\n` +

@@ -1,5 +1,5 @@
 -- ==============================================================================
--- Enlight Sales OS — Scale & Performance Database Index Migration
+-- Enlight Sales OS - Scale & Performance Database Index Migration
 -- Optimizes queries for Multi-Admin, Multi-Sales Manager, Many Salespersons,
 -- and 1000+ customer records with sub-millisecond lookups.
 -- ==============================================================================

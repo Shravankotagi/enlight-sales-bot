@@ -1,5 +1,5 @@
 /**
- * gemini.js — Inquiry extraction & classification module using Google Gemini (gemini-3.5-flash / gemini-3.5-flash-lite)
+ * gemini.js - Inquiry extraction & classification module using Google Gemini (gemini-3.5-flash / gemini-3.5-flash-lite)
  */
 
 const { ChatGoogleGenerativeAI } = require('@langchain/google-genai');
@@ -15,21 +15,21 @@ async function callLightweightModel(prompt) {
 
 const EXTRACTION_PROMPT = `
 You are an expert document parser for Enlight Metals, an Indian B2B metal distributor.
-Input is a photo, PDF, or text of a business document — either a PURCHASE ORDER (PO) or a MATERIAL REQUIREMENT/INQUIRY/RFQ.
+Input is a photo, PDF, or text of a business document - either a PURCHASE ORDER (PO) or a MATERIAL REQUIREMENT/INQUIRY/RFQ.
 
 ════════════════════════════════════════════════════
-🔴 RULE #1 — PO vs INQUIRY (MOST IMPORTANT RULE):
+🔴 RULE #1 - PO vs INQUIRY (MOST IMPORTANT RULE):
 ════════════════════════════════════════════════════
 
 STEP 1: Scan the ENTIRE document for a field explicitly labeled:
   "PO No", "P.O. No", "PO Number", "Purchase Order No", "Purchase Order Number", "PO Ref", "P.O. Ref", "Order No."
 
-STEP 2A — If such a label EXISTS and has a value (e.g. "PO No: 471" or "PO-26-27-00718"):
+STEP 2A - If such a label EXISTS and has a value (e.g. "PO No: 471" or "PO-26-27-00718"):
   → Set inquiry_type: "purchase_order"
   → Set po_number: "<that exact value>"
   → This is a CONFIRMED PURCHASE ORDER.
 
-STEP 2B — If NO such label exists, OR the document says "Inquiry", "RFQ", "Quotation Request", "Material Requirement":
+STEP 2B - If NO such label exists, OR the document says "Inquiry", "RFQ", "Quotation Request", "Material Requirement":
   → Set inquiry_type: "inquiry"
   → Set po_number: null
   → This is an INQUIRY/RFQ, NOT a purchase order.
@@ -39,7 +39,7 @@ STEP 2B — If NO such label exists, OR the document says "Inquiry", "RFQ", "Quo
     When in doubt → inquiry_type: "inquiry", po_number: null.
 
 ════════════════════════════════════════════════════
-🔴 RULE #2 — CUSTOMER / COMPANY NAME vs ADDRESS:
+🔴 RULE #2 - CUSTOMER / COMPANY NAME vs ADDRESS:
 ════════════════════════════════════════════════════
 
 1. CUSTOMER COMPANY NAME (customer.name):
@@ -116,7 +116,7 @@ Additional Rules:
 - GST Components: Extract SGST (e.g. 9%), CGST (e.g. 9%), IGST (e.g. 18%), and total GST amount as stated in the document.
 - Grand Total: The final GST-inclusive value stated in the PO document (e.g. "Grand Total: ₹12,18,940.00").
 - SKU text: preserve the customer's exact words in sku_text
-- If a field is absent return null — never invent values
+- If a field is absent return null - never invent values
 - DATE RULE: Current Year is 2026. Any date specifying month/day MUST ALWAYS use year 2026 (e.g. 2026-08-14).
 - CONFIDENCE RULE:
   * 1.0 (100%) when quantity, product, unit, AND explicit rate/price per MT are stated.
@@ -140,7 +140,7 @@ function postProcessExtraction(parsed) {
     // Model said purchase_order but no PO number found → revert to inquiry
     parsed.inquiry_type = 'inquiry';
     parsed.po_number = null;
-    console.warn('[Gemini] postProcess: model set purchase_order but no po_number found — corrected to inquiry');
+    console.warn('[Gemini] postProcess: model set purchase_order but no po_number found - corrected to inquiry');
   }
 
   // 1. Delivery Date Year Correction (Ensure 2026 or future year)
@@ -227,7 +227,7 @@ function postProcessExtraction(parsed) {
   } else if (statedGrandTotal > 0) {
     parsed.grand_total = statedGrandTotal;
     parsed.total_amount = statedGrandTotal;
-    parsed.calculation_warning = `Calculated total (₹${calculatedGrandTotal.toLocaleString('en-IN')}) does not match PO document total (₹${statedGrandTotal.toLocaleString('en-IN')}) — please review`;
+    parsed.calculation_warning = `Calculated total (₹${calculatedGrandTotal.toLocaleString('en-IN')}) does not match PO document total (₹${statedGrandTotal.toLocaleString('en-IN')}) - please review`;
     console.warn('[Gemini OCR]', parsed.calculation_warning);
   } else {
     parsed.grand_total = calculatedGrandTotal;
@@ -277,7 +277,7 @@ async function extractFromImageOrDoc(buffer, mimeType) {
     const cleanMime = mimeType || 'application/pdf';
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`;
-    // Using gemini-3.5-flash — highest accuracy multimodal model for PO vs Inquiry differentiation
+    // Using gemini-3.5-flash - highest accuracy multimodal model for PO vs Inquiry differentiation
 
     const response = await axios.post(
       url,
@@ -343,7 +343,7 @@ async function extractFromDocument(documentBuffer, mimeType = 'application/pdf')
 
 const INTENT_PROMPT = `
 You are the intelligent message router for Enlight Metals, an Indian B2B metal distributor.
-A salesperson sends a WhatsApp message in English, Hindi, or Hinglish — casually, informally, 
+A salesperson sends a WhatsApp message in English, Hindi, or Hinglish - casually, informally, 
 without any fixed format. Your job is to understand the INTENT behind what they are reporting.
 
 Think about what action the salesperson is describing, not what words they used.
@@ -359,7 +359,7 @@ Return ONLY a JSON object (no prose, no markdown, no backticks):
   "confidence": <float 0.0 to 1.0>
 }
 
-INTENT DEFINITIONS — understand the meaning, not the keywords:
+INTENT DEFINITIONS - understand the meaning, not the keywords:
 
 "stage_update": The salesperson is telling you the STATUS of a deal changed.
   Examples (all different wordings, same intent):
@@ -412,7 +412,7 @@ INTENT DEFINITIONS — understand the meaning, not the keywords:
   - "Complaint fix kar di" (complaint fixed)
   - "Ab theek hai, unhone accept kar liya" (accepted now)
 
-"inquiry": A customer's product requirement — what steel they want to buy.
+"inquiry": A customer's product requirement - what steel they want to buy.
   Examples:
   - "5 ton HR coil chahiye ABC ko" (product requirement)
   - "Mehta ne rate manga 10mm ka" (rate asked for)
