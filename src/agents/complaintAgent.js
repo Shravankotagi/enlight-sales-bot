@@ -5,15 +5,13 @@
  * KRA 8 = Complaint resolved within SLA (target: 48 hours)
  *
  * ENFORCEMENTS & FLOWS:
- * 1. Mandatory Deal ID / PO Number linking:
- *    - If Deal ID / PO provided in message -> links directly.
- *    - If only customer provided & 1 active deal exists -> asks confirmation: "Is this complaint for Deal #DEAL-XXXXXX (PO: YYY)?"
- *    - If only customer provided & multiple active deals exist -> lists them and requires salesperson to specify Deal ID or PO.
- *    - If 0 deals exist -> logs as unlinked record.
- * 2. Separate structured product field (no '[Product: ...]' prefix in description).
- * 3. Exact timestamp recording (created_at & reported_at).
- * 4. Resolution notes mandatory before marking as resolved.
- * 5. Isolated complaint lifecycle: multiple complaints per customer/deal are stored as independent records.
+ * 1. Multi-Complaint Support:
+ *    - If a salesperson reports multiple complaints in one message (different companies or different items),
+ *      each is extracted and created as an independent row in the database.
+ * 2. PO Priority for Won Deals:
+ *    - Won deals reference PO number as primary (e.g. "PO: DEW/RFQ/2026/089 (#DEAL-1BBB57)").
+ *    - Deals without PO or non-won deals reference Deal ID as primary.
+ * 3. Exact Timestamps & Mandatory Resolution Notes.
  */
 
 const { supabase } = require('../supabase');
@@ -24,28 +22,32 @@ const COMPLAINT_AGENT_PROMPT = `
 You are the Specialized Quality & Complaint AI Agent (KRA 7 & KRA 8) for Enlight Metals.
 Your job is to parse quality complaints, material rejection reports, or complaint resolution updates.
 
-The salesperson message may be informal, in Hinglish, or missing expected keywords.
-Understand the meaning and context - do not look for specific words.
-
-Input message can be English, Hindi, or Hinglish.
+CRITICAL INSTRUCTION - MULTIPLE COMPLAINTS:
+A salesperson message may contain MULTIPLE separate complaints for different companies or different issues (e.g. "Complaint from Dynamic Engineering: HR Coil rust. Complaint from Tech Industries: CR Sheet crack").
+You MUST extract each distinct complaint as a separate item in the "complaints" array.
 
 Extract into ONLY a JSON object (no prose, no markdown, no backticks):
 {
-  "action": "report|resolve",
-  "customer_name": "<customer/company name, else null>",
-  "deal_id": "<deal ID e.g. 'DEAL-C538B6' or UUID if mentioned in text, else null>",
-  "po_number": "<PO number e.g. 'PO-2026-001' or 'PO-718' if mentioned, else null>",
-  "complaint_type": "quality|delivery|quantity|billing|specification|other",
-  "affected_product": "<specific product/material affected e.g. 'HR Coil 8mm', 'MS Plates 12mm', 'TMT Bars' - else null>",
-  "description": "<detailed description of complaint or resolution notes, else null>",
-  "is_confirmation": <true if the user is replying 'yes', 'confirm', 'haan', 'correct', 'right', 'sahi hai' to a previous deal confirmation question, else false>,
-  "confidence": <float 0.0 to 1.0>
+  "complaints": [
+    {
+      "action": "report|resolve",
+      "customer_name": "<customer/company name, else null>",
+      "deal_id": "<deal ID e.g. 'DEAL-C538B6' or UUID if mentioned in text, else null>",
+      "po_number": "<PO number e.g. 'PO-2026-001' or 'DEW/RFQ/2026/089' if mentioned, else null>",
+      "complaint_type": "quality|delivery|quantity|billing|specification|other",
+      "affected_product": "<specific product/material affected e.g. 'HR Coil 12 MT', 'CR Sheet 1.20mm coils' - else null>",
+      "description": "<detailed description of complaint or resolution notes for this specific customer/incident>",
+      "is_confirmation": <true if the user is replying 'yes', 'confirm', 'haan', 'correct', 'right', 'sahi hai' to a previous deal confirmation question, else false>,
+      "confidence": <float 0.0 to 1.0>
+    }
+  ]
 }
 
 Rules:
 - "action": "report" -> new issue, defect, rejection, wrong material, shortage, delivery delay, billing dispute.
 - "action": "resolve" -> issue settled, sorted, material replaced, customer accepted, resolved.
-- "affected_product": Extract specific steel category, dimensions, or product form.
+- If multiple companies or separate complaint sentences exist, CREATE A SEPARATE ENTRY IN THE "complaints" ARRAY FOR EACH ONE!
+- "affected_product": Extract specific steel category, dimensions, or product form for that specific complaint.
 - "deal_id": Extract any #DEAL-XXXXXX or DEAL code mentioned.
 - "po_number": Extract any PO number (PO-XXXX, Purchase Order #) mentioned.
 
@@ -53,7 +55,7 @@ Return ONLY the JSON object.
 `;
 
 /**
- * Fetch active/recent deals for a customer.
+ * Fetch won/active deals for a customer.
  */
 async function getCustomerActiveDeals(customerName) {
   if (!customerName) return [];
@@ -130,6 +132,323 @@ async function isKRA8AlreadyLogged(senderPhone, customerName) {
   return data && data.length > 0;
 }
 
+/**
+ * Process a single complaint object.
+ */
+async function processSingleComplaint(data, originalText, senderPhone) {
+  // Missing customer name check
+  if (!data.customer_name) {
+    const dealIdMatch = originalText.match(/#?DEAL-([A-F0-9]{6})/i);
+    if (dealIdMatch) {
+      const shortCode = dealIdMatch[1].toLowerCase();
+      const { data: matchedDeals } = await supabase
+        .from('deals')
+        .select('id, customer_name, po_number')
+        .limit(100);
+      const found = (matchedDeals || []).find(d => d.id.toLowerCase().startsWith(shortCode));
+      if (found) {
+        data.customer_name = found.customer_name;
+        data.deal_id = found.id;
+        if (found.po_number && !data.po_number) data.po_number = found.po_number;
+      }
+    }
+  }
+
+  if (!data.customer_name) {
+    return `⚠️ *Customer Complaints - Missing Information*\n\nPlease specify the *Customer / Company Name* for this complaint.\nExample: _"Quality complaint for Delta Structural Steel - surface rust on 10 MT HR Coil"_`;
+  }
+
+  const customerName = data.customer_name.trim();
+
+  // Verify and get official customer name
+  const { verifyAndGetCustomerName } = require('../supabase');
+  let officialCustomerName = await verifyAndGetCustomerName(customerName, senderPhone);
+
+  if (!officialCustomerName) {
+    await supabase.from('recurring_customers').insert({
+      customer_name: customerName,
+      assigned_salesperson_phone: senderPhone,
+      is_active: true,
+      avg_order_frequency_days: 30,
+    }).select().single();
+    officialCustomerName = customerName;
+  }
+
+  const finalCustomerName = officialCustomerName;
+  const complaintType = data.complaint_type || 'quality';
+  const affectedProduct = data.affected_product || null;
+  const cleanDescription = data.description || originalText;
+
+  // ── RESOLVE FLOW ──────────────────────────────────────────────────
+  if (data.action === 'resolve') {
+    const openComplaint = await getOpenComplaint(finalCustomerName, senderPhone, data.deal_id);
+
+    let resolutionNotes = (data.description || '').trim();
+    const isGenericResolveText = /^(resolved|resolve|issue sorted|fixed|done|ho gaya|settled)$/i.test(resolutionNotes);
+    if (!resolutionNotes || isGenericResolveText) {
+      return `ℹ️ *Resolution Notes Required for ${finalCustomerName}*\n\n` +
+        `Please provide the resolution details (e.g. replacement material dispatched / commercial settlement).\n` +
+        `Example: _"Resolved complaint for ${finalCustomerName} - replacement 10 MT plates dispatched and accepted."_`;
+    }
+
+    if (openComplaint) {
+      const resolvedAt = new Date();
+      const reportedAt = new Date(openComplaint.created_at || openComplaint.reported_at || Date.now());
+      const resolutionTimeHrs = Math.max(1, Math.round(
+        (resolvedAt.getTime() - reportedAt.getTime()) / (1000 * 60 * 60)
+      ));
+      const isSlaBreached = resolutionTimeHrs > 48;
+      const isSlaCompliant = !isSlaBreached;
+
+      await supabase
+        .from('complaints')
+        .update({
+          status: 'resolved',
+          resolution_notes: resolutionNotes,
+          resolved_at: resolvedAt.toISOString(),
+          resolution_time_hrs: resolutionTimeHrs,
+          escalated: isSlaBreached,
+        })
+        .eq('id', openComplaint.id);
+
+      const alreadyLogged = await isKRA8AlreadyLogged(senderPhone, finalCustomerName);
+      if (!alreadyLogged) {
+        await supabase.from('kra_logs').insert({
+          salesperson_phone: senderPhone,
+          kra_number: 8,
+          kra_type: 'complaint_resolved',
+          customer_name: finalCustomerName,
+          description: `Complaint Resolved: ${finalCustomerName} (${resolutionTimeHrs}h - ${isSlaCompliant ? 'Within SLA ✅' : 'SLA BREACHED ⚠️'})`,
+          month: new Date().getMonth() + 1,
+          year: new Date().getFullYear(),
+          created_at: resolvedAt.toISOString(),
+        });
+      }
+
+      try {
+        syncActivity('complaint_resolved', {
+          customerName: finalCustomerName,
+          complaintType,
+          description: resolutionNotes,
+          affectedProduct,
+          action: 'resolve',
+          resolutionTimeHrs,
+          senderPhone,
+        });
+      } catch (e) {
+        console.warn('[ComplaintAgent] Bigin sync notice:', e.message);
+      }
+
+      try {
+        logBotActivity({
+          salesperson_phone: senderPhone,
+          description: `Complaint resolved for ${finalCustomerName}: ${resolutionNotes}`,
+          module: 'Complaints',
+          customer_name: finalCustomerName,
+        });
+      } catch (actErr) {
+        console.warn('[ComplaintAgent] Activity log notice:', actErr?.message);
+      }
+
+      const orderRef = openComplaint.po_number
+        ? `PO: *${openComplaint.po_number}* (#DEAL-${(openComplaint.deal_id || '').substring(0, 6).toUpperCase()})`
+        : openComplaint.deal_id ? `Deal: *#DEAL-${openComplaint.deal_id.substring(0, 6).toUpperCase()}*` : '';
+
+      return `✅ *Customer Complaint Resolved!*\n\n` +
+        `Customer: *${finalCustomerName}*\n` +
+        (orderRef ? `Linked Order: ${orderRef}\n` : '') +
+        `Resolution Notes: ${resolutionNotes}\n` +
+        `Resolution Time: *${resolutionTimeHrs} Hours*\n` +
+        `SLA Target (48h): *${isSlaCompliant ? '✅ Achieved - Within SLA Target!' : '⚠️ Breached - Escalated!'}*\n\n` +
+        `Updated Customer Complaints Card! ✅`;
+
+    } else {
+      const nowIso = new Date().toISOString();
+      await supabase.from('complaints').insert({
+        customer_name: finalCustomerName,
+        deal_id: data.deal_id || null,
+        po_number: data.po_number || null,
+        product_name: affectedProduct || 'General Material',
+        affected_product: affectedProduct || 'General Material',
+        reported_by: senderPhone,
+        complaint_type: complaintType,
+        description: cleanDescription,
+        resolution_notes: resolutionNotes,
+        status: 'resolved',
+        created_at: nowIso,
+        reported_at: nowIso,
+        resolved_at: nowIso,
+        resolution_time_hrs: 0,
+        escalated: false,
+      });
+
+      return `✅ *Customer Complaint Resolved!*\n\n` +
+        `Customer: *${finalCustomerName}*\n` +
+        `Resolution Notes: ${resolutionNotes}\n` +
+        `_Note: Created and marked resolved directly._\n\n` +
+        `Updated Customer Complaints Card! ✅`;
+    }
+  }
+
+  // ── REPORT / CREATE FLOW ───────────────────────────────────────────
+
+  // Step 1: Check if Deal ID / PO is already identified or explicitly in text
+  let targetDealId = null;
+  let targetPoNumber = data.po_number || null;
+
+  const candidateDealCode = (data.deal_id || '').match(/#?DEAL-([A-F0-9]{6})/i)?.[1]
+    || originalText.match(/#?DEAL-([A-F0-9]{6})/i)?.[1]
+    || null;
+
+  if (candidateDealCode) {
+    const shortCode = candidateDealCode.toLowerCase();
+    const { data: matchedDeals } = await supabase
+      .from('deals')
+      .select('id, po_number')
+      .limit(100);
+    const found = (matchedDeals || []).find(d => d.id.toLowerCase().startsWith(shortCode));
+    if (found) {
+      targetDealId = found.id;
+      if (found.po_number && !targetPoNumber) targetPoNumber = found.po_number;
+    } else {
+      targetDealId = candidateDealCode;
+    }
+  } else if (data.deal_id) {
+    targetDealId = data.deal_id;
+  }
+
+  if (!targetPoNumber) {
+    const poMatch = originalText.match(/PO[-:\s]*([A-Z0-9\/-]+)/i);
+    if (poMatch) {
+      const poCandidate = poMatch[1].trim();
+      const { data: matchedDeals } = await supabase
+        .from('deals')
+        .select('id, po_number')
+        .ilike('po_number', `%${poCandidate}%`)
+        .limit(1);
+      if (matchedDeals && matchedDeals.length > 0) {
+        targetPoNumber = matchedDeals[0].po_number;
+        if (!targetDealId) targetDealId = matchedDeals[0].id;
+      }
+    }
+  }
+
+  // Step 2: If no Deal ID or PO provided, lookup customer's active won deals
+  if (!targetDealId && !targetPoNumber) {
+    const activeDeals = await getCustomerActiveDeals(finalCustomerName);
+
+    if (activeDeals.length === 1 && !data.is_confirmation) {
+      const d = activeDeals[0];
+      const itemSummary = d.items.length > 0
+        ? d.items.map(it => `${it.sku_text} ${it.dimensions || ''} ${it.quantity ? `${it.quantity} ${it.unit || 'MT'}` : ''}`.trim()).join(', ')
+        : (affectedProduct || 'Steel Material');
+
+      const poDisplay = d.po_number ? `PO: *${d.po_number}* (${d.deal_code})` : `*${d.deal_code}*`;
+
+      return `🔍 *Confirm Linked Order for Complaint*\n\n` +
+        `Customer: *${finalCustomerName}*\n` +
+        `Found 1 won order in pipeline:\n` +
+        `• ${poDisplay} — ${itemSummary}\n\n` +
+        `Is this complaint for ${poDisplay}?\n` +
+        `👉 Reply *"Yes"* to confirm, or provide the PO Number / Deal ID.`;
+    } else if (activeDeals.length > 1 && !data.is_confirmation) {
+      // Multiple active won deals -> List with PO primary
+      const dealListFormatted = activeDeals.map((d, idx) => {
+        const itemSummary = d.items.length > 0
+          ? d.items.map(it => `${it.sku_text} ${it.dimensions || ''} ${it.quantity ? `${it.quantity}${it.unit || 'MT'}` : ''}`.trim()).join(', ')
+          : 'Steel Material';
+        if (d.po_number) {
+          return `${idx + 1}. PO: *${d.po_number}* (${d.deal_code}) — ${itemSummary}`;
+        }
+        return `${idx + 1}. *${d.deal_code}* — ${itemSummary}`;
+      }).join('\n');
+
+      const samplePo = activeDeals[0].po_number || activeDeals[0].deal_code;
+
+      return `⚠️ *Multiple Won Orders Found for ${finalCustomerName}*\n\n` +
+        `Please specify which order or PO this complaint is about:\n\n` +
+        `${dealListFormatted}\n\n` +
+        `👉 Please reply with the *PO Number* (e.g. _"${samplePo}"_) or *Deal ID*.`;
+    } else if (activeDeals.length === 1 && data.is_confirmation) {
+      targetDealId = activeDeals[0].id;
+      targetPoNumber = activeDeals[0].po_number || null;
+    }
+  }
+
+  // Step 3: Insert new complaint record
+  const nowIso = new Date().toISOString();
+  const reportedAt = new Date();
+  const slaDueAt = new Date(reportedAt.getTime() + 48 * 60 * 60 * 1000); // 48h SLA
+
+  const finalProduct = affectedProduct || 'General Material';
+
+  const insertPayload = {
+    customer_name: finalCustomerName,
+    deal_id: targetDealId || null,
+    po_number: targetPoNumber || null,
+    product_name: finalProduct,
+    affected_product: finalProduct,
+    reported_by: senderPhone,
+    complaint_type: complaintType,
+    description: cleanDescription,
+    status: 'open',
+    created_at: nowIso,
+    reported_at: nowIso,
+    sla_due_at: slaDueAt.toISOString(),
+    escalated: false,
+  };
+
+  const { error: insertError } = await supabase
+    .from('complaints')
+    .insert(insertPayload)
+    .select()
+    .single();
+
+  if (insertError) {
+    console.error('[ComplaintAgent] Error inserting complaint:', insertError);
+  }
+
+  // Log KRA 7
+  await supabase.from('kra_logs').insert({
+    salesperson_phone: senderPhone,
+    kra_number: 7,
+    kra_type: 'quality_complaint',
+    customer_name: finalCustomerName,
+    description: `Complaint Logged: ${finalCustomerName} - ${complaintType}: ${finalProduct}`,
+    month: new Date().getMonth() + 1,
+    year: new Date().getFullYear(),
+    created_at: nowIso,
+  });
+
+  // Log to activity_logs
+  try {
+    logBotActivity({
+      salesperson_phone: senderPhone,
+      description: `New complaint logged for ${finalCustomerName}${targetPoNumber ? ` (PO: ${targetPoNumber})` : targetDealId ? ` (Deal: #DEAL-${targetDealId.substring(0, 6).toUpperCase()})` : ''}`,
+      module: 'Complaints',
+      customer_name: finalCustomerName,
+    });
+  } catch (actErr) {
+    console.warn('[ComplaintAgent] Activity log notice:', actErr?.message);
+  }
+
+  const cleanCode = targetDealId ? (targetDealId.startsWith('DEAL-') ? targetDealId.replace(/^DEAL-/, '') : targetDealId.substring(0, 6).toUpperCase()) : '';
+  const orderRef = targetPoNumber
+    ? `PO: *${targetPoNumber}* ${cleanCode ? `(#DEAL-${cleanCode})` : ''}`
+    : cleanCode ? `#DEAL-${cleanCode}` : 'Unlinked';
+
+  return `🚨 *Customer Complaint Logged*\n\n` +
+    `Customer: *${finalCustomerName}*\n` +
+    `Linked Order: ${orderRef}\n` +
+    `Product: *${finalProduct}*\n` +
+    `Type: *${complaintType.toUpperCase()}*\n` +
+    `Details: ${cleanDescription}\n` +
+    `Status: *Open ⏱️ (48-Hour SLA Clock Started)*\n` +
+    `SLA Due: *${slaDueAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}*\n\n` +
+    `Updated Customer Complaints Card! ✅\n\n` +
+    `When resolved, reply: _"Resolved complaint for ${finalCustomerName}: [resolution notes]"_ ✅`;
+}
+
 async function processComplaintMessage(text, senderPhone) {
   try {
     const { invokeWithFallback } = require('../core/modelRouter');
@@ -143,312 +462,18 @@ async function processComplaintMessage(text, senderPhone) {
     const data = safeParseJSON(rawText, null);
     if (!data) throw new Error('Could not parse complaint JSON from LLM response');
 
-    // Missing customer name check
-    if (!data.customer_name) {
-      // Check if text has a deal ID (e.g. "#DEAL-C538B6")
-      const dealIdMatch = text.match(/#?DEAL-([A-F0-9]{6})/i);
-      if (dealIdMatch) {
-        const shortCode = dealIdMatch[1].toLowerCase();
-        const { data: matchedDeals } = await supabase
-          .from('deals')
-          .select('id, customer_name, po_number')
-          .limit(100);
-        const found = (matchedDeals || []).find(d => d.id.toLowerCase().startsWith(shortCode));
-        if (found) {
-          data.customer_name = found.customer_name;
-          data.deal_id = found.id;
-          if (found.po_number && !data.po_number) data.po_number = found.po_number;
-        }
-      }
+    // Extract list of complaints
+    const rawComplaints = Array.isArray(data.complaints) && data.complaints.length > 0
+      ? data.complaints
+      : [data];
+
+    const results = [];
+    for (const comp of rawComplaints) {
+      const res = await processSingleComplaint(comp, text, senderPhone);
+      results.push(res);
     }
 
-    if (!data.customer_name) {
-      return `⚠️ *Customer Complaints - Missing Information*\n\nPlease specify the *Customer / Company Name* or *Deal ID* for this complaint.\nExample: _"Quality complaint for Delta Structural Steel on Deal #DEAL-C538B6 - surface rust on 10 MT MS Plates"_`;
-    }
-
-    const customerName = data.customer_name.trim();
-
-    // Verify and get official customer name
-    const { verifyAndGetCustomerName } = require('../supabase');
-    let officialCustomerName = await verifyAndGetCustomerName(customerName, senderPhone);
-
-    if (!officialCustomerName) {
-      await supabase.from('recurring_customers').insert({
-        customer_name: customerName,
-        assigned_salesperson_phone: senderPhone,
-        is_active: true,
-        avg_order_frequency_days: 30,
-      }).select().single();
-      officialCustomerName = customerName;
-    }
-
-    const finalCustomerName = officialCustomerName;
-    const complaintType = data.complaint_type || 'quality';
-    const affectedProduct = data.affected_product || null;
-    const cleanDescription = data.description || text;
-
-    // ── RESOLVE FLOW ──────────────────────────────────────────────────
-    if (data.action === 'resolve') {
-      const openComplaint = await getOpenComplaint(finalCustomerName, senderPhone, data.deal_id);
-
-      // Require non-empty resolution notes before resolving
-      let resolutionNotes = (data.description || '').trim();
-      const isGenericResolveText = /^(resolved|resolve|issue sorted|fixed|done|ho gaya|settled)$/i.test(resolutionNotes);
-      if (!resolutionNotes || isGenericResolveText) {
-        return `ℹ️ *Resolution Notes Required*\n\n` +
-          `To mark the complaint for *${finalCustomerName}* as resolved, please provide the resolution details.\n` +
-          `Example: _"Resolved complaint for ${finalCustomerName} - replacement 10 MT plates dispatched and accepted by customer."_`;
-      }
-
-      if (openComplaint) {
-        const resolvedAt = new Date();
-        const reportedAt = new Date(openComplaint.created_at || openComplaint.reported_at || Date.now());
-        const resolutionTimeHrs = Math.max(1, Math.round(
-          (resolvedAt.getTime() - reportedAt.getTime()) / (1000 * 60 * 60)
-        ));
-        const isSlaBreached = resolutionTimeHrs > 48;
-        const isSlaCompliant = !isSlaBreached;
-
-        // Update specific complaint record to resolved
-        await supabase
-          .from('complaints')
-          .update({
-            status: 'resolved',
-            resolution_notes: resolutionNotes,
-            resolved_at: resolvedAt.toISOString(),
-            resolution_time_hrs: resolutionTimeHrs,
-            escalated: isSlaBreached,
-          })
-          .eq('id', openComplaint.id);
-
-        // KRA 8 log
-        const alreadyLogged = await isKRA8AlreadyLogged(senderPhone, finalCustomerName);
-        if (!alreadyLogged) {
-          await supabase.from('kra_logs').insert({
-            salesperson_phone: senderPhone,
-            kra_number: 8,
-            kra_type: 'complaint_resolved',
-            customer_name: finalCustomerName,
-            description: `Complaint Resolved: ${finalCustomerName} (${resolutionTimeHrs}h - ${isSlaCompliant ? 'Within SLA ✅' : 'SLA BREACHED ⚠️'})`,
-            month: new Date().getMonth() + 1,
-            year: new Date().getFullYear(),
-            created_at: resolvedAt.toISOString(),
-          });
-        }
-
-        try {
-          syncActivity('complaint_resolved', {
-            customerName: finalCustomerName,
-            complaintType,
-            description: resolutionNotes,
-            affectedProduct,
-            action: 'resolve',
-            resolutionTimeHrs,
-            senderPhone,
-          });
-        } catch (e) {
-          console.warn('[ComplaintAgent] Bigin sync notice:', e.message);
-        }
-
-        try {
-          logBotActivity({
-            salesperson_phone: senderPhone,
-            description: `Complaint resolved for ${finalCustomerName}: ${resolutionNotes}`,
-            module: 'Complaints',
-            customer_name: finalCustomerName,
-          });
-        } catch (actErr) {
-          console.warn('[ComplaintAgent] Activity log notice:', actErr?.message);
-        }
-
-        return `✅ *Customer Complaint Resolved!*\n\n` +
-          `Customer: *${finalCustomerName}*\n` +
-          (openComplaint.deal_id ? `Deal ID: *#DEAL-${openComplaint.deal_id.substring(0, 6).toUpperCase()}*\n` : '') +
-          `Resolution Notes: ${resolutionNotes}\n` +
-          `Resolution Time: *${resolutionTimeHrs} Hours*\n` +
-          `SLA Target (48h): *${isSlaCompliant ? '✅ Achieved - Within SLA Target!' : '⚠️ Breached - Escalated!'}*\n\n` +
-          `Updated Customer Complaints Card! ✅`;
-
-      } else {
-        // No prior open complaint found
-        const nowIso = new Date().toISOString();
-        await supabase.from('complaints').insert({
-          customer_name: finalCustomerName,
-          deal_id: data.deal_id || null,
-          po_number: data.po_number || null,
-          product_name: affectedProduct || 'General Material',
-          affected_product: affectedProduct || 'General Material',
-          reported_by: senderPhone,
-          complaint_type: complaintType,
-          description: cleanDescription,
-          resolution_notes: resolutionNotes,
-          status: 'resolved',
-          created_at: nowIso,
-          reported_at: nowIso,
-          resolved_at: nowIso,
-          resolution_time_hrs: 0,
-          escalated: false,
-        });
-
-        return `✅ *Customer Complaint Resolved!*\n\n` +
-          `Customer: *${finalCustomerName}*\n` +
-          `Resolution Notes: ${resolutionNotes}\n` +
-          `_Note: Created and marked resolved directly._\n\n` +
-          `Updated Customer Complaints Card! ✅`;
-      }
-    }
-
-    // ── REPORT / CREATE FLOW ───────────────────────────────────────────
-
-    // Step 1: Check if Deal ID / PO is already identified or explicitly in text
-    let targetDealId = null;
-    let targetPoNumber = data.po_number || null;
-
-    const candidateDealCode = (data.deal_id || '').match(/#?DEAL-([A-F0-9]{6})/i)?.[1]
-      || text.match(/#?DEAL-([A-F0-9]{6})/i)?.[1]
-      || null;
-
-    if (candidateDealCode) {
-      const shortCode = candidateDealCode.toLowerCase();
-      const { data: matchedDeals } = await supabase
-        .from('deals')
-        .select('id, po_number')
-        .limit(100);
-      const found = (matchedDeals || []).find(d => d.id.toLowerCase().startsWith(shortCode));
-      if (found) {
-        targetDealId = found.id;
-        if (found.po_number && !targetPoNumber) targetPoNumber = found.po_number;
-      } else {
-        targetDealId = candidateDealCode;
-      }
-    } else if (data.deal_id) {
-      targetDealId = data.deal_id;
-    }
-
-    if (!targetPoNumber) {
-      const poMatch = text.match(/PO[-:\s]*([A-Z0-9\/-]+)/i);
-      if (poMatch) {
-        const poCandidate = poMatch[1].trim();
-        const { data: matchedDeals } = await supabase
-          .from('deals')
-          .select('id, po_number')
-          .ilike('po_number', `%${poCandidate}%`)
-          .limit(1);
-        if (matchedDeals && matchedDeals.length > 0) {
-          targetPoNumber = matchedDeals[0].po_number;
-          if (!targetDealId) targetDealId = matchedDeals[0].id;
-        }
-      }
-    }
-
-    // Step 2: If no Deal ID or PO provided, lookup customer's active deals
-    if (!targetDealId && !targetPoNumber) {
-      const activeDeals = await getCustomerActiveDeals(finalCustomerName);
-
-      if (activeDeals.length === 1 && !data.is_confirmation) {
-        // Exactly 1 active deal -> Prompt confirmation
-        const d = activeDeals[0];
-        const itemSummary = d.items.length > 0
-          ? d.items.map(it => `${it.sku_text} ${it.dimensions || ''} ${it.quantity ? `${it.quantity} ${it.unit || 'MT'}` : ''}`.trim()).join(', ')
-          : (affectedProduct || 'Steel Material');
-
-        return `🔍 *Confirm Linked Deal for Complaint*\n\n` +
-          `Customer: *${finalCustomerName}*\n` +
-          `Found 1 active deal in pipeline:\n` +
-          `• *${d.deal_code}* — ${itemSummary} ${d.po_number ? `(PO: *${d.po_number}*)` : ''}\n\n` +
-          `Is this complaint for *${d.deal_code}*?\n` +
-          `👉 Reply *"Yes"* to confirm, or reply with the specific *Deal ID* / *PO Number*.`;
-      } else if (activeDeals.length > 1 && !data.is_confirmation) {
-        // Multiple active deals -> List and ask salesperson to choose
-        const dealListFormatted = activeDeals.map((d, idx) => {
-          const itemSummary = d.items.length > 0
-            ? d.items.map(it => `${it.sku_text} ${it.dimensions || ''} ${it.quantity ? `${it.quantity}${it.unit || 'MT'}` : ''}`.trim()).join(', ')
-            : 'Steel Material';
-          const poStr = d.po_number ? ` (PO: ${d.po_number})` : '';
-          return `${idx + 1}. *${d.deal_code}* — ${itemSummary}${poStr}`;
-        }).join('\n');
-
-        return `⚠️ *Multiple Active Deals Found for ${finalCustomerName}*\n\n` +
-          `Please specify which deal or PO this complaint is about:\n\n` +
-          `${dealListFormatted}\n\n` +
-          `👉 Please reply with the *Deal ID* (e.g. _"${activeDeals[0].deal_code}"_) or *PO Number*.`;
-      } else if (activeDeals.length === 1 && data.is_confirmation) {
-        targetDealId = activeDeals[0].id;
-        targetPoNumber = activeDeals[0].po_number || null;
-      }
-    }
-
-    // Step 3: Insert new complaint record
-    const nowIso = new Date().toISOString();
-    const reportedAt = new Date();
-    const slaDueAt = new Date(reportedAt.getTime() + 48 * 60 * 60 * 1000); // 48h SLA
-
-    const finalProduct = affectedProduct || 'General Material';
-
-    const insertPayload = {
-      customer_name: finalCustomerName,
-      deal_id: targetDealId || null,
-      po_number: targetPoNumber || null,
-      product_name: finalProduct,
-      affected_product: finalProduct,
-      reported_by: senderPhone,
-      complaint_type: complaintType,
-      description: cleanDescription,
-      status: 'open',
-      created_at: nowIso,
-      reported_at: nowIso,
-      sla_due_at: slaDueAt.toISOString(),
-      escalated: false,
-    };
-
-    const { data: createdComp, error: insertError } = await supabase
-      .from('complaints')
-      .insert(insertPayload)
-      .select()
-      .single();
-
-    if (insertError) {
-      console.error('[ComplaintAgent] Error inserting complaint:', insertError);
-    }
-
-    // Log KRA 7
-    await supabase.from('kra_logs').insert({
-      salesperson_phone: senderPhone,
-      kra_number: 7,
-      kra_type: 'quality_complaint',
-      customer_name: finalCustomerName,
-      description: `Complaint Logged: ${finalCustomerName} - ${complaintType}: ${finalProduct}`,
-      month: new Date().getMonth() + 1,
-      year: new Date().getFullYear(),
-      created_at: nowIso,
-    });
-
-    // Log to activity_logs
-    try {
-      logBotActivity({
-        salesperson_phone: senderPhone,
-        description: `New complaint logged for ${finalCustomerName}${targetDealId ? ` (Deal: #DEAL-${targetDealId.substring(0, 6).toUpperCase()})` : ''}`,
-        module: 'Complaints',
-        customer_name: finalCustomerName,
-      });
-    } catch (actErr) {
-      console.warn('[ComplaintAgent] Activity log notice:', actErr?.message);
-    }
-
-    const cleanCode = targetDealId ? (targetDealId.startsWith('DEAL-') ? targetDealId.replace(/^DEAL-/, '') : targetDealId.substring(0, 6).toUpperCase()) : '';
-    const dealTag = cleanCode ? `#DEAL-${cleanCode}` : 'Unlinked';
-    const poTag = targetPoNumber ? `PO: ${targetPoNumber}` : '';
-
-    return `🚨 *Customer Complaint Logged*\n\n` +
-      `Customer: *${finalCustomerName}*\n` +
-      `Linked Deal: *${dealTag}* ${poTag ? `(${poTag})` : ''}\n` +
-      `Product: *${finalProduct}*\n` +
-      `Type: *${complaintType.toUpperCase()}*\n` +
-      `Details: ${cleanDescription}\n` +
-      `Status: *Open ⏱️ (48-Hour SLA Clock Started)*\n` +
-      `SLA Due: *${slaDueAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}*\n\n` +
-      `Updated Customer Complaints Card! ✅\n\n` +
-      `When resolved, reply: _"Resolved complaint for ${finalCustomerName}: [resolution notes]"_ ✅`;
+    return results.join('\n\n━━━━━━━━━━━━━━━━━━━━\n\n');
 
   } catch (error) {
     console.error('Complaint Agent Error:', error.message);
