@@ -785,15 +785,37 @@ async function getCustomerMissingInfoPrompt(customerName, senderPhone) {
 async function saveActiveSession(salespersonPhone, customerName, intent = 'general') {
   if (!salespersonPhone || !customerName) return;
   try {
-    const { error } = await supabase
+    const clean = String(salespersonPhone).replace(/\D/g, '');
+    const p10 = clean.slice(-10);
+    const variants = p10 ? Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean])) : [clean];
+
+    const { data: existing } = await supabase
       .from('conversation_sessions')
-      .upsert({
-        salesperson_phone: salespersonPhone,
-        active_customer_name: customerName,
-        last_intent: intent,
-        updated_at: new Date().toISOString()
-      });
-    if (error) console.error('saveActiveSession error:', error.message);
+      .select('salesperson_phone')
+      .in('salesperson_phone', variants)
+      .limit(1);
+
+    const primaryPhone = `91${p10 || clean}`;
+
+    if (existing && existing.length > 0) {
+      await supabase
+        .from('conversation_sessions')
+        .update({
+          active_customer_name: customerName,
+          last_intent: intent,
+          updated_at: new Date().toISOString()
+        })
+        .eq('salesperson_phone', existing[0].salesperson_phone);
+    } else {
+      await supabase
+        .from('conversation_sessions')
+        .insert({
+          salesperson_phone: primaryPhone,
+          active_customer_name: customerName,
+          last_intent: intent,
+          updated_at: new Date().toISOString()
+        });
+    }
   } catch (err) {
     console.error('saveActiveSession catch:', err.message);
   }
@@ -811,12 +833,16 @@ function getStartOfTodayISO() {
 async function getActiveSession(salespersonPhone) {
   if (!salespersonPhone) return null;
   try {
+    const clean = String(salespersonPhone).replace(/\D/g, '');
+    const p10 = clean.slice(-10);
+    const variants = p10 ? Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean])) : [clean];
     const startOfToday = getStartOfTodayISO();
     const { data, error } = await supabase
       .from('conversation_sessions')
       .select('active_customer_name')
-      .eq('salesperson_phone', salespersonPhone)
+      .in('salesperson_phone', variants)
       .gte('updated_at', startOfToday)
+      .order('updated_at', { ascending: false })
       .limit(1);
 
     if (error) {
@@ -838,12 +864,16 @@ async function getActiveSession(salespersonPhone) {
 async function getFullActiveSession(salespersonPhone) {
   if (!salespersonPhone) return null;
   try {
+    const clean = String(salespersonPhone).replace(/\D/g, '');
+    const p10 = clean.slice(-10);
+    const variants = p10 ? Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean])) : [clean];
     const startOfToday = getStartOfTodayISO();
     const { data, error } = await supabase
       .from('conversation_sessions')
       .select('*')
-      .eq('salesperson_phone', salespersonPhone)
+      .in('salesperson_phone', variants)
       .gte('updated_at', startOfToday)
+      .order('updated_at', { ascending: false })
       .limit(1);
 
     if (error) {

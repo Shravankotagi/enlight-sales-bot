@@ -12,28 +12,47 @@
 const { HumanMessage, AIMessage } = require('@langchain/core/messages');
 const { supabase } = require('../supabase');
 
-// Fast in-memory cache per salesperson phone
+// Fast in-memory cache per canonical 10-digit salesperson phone
 const chatHistoryMap = new Map();
 const MAX_TURNS = 5; // Keep exact last 5 conversations (10 messages: 5 human, 5 AI)
+
+function getCanonicalPhoneKey(phone) {
+  if (!phone) return '';
+  const clean = String(phone).replace(/\D/g, '');
+  return clean.slice(-10);
+}
+
+function getCanonicalPhoneVariants(phone) {
+  if (!phone) return [];
+  const clean = String(phone).replace(/\D/g, '');
+  const p10 = clean.slice(-10);
+  if (!p10) return [];
+  return Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean]));
+}
 
 /**
  * Get recent chat history messages for a salesperson.
  * Fetches from in-memory cache or PostgreSQL `conversation_sessions`.
+ * Strict 1-to-1 partitioning: Never accesses other salespeople's histories.
  */
 async function getChatHistory(senderPhone) {
   if (!senderPhone) return [];
+  const pKey = getCanonicalPhoneKey(senderPhone);
+  if (!pKey) return [];
 
   // Check in-memory cache first
-  if (chatHistoryMap.has(senderPhone)) {
-    return chatHistoryMap.get(senderPhone);
+  if (chatHistoryMap.has(pKey)) {
+    return chatHistoryMap.get(pKey);
   }
 
   // Load from Supabase conversation_sessions
   try {
+    const variants = getCanonicalPhoneVariants(senderPhone);
     const { data: session } = await supabase
       .from('conversation_sessions')
       .select('chat_history')
-      .eq('salesperson_phone', senderPhone)
+      .in('salesperson_phone', variants)
+      .order('updated_at', { ascending: false })
       .limit(1);
 
     if (session && session.length > 0 && Array.isArray(session[0].chat_history)) {
@@ -42,7 +61,7 @@ async function getChatHistory(senderPhone) {
         if (m.role === 'human') return new HumanMessage(m.content);
         return new AIMessage(m.content);
       });
-      chatHistoryMap.set(senderPhone, history);
+      chatHistoryMap.set(pKey, history);
       return history;
     }
   } catch (err) {
@@ -57,17 +76,21 @@ async function getChatHistory(senderPhone) {
  */
 function getChatHistorySync(senderPhone) {
   if (!senderPhone) return [];
-  return chatHistoryMap.get(senderPhone) || [];
+  const pKey = getCanonicalPhoneKey(senderPhone);
+  return chatHistoryMap.get(pKey) || [];
 }
 
 /**
  * Append a human message and AI message to the salesperson's chat history.
  * Persists to both memory cache and PostgreSQL `conversation_sessions`.
+ * Strict isolation: Persisted strictly under this salesperson's phone identifier.
  */
 async function addChatHistory(senderPhone, humanText, aiReplyText) {
   if (!senderPhone) return;
+  const pKey = getCanonicalPhoneKey(senderPhone);
+  if (!pKey) return;
 
-  let history = chatHistoryMap.get(senderPhone) || [];
+  let history = chatHistoryMap.get(pKey) || [];
 
   if (humanText) {
     history.push(new HumanMessage(humanText));
@@ -81,7 +104,7 @@ async function addChatHistory(senderPhone, humanText, aiReplyText) {
     history = history.slice(-MAX_TURNS * 2);
   }
 
-  chatHistoryMap.set(senderPhone, history);
+  chatHistoryMap.set(pKey, history);
 
   // Format serializable JSON list
   const serialized = history.map(m => ({
@@ -91,11 +114,14 @@ async function addChatHistory(senderPhone, humanText, aiReplyText) {
 
   // Persist to Supabase conversation_sessions asynchronously
   try {
+    const variants = getCanonicalPhoneVariants(senderPhone);
     const { data: existing } = await supabase
       .from('conversation_sessions')
       .select('salesperson_phone')
-      .eq('salesperson_phone', senderPhone)
+      .in('salesperson_phone', variants)
       .limit(1);
+
+    const primaryPhone = `91${pKey}`;
 
     if (existing && existing.length > 0) {
       await supabase
@@ -104,12 +130,12 @@ async function addChatHistory(senderPhone, humanText, aiReplyText) {
           chat_history: serialized,
           updated_at: new Date().toISOString(),
         })
-        .eq('salesperson_phone', senderPhone);
+        .eq('salesperson_phone', existing[0].salesperson_phone);
     } else {
       await supabase
         .from('conversation_sessions')
         .insert({
-          salesperson_phone: senderPhone,
+          salesperson_phone: primaryPhone,
           chat_history: serialized,
           updated_at: new Date().toISOString(),
         });
@@ -121,15 +147,19 @@ async function addChatHistory(senderPhone, humanText, aiReplyText) {
 
 /**
  * Fetches active customer session & missing profile fields context for the LLM prompt.
+ * Strictly enforces RBAC:
+ * - Salesperson sees only active customer session created by themselves
+ * - Customer profile metrics/fields are fetched strictly within caller's authorized scope
  */
 async function getActiveContextPrompt(senderPhone) {
   if (!senderPhone) return '';
+  const variants = getCanonicalPhoneVariants(senderPhone);
 
   try {
     const { data: session } = await supabase
       .from('conversation_sessions')
       .select('active_customer_name, last_intent, updated_at')
-      .eq('salesperson_phone', senderPhone)
+      .in('salesperson_phone', variants)
       .order('updated_at', { ascending: false })
       .limit(1);
 
@@ -140,13 +170,25 @@ async function getActiveContextPrompt(senderPhone) {
     const activeCustomer = session[0].active_customer_name;
     const lastIntent = session[0].last_intent || 'general';
 
-    // Fetch customer profile from recurring_customers
-    const { data: custData } = await supabase
+    const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+
+    // Fetch customer profile from recurring_customers strictly within authorized scope
+    let custQuery = supabase
       .from('recurring_customers')
-      .select('customer_name, customer_phone, customer_gst, customer_address, contact_person')
+      .select('customer_name, customer_phone, customer_gst, customer_address, contact_person, assigned_salesperson_phone')
       .ilike('customer_name', `%${activeCustomer}%`)
       .limit(1);
 
+    if (scope.phones !== null) {
+      if (scope.phones.length === 1) {
+        custQuery = custQuery.eq('assigned_salesperson_phone', scope.phones[0]);
+      } else if (scope.phones.length > 1) {
+        custQuery = custQuery.in('assigned_salesperson_phone', scope.phones);
+      }
+    }
+
+    const { data: custData } = await custQuery;
     const cust = custData && custData.length > 0 ? custData[0] : null;
 
     let profileSummary = '';
