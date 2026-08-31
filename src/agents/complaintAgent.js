@@ -304,17 +304,28 @@ async function processSingleComplaint(data, originalText, senderPhone) {
     const shortCode = candidateDealCode.toLowerCase();
     const { data: matchedDeals } = await supabase
       .from('deals')
-      .select('id, po_number')
-      .limit(100);
-    const found = (matchedDeals || []).find(d => d.id.toLowerCase().startsWith(shortCode));
-    if (found) {
-      targetDealId = found.id;
-      if (found.po_number && !targetPoNumber) targetPoNumber = found.po_number;
+      .select('id, po_number, customer_name')
+      .or(`id.eq.${shortCode},id.ilike.${shortCode}%`)
+      .limit(5);
+    if (matchedDeals && matchedDeals.length > 0) {
+      targetDealId = matchedDeals[0].id;
+      if (matchedDeals[0].po_number) targetPoNumber = matchedDeals[0].po_number;
     } else {
       targetDealId = candidateDealCode;
     }
   } else if (data.deal_id) {
-    targetDealId = data.deal_id;
+    const cleanId = data.deal_id.replace(/^#?DEAL-/i, '').trim().toLowerCase();
+    const { data: matchedDeals } = await supabase
+      .from('deals')
+      .select('id, po_number, customer_name')
+      .or(`id.eq.${cleanId},id.ilike.${cleanId}%`)
+      .limit(5);
+    if (matchedDeals && matchedDeals.length > 0) {
+      targetDealId = matchedDeals[0].id;
+      if (matchedDeals[0].po_number) targetPoNumber = matchedDeals[0].po_number;
+    } else {
+      targetDealId = data.deal_id;
+    }
   }
 
   if (!targetPoNumber) {
@@ -330,6 +341,20 @@ async function processSingleComplaint(data, originalText, senderPhone) {
         targetPoNumber = matchedDeals[0].po_number;
         if (!targetDealId) targetDealId = matchedDeals[0].id;
       }
+    }
+  }
+
+  // If targetDealId is present but targetPoNumber is still missing, lookup deal's po_number
+  if (targetDealId && !targetPoNumber) {
+    const cleanId = targetDealId.replace(/^#?DEAL-/i, '').trim().toLowerCase();
+    const { data: matchedDeals } = await supabase
+      .from('deals')
+      .select('id, po_number')
+      .or(`id.eq.${cleanId},id.ilike.${cleanId}%`)
+      .limit(1);
+    if (matchedDeals && matchedDeals.length > 0) {
+      targetDealId = matchedDeals[0].id;
+      if (matchedDeals[0].po_number) targetPoNumber = matchedDeals[0].po_number;
     }
   }
 

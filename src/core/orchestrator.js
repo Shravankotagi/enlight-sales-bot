@@ -156,10 +156,10 @@ function getDeterministicIntentHint(text) {
 
   const isVisit = /\b(visited|met with|meeting at|site visit|factory visit|plant visit|market visit)\b/i.test(lower);
   const isPayment = /\b(received payment|paid rs|paid inr|received advance|collected payment|advance of|payment received|neft done|upi done|cheque received)\b/i.test(lower);
-  const isComplaint = /\b(complaint|defective|damaged|scratch|rust|quality|rejected|rejection|faulty)\b/i.test(lower);
+  const isComplaint = /\b(complaint|defective|damaged|scratch|rust|quality|rejected|rejection|faulty|crack|cracks|bending issue|thickness variation)\b/i.test(lower);
   const isProfileUpdate = /\b(order frequency|frequency|reorder days|order cycle|reassign customer|change frequency)\b/i.test(lower);
 
-  const hasInquiryVerb = /\b(requires|requirement|need|needs|inquiry|rfq|quote|quotation|rates?|order|chahiye|mangwa)\b/i.test(lower);
+  const hasInquiryVerb = /\b(requires|requirement|need|needs|inquiry|rfq|quote|quotation|rates?|chahiye|mangwa)\b/i.test(lower);
   const hasQuantityUnit = /\b\d+(?:\.\d+)?\s*(?:ton|tons|tonne|tonnes|mt|kg|kgs|sheet|sheets|plate|plates|coil|coils|bar|bars|pcs|nos)\b/i.test(lower);
 
   // Standalone company name lookup: Short message with no operational verbs or quantities
@@ -187,14 +187,16 @@ function getDeterministicIntentHint(text) {
     anchors.push('CALL log_customer_visit');
   }
   if (isComplaint) {
+    // CRITICAL: A complaint report must ONLY call log_complaint and NEVER create/update an inquiry deal
     anchors.push('CALL log_complaint');
-  }
-  if (isProfileUpdate) {
-    anchors.push('CALL update_customer_profile');
-  }
-  if (!isVisit || isExplicitDealCommand) {
-    if (isExplicitDealCommand || hasInquiryVerb || hasQuantityUnit) {
-      anchors.push('CALL update_deal_stage');
+  } else {
+    if (isProfileUpdate) {
+      anchors.push('CALL update_customer_profile');
+    }
+    if (!isVisit || isExplicitDealCommand) {
+      if (isExplicitDealCommand || hasInquiryVerb || hasQuantityUnit) {
+        anchors.push('CALL update_deal_stage');
+      }
     }
   }
 
