@@ -4,25 +4,16 @@
  * KRA 7 = Log new quality complaints (reported by salesperson or forwarded from customer)
  * KRA 8 = Complaint resolved within SLA (target: 48 hours)
  *
- * DESIGN PRINCIPLES:
- * - One complaint row per incident in the `complaints` table.
- * - Resolution updates the EXISTING open complaint, never creates a duplicate.
- * - KRA 7 log fires on new complaint.
- * - KRA 8 log fires ONLY on resolution - and only if not already resolved.
- * - SLA compliance tracked in hours (target: ≤ 48 hours).
- * - If customer reports a complaint that is already resolved, inform the salesperson.
- *
- * EDGE CASES HANDLED:
- * 1.  New complaint → insert to complaints + log KRA 7
- * 2.  Resolve complaint → find open complaint, mark resolved, log KRA 8
- * 3.  Resolution with no prior open complaint → create a completed record (backdated)
- * 4.  Complaint already resolved → don't create duplicate, notify user
- * 5.  Missing customer name → ask for clarification
- * 6.  SLA breach detection → flag if >48 hours
- * 7.  Assigned salesperson routing → alert correct salesperson if complaint came from customer
- * 8.  Duplicate complaint check → don't log a second open complaint for same customer + type
- * 9.  Escalation flag → set escalated=true if SLA breached on resolution
- * 10. Hinglish/casual messages → AI handles semantic parsing
+ * ENFORCEMENTS & FLOWS:
+ * 1. Mandatory Deal ID / PO Number linking:
+ *    - If Deal ID / PO provided in message -> links directly.
+ *    - If only customer provided & 1 active deal exists -> asks confirmation: "Is this complaint for Deal #DEAL-XXXXXX (PO: YYY)?"
+ *    - If only customer provided & multiple active deals exist -> lists them and requires salesperson to specify Deal ID or PO.
+ *    - If 0 deals exist -> logs as unlinked record.
+ * 2. Separate structured product field (no '[Product: ...]' prefix in description).
+ * 3. Exact timestamp recording (created_at & reported_at).
+ * 4. Resolution notes mandatory before marking as resolved.
+ * 5. Isolated complaint lifecycle: multiple complaints per customer/deal are stored as independent records.
  */
 
 const { supabase } = require('../supabase');
@@ -42,44 +33,87 @@ Extract into ONLY a JSON object (no prose, no markdown, no backticks):
 {
   "action": "report|resolve",
   "customer_name": "<customer/company name, else null>",
-  "complaint_type": "quality|delivery|billing|specification|other",
-  "affected_product": "<specific product/material affected e.g. 'HR Coil 8mm', 'TMT Bars', 'MS Sheets' - else null>",
-  "description": "<brief description of complaint or resolution, else null>",
+  "deal_id": "<deal ID e.g. 'DEAL-C538B6' or UUID if mentioned in text, else null>",
+  "po_number": "<PO number e.g. 'PO-2026-001' or 'PO-718' if mentioned, else null>",
+  "complaint_type": "quality|delivery|quantity|billing|specification|other",
+  "affected_product": "<specific product/material affected e.g. 'HR Coil 8mm', 'MS Plates 12mm', 'TMT Bars' - else null>",
+  "description": "<detailed description of complaint or resolution notes, else null>",
+  "is_confirmation": <true if the user is replying 'yes', 'confirm', 'haan', 'correct', 'right', 'sahi hai' to a previous deal confirmation question, else false>,
   "confidence": <float 0.0 to 1.0>
 }
 
-Rules - understand meaning, not keywords:
-- "action": "report" → new problem, quality issue, material rejection, wrong delivery, billing dispute.
-- "action": "resolve" → complaint fixed, settled, customer accepted, issue sorted, resolved.
-- "affected_product": Extract the specific steel product/material affected (e.g. 'HR Coil', 'TMT Bar 10mm', 'MS Plate'). null if not mentioned.
-- If ambiguous, prefer "report" over "resolve".
+Rules:
+- "action": "report" -> new issue, defect, rejection, wrong material, shortage, delivery delay, billing dispute.
+- "action": "resolve" -> issue settled, sorted, material replaced, customer accepted, resolved.
+- "affected_product": Extract specific steel category, dimensions, or product form.
+- "deal_id": Extract any #DEAL-XXXXXX or DEAL code mentioned.
+- "po_number": Extract any PO number (PO-XXXX, Purchase Order #) mentioned.
 
 Return ONLY the JSON object.
 `;
 
 /**
- * Find the most recent OPEN complaint for a customer.
+ * Fetch active/recent deals for a customer.
  */
-async function getOpenComplaint(customerName, senderPhone) {
+async function getCustomerActiveDeals(customerName) {
+  if (!customerName) return [];
+  const { data: deals } = await supabase
+    .from('deals')
+    .select('id, stage, po_number, customer_name, total_amount, created_at')
+    .ilike('customer_name', `%${customerName.trim()}%`)
+    .order('created_at', { ascending: false })
+    .limit(6);
+
+  if (!deals || deals.length === 0) return [];
+
+  const dealIds = deals.map(d => d.id);
+  const { data: items } = await supabase
+    .from('deal_items')
+    .select('deal_id, sku_text, dimensions, quantity, unit')
+    .in('deal_id', dealIds);
+
+  const itemMap = new Map();
+  (items || []).forEach(it => {
+    const list = itemMap.get(it.deal_id) || [];
+    list.push(it);
+    itemMap.set(it.deal_id, list);
+  });
+
+  return deals.map(d => ({
+    ...d,
+    deal_code: `#DEAL-${d.id.substring(0, 6).toUpperCase()}`,
+    items: itemMap.get(d.id) || [],
+  }));
+}
+
+/**
+ * Find the most recent OPEN complaint for a customer or specific deal.
+ */
+async function getOpenComplaint(customerName, senderPhone, dealId = null) {
   let query = supabase
     .from('complaints')
     .select('*')
-    .ilike('customer_name', `%${customerName}%`)
-    .eq('status', 'open');
+    .in('status', ['open', 'reported', 'reopened']);
+
+  if (dealId) {
+    query = query.eq('deal_id', dealId);
+  } else if (customerName) {
+    query = query.ilike('customer_name', `%${customerName.trim()}%`);
+  }
 
   if (senderPhone) {
     query = query.eq('reported_by', senderPhone);
   }
 
   const { data } = await query
-    .order('reported_at', { ascending: false })
+    .order('created_at', { ascending: false })
     .limit(1);
 
   return data && data.length > 0 ? data[0] : null;
 }
 
 /**
- * Check if a KRA 8 log already exists for this complaint (to avoid re-logging resolved).
+ * Check if a KRA 8 log already exists for this complaint resolution.
  */
 async function isKRA8AlreadyLogged(senderPhone, customerName) {
   const { data } = await supabase
@@ -87,7 +121,7 @@ async function isKRA8AlreadyLogged(senderPhone, customerName) {
     .select('id')
     .eq('salesperson_phone', senderPhone)
     .eq('kra_number', 8)
-    .ilike('customer_name', `%${customerName}%`)
+    .ilike('customer_name', `%${customerName.trim()}%`)
     .eq('month', new Date().getMonth() + 1)
     .eq('year', new Date().getFullYear())
     .limit(1);
@@ -108,83 +142,104 @@ async function processComplaintMessage(text, senderPhone) {
     const data = safeParseJSON(rawText, null);
     if (!data) throw new Error('Could not parse complaint JSON from LLM response');
 
-    // Edge Case 5: Missing customer name
+    // Missing customer name check
     if (!data.customer_name) {
-      return `⚠️ *Quality Agent - Customer Name Missing*\n\nPlease specify the *Customer/Company Name* for this complaint.\nExample: _"Quality complaint from Delta Structural Steel - wrong material delivered"_`;
+      // Check if text has a deal ID (e.g. "#DEAL-C538B6")
+      const dealIdMatch = text.match(/#?DEAL-([A-F0-9]{6})/i);
+      if (dealIdMatch) {
+        const shortCode = dealIdMatch[1].toLowerCase();
+        const { data: matchedDeals } = await supabase
+          .from('deals')
+          .select('id, customer_name, po_number')
+          .limit(100);
+        const found = (matchedDeals || []).find(d => d.id.toLowerCase().startsWith(shortCode));
+        if (found) {
+          data.customer_name = found.customer_name;
+          data.deal_id = found.id;
+          if (found.po_number && !data.po_number) data.po_number = found.po_number;
+        }
+      }
     }
 
-    const customerName   = data.customer_name.trim();
+    if (!data.customer_name) {
+      return `⚠️ *Customer Complaints - Missing Information*\n\nPlease specify the *Customer / Company Name* or *Deal ID* for this complaint.\nExample: _"Quality complaint for Delta Structural Steel on Deal #DEAL-C538B6 - surface rust on 10 MT MS Plates"_`;
+    }
 
-    // Verify and get official customer name - auto-create if not found
+    const customerName = data.customer_name.trim();
+
+    // Verify and get official customer name
     const { verifyAndGetCustomerName } = require('../supabase');
     let officialCustomerName = await verifyAndGetCustomerName(customerName, senderPhone);
 
     if (!officialCustomerName) {
-      // Auto-create as prospect instead of rejecting the complaint
       await supabase.from('recurring_customers').insert({
-        customer_name:              customerName,
+        customer_name: customerName,
         assigned_salesperson_phone: senderPhone,
-        is_active:                  true,
-        avg_order_frequency_days:   30,
+        is_active: true,
+        avg_order_frequency_days: 30,
       }).select().single();
       officialCustomerName = customerName;
-      console.log(`[ComplaintAgent] Auto-created new prospect: ${customerName}`);
     }
 
     const finalCustomerName = officialCustomerName;
-    const complaintType    = data.complaint_type || 'quality';
-    const affectedProduct  = data.affected_product || null;
-    const rawDescription   = data.description || text;
-    // Structure description with product prefix for clean dashboard parsing
-    const description = affectedProduct
-      ? `[Product: ${affectedProduct}] ${rawDescription}`
-      : rawDescription;
+    const complaintType = data.complaint_type || 'quality';
+    const affectedProduct = data.affected_product || null;
+    const cleanDescription = data.description || text;
 
     // ── RESOLVE FLOW ──────────────────────────────────────────────────
     if (data.action === 'resolve') {
-      const openComplaint = await getOpenComplaint(finalCustomerName, senderPhone);
+      const openComplaint = await getOpenComplaint(finalCustomerName, senderPhone, data.deal_id);
+
+      // Require non-empty resolution notes before resolving
+      let resolutionNotes = (data.description || '').trim();
+      const isGenericResolveText = /^(resolved|resolve|issue sorted|fixed|done|ho gaya|settled)$/i.test(resolutionNotes);
+      if (!resolutionNotes || isGenericResolveText) {
+        return `ℹ️ *Resolution Notes Required*\n\n` +
+          `To mark the complaint for *${finalCustomerName}* as resolved, please provide the resolution details.\n` +
+          `Example: _"Resolved complaint for ${finalCustomerName} - replacement 10 MT plates dispatched and accepted by customer."_`;
+      }
 
       if (openComplaint) {
-        // Edge Case 4: Check if already resolved
         const resolvedAt = new Date();
-        const reportedAt = new Date(openComplaint.reported_at);
+        const reportedAt = new Date(openComplaint.created_at || openComplaint.reported_at || Date.now());
         const resolutionTimeHrs = Math.max(1, Math.round(
           (resolvedAt.getTime() - reportedAt.getTime()) / (1000 * 60 * 60)
         ));
-        const isSlaBreached  = resolutionTimeHrs > 48;
+        const isSlaBreached = resolutionTimeHrs > 48;
         const isSlaCompliant = !isSlaBreached;
 
-        // Update existing complaint to resolved
+        // Update specific complaint record to resolved
         await supabase
           .from('complaints')
           .update({
-            status:               'resolved',
-            resolved_at:          resolvedAt.toISOString(),
-            resolution_time_hrs:  resolutionTimeHrs,
-            escalated:            isSlaBreached, // Edge Case 9: flag escalation on SLA breach
+            status: 'resolved',
+            resolution_notes: resolutionNotes,
+            resolved_at: resolvedAt.toISOString(),
+            resolution_time_hrs: resolutionTimeHrs,
+            escalated: isSlaBreached,
           })
           .eq('id', openComplaint.id);
 
-        // Edge Case 4: Only log KRA 8 once per resolution
+        // KRA 8 log
         const alreadyLogged = await isKRA8AlreadyLogged(senderPhone, finalCustomerName);
         if (!alreadyLogged) {
           await supabase.from('kra_logs').insert({
             salesperson_phone: senderPhone,
-            kra_number:        8,
-            kra_type:          'complaint_resolved',
-            customer_name:     finalCustomerName,
-            description:       `Complaint Resolved: ${finalCustomerName} (${resolutionTimeHrs}h - ${isSlaCompliant ? 'Within SLA ✅' : 'SLA BREACHED ⚠️'})`,
+            kra_number: 8,
+            kra_type: 'complaint_resolved',
+            customer_name: finalCustomerName,
+            description: `Complaint Resolved: ${finalCustomerName} (${resolutionTimeHrs}h - ${isSlaCompliant ? 'Within SLA ✅' : 'SLA BREACHED ⚠️'})`,
             month: new Date().getMonth() + 1,
-            year:  new Date().getFullYear(),
+            year: new Date().getFullYear(),
+            created_at: resolvedAt.toISOString(),
           });
         }
 
         try {
-          const { syncActivity } = require('./biginSyncAgent');
           syncActivity('complaint_resolved', {
             customerName: finalCustomerName,
             complaintType,
-            description: data.description,
+            description: resolutionNotes,
             affectedProduct,
             action: 'resolve',
             resolutionTimeHrs,
@@ -194,162 +249,209 @@ async function processComplaintMessage(text, senderPhone) {
           console.warn('[ComplaintAgent] Bigin sync notice:', e.message);
         }
 
-        // Log to activity_logs
         try {
           logBotActivity({
             salesperson_phone: senderPhone,
-            description: `Complaint resolved for ${finalCustomerName}`,
+            description: `Complaint resolved for ${finalCustomerName}: ${resolutionNotes}`,
             module: 'Complaints',
             customer_name: finalCustomerName,
           });
         } catch (actErr) {
-          console.warn('[ComplaintAgent] Non-blocking activity log notice:', actErr?.message);
+          console.warn('[ComplaintAgent] Activity log notice:', actErr?.message);
         }
 
-        const { getCustomerMissingInfoPrompt } = require('../supabase');
-        const missingPrompt = await getCustomerMissingInfoPrompt(finalCustomerName, senderPhone);
-
-        return `✅ *Complaint Resolved!*\n\n` +
+        return `✅ *Customer Complaint Resolved!*\n\n` +
           `Customer: *${finalCustomerName}*\n` +
-          `Complaint Type: *${complaintType.toUpperCase()}*\n` +
+          (openComplaint.deal_id ? `Deal ID: *#DEAL-${openComplaint.deal_id.substring(0, 6).toUpperCase()}*\n` : '') +
+          `Resolution Notes: ${resolutionNotes}\n` +
           `Resolution Time: *${resolutionTimeHrs} Hours*\n` +
-          `SLA Target (48h): *${isSlaCompliant ? '✅ Achieved - Within Target!' : '⚠️ Breached - Escalated!'}*\n\n` +
-          `Updated Customer Complaints Card! ✅` + (missingPrompt || '');
+          `SLA Target (48h): *${isSlaCompliant ? '✅ Achieved - Within SLA Target!' : '⚠️ Breached - Escalated!'}*\n\n` +
+          `Updated Customer Complaints Card! ✅`;
 
       } else {
-        // Edge Case 3: No prior open complaint found → create a backdated resolved record
+        // No prior open complaint found
+        const nowIso = new Date().toISOString();
         await supabase.from('complaints').insert({
-          customer_name:        finalCustomerName,
-          reported_by:          senderPhone,
-          complaint_type:       complaintType,
-          description:          description,
-          status:               'resolved',
-          reported_at:          new Date().toISOString(),
-          resolved_at:          new Date().toISOString(),
-          resolution_time_hrs:  0,
-          escalated:            false,
+          customer_name: finalCustomerName,
+          deal_id: data.deal_id || null,
+          po_number: data.po_number || null,
+          product_name: affectedProduct || 'General Material',
+          affected_product: affectedProduct || 'General Material',
+          reported_by: senderPhone,
+          complaint_type: complaintType,
+          description: cleanDescription,
+          resolution_notes: resolutionNotes,
+          status: 'resolved',
+          created_at: nowIso,
+          reported_at: nowIso,
+          resolved_at: nowIso,
+          resolution_time_hrs: 0,
+          escalated: false,
         });
 
-        await supabase.from('kra_logs').insert({
-          salesperson_phone: senderPhone,
-          kra_number:        8,
-          kra_type:          'complaint_resolved',
-          customer_name:     finalCustomerName,
-          description:       `Complaint Resolved (no prior open record): ${finalCustomerName}`,
-          month: new Date().getMonth() + 1,
-          year:  new Date().getFullYear(),
-        });
-
-        const { getCustomerMissingInfoPrompt } = require('../supabase');
-        const missingPrompt = await getCustomerMissingInfoPrompt(finalCustomerName, senderPhone);
-
-        return `✅ *Complaint Resolved!*\n\n` +
+        return `✅ *Customer Complaint Resolved!*\n\n` +
           `Customer: *${finalCustomerName}*\n` +
-          `_Note: No prior open complaint found. Created and resolved in one step._\n\n` +
-          `Updated Customer Complaints Card! ✅` + (missingPrompt || '');
+          `Resolution Notes: ${resolutionNotes}\n` +
+          `_Note: Created and marked resolved directly._\n\n` +
+          `Updated Customer Complaints Card! ✅`;
       }
     }
 
-    // ── REPORT FLOW ───────────────────────────────────────────────────
-    // Edge Case 8: Check if there's already an open complaint of same type for this customer
-    const existingOpen = await getOpenComplaint(finalCustomerName);
-    if (existingOpen && existingOpen.complaint_type === complaintType) {
-      return `⚠️ *Complaint Already Open*\n\n` +
-        `Customer: *${finalCustomerName}*\n` +
-        `Type: *${complaintType.toUpperCase()}*\n` +
-        `Reported: *${new Date(existingOpen.reported_at).toLocaleString('en-IN')}*\n\n` +
-        `This complaint is already logged and open. When resolved, reply:\n` +
-        `_"Resolved ${finalCustomerName} complaint"_`;
+    // ── REPORT / CREATE FLOW ───────────────────────────────────────────
+
+    // Step 1: Check if Deal ID / PO is already identified or explicitly in text
+    let targetDealId = null;
+    let targetPoNumber = data.po_number || null;
+
+    const candidateDealCode = (data.deal_id || '').match(/#?DEAL-([A-F0-9]{6})/i)?.[1]
+      || text.match(/#?DEAL-([A-F0-9]{6})/i)?.[1]
+      || null;
+
+    if (candidateDealCode) {
+      const shortCode = candidateDealCode.toLowerCase();
+      const { data: matchedDeals } = await supabase
+        .from('deals')
+        .select('id, po_number')
+        .limit(100);
+      const found = (matchedDeals || []).find(d => d.id.toLowerCase().startsWith(shortCode));
+      if (found) {
+        targetDealId = found.id;
+        if (found.po_number && !targetPoNumber) targetPoNumber = found.po_number;
+      } else {
+        targetDealId = candidateDealCode;
+      }
+    } else if (data.deal_id) {
+      targetDealId = data.deal_id;
     }
 
-    // Edge Case 7: Look up assigned salesperson for this customer
-    const { data: customerRecord } = await supabase
-      .from('recurring_customers')
-      .select('assigned_salesperson_phone')
-      .ilike('customer_name', `%${finalCustomerName}%`)
-      .limit(1);
+    if (!targetPoNumber) {
+      const poMatch = text.match(/PO[-:\s]*([A-Z0-9\/-]+)/i);
+      if (poMatch) {
+        const poCandidate = poMatch[1].trim();
+        const { data: matchedDeals } = await supabase
+          .from('deals')
+          .select('id, po_number')
+          .ilike('po_number', `%${poCandidate}%`)
+          .limit(1);
+        if (matchedDeals && matchedDeals.length > 0) {
+          targetPoNumber = matchedDeals[0].po_number;
+          if (!targetDealId) targetDealId = matchedDeals[0].id;
+        }
+      }
+    }
 
-    const targetPhone = (customerRecord && customerRecord[0]?.assigned_salesperson_phone) || senderPhone;
+    // Step 2: If no Deal ID or PO provided, lookup customer's active deals
+    if (!targetDealId && !targetPoNumber) {
+      const activeDeals = await getCustomerActiveDeals(finalCustomerName);
 
-    // Insert new complaint with SLA timestamps
+      if (activeDeals.length === 1 && !data.is_confirmation) {
+        // Exactly 1 active deal -> Prompt confirmation
+        const d = activeDeals[0];
+        const itemSummary = d.items.length > 0
+          ? d.items.map(it => `${it.sku_text} ${it.dimensions || ''} ${it.quantity ? `${it.quantity} ${it.unit || 'MT'}` : ''}`.trim()).join(', ')
+          : (affectedProduct || 'Steel Material');
+
+        return `🔍 *Confirm Linked Deal for Complaint*\n\n` +
+          `Customer: *${finalCustomerName}*\n` +
+          `Found 1 active deal in pipeline:\n` +
+          `• *${d.deal_code}* — ${itemSummary} ${d.po_number ? `(PO: *${d.po_number}*)` : ''}\n\n` +
+          `Is this complaint for *${d.deal_code}*?\n` +
+          `👉 Reply *"Yes"* to confirm, or reply with the specific *Deal ID* / *PO Number*.`;
+      } else if (activeDeals.length > 1 && !data.is_confirmation) {
+        // Multiple active deals -> List and ask salesperson to choose
+        const dealListFormatted = activeDeals.map((d, idx) => {
+          const itemSummary = d.items.length > 0
+            ? d.items.map(it => `${it.sku_text} ${it.dimensions || ''} ${it.quantity ? `${it.quantity}${it.unit || 'MT'}` : ''}`.trim()).join(', ')
+            : 'Steel Material';
+          const poStr = d.po_number ? ` (PO: ${d.po_number})` : '';
+          return `${idx + 1}. *${d.deal_code}* — ${itemSummary}${poStr}`;
+        }).join('\n');
+
+        return `⚠️ *Multiple Active Deals Found for ${finalCustomerName}*\n\n` +
+          `Please specify which deal or PO this complaint is about:\n\n` +
+          `${dealListFormatted}\n\n` +
+          `👉 Please reply with the *Deal ID* (e.g. _"${activeDeals[0].deal_code}"_) or *PO Number*.`;
+      } else if (activeDeals.length === 1 && data.is_confirmation) {
+        targetDealId = activeDeals[0].id;
+        targetPoNumber = activeDeals[0].po_number || null;
+      }
+    }
+
+    // Step 3: Insert new complaint record
+    const nowIso = new Date().toISOString();
     const reportedAt = new Date();
-    const slaDueAt   = new Date(reportedAt.getTime() + 48 * 60 * 60 * 1000); // SLA = 48h from report
+    const slaDueAt = new Date(reportedAt.getTime() + 48 * 60 * 60 * 1000); // 48h SLA
 
-    await supabase.from('complaints').insert({
-      customer_name:   finalCustomerName,
-      reported_by:     targetPhone,
-      complaint_type:  complaintType,
-      description:     description, // structured: '[Product: HR Coil] Rust detected...'
-      status:          'open',
-      reported_at:     reportedAt.toISOString(),
-      escalated:       false,
-    });
+    const finalProduct = affectedProduct || 'General Material';
+
+    const insertPayload = {
+      customer_name: finalCustomerName,
+      deal_id: targetDealId || null,
+      po_number: targetPoNumber || null,
+      product_name: finalProduct,
+      affected_product: finalProduct,
+      reported_by: senderPhone,
+      complaint_type: complaintType,
+      description: cleanDescription,
+      status: 'open',
+      created_at: nowIso,
+      reported_at: nowIso,
+      sla_due_at: slaDueAt.toISOString(),
+      escalated: false,
+    };
+
+    const { data: createdComp, error: insertError } = await supabase
+      .from('complaints')
+      .insert(insertPayload)
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error('[ComplaintAgent] Error inserting complaint:', insertError);
+    }
 
     // Log KRA 7
     await supabase.from('kra_logs').insert({
-      salesperson_phone: targetPhone,
-      kra_number:        7,
-      kra_type:          'quality_complaint',
-      customer_name:     finalCustomerName,
-      description:       `Complaint Logged: ${finalCustomerName} - ${complaintType}: ${description}`,
+      salesperson_phone: senderPhone,
+      kra_number: 7,
+      kra_type: 'quality_complaint',
+      customer_name: finalCustomerName,
+      description: `Complaint Logged: ${finalCustomerName} - ${complaintType}: ${finalProduct}`,
       month: new Date().getMonth() + 1,
-      year:  new Date().getFullYear(),
+      year: new Date().getFullYear(),
+      created_at: nowIso,
     });
 
     // Log to activity_logs
     try {
       logBotActivity({
-        salesperson_phone: targetPhone || senderPhone,
-        description: `New complaint logged for ${finalCustomerName}`,
+        salesperson_phone: senderPhone,
+        description: `New complaint logged for ${finalCustomerName}${targetDealId ? ` (Deal: #DEAL-${targetDealId.substring(0, 6).toUpperCase()})` : ''}`,
         module: 'Complaints',
         customer_name: finalCustomerName,
       });
     } catch (actErr) {
-      console.warn('[ComplaintAgent] Non-blocking activity log notice:', actErr?.message);
+      console.warn('[ComplaintAgent] Activity log notice:', actErr?.message);
     }
 
-    // Edge Case 7: Alert the assigned salesperson if complaint came from a different sender
-    if (targetPhone !== senderPhone) {
-      try {
-        const { sendTextMessage } = require('../whatsapp');
-        await sendTextMessage(
-          targetPhone,
-          `🚨 *URGENT COMPLAINT ALERT - ${finalCustomerName}*\n\n` +
-          `Type: *${complaintType.toUpperCase()}*\n` +
-          `Issue: ${description}\n` +
-          `SLA Target: *Resolve within 48 Hours ⏱️*\n\n` +
-          `Reply: _"Resolved ${finalCustomerName} complaint"_ once sorted.`
-        );
-      } catch (alertError) {
-        console.error('Complaint alert send failed:', alertError.message);
-      }
-    }
-
-    const { getCustomerMissingInfoPrompt } = require('../supabase');
-    const missingPrompt = await getCustomerMissingInfoPrompt(finalCustomerName, senderPhone);
-
-    // Async Zoho Bigin Smart Sync
-    syncActivity('complaint', {
-      customerName:  finalCustomerName,
-      complaintType,
-      description,
-      action:       'report',
-      senderPhone:  targetPhone,
-    });
+    const cleanCode = targetDealId ? (targetDealId.startsWith('DEAL-') ? targetDealId.replace(/^DEAL-/, '') : targetDealId.substring(0, 6).toUpperCase()) : '';
+    const dealTag = cleanCode ? `#DEAL-${cleanCode}` : 'Unlinked';
+    const poTag = targetPoNumber ? `PO: ${targetPoNumber}` : '';
 
     return `🚨 *Customer Complaint Logged*\n\n` +
       `Customer: *${finalCustomerName}*\n` +
+      `Linked Deal: *${dealTag}* ${poTag ? `(${poTag})` : ''}\n` +
+      `Product: *${finalProduct}*\n` +
       `Type: *${complaintType.toUpperCase()}*\n` +
-      (affectedProduct ? `Product Affected: *${affectedProduct}*\n` : '') +
-      `Details: ${rawDescription}\n` +
+      `Details: ${cleanDescription}\n` +
       `Status: *Open ⏱️ (48-Hour SLA Clock Started)*\n` +
       `SLA Due: *${slaDueAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}*\n\n` +
       `Updated Customer Complaints Card! ✅\n\n` +
-      `When resolved, reply: _"Resolved ${finalCustomerName} complaint"_ ✅` + (missingPrompt || '');
+      `When resolved, reply: _"Resolved complaint for ${finalCustomerName}: [resolution notes]"_ ✅`;
 
   } catch (error) {
     console.error('Complaint Agent Error:', error.message);
-    return `⚠️ Could not process complaint update: ${error.message}`;
+    return `⚠️ Could not process complaint: ${error.message}`;
   }
 }
 
