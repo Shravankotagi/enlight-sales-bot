@@ -61,6 +61,7 @@ async function getCustomerActiveDeals(customerName) {
     .from('deals')
     .select('id, stage, po_number, customer_name, total_amount, created_at')
     .ilike('customer_name', `%${customerName.trim()}%`)
+    .eq('stage', 'won')
     .order('created_at', { ascending: false })
     .limit(6);
 
