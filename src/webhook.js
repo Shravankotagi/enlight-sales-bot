@@ -180,44 +180,6 @@ router.post('/', async (req, res) => {
           raw_text = raw_text.substring(0, 2000) + "... (truncated)";
         }
 
-        // ── 1. EARLY INTERCEPTION FOR CHATBOT ASSISTANT QUERIES ──
-        // Questions, policy inquiries, data lookups, and conversational queries
-        // route directly to the Central Chatbot Gateway without creating inquiries or modifying deals.
-        const { isQuery } = require('./queryhandler');
-        const isChatbotQuery = messageType === 'text' && isQuery(raw_text);
-
-        if (isChatbotQuery) {
-          console.log(`[Webhook] Intercepted Chatbot Query from ${senderPhone}: "${raw_text.slice(0, 60)}"`);
-          const axios = require('axios');
-          const backendUrl = process.env.CENTRAL_BACKEND_URL || 'http://127.0.0.1:3000';
-          try {
-            const res = await axios.post(
-              `${backendUrl}/chat/whatsapp/message`,
-              {
-                senderPhone,
-                messageText: raw_text,
-              },
-              { timeout: 25000 }
-            );
-
-            const botReply = res.data?.data?.reply || res.data?.reply;
-            if (botReply) {
-              await sendTextMessage(senderPhone, botReply);
-              return;
-            }
-          } catch (backendErr) {
-            console.error(`[Webhook] Central backend error on query: ${backendErr.message}. Falling back to local query handler.`);
-          }
-
-          // Fallback to local query handler if central backend is unreachable
-          const { handleQuery } = require('./queryhandler');
-          const queryReply = await handleQuery(raw_text, senderPhone);
-          if (queryReply) {
-            await sendTextMessage(senderPhone, queryReply);
-            return;
-          }
-        }
-
         let isMediaMessage = messageType === 'image' || messageType === 'document';
         const { getFullActiveSession, saveActiveSession } = require('./supabase');
 

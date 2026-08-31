@@ -702,6 +702,32 @@ async function updateCustomerProfileRecord(senderPhone, customerName, updates = 
 
     if (updateError) throw updateError;
 
+    // Sync updated location / phone / contact person to the customer's latest visit record
+    try {
+      const visitUpdates = {};
+      if (updates.address_or_city) visitUpdates.customer_address = updates.address_or_city;
+      if (updates.phone) visitUpdates.contact_no = updates.phone;
+      if (updates.contact_person) visitUpdates.person_met = updates.contact_person;
+
+      if (Object.keys(visitUpdates).length > 0) {
+        const { data: latestVisit } = await supabase
+          .from('customer_visits')
+          .select('id')
+          .ilike('customer_name', `%${matched.customer_name}%`)
+          .order('visited_at', { ascending: false })
+          .limit(1);
+
+        if (latestVisit && latestVisit.length > 0) {
+          await supabase
+            .from('customer_visits')
+            .update(visitUpdates)
+            .eq('id', latestVisit[0].id);
+        }
+      }
+    } catch (vErr) {
+      console.warn('Syncing profile update to customer_visits notice:', vErr.message);
+    }
+
     // Get current assigned rep name for display
     let assignedRepName = targetRepEmployee ? targetRepEmployee.name : null;
     if (!assignedRepName && updatedRecord.assigned_salesperson_phone) {

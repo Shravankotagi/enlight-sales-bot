@@ -38,6 +38,12 @@ function checkOperationalAction(lowerText) {
     ) ||
     /\b(new customer|add customer|onboard customer|register customer)\b/i.test(
       lowerText,
+    ) ||
+    /\b(location|city|address|gst|gstin|gst number|contact person|owner|phone|mobile|phone number|mobile number|order frequency|frequency|reorder days|order cycle|reassign customer|change frequency)\b/i.test(
+      lowerText,
+    ) ||
+    /^(?:location\s*[-:]|gst\s*(?:no|number)?\s*[-:]|phone\s*[-:]|owner\s*[-:]|contact\s*(?:no|number|numeber)?\s*[-:])/i.test(
+      lowerText,
     )
   );
 }
