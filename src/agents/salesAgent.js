@@ -977,6 +977,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         lineItems: refreshedDeal.deal_items || [],
         deliveryLocation: refreshedDeal.delivery_location,
         paymentTerms: refreshedDeal.payment_terms,
+        totalAmount: refreshedDeal.total_amount,
+      });
+
       // Auto-resolve pending follow-ups for this customer
       try {
         const { resolveCustomerFollowupTasks } = require('../kra3');
