@@ -318,28 +318,141 @@ function getMonthRange(monthOffset = 0) {
   };
 }
 
-function getMonthRangeFromQuery(text) {
-  if (!text) return getMonthRange();
-  const lower = text.toLowerCase();
+function getDateRangeFromQuery(text = '', defaultWindow = 'month') {
+  if (!text) {
+    if (defaultWindow === 'recent_or_month') {
+      const now = new Date();
+      if (now.getDate() <= 7) {
+        const numDays = 7;
+        const start = new Date(now.getTime() - numDays * 24 * 60 * 60 * 1000);
+        start.setHours(0, 0, 0, 0);
+        const end = new Date(now);
+        end.setHours(23, 59, 59, 999);
+        return {
+          start: start.toISOString(),
+          end: end.toISOString(),
+          label: `Last ${numDays} Days`,
+          monthName: now.toLocaleString('en-IN', { month: 'long' }),
+          year: now.getFullYear(),
+          isRelativeDays: true,
+          days: numDays,
+        };
+      }
+    }
+    const res = getMonthRange(0);
+    return { ...res, label: `${res.monthName} ${res.year}`, isRelativeDays: false };
+  }
 
-  // 1. Explicit relative phrases take priority if present
+  const lower = text.toLowerCase().trim();
+  const now = new Date();
+
+  // 1. "last N days" / "past N days" / "pichle N din" / "past N day" / "last N day" / "N days"
+  const daysMatch = lower.match(/\b(?:last|past|previous|pichle)?\s*(\d+)\s*(?:days?|din)\b/i);
+  if (daysMatch) {
+    const numDays = parseInt(daysMatch[1], 10) || 7;
+    const start = new Date(now.getTime() - numDays * 24 * 60 * 60 * 1000);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(now);
+    end.setHours(23, 59, 59, 999);
+    return {
+      start: start.toISOString(),
+      end: end.toISOString(),
+      label: `Last ${numDays} Days`,
+      monthName: start.toLocaleString('en-IN', { month: 'long' }),
+      year: start.getFullYear(),
+      isRelativeDays: true,
+      days: numDays,
+    };
+  }
+
+  // 2. "this week" / "current week" / "is hafte"
+  if (lower.includes('this week') || lower.includes('is hafte') || lower.includes('current week')) {
+    const dayOfWeek = now.getDay();
+    const diffToMonday = (dayOfWeek === 0 ? -6 : 1) - dayOfWeek;
+    const start = new Date(now);
+    start.setDate(now.getDate() + diffToMonday);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(now);
+    end.setHours(23, 59, 59, 999);
+    return {
+      start: start.toISOString(),
+      end: end.toISOString(),
+      label: 'This Week',
+      monthName: start.toLocaleString('en-IN', { month: 'long' }),
+      year: start.getFullYear(),
+      isRelativeDays: true,
+    };
+  }
+
+  // 3. "last week" / "pichle hafte" / "past week" / "previous week"
+  if (lower.includes('last week') || lower.includes('pichle hafte') || lower.includes('previous week') || lower.includes('past week')) {
+    const dayOfWeek = now.getDay();
+    const diffToLastMonday = (dayOfWeek === 0 ? -6 : 1) - dayOfWeek - 7;
+    const start = new Date(now);
+    start.setDate(now.getDate() + diffToLastMonday);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
+    end.setHours(23, 59, 59, 999);
+    return {
+      start: start.toISOString(),
+      end: end.toISOString(),
+      label: 'Last Week',
+      monthName: start.toLocaleString('en-IN', { month: 'long' }),
+      year: start.getFullYear(),
+      isRelativeDays: true,
+    };
+  }
+
+  // 4. "today" / "aaj"
+  if (/\b(today|aaj)\b/i.test(lower)) {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(now);
+    end.setHours(23, 59, 59, 999);
+    return {
+      start: start.toISOString(),
+      end: end.toISOString(),
+      label: 'Today',
+      monthName: start.toLocaleString('en-IN', { month: 'long' }),
+      year: start.getFullYear(),
+      isRelativeDays: true,
+    };
+  }
+
+  // 5. "yesterday" / "kal"
+  if (/\b(yesterday|kal)\b/i.test(lower)) {
+    const start = new Date(now);
+    start.setDate(now.getDate() - 1);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setHours(23, 59, 59, 999);
+    return {
+      start: start.toISOString(),
+      end: end.toISOString(),
+      label: 'Yesterday',
+      monthName: start.toLocaleString('en-IN', { month: 'long' }),
+      year: start.getFullYear(),
+      isRelativeDays: true,
+    };
+  }
+
+  // 6. "last month" / "previous month" / "pichle mahine"
   if (
     lower.includes('last month') ||
     lower.includes('previous month') ||
     lower.includes('pichle mahine') ||
     lower.includes('beete mahine')
   ) {
-    return getMonthRange(-1);
-  }
-  if (
-    lower.includes('this month') ||
-    lower.includes('current month') ||
-    lower.includes('is mahine') ||
-    lower.includes('present month')
-  ) {
-    return getMonthRange(0);
+    const res = getMonthRange(-1);
+    return {
+      ...res,
+      label: `${res.monthName} ${res.year}`,
+      isRelativeDays: false,
+    };
   }
 
+  // 7. Explicit month names (january, feb, march, april, august, september, etc.)
   const months = [
     { name: 'january', aliases: ['january', 'jan', 'januari'] },
     { name: 'february', aliases: ['february', 'feb', 'februari'] },
@@ -355,10 +468,7 @@ function getMonthRangeFromQuery(text) {
     { name: 'december', aliases: ['december', 'dec'] },
   ];
 
-  const now = new Date();
-  let targetMonth = now.getMonth();
-  let targetYear = now.getFullYear();
-
+  let matchedMonthIdx = -1;
   for (let idx = 0; idx < months.length; idx++) {
     const m = months[idx];
     const matched = m.aliases.some((alias) => {
@@ -366,26 +476,60 @@ function getMonthRangeFromQuery(text) {
       return regex.test(lower);
     });
     if (matched) {
-      targetMonth = idx;
+      matchedMonthIdx = idx;
       break;
     }
   }
 
-  // Extract explicit 4-digit year if present (e.g. 2025, 2026)
-  const yearMatch = text.match(/\b(202[0-9])\b/);
-  if (yearMatch) {
-    targetYear = parseInt(yearMatch[1], 10);
+  if (matchedMonthIdx >= 0) {
+    let targetYear = now.getFullYear();
+    const yearMatch = text.match(/\b(202[0-9])\b/);
+    if (yearMatch) {
+      targetYear = parseInt(yearMatch[1], 10);
+    }
+    const start = new Date(targetYear, matchedMonthIdx, 1);
+    const end = new Date(targetYear, matchedMonthIdx + 1, 0, 23, 59, 59);
+    const mName = start.toLocaleString('en-IN', { month: 'long' });
+    return {
+      start: start.toISOString(),
+      end: end.toISOString(),
+      monthName: mName,
+      year: targetYear,
+      label: `${mName} ${targetYear}`,
+      isRelativeDays: false,
+    };
   }
 
-  const start = new Date(targetYear, targetMonth, 1);
-  const end = new Date(targetYear, targetMonth + 1, 0, 23, 59, 59);
+  if (defaultWindow === 'recent_or_month') {
+    // If it's early in the month (day <= 7), default to last 7 days so recent visits from end of previous month are included
+    if (now.getDate() <= 7) {
+      const numDays = 7;
+      const start = new Date(now.getTime() - numDays * 24 * 60 * 60 * 1000);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(now);
+      end.setHours(23, 59, 59, 999);
+      return {
+        start: start.toISOString(),
+        end: end.toISOString(),
+        label: `Last ${numDays} Days`,
+        monthName: now.toLocaleString('en-IN', { month: 'long' }),
+        year: now.getFullYear(),
+        isRelativeDays: true,
+        days: numDays,
+      };
+    }
+  }
 
+  const res = getMonthRange(0);
   return {
-    start: start.toISOString(),
-    end: end.toISOString(),
-    monthName: start.toLocaleString('en-IN', { month: 'long' }),
-    year: targetYear,
+    ...res,
+    label: `${res.monthName} ${res.year}`,
+    isRelativeDays: false,
   };
+}
+
+function getMonthRangeFromQuery(text) {
+  return getDateRangeFromQuery(text, 'month');
 }
 
 // Get current week date range
@@ -1536,14 +1680,15 @@ async function getRateSheet() {
 async function getVisitList(scopeOrPhone, text = '') {
   try {
     const supabase = getSupabase();
-    const { start, end, monthName, year } = getMonthRangeFromQuery(text);
+    const timeRange = getDateRangeFromQuery(text, 'recent_or_month');
+    const { start, end, label, monthName, year } = timeRange;
     const scope =
       typeof scopeOrPhone === 'object' && scopeOrPhone !== null
         ? scopeOrPhone
         : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
 
     if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
-      return `📍 No visits logged for ${monthName} ${year}. You currently have no salespersons assigned to your team.`;
+      return `📍 No visits logged for ${label}. You currently have no salespersons assigned to your team.`;
     }
 
     let query = supabase
@@ -1557,7 +1702,7 @@ async function getVisitList(scopeOrPhone, text = '') {
     const { data: visits } = await query;
 
     if (!visits || visits.length === 0) {
-      return `📍 No visits logged for ${monthName} ${year}.`;
+      return `📍 No visits logged for ${label}.`;
     }
 
     const lines = visits.map(
@@ -1578,7 +1723,7 @@ async function getVisitList(scopeOrPhone, text = '') {
           : 'Customer Visits';
 
     return (
-      `📍 *${title} - ${monthName} ${year}* (${visits.length} visits)\n\n` +
+      `📍 *${title} - ${label}* (${visits.length} visits)\n\n` +
       lines.join('\n\n')
     );
   } catch (err) {
@@ -1590,14 +1735,15 @@ async function getVisitList(scopeOrPhone, text = '') {
 async function getVisitSummary(scopeOrPhone, text = '') {
   try {
     const supabase = getSupabase();
-    const { start, end, monthName, year } = getMonthRangeFromQuery(text);
+    const timeRange = getDateRangeFromQuery(text, 'recent_or_month');
+    const { start, end, label, monthName, year } = timeRange;
     const scope =
       typeof scopeOrPhone === 'object' && scopeOrPhone !== null
         ? scopeOrPhone
         : await getAccessibleSalespersonPhonesForBot(scopeOrPhone);
 
     if (scope.isManager && (!scope.phones || scope.phones.length === 0)) {
-      return `📊 *Customer Visits Card (Team) - ${monthName} ${year}*\n\nNo visits logged. You currently have no salespersons assigned to your team.`;
+      return `📊 *Customer Visits Card (Team) - ${label}*\n\nNo visits logged. You currently have no salespersons assigned to your team.`;
     }
 
     let query = supabase
@@ -1611,14 +1757,14 @@ async function getVisitSummary(scopeOrPhone, text = '') {
     const { data: visits } = await query;
 
     if (!visits || visits.length === 0) {
-      return `📊 *Customer Visits Card - ${monthName} ${year}*\n\nNo visits logged this month yet.\n\nLog a visit:\n"visited ABC Fabricators today, met Rahul, discussed pricing"`;
+      return `📊 *Customer Visits Card - ${label}*\n\nNo visits logged in this period.\n\nLog a visit:\n"visited ABC Fabricators today, met Rahul, discussed pricing"`;
     }
 
     const visitList = visits
-      .slice(0, 5)
+      .slice(0, 15)
       .map(
         (v, i) =>
-          `${i + 1}. ${v.customer_name || 'Unknown'} - ${new Date(v.visited_at).toLocaleDateString('en-IN')}`,
+          `${i + 1}. *${v.customer_name || 'Unknown'}* - ${new Date(v.visited_at).toLocaleDateString('en-IN')}${v.customer_address ? ` (${v.customer_address})` : ''}`,
       )
       .join('\n');
 
@@ -1631,8 +1777,8 @@ async function getVisitSummary(scopeOrPhone, text = '') {
           : 'Customer Visits Card';
 
     return (
-      `📊 *${title} - ${monthName} ${year}*\n\n` +
-      `Total visits: ${visits.length}\n\n` +
+      `📊 *${title} - ${label}*\n\n` +
+      `Total visits: *${visits.length}*\n\n` +
       `Recent visits:\n${visitList}\n\n` +
       `_Target: 10 visits/week, 3 field days/week_`
     );
