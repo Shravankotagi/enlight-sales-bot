@@ -97,15 +97,15 @@ function startScheduler() {
 
   schedulePaymentChecks();
 
-  // KRA 8 - Complaint check every 6 hours
+  // KRA 8 - Complaint check every 5 hours
   async function runComplaintCheck() {
     await checkComplaints();
   }
 
-  // Run immediately and then every 6 hours
+  // Run immediately on startup (throttled persistently in DB to 5 hours) and then every 5 hours
   runComplaintCheck();
-  setInterval(runComplaintCheck, 6 * 60 * 60 * 1000);
-  console.log('Complaint check scheduled: every 6 hours');
+  setInterval(runComplaintCheck, 5 * 60 * 60 * 1000);
+  console.log('Complaint check scheduled: every 5 hours');
 }
 
 // For manual trigger (testing)
