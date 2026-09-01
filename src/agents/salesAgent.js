@@ -477,18 +477,40 @@ MIDC Industrial Zone, Mumbai - 400001`;
 
   const attachments = [];
   try {
+    let salespersonName = deal.salesperson_name || null;
+    const phoneToLookup = senderPhone || deal.salesperson_phone;
+    if (!salespersonName && phoneToLookup) {
+      const { getEmployeeByPhone } = require('../supabase');
+      const emp = await getEmployeeByPhone(phoneToLookup);
+      if (emp && emp.name) salespersonName = emp.name;
+    }
+
+    let customerGstin = deal.customer_gst || '';
+    let customerAddress = deal.customer_address || '';
+    if (!customerGstin || !customerAddress) {
+      const { data: custRec } = await supabase
+        .from('recurring_customers')
+        .select('customer_gst, customer_address, delivery_location')
+        .ilike('customer_name', `%${customerName}%`)
+        .limit(1);
+      if (custRec && custRec.length > 0) {
+        if (!customerGstin && custRec[0].customer_gst) customerGstin = custRec[0].customer_gst;
+        if (!customerAddress && custRec[0].customer_address) customerAddress = custRec[0].customer_address;
+      }
+    }
+
     const { generateQuotationPdfBuffer } = require('../utils/quotationPdf');
     const pdfBuffer = await generateQuotationPdfBuffer(qRefNum, customerName, {
       ...deal,
       companyName: customerName,
       customerName: customerName,
-      customerAddress: deal.customer_address || deal.delivery_location || '',
-      deliveryLocation: deal.delivery_location || '',
+      customerAddress: customerAddress || deal.delivery_location || '',
+      deliveryLocation: deal.delivery_location || customerAddress || '',
       paymentTerms: deal.payment_terms || '30 Days Credit',
       totalAmount: baseAmt,
       lineItems: dealItems,
-      salespersonName: deal.salesperson_name || 'Shravan Kotagi',
-      customerGstin: deal.customer_gst || '',
+      salespersonName: salespersonName || 'Sales Operations Team',
+      customerGstin: customerGstin,
     });
     const sanitizedRef = qRefNum.replace(/[/\\?%*:|"<>]/g, '_');
     attachments.push({

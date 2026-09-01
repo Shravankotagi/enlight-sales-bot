@@ -89,17 +89,19 @@ function resolvePlaceOfSupply(address = '') {
 }
 
 function cleanAddressLines(raw, company) {
-  if (!raw) return ['MIDC Industrial Area', 'Nashik', 'Maharashtra - 422010'];
+  if (!raw || !raw.trim()) {
+    return [company || 'Client Site', 'India'];
+  }
   const parts = raw.split(',').map(p => p.trim()).filter(Boolean);
   const cleaned = [];
   for (let part of parts) {
-    if (part.toUpperCase() === company.toUpperCase()) continue;
-    if (part.toUpperCase().startsWith(company.toUpperCase())) {
+    if (part.toUpperCase() === (company || '').toUpperCase()) continue;
+    if (company && part.toUpperCase().startsWith(company.toUpperCase())) {
       part = part.substring(company.length).trim().replace(/^[-,\s]+/, '');
     }
     if (part) cleaned.push(part);
   }
-  return cleaned.length > 0 ? cleaned : parts;
+  return cleaned.length > 0 ? cleaned : [raw.trim()];
 }
 
 /**
@@ -152,7 +154,7 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
         year: 'numeric',
       });
 
-      const salesperson = details.salespersonName || details.salesperson_name || details.salesperson || 'Shravan Kotagi';
+      const salesperson = details.salespersonName || details.salesperson_name || details.salesperson || 'Sales Team';
       const compName = (details.companyName || customerName || 'Valued Customer').toUpperCase();
       const rawAddress = (details.deliveryLocation || details.delivery_location || details.customerAddress || details.address || '').trim();
 
