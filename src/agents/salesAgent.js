@@ -406,7 +406,8 @@ async function syncInquiryFromDeal(inquiryId, dealObj, dealItems) {
 }
 
 /**
- * Dispatches a quotation email to the given recipient email for a deal.
+ * Dispatches a quotation email to the given recipient email for a deal,
+ * attaching the official Enlight Metals commercial quotation PDF.
  */
 async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
   const { data: deals } = await supabase
@@ -431,52 +432,72 @@ async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
   const todayDateStr = new Date().toLocaleDateString('en-IN');
 
   const baseAmt = Number(deal.total_amount) || dealItems.reduce((s, i) => s + (Number(i.amount) || 0), 0);
-  const gstAmt = Math.round(baseAmt * 0.18);
-  const grandTotal = baseAmt + gstAmt;
+  const cgstAmt = Math.round(baseAmt * 0.09);
+  const sgstAmt = Math.round(baseAmt * 0.09);
+  const grandTotal = baseAmt + cgstAmt + sgstAmt;
 
   let itemsSummary = '';
   if (dealItems.length > 0) {
     itemsSummary = dealItems
       .map((item, idx) => {
         const spec = item.dimensions ? ` (${item.dimensions})` : '';
-        const rateStr = item.rate > 0 ? ` @ Rs. ${Number(item.rate).toLocaleString('en-IN')}/${item.unit || 'MT'}` : '';
-        const amtStr = item.amount > 0 ? ` = Rs. ${Number(item.amount).toLocaleString('en-IN')}` : '';
-        return `  ${idx + 1}. ${item.sku_text || 'Material'}${spec} - Qty: ${item.quantity || 0} ${item.unit || 'MT'}${rateStr}${amtStr}`;
+        const unit = item.unit || 'MT';
+        const rateVal = Number(item.rate || 0).toLocaleString('en-IN');
+        const amtVal = Number(item.amount || (Number(item.quantity || 0) * Number(item.rate || 0))).toLocaleString('en-IN');
+        return `  ${idx + 1}. ${item.sku_text || 'Material'}${spec} - Qty: ${item.quantity || 0} ${unit} @ ₹ ${rateVal}/${unit} = ₹ ${amtVal}`;
       })
       .join('\n');
   } else {
-    itemsSummary = `  1. Steel Material - Amount: Rs. ${Number(baseAmt).toLocaleString('en-IN')}`;
+    itemsSummary = `  1. Steel Material - Qty: 1 MT @ ₹ ${Number(baseAmt).toLocaleString('en-IN')}/MT = ₹ ${Number(baseAmt).toLocaleString('en-IN')}`;
   }
 
-  const textContent = `
-Dear ${customerName},
+  const textContent = `Dear ${customerName},
 
-Thank you for your inquiry with Enlight Metals. Please find the quotation details below:
+Thank you for partnering with Enlight Metals Private Limited.
 
-Quotation Reference: ${qRefNum}
-Date: ${todayDateStr}
-Customer: ${customerName}
-Delivery Location: ${deal.delivery_location || 'As specified'}
-Payment Terms: ${deal.payment_terms || 'As agreed'}
+Please find attached our official Commercial Price Quotation (Ref #: ${qRefNum}) detailing the complete material specifications, unit rates, delivery location, and commercial terms.
 
-Items Breakdown:
+Summary:
+- Reference Number: ${qRefNum}
+- Issue Date: ${todayDateStr}
+- Items & Specifications:
 ${itemsSummary}
+- Subtotal (Base Amount): ₹ ${Number(baseAmt).toLocaleString('en-IN')}
+- CGST (9%): ₹ ${Number(cgstAmt).toLocaleString('en-IN')}
+- SGST (9%): ₹ ${Number(sgstAmt).toLocaleString('en-IN')}
+- Grand Total (incl. GST): ₹ ${Number(grandTotal).toLocaleString('en-IN')}
+${deal.payment_terms ? `- Payment Terms: ${deal.payment_terms}\n` : ''}${deal.delivery_location ? `- Delivery Location: ${deal.delivery_location}\n` : ''}
+The attached PDF document contains our official pricing structure and complete commercial terms.
 
---------------------------------------------------
-Subtotal: Rs. ${Number(baseAmt).toLocaleString('en-IN')}
-GST (18%): Rs. ${Number(gstAmt).toLocaleString('en-IN')}
-Grand Total: Rs. ${Number(grandTotal).toLocaleString('en-IN')}
---------------------------------------------------
+Warm regards,
 
-Terms & Conditions:
-1. Rates are valid for 7 days from the date of quotation.
-2. Delivery as per mutually agreed dispatch schedule.
-3. Material test certificates (MTC) will be provided upon dispatch.
-
-Best regards,
 Sales Operations Team
-Enlight Metals Pvt. Ltd.
-`;
+Enlight Metals Private Limited
+MIDC Industrial Zone, Mumbai - 400001`;
+
+  const attachments = [];
+  try {
+    const { generateQuotationPdfBuffer } = require('../utils/quotationPdf');
+    const pdfBuffer = await generateQuotationPdfBuffer(qRefNum, customerName, {
+      ...deal,
+      companyName: customerName,
+      customerName: customerName,
+      customerAddress: deal.customer_address || deal.delivery_location || '',
+      deliveryLocation: deal.delivery_location || '',
+      paymentTerms: deal.payment_terms || '30 Days Credit',
+      totalAmount: baseAmt,
+      lineItems: dealItems,
+      salespersonName: deal.salesperson_name || 'Shravan Kotagi',
+      customerGstin: deal.customer_gst || '',
+    });
+    const sanitizedRef = qRefNum.replace(/[/\\?%*:|"<>]/g, '_');
+    attachments.push({
+      filename: `Quotation_${sanitizedRef}.pdf`,
+      content: pdfBuffer.toString('base64'),
+    });
+  } catch (pdfErr) {
+    console.warn('[SalesAgent] Quotation PDF generation error:', pdfErr.message);
+  }
 
   if (resendApiKey && targetEmail) {
     try {
@@ -488,6 +509,7 @@ Enlight Metals Pvt. Ltd.
           to: [targetEmail],
           subject: `Quotation ${qRefNum} - Enlight Metals - ${customerName}`,
           text: textContent,
+          attachments: attachments.length > 0 ? attachments : undefined,
         },
         {
           headers: {
