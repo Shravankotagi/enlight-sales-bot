@@ -1529,6 +1529,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     };
 
     let inqId = existingDeal?.inquiry_id || null;
+    const initialInqStatus = dbStage === 'won' ? 'confirmed' : 'review';
 
     if (!dealId || !inqId) {
       try {
@@ -1541,7 +1542,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             sender_phone: actualCustomerPhone || null,
             salesperson_phone: senderPhone,
             inquiry_type: 'inquiry',
-            status: 'review',
+            status: initialInqStatus,
             ai_extraction_json: structuredExtraction,
             overall_confidence: data.confidence || 0.95,
             created_at: new Date().toISOString(),
@@ -1638,13 +1639,17 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
       await supabase.from('deals').update(updatePayload).eq('id', dealId);
 
-      // Sync inquiries table ai_extraction_json
+      // Sync inquiries table ai_extraction_json & status
       if (inqId) {
+        if (effectiveStage === 'won') {
+          await supabase.from('inquiries').update({ status: 'confirmed' }).eq('id', inqId);
+        }
         await syncInquiryFromDeal(inqId, { ...existingDeal, ...updatePayload }, finalPersistedItems);
       }
 
       activeDealObj = { id: dealId, ...updatePayload };
     } else {
+      const effectiveStage = (dbStage === 'won' || dbStage === 'lost') ? dbStage : 'new_inquiry';
       const { data: newDeal, error: dealInsertErr } = await supabase
         .from('deals')
         .insert({
@@ -1652,7 +1657,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           customer_name:     finalCustomerName,
           salesperson_phone: senderPhone,
           customer_phone:    actualCustomerPhone,
-          stage:             'new_inquiry',
+          stage:             effectiveStage,
           total_amount:      dealAmount || 0,
           inquiry_type:      'inquiry',
           delivery_location: finalDeliveryLoc,
@@ -1660,8 +1665,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           payment_terms:     finalPaymentTerms,
           po_date:           poDate,
           po_number:         poNumber,
-          won_at:            dbStage === 'won' ? new Date().toISOString() : null,
-          lost_reason:       dbStage === 'lost' ? data.loss_reason : null,
+          won_at:            effectiveStage === 'won' ? new Date().toISOString() : null,
+          lost_reason:       effectiveStage === 'lost' ? data.loss_reason : null,
           created_at:        new Date().toISOString(),
         })
         .select()
@@ -1684,6 +1689,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           if (insItem) finalPersistedItems.push(insItem);
         }
         if (inqId) {
+          if (effectiveStage === 'won') {
+            await supabase.from('inquiries').update({ status: 'confirmed' }).eq('id', inqId);
+          }
           await syncInquiryFromDeal(inqId, newDeal, finalPersistedItems);
         }
       }
