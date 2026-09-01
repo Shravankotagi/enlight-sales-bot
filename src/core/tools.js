@@ -59,6 +59,26 @@ function createTools(senderPhone, rawUserText = '') {
     }
   );
 
+  const sendQuotationTool = tool(
+    async ({ text, email, customer_name, deal_id }) => {
+      try {
+        return await getSalesAgent().handleSendQuotationMessage(rawUserText || text, senderPhone, email, customer_name, deal_id);
+      } catch (err) {
+        return `Error sending quotation: ${err.message}`;
+      }
+    },
+    {
+      name: 'send_quotation',
+      description: `Use this tool when the salesperson explicitly requests to send, email, mail, or dispatch a quotation / quote to an email address or customer (e.g. "Send quotation to client@gmail.com", "Mail quote to test@example.com", "Send quote for Deal #DEAL-A983FC").`,
+      schema: z.object({
+        text: z.string().describe('The full original message from the salesperson'),
+        email: z.string().optional().nullable().describe('The email address if mentioned e.g. client@gmail.com, else null'),
+        customer_name: z.string().optional().nullable().describe('Customer or company name if mentioned, else null'),
+        deal_id: z.string().optional().nullable().describe('Deal ID if mentioned e.g. #DEAL-A983FC, else null'),
+      }),
+    }
+  );
+
   const logPaymentTool = tool(
     async ({ text }) => {
       try {
@@ -258,6 +278,7 @@ function createTools(senderPhone, rawUserText = '') {
     getDealIdsTool,
     logCustomerVisitTool,
     updateDealStageTool,
+    sendQuotationTool,
     logPaymentTool,
     logComplaintTool,
     logRetentionFollowupTool,

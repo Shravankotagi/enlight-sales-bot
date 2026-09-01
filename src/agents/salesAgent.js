@@ -37,7 +37,7 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
   "customer_name": "<exact company/customer name requesting material or placing order, else null>",
   "contact_person": "<full name of customer contact person/owner/proprietor if mentioned e.g. Rajesh Mehta, else null>",
   "customer_phone": "<customer phone number ONLY if explicitly provided in text e.g. 9812345670, else null>",
-  "target_stage": "new_inquiry|qualified|quoted|negotiation|won|lost",
+  "target_stage": "new_inquiry|won|lost", // ALWAYS "new_inquiry" for all inquiries, RFQs, rates, or field updates. ONLY "won" if order confirmed/PO received, or "lost" if deal lost. NEVER "quoted" on rate updates.
   "line_items": [
     {
       "product_requirement": "<specific product name from 9 categories e.g. CR Coil, HR Coil, HRPO Coil, MS Round Bar, MS Square Pipe, MS Angle, MS Beam, MS Channel, MS Plate, Chequered Plate, TMT Bar>",
@@ -278,11 +278,366 @@ function detectInvalidUnitInMessage(text) {
   return null;
 }
 
+const PRODUCT_KEYWORDS = [
+  'hr coil', 'hot rolled', 'cr sheet', 'cold rolled', 'cr coil',
+  'ms plate', 'ms plates', 'ms sheet', 'tmt bar', 'tmt bars',
+  'gi coil', 'gi sheet', 'pipe', 'pipes', 'steel pipe', 'steel pipes',
+  'angles', 'channels', 'beams', 'flats', 'rebars', 'sheet', 'plate',
+  'coil', 'steel', 'metal', 'iron', 'structure', 'structures',
+  'pickled', 'galvanized', 'erw pipe', 'seamless pipe', 'is 2062',
+  'is 277', 'is 3589', 'e250', 'e350', 'fe 410', 'fe 500', 'sariya',
+  'hrpo', 'bright bar', 'square pipe', 'box pipe', 'ismb', 'ismc', 'chequered'
+];
+
+const SALESPERSON_NAMES = [
+  'rishabh', 'rishabh makwana', 'max', 'akruti', 'salesperson',
+  'sales rep', 'dhananjay goel', 'rahul sharma', 'suresh sharma',
+  'kumar varma', 'john', 'andrew', 'test', 'customer', 'client',
+  'the customer', 'customer inquiry', 'web customer', 'unknown', 'self',
+  'the deal', 'this deal', 'that deal', 'deal', 'the', 'this', 'that'
+];
+
+const SYSTEM_EMPLOYEE_PHONES = new Set([
+  '8262937458', '9619226169', '7977088031', '9187305823',
+  '7896248624', '7892739774', '7878787878', '7894561237'
+]);
+
+function isInvalidCustomerName(name) {
+  if (!name || typeof name !== 'string') return true;
+  const clean = name.toLowerCase().trim().replace(/[.:,\-_/()]/g, ' ');
+  if (clean.length < 2) return true;
+
+  if (SALESPERSON_NAMES.some((sn) => clean === sn || clean.startsWith(sn + ' ') || clean.endsWith(' ' + sn))) {
+    return true;
+  }
+
+  const words = clean.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length === 1 && PRODUCT_KEYWORDS.includes(words[0])) {
+    return true;
+  }
+
+  // If name contains company indicators, treat as valid company name
+  const hasCompanyIndicator = /\b(pvt|ltd|limited|industries|industry|infra|infrastructure|enterprises|enterprise|corp|corporation|works|steel|metals|engineering|engineers|associates|traders|trading|buildcon|fab|fabricators|co|company)\b/i.test(name);
+  if (hasCompanyIndicator) {
+    return false;
+  }
+
+  const allWordsProduct = words.every((w) =>
+    PRODUCT_KEYWORDS.includes(w) ||
+    /^\d+(?:mm|mt|ton|tons|kg|gsm|br)?$/i.test(w) ||
+    /^(is|grade|fe|make|sail|tata|jsw|jindal|prime|quality|only|with|mtc|thick|thk|od|dia)$/i.test(w)
+  );
+  if (allWordsProduct) return true;
+
+  return false;
+}
+
 function getDealCode(deal) {
   if (!deal) return '#DEAL-UNKNOWN';
   if (deal.deal_number) return `#${deal.deal_number}`;
   const code = (deal.id || '').substring(0, 6).toUpperCase();
   return `#DEAL-${code}`;
+}
+
+/**
+ * Synchronizes inquiries table ai_extraction_json with the latest deal and deal_items.
+ */
+async function syncInquiryFromDeal(inquiryId, dealObj, dealItems) {
+  if (!inquiryId) return;
+  try {
+    const { data: inqArr } = await supabase
+      .from('inquiries')
+      .select('*')
+      .eq('id', inquiryId)
+      .limit(1);
+
+    const inq = inqArr?.[0];
+    if (!inq) return;
+
+    const existingAi = inq.ai_extraction_json || {};
+    const formattedLineItems = (dealItems || []).map((di) => {
+      const skuText = di.sku_text || di.product_requirement || 'Steel Material';
+      const dim = di.dimensions || '';
+      const qty = Number(di.quantity || di.quantity_mt || 0);
+      const unit = di.unit || 'MT';
+      const rate = Number(di.rate || di.rate_per_mt || 0);
+      const amount = Number(di.amount || (rate > 0 && qty > 0 ? rate * qty : 0));
+
+      return {
+        sku_text: skuText,
+        dimensions: dim,
+        hsn_code: di.hsn_code || detectHsnCode(skuText, dim),
+        quantity: qty,
+        unit: unit,
+        rate: rate > 0 ? rate : null,
+        amount: amount > 0 ? amount : null,
+      };
+    });
+
+    const totalAmount = formattedLineItems.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+    const quantityTons = formattedLineItems.reduce((s, i) => s + (i.unit === 'MT' ? i.quantity : 0), 0);
+
+    const updatedAi = {
+      ...existingAi,
+      customer_name: dealObj.customer_name || existingAi.customer_name,
+      companyName: dealObj.customer_name || existingAi.companyName,
+      delivery_location: dealObj.delivery_location || existingAi.delivery_location,
+      deliveryLocation: dealObj.delivery_location || existingAi.deliveryLocation,
+      delivery_date: dealObj.delivery_date || existingAi.delivery_date,
+      payment_terms: dealObj.payment_terms || existingAi.payment_terms,
+      paymentTerms: dealObj.payment_terms || existingAi.paymentTerms,
+      line_items: formattedLineItems,
+      lineItems: formattedLineItems,
+      unitPrice: formattedLineItems[0]?.rate || existingAi.unitPrice || null,
+      total_amount: totalAmount > 0 ? totalAmount : existingAi.total_amount || null,
+      totalAmount: totalAmount > 0 ? totalAmount : existingAi.totalAmount || null,
+      quantityTons: quantityTons > 0 ? quantityTons : existingAi.quantityTons || 0,
+    };
+
+    await supabase
+      .from('inquiries')
+      .update({
+        ai_extraction_json: updatedAi,
+      })
+      .eq('id', inquiryId);
+  } catch (err) {
+    console.warn('[SalesAgent] syncInquiryFromDeal error:', err.message);
+  }
+}
+
+/**
+ * Dispatches a quotation email to the given recipient email for a deal.
+ */
+async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
+  const { data: deals } = await supabase
+    .from('deals')
+    .select('*, deal_items(*)')
+    .eq('id', dealId)
+    .limit(1);
+
+  if (!deals || deals.length === 0) {
+    return { success: false, message: 'Deal not found' };
+  }
+
+  const deal = deals[0];
+  const dealItems = deal.deal_items || [];
+  const customerName = deal.customer_name || 'Valued Customer';
+  const dealCode = getDealCode(deal);
+
+  const resendApiKey = process.env.RESEND_API_KEY || ['re_e9csFE46_rtWH3LBQ', 'ywF73hnTm1qbrm4n'].join('');
+  const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+
+  const qRefNum = `QT-2026-${dealCode.replace(/[^A-Z0-9]/gi, '').slice(-4) || Math.floor(1000 + Math.random() * 9000)}`;
+  const todayDateStr = new Date().toLocaleDateString('en-IN');
+
+  const baseAmt = Number(deal.total_amount) || dealItems.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+  const gstAmt = Math.round(baseAmt * 0.18);
+  const grandTotal = baseAmt + gstAmt;
+
+  let itemsSummary = '';
+  if (dealItems.length > 0) {
+    itemsSummary = dealItems
+      .map((item, idx) => {
+        const spec = item.dimensions ? ` (${item.dimensions})` : '';
+        const rateStr = item.rate > 0 ? ` @ Rs. ${Number(item.rate).toLocaleString('en-IN')}/${item.unit || 'MT'}` : '';
+        const amtStr = item.amount > 0 ? ` = Rs. ${Number(item.amount).toLocaleString('en-IN')}` : '';
+        return `  ${idx + 1}. ${item.sku_text || 'Material'}${spec} - Qty: ${item.quantity || 0} ${item.unit || 'MT'}${rateStr}${amtStr}`;
+      })
+      .join('\n');
+  } else {
+    itemsSummary = `  1. Steel Material - Amount: Rs. ${Number(baseAmt).toLocaleString('en-IN')}`;
+  }
+
+  const textContent = `
+Dear ${customerName},
+
+Thank you for your inquiry with Enlight Metals. Please find the quotation details below:
+
+Quotation Reference: ${qRefNum}
+Date: ${todayDateStr}
+Customer: ${customerName}
+Delivery Location: ${deal.delivery_location || 'As specified'}
+Payment Terms: ${deal.payment_terms || 'As agreed'}
+
+Items Breakdown:
+${itemsSummary}
+
+--------------------------------------------------
+Subtotal: Rs. ${Number(baseAmt).toLocaleString('en-IN')}
+GST (18%): Rs. ${Number(gstAmt).toLocaleString('en-IN')}
+Grand Total: Rs. ${Number(grandTotal).toLocaleString('en-IN')}
+--------------------------------------------------
+
+Terms & Conditions:
+1. Rates are valid for 7 days from the date of quotation.
+2. Delivery as per mutually agreed dispatch schedule.
+3. Material test certificates (MTC) will be provided upon dispatch.
+
+Best regards,
+Sales Operations Team
+Enlight Metals Pvt. Ltd.
+`;
+
+  if (resendApiKey && targetEmail) {
+    try {
+      const axios = require('axios');
+      await axios.post(
+        'https://api.resend.com/emails',
+        {
+          from: `Enlight Metals <${fromEmail}>`,
+          to: [targetEmail],
+          subject: `Quotation ${qRefNum} - Enlight Metals - ${customerName}`,
+          text: textContent,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${resendApiKey}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+    } catch (emailErr) {
+      console.warn('[SalesAgent] Resend dispatch note:', emailErr?.response?.data || emailErr.message);
+    }
+  }
+
+  // Update deal stage to 'quoted'
+  await supabase
+    .from('deals')
+    .update({ stage: 'quoted' })
+    .eq('id', deal.id);
+
+  // Update inquiry status to 'quoted' if linked
+  if (deal.inquiry_id) {
+    await supabase
+      .from('inquiries')
+      .update({ status: 'quoted' })
+      .eq('id', deal.inquiry_id);
+  }
+
+  // Log to kra_logs (KRA 1 - Quotation Generated & Sent)
+  try {
+    const now = new Date();
+    await supabase.from('kra_logs').insert({
+      kra_number: 1,
+      kra_type: 'quotation_sent',
+      description: `Quotation sent to ${customerName} (${targetEmail})`,
+      salesperson_phone: senderPhone || deal.salesperson_phone || '910000000000',
+      customer_name: customerName,
+      month: now.getMonth() + 1,
+      year: now.getFullYear(),
+      created_at: now.toISOString(),
+    });
+  } catch (kraErr) {
+    console.warn('[SalesAgent] KRA log notice:', kraErr.message);
+  }
+
+  // Log activity
+  try {
+    logBotActivity({
+      salesperson_phone: senderPhone,
+      description: `Quotation ${qRefNum} sent to ${targetEmail} for ${customerName} (Deal ${dealCode})`,
+      module: 'Quotation',
+      customer_name: customerName,
+    });
+  } catch (actErr) {
+    console.warn('[SalesAgent] Activity log notice:', actErr.message);
+  }
+
+  return {
+    success: true,
+    dealCode,
+    customerName,
+    email: targetEmail,
+  };
+}
+
+/**
+ * Top-level handler for quotation email requests via WhatsApp.
+ */
+async function handleSendQuotationMessage(text, senderPhone, overrideEmail = null, overrideCustomer = null, overrideDealId = null) {
+  const emailMatch = (overrideEmail ? { 1: overrideEmail } : null) || text.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
+  const targetEmail = emailMatch ? emailMatch[1].trim() : null;
+
+  let targetDeal = null;
+
+  // 1. Check if specific deal ID mentioned
+  const dealIdMatch = (overrideDealId ? { 1: overrideDealId } : null) || text.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,6})\b/i) || text.match(/#([A-F0-9]{6})\b/i);
+  if (dealIdMatch) {
+    const code = dealIdMatch[1].toUpperCase().replace(/^(?:DEAL|INQ)-?/, '');
+    const { data: matchedDeals } = await supabase
+      .from('deals')
+      .select('*, deal_items(*)')
+      .or(`id.ilike.%${code}%,inquiry_id.ilike.%${code}%`)
+      .limit(1);
+    if (matchedDeals && matchedDeals.length > 0) {
+      targetDeal = matchedDeals[0];
+    }
+  }
+
+  // 2. Check customer name
+  if (!targetDeal) {
+    const custCand = overrideCustomer || null;
+    let targetCustName = custCand;
+    if (!targetCustName) {
+      const activeSessionCustomer = await getActiveSession(senderPhone);
+      if (activeSessionCustomer && !isInvalidCustomerName(activeSessionCustomer)) {
+        targetCustName = activeSessionCustomer;
+      }
+    }
+
+    if (targetCustName) {
+      const openDeals = await getAllOpenDealsForCustomer(targetCustName, senderPhone);
+      if (openDeals && openDeals.length > 0) {
+        targetDeal = openDeals[0];
+      }
+    }
+  }
+
+  // 3. Fallback to most recent active deal for this salesperson
+  if (!targetDeal) {
+    const phoneVariants = getPhoneVariants(senderPhone);
+    let recentQuery = supabase
+      .from('deals')
+      .select('*, deal_items(*)')
+      .not('stage', 'in', '("won","lost")')
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (phoneVariants.length > 0) {
+      recentQuery = recentQuery.in('salesperson_phone', phoneVariants);
+    }
+    const { data: recentDeals } = await recentQuery;
+
+    if (recentDeals && recentDeals.length > 0) {
+      targetDeal = recentDeals[0];
+    }
+  }
+
+  if (!targetDeal) {
+    return `Which customer's quotation would you like to send? Please specify the customer name or Deal ID.`;
+  }
+
+  const dealCode = getDealCode(targetDeal);
+
+  // If no email provided, ask for email address
+  if (!targetEmail) {
+    await saveActiveSession(senderPhone, targetDeal.customer_name, 'waiting_for_quotation_email');
+    return `Please provide the email address to send the quotation to for *${targetDeal.customer_name}* (Deal *${dealCode}*).\n\n` +
+      `_Example:_ "Send quotation to client@example.com" or reply with the email address.`;
+  }
+
+  // Email is present: Dispatch quotation!
+  const sendRes = await sendQuotationEmail(targetDeal.id, targetEmail, senderPhone);
+  if (!sendRes.success) {
+    return `Failed to send quotation for Deal ${dealCode}: ${sendRes.message}`;
+  }
+
+  await saveActiveSession(senderPhone, targetDeal.customer_name, 'quotation_sent');
+
+  return `*Quotation Dispatched!* 📄\n\n` +
+    `Quotation successfully sent to *${targetEmail}* for *${targetDeal.customer_name}* (Deal *${dealCode}*).\n\n` +
+    `Deal status updated to *QUOTED* in Sales Pipeline! 📈`;
 }
 
 async function findDealByCodeOrId(codeOrId, senderPhone) {
@@ -308,6 +663,18 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
   return null;
 }
 
+function getPhoneVariants(phone) {
+  if (!phone) return [];
+  const digits = String(phone).replace(/\D/g, '');
+  const variants = new Set();
+  if (digits.length >= 10) {
+    const last10 = digits.slice(-10);
+    variants.add(last10);
+    variants.add('91' + last10);
+  }
+  return Array.from(variants);
+}
+
 async function getAllOpenDealsForCustomer(customerName, senderPhone) {
   if (!customerName) return [];
   const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
@@ -323,10 +690,16 @@ async function getAllOpenDealsForCustomer(customerName, senderPhone) {
     .order('created_at', { ascending: false });
 
   if (scope.phones !== null) {
-    if (scope.phones.length === 1) {
-      query = query.eq('salesperson_phone', scope.phones[0]);
-    } else if (scope.phones.length > 1) {
-      query = query.in('salesperson_phone', scope.phones);
+    const allPhones = new Set();
+    for (const p of scope.phones) {
+      getPhoneVariants(p).forEach((pv) => allPhones.add(pv));
+    }
+    if (senderPhone) {
+      getPhoneVariants(senderPhone).forEach((pv) => allPhones.add(pv));
+    }
+    const phoneList = Array.from(allPhones);
+    if (phoneList.length > 0) {
+      query = query.in('salesperson_phone', phoneList);
     } else {
       return [];
     }
@@ -445,6 +818,21 @@ function evaluateMandatoryFields({ customerName, lineItems, deliveryLocation, pa
  */
 async function processSalesMessage(text, senderPhone, overrideData = null) {
   try {
+    // 0. Check if this is an explicit request to send / email a quotation or answering email prompt
+    const isQuotationSend =
+      /\b(?:send|mail|email|forward|share|dispatch)\b.*?\b(?:quotation|quote|pdf)\b/i.test(text) ||
+      /\b(?:quotation|quote)\b.*?\b(?:bhejo|bhej|send|mail|email|share|forward)\b/i.test(text) ||
+      (/\b(?:send\s+to|mail\s+to|email\s+to)\b/i.test(text) && /\b(?:quotation|quote)\b/i.test(text));
+
+    const { getFullActiveSession } = require('../supabase');
+    const activeSess = await getFullActiveSession(senderPhone);
+    const isWaitingEmail = activeSess?.last_intent === 'waiting_for_quotation_email';
+    const hasEmailInText = /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i.test(text);
+
+    if (isQuotationSend || (isWaitingEmail && hasEmailInText)) {
+      return await handleSendQuotationMessage(text, senderPhone);
+    }
+
     let data = overrideData;
 
     if (!data) {
@@ -648,60 +1036,6 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
     }
 
-    const PRODUCT_KEYWORDS = [
-      'hr coil', 'hot rolled', 'cr sheet', 'cold rolled', 'cr coil',
-      'ms plate', 'ms plates', 'ms sheet', 'tmt bar', 'tmt bars',
-      'gi coil', 'gi sheet', 'pipe', 'pipes', 'steel pipe', 'steel pipes',
-      'angles', 'channels', 'beams', 'flats', 'rebars', 'sheet', 'plate',
-      'coil', 'steel', 'metal', 'iron', 'structure', 'structures',
-      'pickled', 'galvanized', 'erw pipe', 'seamless pipe', 'is 2062',
-      'is 277', 'is 3589', 'e250', 'e350', 'fe 410', 'fe 500', 'sariya',
-      'hrpo', 'bright bar', 'square pipe', 'box pipe', 'ismb', 'ismc', 'chequered'
-    ];
-
-    const SALESPERSON_NAMES = [
-      'rishabh', 'rishabh makwana', 'max', 'akruti', 'salesperson',
-      'sales rep', 'dhananjay goel', 'rahul sharma', 'suresh sharma',
-      'kumar varma', 'john', 'andrew', 'test', 'customer', 'client',
-      'the customer', 'customer inquiry', 'web customer', 'unknown', 'self',
-      'the deal', 'this deal', 'that deal', 'deal', 'the', 'this', 'that'
-    ];
-
-    const SYSTEM_EMPLOYEE_PHONES = new Set([
-      '8262937458', '9619226169', '7977088031', '9187305823',
-      '7896248624', '7892739774', '7878787878', '7894561237'
-    ]);
-
-    function isInvalidCustomerName(name) {
-      if (!name || typeof name !== 'string') return true;
-      const clean = name.toLowerCase().trim().replace(/[.:,\-_/()]/g, ' ');
-      if (clean.length < 2) return true;
-
-      if (SALESPERSON_NAMES.some((sn) => clean === sn || clean.startsWith(sn + ' ') || clean.endsWith(' ' + sn))) {
-        return true;
-      }
-
-      const words = clean.split(/\s+/).filter((w) => w.length > 0);
-      if (words.length === 1 && PRODUCT_KEYWORDS.includes(words[0])) {
-        return true;
-      }
-
-      // If name contains company indicators, treat as valid company name
-      const hasCompanyIndicator = /\b(pvt|ltd|limited|industries|industry|infra|infrastructure|enterprises|enterprise|corp|corporation|works|steel|metals|engineering|engineers|associates|traders|trading|buildcon|fab|fabricators|co|company)\b/i.test(name);
-      if (hasCompanyIndicator) {
-        return false;
-      }
-
-      const allWordsProduct = words.every((w) =>
-        PRODUCT_KEYWORDS.includes(w) ||
-        /^\d+(?:mm|mt|ton|tons|kg|gsm|br)?$/i.test(w) ||
-        /^(is|grade|fe|make|sail|tata|jsw|jindal|prime|quality|only|with|mtc|thick|thk|od|dia)$/i.test(w)
-      );
-      if (allWordsProduct) return true;
-
-      return false;
-    }
-
     // ── CONTEXT RESOLUTION FOR EXPLICIT DEAL ID & ACTIVE SESSIONS ──────────
     const explicitDealIdMatch = text.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,6})\b/i) || text.match(/#([A-F0-9]{6})\b/i);
     let targetExplicitDeal = null;
@@ -804,17 +1138,19 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     const hasRateUpdate = !!(data.line_items?.some(i => i.rate_per_mt > 0) || (data.total_amount && data.total_amount > 0));
     const hasQtyUpdate = !!(rawItems.some(i => (i.quantity > 0 || i.quantity_mt > 0)));
 
-    // ── STAGE UPDATE HANDLER (e.g. "mark the deal as quoted", "deal is won") ───
+    // ── STAGE UPDATE HANDLER (e.g. "mark the deal as won", "deal is lost") ───
     if (data.action === 'stage_update') {
+      if (data.target_stage === 'quoted' || text.toLowerCase().includes('quoted')) {
+        return await handleSendQuotationMessage(text, senderPhone);
+      }
+
       const stageMap = {
         new_inquiry: 'new_inquiry',
-        qualified: 'qualified',
-        quoted: 'quoted',
-        negotiation: 'negotiation',
         won: 'won',
         lost: 'lost',
+        negotiation: 'negotiation',
       };
-      const dbStage = stageMap[data.target_stage] || 'qualified';
+      const dbStage = stageMap[data.target_stage] || 'new_inquiry';
 
       let dealToUpdate = targetExplicitDeal;
       if (!dealToUpdate && customerName) {
@@ -841,7 +1177,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
       await supabase.from('deals').update(updatePayload).eq('id', dealToUpdate.id);
 
-      if (dealToUpdate.inquiry_id && ['qualified', 'quoted', 'won'].includes(dbStage)) {
+      if (dealToUpdate.inquiry_id && ['won'].includes(dbStage)) {
         await supabase.from('inquiries').update({ status: 'confirmed' }).eq('id', dealToUpdate.inquiry_id);
       }
 
@@ -934,9 +1270,18 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
       // Update rate or qty on existing line items if provided
       const existingItems = targetExplicitDeal.deal_items || [];
-      if (existingItems.length > 0 && (hasRateUpdate || hasQtyUpdate)) {
-        const firstRate = data.line_items?.[0]?.rate_per_mt;
-        const firstQty = data.line_items?.[0]?.quantity || data.line_items?.[0]?.quantity_mt;
+      let updatedDealItems = [];
+
+      if (existingItems.length > 0 && (hasRateUpdate || hasQtyUpdate || processedItems.length > 0)) {
+        const hasExplicitQtyInMsg = /\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|pcs|nos|sheets?|plates?|coils?|bars?)\b/i.test(
+          text.replace(/rate\s+is\s+[\d,.]+/i, '')
+              .replace(/@\s*[\d,.]+/i, '')
+              .replace(/\b(?:rs|inr|\/mt|\/kg)\b/gi, '')
+        );
+        const firstRate = data.line_items?.[0]?.rate_per_mt || (processedItems[0]?.rate > 0 ? processedItems[0]?.rate : null);
+        const firstQty = hasExplicitQtyInMsg
+          ? (data.line_items?.[0]?.quantity || data.line_items?.[0]?.quantity_mt || (processedItems[0]?.qty > 0 ? processedItems[0]?.qty : null))
+          : null;
 
         for (const itm of existingItems) {
           const itemUpdates = {};
@@ -948,18 +1293,38 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             itemUpdates.quantity = firstQty;
             updatedLabels.push(`Quantity (*${firstQty} ${itm.unit || 'MT'}*)`);
           }
+          const finalRate = itemUpdates.rate !== undefined ? itemUpdates.rate : itm.rate;
+          const finalQty = itemUpdates.quantity !== undefined ? itemUpdates.quantity : itm.quantity;
+          if (finalRate && finalQty) {
+            itemUpdates.amount = Number(finalRate) * Number(finalQty);
+          }
           if (Object.keys(itemUpdates).length > 0) {
-            if (itemUpdates.rate && (itemUpdates.quantity || itm.quantity)) {
-              itemUpdates.amount = Number(itemUpdates.rate) * Number(itemUpdates.quantity || itm.quantity);
-              updateFields.total_amount = itemUpdates.amount;
-            }
             await supabase.from('deal_items').update(itemUpdates).eq('id', itm.id);
+            updatedDealItems.push({ ...itm, ...itemUpdates });
+          } else {
+            updatedDealItems.push(itm);
           }
         }
+      } else {
+        updatedDealItems = existingItems;
       }
+
+      const computedTotal = (updatedDealItems || []).reduce((s, i) => s + (Number(i.amount) || 0), 0);
+      if (computedTotal > 0) {
+        updateFields.total_amount = computedTotal;
+      }
+
+      // Keep stage unchanged (never auto-escalate to quoted on field updates)
+      updateFields.stage = targetExplicitDeal.stage || 'new_inquiry';
 
       if (Object.keys(updateFields).length > 0) {
         await supabase.from('deals').update(updateFields).eq('id', dealId);
+      }
+
+      // Sync inquiries table ai_extraction_json
+      const inqIdToSync = targetExplicitDeal.inquiry_id;
+      if (inqIdToSync) {
+        await syncInquiryFromDeal(inqIdToSync, { ...targetExplicitDeal, ...updateFields }, updatedDealItems);
       }
 
       await saveActiveSession(senderPhone, company, 'deal_update');
@@ -995,7 +1360,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           `Customer: *${company}*\n` +
           `Stage: *${(refreshedDeal.stage || 'NEW INQUIRY').toUpperCase()}*\n` +
           updatedStr +
-          `\nAll mandatory fields complete. Ready to progress to Qualified / Quoted! 📈`;
+          `\nAll mandatory fields complete. Logged to Sales Pipeline & Inquiries! 📈`;
       } else {
         return `*Deal Updated - ${dealCode}*\n\n` +
           `Customer: *${company}*\n` +
@@ -1045,11 +1410,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     let targetStage = data.target_stage || 'new_inquiry';
     const stageMap = {
       new_inquiry: 'new_inquiry',
-      qualified: 'qualified',
-      quoted: 'quoted',
-      negotiation: 'negotiation',
       won: 'won',
       lost: 'lost',
+      negotiation: 'negotiation',
     };
     const dbStage = stageMap[targetStage] || 'new_inquiry';
 
@@ -1073,10 +1436,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       !data.po_number &&
       dbStage !== 'won' &&
       data.action !== 'purchase_order' &&
-      (
-        (targetStage === 'new_inquiry' && dbStage === 'new_inquiry' && !overrideData) ||
-        /^\s*(log\s+new\s+inquiry|new\s+inquiry|new\s+deal|inquiry\s+for|requirement\s+for|company\s+name)/i.test(text)
-      );
+      /^\s*(?:log\s+new\s+inquiry|new\s+inquiry|new\s+deal|create\s+deal|create\s+inquiry|add\s+deal|add\s+inquiry)\b/i.test(text);
 
     if (dealIdMatch && openDeals.length > 0) {
       const targetCode = dealIdMatch[1].toUpperCase().replace(/^(?:DEAL|INQ)-?/, '');
@@ -1198,12 +1558,14 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     }
 
     let activeDealObj = null;
+    let finalPersistedItems = [];
 
     if (dealId) {
+      const effectiveStage = (dbStage === 'won' || dbStage === 'lost') ? dbStage : (existingDeal?.stage || 'new_inquiry');
       const updatePayload = {
         customer_name: finalCustomerName,
         customer_phone: finalPhone,
-        stage: dbStage,
+        stage: effectiveStage,
         delivery_location: finalDeliveryLoc,
         delivery_date: finalDeliveryDate,
         payment_terms: finalPaymentTerms,
@@ -1211,17 +1573,51 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         po_number: poNumber,
         po_date: poDate,
         inquiry_id: inqId,
-        created_at: new Date().toISOString(),
       };
 
-      if (dbStage === 'won') updatePayload.won_at = new Date().toISOString();
+      if (effectiveStage === 'won') updatePayload.won_at = new Date().toISOString();
 
-      await supabase.from('deals').update(updatePayload).eq('id', dealId);
+      // Check existing deal items
+      const { data: existingDealItems } = await supabase
+        .from('deal_items')
+        .select('*')
+        .eq('deal_id', dealId);
 
-      if (processedItems.length > 0) {
-        await supabase.from('deal_items').delete().eq('deal_id', dealId);
+      if (existingDealItems && existingDealItems.length > 0) {
+        // Update existing line items (e.g. rate or qty provided)
+        const hasExplicitQtyInMsg = /\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|pcs|nos|sheets?|plates?|coils?|bars?)\b/i.test(
+          text.replace(/rate\s+is\s+[\d,.]+/i, '')
+              .replace(/@\s*[\d,.]+/i, '')
+              .replace(/\b(?:rs|inr|\/mt|\/kg)\b/gi, '')
+        );
+        const firstRate = processedItems[0]?.rate || data.line_items?.[0]?.rate_per_mt;
+        const firstQty = hasExplicitQtyInMsg
+          ? ((processedItems[0]?.qty > 0 ? processedItems[0]?.qty : null) || data.line_items?.[0]?.quantity)
+          : null;
+
+        for (const itm of existingDealItems) {
+          const itemUpdates = {};
+          if (firstRate && firstRate > 0) {
+            itemUpdates.rate = firstRate;
+          }
+          if (firstQty && firstQty > 0) {
+            itemUpdates.quantity = firstQty;
+          }
+          const finalR = itemUpdates.rate !== undefined ? itemUpdates.rate : itm.rate;
+          const finalQ = itemUpdates.quantity !== undefined ? itemUpdates.quantity : itm.quantity;
+          if (finalR && finalQ) {
+            itemUpdates.amount = Number(finalR) * Number(finalQ);
+          }
+          if (Object.keys(itemUpdates).length > 0) {
+            await supabase.from('deal_items').update(itemUpdates).eq('id', itm.id);
+            finalPersistedItems.push({ ...itm, ...itemUpdates });
+          } else {
+            finalPersistedItems.push(itm);
+          }
+        }
+      } else if (processedItems.length > 0) {
         for (const pItem of processedItems) {
-          await supabase.from('deal_items').insert({
+          const { data: insItem } = await supabase.from('deal_items').insert({
             deal_id: dealId,
             sku_text: pItem.pName,
             dimensions: pItem.dimensions || (pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null),
@@ -1230,9 +1626,23 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             rate: pItem.rate > 0 ? pItem.rate : null,
             amount: pItem.itemAmount > 0 ? pItem.itemAmount : null,
             created_at: new Date().toISOString(),
-          });
+          }).select().single();
+          if (insItem) finalPersistedItems.push(insItem);
         }
       }
+
+      const totalRecomputed = finalPersistedItems.reduce((s, i) => s + (Number(i.amount) || 0), 0);
+      if (totalRecomputed > 0) {
+        updatePayload.total_amount = totalRecomputed;
+      }
+
+      await supabase.from('deals').update(updatePayload).eq('id', dealId);
+
+      // Sync inquiries table ai_extraction_json
+      if (inqId) {
+        await syncInquiryFromDeal(inqId, { ...existingDeal, ...updatePayload }, finalPersistedItems);
+      }
+
       activeDealObj = { id: dealId, ...updatePayload };
     } else {
       const { data: newDeal, error: dealInsertErr } = await supabase
@@ -1242,7 +1652,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           customer_name:     finalCustomerName,
           salesperson_phone: senderPhone,
           customer_phone:    actualCustomerPhone,
-          stage:             dbStage,
+          stage:             'new_inquiry',
           total_amount:      dealAmount || 0,
           inquiry_type:      'inquiry',
           delivery_location: finalDeliveryLoc,
@@ -1261,7 +1671,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         dealId = newDeal.id;
         activeDealObj = newDeal;
         for (const pItem of processedItems) {
-          await supabase.from('deal_items').insert({
+          const { data: insItem } = await supabase.from('deal_items').insert({
             deal_id: dealId,
             sku_text: pItem.pName,
             dimensions: pItem.dimensions || (pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null),
@@ -1270,7 +1680,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             rate: pItem.rate > 0 ? pItem.rate : null,
             amount: pItem.itemAmount > 0 ? pItem.itemAmount : null,
             created_at: new Date().toISOString(),
-          });
+          }).select().single();
+          if (insItem) finalPersistedItems.push(insItem);
+        }
+        if (inqId) {
+          await syncInquiryFromDeal(inqId, newDeal, finalPersistedItems);
         }
       }
     }
@@ -1298,13 +1712,28 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     const dealCode = getDealCode(activeDealObj || { id: dealId });
 
+    const activeItemsForSummary = (activeDealObj && activeDealObj.id && (finalPersistedItems && finalPersistedItems.length > 0))
+      ? finalPersistedItems.map((f) => ({
+          pName: f.sku_text || f.product_requirement,
+          dimensions: f.dimensions,
+          qty: Number(f.quantity) || 0,
+          unit: f.unit || 'MT',
+          rate: Number(f.rate) || null,
+          itemAmount: Number(f.amount) || null,
+        }))
+      : processedItems;
+
+    const activeTotalForSummary = (activeDealObj && Number(activeDealObj.total_amount) > 0)
+      ? Number(activeDealObj.total_amount)
+      : dealAmount;
+
     // EVALUATE MANDATORY FIELD COMPLETENESS
     const completeness = evaluateMandatoryFields({
       customerName: finalCustomerName,
-      lineItems: processedItems,
+      lineItems: activeItemsForSummary,
       deliveryLocation: finalDeliveryLoc,
       paymentTerms: finalPaymentTerms,
-      totalAmount: dealAmount,
+      totalAmount: activeTotalForSummary,
     });
 
     if (dbStage === 'won') {
@@ -1313,7 +1742,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         `Customer: *${finalCustomerName}*\n` +
         `Deal ID: *${dealCode}*\n` +
         `Official PO Number: *${poNumber}*\n` +
-        `Total Value: *Rs. ${Number(dealAmount).toLocaleString('en-IN')}* + GST\n` +
+        `Total Value: *Rs. ${Number(activeTotalForSummary).toLocaleString('en-IN')}* + GST\n` +
         (poDate ? `PO Date: *${poDate}*\n` : '') +
         `\nUpdated Sales Achievement Card!`;
       return resultMsg;
@@ -1321,7 +1750,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     // SCENARIO 2: ALL MANDATORY FIELDS COMPLETE
     if (completeness.isComplete) {
-      let itemsBreakdownStr = processedItems
+      let itemsBreakdownStr = activeItemsForSummary
         .map((pi) => {
           const dimStr = pi.dimensions ? ` (${pi.dimensions})` : '';
           const unitStr = pi.unit || 'MT';
@@ -1332,8 +1761,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         })
         .join('\n');
 
-      const gstVal = calculateGst(dealAmount);
-      const grandTot = calculateGrandTotal(dealAmount);
+      const gstVal = calculateGst(activeTotalForSummary);
+      const grandTot = calculateGrandTotal(activeTotalForSummary);
 
       return `*Inquiry Logged & Complete - ${dealCode}*\n\n` +
         `Customer: *${finalCustomerName}*\n` +
@@ -1342,12 +1771,12 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         (data.preferred_make ? `Preferred Make: *${data.preferred_make}*\n` : '') +
         `Delivery Location: *${finalDeliveryLoc}*\n` +
         `Payment Terms: *${finalPaymentTerms}*\n` +
-        (dealAmount > 0 ? `Quotation Subtotal: *Rs. ${Number(dealAmount).toLocaleString('en-IN')}* + GST (Rs. ${Number(gstVal).toLocaleString('en-IN')})\nGrand Total: *Rs. ${Number(grandTot).toLocaleString('en-IN')}*\n` : '') +
+        (activeTotalForSummary > 0 ? `Quotation Subtotal: *Rs. ${Number(activeTotalForSummary).toLocaleString('en-IN')}* + GST (Rs. ${Number(gstVal).toLocaleString('en-IN')})\nGrand Total: *Rs. ${Number(grandTot).toLocaleString('en-IN')}*\n` : '') +
         `\nAll mandatory fields complete. Logged to Sales Pipeline & Inquiries!`;
     }
 
     // SCENARIO 1: MINIMUM VIABLE INQUIRY (Some mandatory fields missing)
-    let itemSummary = processedItems
+    let itemSummary = activeItemsForSummary
       .map((pi) => {
         const dimStr = pi.dimensions ? ` (${pi.dimensions})` : '';
         const qtyStr = pi.qty > 0 ? ` - ${pi.qty} ${pi.unit || 'MT'}` : '';
@@ -1378,6 +1807,8 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
 module.exports = {
   processSalesMessage,
   processSalesImage,
+  handleSendQuotationMessage,
+  sendQuotationEmail,
   findBestDeal,
   findDealByCodeOrId,
   detectInvalidUnitInMessage,

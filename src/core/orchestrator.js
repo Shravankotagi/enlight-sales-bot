@@ -148,11 +148,20 @@ function getDeterministicIntentHint(text) {
   if (!text || typeof text !== 'string') return '';
   const lower = text.toLowerCase().trim();
 
+  const isSendQuotation =
+    /\b(?:send|mail|email|forward|share|dispatch)\b.*?\b(?:quotation|quote|pdf)\b/i.test(lower) ||
+    /\b(?:quotation|quote)\b.*?\b(?:bhejo|bhej|send|mail|email|share|forward)\b/i.test(lower) ||
+    (/\b(?:send\s+to|mail\s+to|email\s+to)\b/i.test(lower) && /\b(?:quotation|quote)\b/i.test(lower));
+
+  if (isSendQuotation) {
+    return '\n[REQUIRED TOOL CALLS THIS TURN: CALL send_quotation. The salesperson is requesting to send, email, or dispatch a quotation to a customer or email address.]';
+  }
+
   const isExplicitDealCommand =
     /\b(create|log|add|new|record|enter|post)\s+(?:new\s+)?(?:deal|inquiry|requirement|rfq|quote|quotation|order)\b/i.test(lower) ||
     /^(?:log\s+)?new\s+inquiry\b/i.test(lower) ||
     /\b(company\s+name|material|grade\/spec|target\s+price)\s*:/i.test(lower) ||
-    /\b(mark\b.*?\b(won|lost)|move\b.*?\b(stage|won|lost|quoted|negotiation|pipeline)|change\b.*?\b(stage|won|lost|quoted)|.*?\b(deal|inquiry|order)\b.*?\b(won|lost|closed|negotiation|quoted|qualified)|deal\s+won|deal\s+lost|mark\s+as\s+won|mark\s+as\s+lost|stage\s+update|po\s+received|order\s+placed|order\s+confirmed)\b/i.test(lower);
+    /\b(mark\b.*?\b(won|lost)|move\b.*?\b(stage|won|lost|negotiation|pipeline)|change\b.*?\b(stage|won|lost)|.*?\b(deal|inquiry|order)\b.*?\b(won|lost|closed|negotiation|qualified)|deal\s+won|deal\s+lost|mark\s+as\s+won|mark\s+as\s+lost|stage\s+update|po\s+received|order\s+placed|order\s+confirmed)\b/i.test(lower);
 
   const isVisit = /\b(visited|met with|meeting at|site visit|factory visit|plant visit|market visit)\b/i.test(lower);
   const isPayment = /\b(received payment|paid rs|paid inr|received advance|collected payment|advance of|payment received|neft done|upi done|cheque received)\b/i.test(lower);
