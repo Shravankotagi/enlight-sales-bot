@@ -396,7 +396,6 @@ async function findContact(customerName, token) {
   }
 }
 
-async function upsertContact(profile, salespersonName, token) {
 const KNOWN_CONTACT_PERSONS = {
   'hp oil engines ltd.': 'Girish Kulkarni',
   'kirloskar oil engines ltd.': 'Anil Deshmukh',
