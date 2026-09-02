@@ -33,6 +33,12 @@ const { createClient } = require('@supabase/supabase-js');
 const ZOHO_TOKEN_URL  = 'https://accounts.zoho.in/oauth/v2/token';
 const ZOHO_BIGIN_BASE = 'https://www.zohoapis.in/bigin/v1';
 
+function cleanPhone(p) {
+  if (!p) return '';
+  const digits = String(p).replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : '';
+}
+
 function getSupabase() {
   return createClient(
     process.env.SUPABASE_URL,
@@ -1194,14 +1200,79 @@ async function syncAllDatabaseToBigin() {
   }
 }
 
-// ── Inbound Import: Pull all Contacts & Deals from Zoho Bigin → Supabase DB ──
+// ── Inbound Import: Pull all Accounts, Contacts & Deals from Zoho Bigin → Supabase DB ──
 async function pullBiginToDatabase() {
   const sb = getSupabase();
   const token = await getZohoToken();
-  const results = { contactsImported: 0, dealsImported: 0, errors: [] };
+  const results = { accountsImported: 0, contactsImported: 0, dealsImported: 0, errors: [] };
 
   try {
-    // 1. Pull Contacts from Zoho Bigin
+    // 0. Build Employee Name to Phone lookup
+    const { data: employees } = await sb.from('employees').select('name, phone');
+    const empNameToPhoneMap = new Map();
+    (employees || []).forEach(e => {
+      if (e.phone && e.name) {
+        empNameToPhoneMap.set(e.name.toLowerCase().trim(), cleanPhone(e.phone));
+      }
+    });
+
+    const defaultRepPhone = empNameToPhoneMap.get('max') || empNameToPhoneMap.get('yash dalmia') || '918262937458';
+
+    // 1. Pull Accounts (Companies) with Company Owner Mapping (Image 1)
+    try {
+      const accRes = await axios.get(`${ZOHO_BIGIN_BASE}/Accounts`, {
+        headers: zohoHeaders(token),
+        params: { per_page: 200 },
+      });
+      const biginAccounts = accRes.data?.data || [];
+
+      for (const acc of biginAccounts) {
+        try {
+          const companyName = (acc.Account_Name || '').trim();
+          if (!companyName) continue;
+
+          const phone = acc.Phone || '';
+          const address = acc.Billing_City || acc.Billing_Street || '';
+          const industry = acc.Industry || 'Steel & Manufacturing';
+          const ownerName = (acc.Owner?.name || '').toLowerCase().trim();
+          const repPhone = empNameToPhoneMap.get(ownerName) || defaultRepPhone;
+
+          const { data: existing } = await sb
+            .from('recurring_customers')
+            .select('id, customer_phone, customer_address')
+            .ilike('customer_name', companyName)
+            .limit(1);
+
+          if (!existing || existing.length === 0) {
+            await sb.from('recurring_customers').insert([{
+              customer_name: companyName,
+              customer_phone: phone || null,
+              customer_address: address || null,
+              assigned_salesperson_phone: repPhone,
+              industry: industry,
+              is_active: true,
+              avg_order_frequency_days: 30,
+            }]);
+            results.accountsImported++;
+          } else {
+            const existingCust = existing[0];
+            const updateData = { updated_at: new Date().toISOString() };
+            if (!existingCust.customer_phone && phone) updateData.customer_phone = phone;
+            if (!existingCust.customer_address && address) updateData.customer_address = address;
+            if (repPhone) updateData.assigned_salesperson_phone = repPhone;
+
+            await sb.from('recurring_customers').update(updateData).eq('id', existingCust.id);
+            results.accountsImported++;
+          }
+        } catch (accErr) {
+          results.errors.push(`Account import error (${acc.Account_Name}): ${accErr.message}`);
+        }
+      }
+    } catch (accErr) {
+      results.errors.push(`Accounts endpoint error: ${accErr.message}`);
+    }
+
+    // 2. Pull Contacts & Visits from Zoho Bigin (Image 2)
     const contactRes = await axios.get(`${ZOHO_BIGIN_BASE}/Contacts`, {
       headers: zohoHeaders(token),
       params: { per_page: 200 },
@@ -1210,50 +1281,52 @@ async function pullBiginToDatabase() {
 
     for (const c of biginContacts) {
       try {
-        const custName = (c.Company_Name || c.Last_Name || `${c.First_Name || ''} ${c.Last_Name || ''}`).trim();
-        if (!custName) continue;
+        const personMet = (
+          c.Full_Name || `${c.First_Name || ''} ${c.Last_Name || ''}`
+        ).trim();
+        const companyName = (
+          c.Account_Name?.name ||
+          c.Company_Name ||
+          c.Last_Name ||
+          ''
+        ).trim();
+        if (!companyName) continue;
 
         const phone = c.Mobile || c.Phone || '';
-        const address = [c.Mailing_Street, c.Mailing_City, c.Mailing_State].filter(Boolean).join(', ');
-        const contactPerson = [c.First_Name, c.Last_Name].filter(Boolean).join(' ');
+        const ownerName = (c.Owner?.name || '').toLowerCase().trim();
+        const repPhone = empNameToPhoneMap.get(ownerName) || defaultRepPhone;
 
-        // Check if customer already exists in DB
-        const { data: existing } = await sb
-          .from('recurring_customers')
-          .select('id, customer_phone, customer_address')
-          .ilike('customer_name', custName)
-          .limit(1);
+        if (personMet && personMet.toLowerCase() !== 'purchase head') {
+          await sb
+            .from('recurring_customers')
+            .update({ contact_person: personMet })
+            .ilike('customer_name', companyName);
 
-        if (!existing || existing.length === 0) {
-          // Insert new customer into Supabase DB
-          await sb.from('recurring_customers').insert([{
-            customer_name: custName,
-            customer_phone: phone,
-            customer_address: address,
-            contact_person: contactPerson,
-            is_active: true,
-          }]);
-          results.contactsImported++;
-          console.log(`[BiginPull] Imported new customer to DB: ${custName}`);
-        } else {
-          // Update existing customer fields if missing
-          const existingCust = existing[0];
-          const updateData = {};
-          if (!existingCust.customer_phone && phone) updateData.customer_phone = phone;
-          if (!existingCust.customer_address && address) updateData.customer_address = address;
+          const { data: existingVisit } = await sb
+            .from('customer_visits')
+            .select('id')
+            .ilike('customer_name', companyName)
+            .eq('person_met', personMet)
+            .limit(1);
 
-          if (Object.keys(updateData).length > 0) {
-            await sb.from('recurring_customers').update(updateData).eq('id', existingCust.id);
-            results.contactsImported++;
-            console.log(`[BiginPull] Updated existing customer in DB: ${custName}`);
+          if (!existingVisit || existingVisit.length === 0) {
+            await sb.from('customer_visits').insert([{
+              customer_name: companyName,
+              person_met: personMet,
+              contact_no: phone || null,
+              salesperson_phone: repPhone,
+              remarks: 'Contact Synced from Zoho Bigin',
+              visited_at: new Date().toISOString(),
+            }]);
           }
         }
+        results.contactsImported++;
       } catch (err) {
         results.errors.push(`Contact import error (${c.Last_Name}): ${err.message}`);
       }
     }
 
-    // 2. Pull Deals from Zoho Bigin
+    // 3. Pull Deals from Zoho Bigin
     const dealRes = await axios.get(`${ZOHO_BIGIN_BASE}/Deals`, {
       headers: zohoHeaders(token),
       params: { per_page: 200 },
@@ -1265,7 +1338,7 @@ async function pullBiginToDatabase() {
       'Closed Lost': 'lost',
       'Negotiation/Review': 'negotiation',
       'Proposal/Price Quote': 'quoted',
-      'Qualification': 'qualified',
+      'Qualification': 'new_inquiry',
       'Needs Analysis': 'qualified',
     };
 
@@ -1278,8 +1351,9 @@ async function pullBiginToDatabase() {
 
         const dbStage = REVERSE_STAGE_MAP[d.Stage] || 'new_inquiry';
         const amount = Number(d.Amount) || 0;
+        const ownerName = (d.Owner?.name || '').toLowerCase().trim();
+        const repPhone = empNameToPhoneMap.get(ownerName) || defaultRepPhone;
 
-        // Check if deal exists in DB by bigin_deal_id or customer_name
         const { data: existingDeal } = await sb
           .from('deals')
           .select('id, stage, total_amount')
@@ -1287,18 +1361,16 @@ async function pullBiginToDatabase() {
           .limit(1);
 
         if (!existingDeal || existingDeal.length === 0) {
-          // Insert new deal into Supabase DB
           await sb.from('deals').insert([{
             customer_name: custName,
             stage: dbStage,
             total_amount: amount,
             bigin_deal_id: dealId,
+            salesperson_phone: repPhone,
             inquiry_type: 'inquiry',
             status: 'needs_review',
           }]);
           results.dealsImported++;
-          console.log(`[BiginPull] Imported new deal to DB: ${dealName} (₹${amount})`);
-        } else {
           // Update existing deal in DB
           const ex = existingDeal[0];
           await sb.from('deals').update({
