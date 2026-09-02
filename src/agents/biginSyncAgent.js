@@ -884,19 +884,30 @@ async function syncActivity(activityType, data) {
         case 'visit': {
           summary = buildVisitSummary(data, salespersonName);
 
-          if (data.personMet || data.contactNo || data.city) {
-            await upsertContact({
-              ...mergedProfile,
-              contact_person: data.personMet || mergedProfile.contact_person,
-              customer_phone: data.contactNo || mergedProfile.customer_phone,
-              customer_address: data.city    || mergedProfile.customer_address,
-            }, salespersonName, token);
-          }
+          const updatedContactId = await upsertContact({
+            ...mergedProfile,
+            contact_person: data.personMet || mergedProfile.contact_person,
+            customer_phone: data.contactNo || mergedProfile.customer_phone,
+            customer_address: data.city    || mergedProfile.customer_address,
+          }, salespersonName, token);
+          if (updatedContactId) zohoContactId = updatedContactId;
 
+          // 1. Attach Visit Note to Contact (Person Met)
           if (zohoContactId) {
             await addNote({
               parentId:     zohoContactId,
               parentModule: 'Contacts',
+              noteTitle:    `Field Visit - ${new Date().toLocaleDateString('en-IN')}`,
+              noteContent:  summary,
+            }, token);
+          }
+
+          // 2. Attach Visit Note directly to Company Account (Company Name)
+          const accountId = await upsertAccount(customerName, mergedProfile, salespersonName, token);
+          if (accountId) {
+            await addNote({
+              parentId:     accountId,
+              parentModule: 'Accounts',
               noteTitle:    `Field Visit - ${new Date().toLocaleDateString('en-IN')}`,
               noteContent:  summary,
             }, token);
