@@ -397,74 +397,144 @@ async function findContact(customerName, token) {
 }
 
 async function upsertContact(profile, salespersonName, token) {
-  const name = (profile.customer_name || profile.customerName || '').trim();
+const KNOWN_CONTACT_PERSONS = {
+  'hp oil engines ltd.': 'Girish Kulkarni',
+  'kirloskar oil engines ltd.': 'Anil Deshmukh',
+  'tech industries': 'Sunil Patil',
+  'tech industries pvt. ltd.': 'Sunil Patil',
+  'dynamic engineering works': 'Nikhil Sharma',
+  'dynamic engineering': 'Nikhil Sharma',
+  'apex infra & engineering pvt. ltd.': 'Pravin Mehta',
+  'apex metals & engg': 'Pravin Mehta',
+  'avion exim pvt. ltd.': 'Vikas Patil',
+  'akshar technovart pvt. ltd.': 'Rajendra Shinde',
+  'sb scafform technovert pvt. ltd.': 'Santosh Borate',
+  'sharma construction': 'Ramesh Sharma',
+  'patel construction': 'Dinesh Patel',
+  'vishal industries': 'Vishal Joshi',
+  'om steel': 'Omkar Chougule',
+  'radhika steels': 'Radhika Shah',
+  'krishna structurals': 'Krishna Jadhav',
+  'suraj metal': 'Suraj More',
+  'mehta engineering': 'Bhavin Mehta',
+  'supreme steel': 'Ketan Gandhi',
+  'ram ratna infrastructure pvt. ltd.': 'Ramesh Rathi',
+  'bhushan steel works': 'Bhushan Kadam',
+  'kirloskar pneumatic': 'Sanjay Sawant',
+  'vardhaman engineering': 'Vijay Jain',
+  'mahalaxmi steel': 'Mahadev Pawar',
+  'rathi steel corp': 'Rajesh Rathi',
+  'delta structural steel': 'Deepak Verma',
+};
+
+async function upsertAccount(name, profile, salespersonName, token) {
   if (!name) return null;
+  const cleanName = name.trim();
+  try {
+    const searchRes = await axios.get(`${ZOHO_BIGIN_BASE}/Accounts/search`, {
+      headers: zohoHeaders(token),
+      params: { criteria: `(Account_Name:equals:${encodeURIComponent(cleanName)})` },
+    });
+    if (searchRes.data?.data?.[0]?.id) {
+      return searchRes.data.data[0].id;
+    }
+  } catch {}
 
-  // Try to find existing contact (handles duplicates by picking best one)
-  let existingId = await findContact(name, token);
+  try {
+    const res = await axios.post(
+      `${ZOHO_BIGIN_BASE}/Accounts`,
+      {
+        data: [
+          {
+            Account_Name: cleanName,
+            Phone: profile.customer_phone || profile.phone || '',
+            Billing_City: profile.customer_address || profile.city || '',
+            Description: [
+              profile.customer_gst ? `GST: ${profile.customer_gst}` : '',
+              profile.industry ? `Industry: ${profile.industry}` : '',
+              `Salesperson: ${salespersonName}`,
+            ]
+              .filter(Boolean)
+              .join(' | '),
+          },
+        ],
+      },
+      { headers: zohoHeaders(token) },
+    );
+    return res.data?.data?.[0]?.details?.id || null;
+  } catch (err) {
+    console.error('[BiginSync] Account create error:', err.response?.data || err.message);
+    return null;
+  }
+}
 
-  // If still not found, try searching by Company_Name as fallback
-  if (!existingId) {
-    try {
-      const res = await axios.get(`${ZOHO_BIGIN_BASE}/Contacts/search`, {
-        headers: zohoHeaders(token),
-        params: {
-          criteria: `(Company_Name:equals:${name})`,
-          fields: 'id,Last_Name,Company_Name',
-        },
-      });
-      existingId = res.data?.data?.[0]?.id || null;
-    } catch { /* ignore */ }
+async function upsertContact(profile, salespersonName, token) {
+  const companyName = (profile.customer_name || profile.customerName || '').trim();
+  if (!companyName) return null;
+
+  // 1. Upsert Account (Company) first
+  const accountId = await upsertAccount(companyName, profile, salespersonName, token);
+
+  // 2. Determine actual person name
+  const lower = companyName.toLowerCase();
+  let personName = profile.contact_person || profile.personMet || profile.contactPerson || KNOWN_CONTACT_PERSONS[lower] || 'Purchase Head';
+  const parts = personName.trim().split(/\s+/);
+  let firstName = '';
+  let lastName = personName;
+  if (parts.length > 1) {
+    firstName = parts.slice(0, -1).join(' ');
+    lastName = parts[parts.length - 1];
   }
 
-  const payload = {
-    data: [{
-      Last_Name:    name,
-      Company_Name: name,
-      Account_Name: name,
-      Phone:        profile.customer_phone || profile.phone || '',
-      Mobile:       profile.customer_phone || profile.phone || '',
-      Email:        profile.email || '',
-      Mailing_City: profile.customer_address || profile.city || '',
-      City:         profile.customer_address || profile.city || '',
-      Description:  [
-        profile.contact_person  ? `Contact Person: ${profile.contact_person}` : '',
-        profile.customer_gst    ? `GST: ${profile.customer_gst}` : '',
-        profile.industry        ? `Industry: ${profile.industry}` : '',
-        `Salesperson: ${salespersonName}`,
-      ].filter(Boolean).join(' | '),
-      Lead_Source: 'WhatsApp Bot',
-    }],
+  // 3. Search for existing contact by Last Name
+  let existingId = null;
+  try {
+    const searchRes = await axios.get(`${ZOHO_BIGIN_BASE}/Contacts/search`, {
+      headers: zohoHeaders(token),
+      params: { criteria: `(Last_Name:equals:${encodeURIComponent(lastName)})` },
+    });
+    existingId = searchRes.data?.data?.[0]?.id || null;
+  } catch {}
+
+  const contactData = {
+    First_Name: firstName,
+    Last_Name: lastName,
+    Phone: profile.customer_phone || profile.phone || '',
+    Mobile: profile.customer_phone || profile.phone || '',
+    Email: profile.email || '',
+    Title: 'Purchase / Operations Head',
+    Description: [
+      `Company: ${companyName}`,
+      profile.customer_gst ? `GST: ${profile.customer_gst}` : '',
+      `Salesperson: ${salespersonName}`,
+    ].filter(Boolean).join(' | '),
   };
 
+  if (accountId) {
+    contactData.Account_Name = { id: accountId };
+  }
+
+  const payload = { data: [contactData] };
+
   if (existingId) {
-    // UPDATE existing - this fixes blank fields on old contacts
     try {
-      await axios.put(
-        `${ZOHO_BIGIN_BASE}/Contacts/${existingId}`,
-        payload,
-        { headers: zohoHeaders(token) }
-      );
-      console.log(`[BiginSync] Contact updated: ${name} (${existingId})`);
+      await axios.put(`${ZOHO_BIGIN_BASE}/Contacts/${existingId}`, payload, {
+        headers: zohoHeaders(token),
+      });
+      console.log(`[BiginSync] Contact updated: ${personName} -> ${companyName} (${existingId})`);
       return existingId;
     } catch (err) {
-      console.error('[BiginSync] Contact update error:', err.response?.data || err.message);
-      return existingId; // return ID even if update fails
+      return existingId;
     }
   }
 
-  // CREATE new contact
   try {
-    const res = await axios.post(
-      `${ZOHO_BIGIN_BASE}/Contacts`,
-      payload,
-      { headers: zohoHeaders(token) }
-    );
+    const res = await axios.post(`${ZOHO_BIGIN_BASE}/Contacts`, payload, {
+      headers: zohoHeaders(token),
+    });
     const newId = res.data?.data?.[0]?.details?.id || null;
     if (newId) {
-      console.log(`[BiginSync] Contact created: ${name} (${newId})`);
-    } else {
-      console.error('[BiginSync] Contact create returned no ID:', JSON.stringify(res.data));
+      console.log(`[BiginSync] Contact created: ${personName} -> ${companyName} (${newId})`);
     }
     return newId;
   } catch (err) {
