@@ -234,6 +234,22 @@ async function processVisitMessage(text, senderPhone) {
       year:  new Date().getFullYear(),
     });
 
+    // Also log to activity_logs for real-time timeline visibility
+    try {
+      await supabase.from('activity_logs').insert({
+        timestamp: new Date().toISOString(),
+        salesperson_name: 'Sales Team',
+        salesperson_phone: senderPhone,
+        description: `Site visit logged for ${finalCustomerName}${city ? ` at ${city}` : ''}${personMet ? ` (Met: ${personMet})` : ''}`,
+        module: 'Visits',
+        customer_name: finalCustomerName,
+        source: 'bot',
+        action_type: 'visit_logged',
+      });
+    } catch (e) {
+      console.warn('[VisitAgent] activity_logs insert notice:', e.message);
+    }
+
     // Also log KRA 2 for new prospect acquisition if not already logged
     if (isNewProspect) {
       try {
