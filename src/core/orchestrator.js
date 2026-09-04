@@ -162,13 +162,15 @@ function getDeterministicIntentHint(text) {
     /\b(create|log|add|new|record|enter|post)\s+(?:new\s+)?(?:deal|inquiry|requirement|rfq|quote|quotation|order)\b/i.test(lower) ||
     /^(?:log\s+)?new\s+inquiry\b/i.test(lower) ||
     /\b(company\s+name|material|grade\/spec|target\s+price)\s*:/i.test(lower) ||
-    /\b(upadte|updt|updte|update|set|give|enter|new)\s+(?:the\s+)?(?:rates?|prices?|pricing)\b/i.test(lower) ||
+    /\b(upadte|updt|updte|update|set|give|enter|new|change)\s+(?:the\s+)?(?:rates?|prices?|pricing|qty|quantity|unit|payment\s*terms?|delivery\s*location|delivery\s*address|delivery\s*date|notes?)\b/i.test(lower) ||
     /\b(?:rates?|prices?)\s+(?:for|of)\b/i.test(lower) ||
+    /\b(add\s+(?:item|line\s*item)|remove\s+(?:item|line\s*item)|delete\s+(?:item|line\s*item))\b/i.test(lower) ||
+    /\b(confirm|confirmed|proceed|haan?|sahi\s+hai|yes\s+its\s+correct|update\s+(?:it|this|deal|inquiry|rates?))\b/i.test(lower) ||
     /\b(update|upadte|change|move|set|mark)\b.*?\b(status|stage|negotiation|qualified|quoted|won|lost)\b/i.test(lower) ||
     /\b(status|stage)\b.*?\b(negotiation|qualified|quoted|won|lost)\b/i.test(lower) ||
     /\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+)?(won|lost|quoted|negotiation|qualified)\b/i.test(lower) ||
     /\b(deal\s+won|deal\s+lost|mark\s+as\s+won|mark\s+as\s+lost|stage\s+update|po\s+received|order\s+placed|order\s+confirmed)\b/i.test(lower) ||
-    /#?(?:DEAL|INQ)-[A-F0-9]{4,6}\b/i.test(lower);
+    /#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/i.test(lower);
 
   const isVisit = /\b(visited|met with|meeting at|site visit|factory visit|plant visit|market visit)\b/i.test(lower);
   const isPayment = /\b(received payment|paid rs|paid inr|received advance|collected payment|advance of|payment received|neft done|upi done|cheque received)\b/i.test(lower);

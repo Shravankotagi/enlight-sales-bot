@@ -52,7 +52,7 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'update_deal_stage',
-      description: `Use this tool when the salesperson explicitly requests to create a new inquiry, add a deal to the sales pipeline, update a deal stage, progress an RFQ/quotation, or mark a deal as won/lost. DO NOT call this tool for customer site visits (use log_customer_visit) or customer quality complaints / rejection reports (use log_complaint).`,
+      description: `Use this tool when the salesperson creates a new inquiry, updates deal rates, updates quantities or units, adds/removes line items, updates payment terms, delivery address, delivery date, notes, customer details, or updates deal stage. DO NOT call this tool for customer site visits (use log_customer_visit) or customer quality complaints / rejection reports (use log_complaint).`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
       }),

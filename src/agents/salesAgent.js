@@ -163,25 +163,63 @@ function findMatchingProcessedItem(existingItem, processedList, fallbackIndex = 
   const itmFull = `${itmSku} ${itmDim}`.toLowerCase();
   const existingFam = getProductFamily(existingItem.sku_text);
 
+  // Helper: extract leading thickness / diameter / gauge / mm numbers
+  const extractLeadingDim = (str) => {
+    if (!str) return null;
+    const m = str.match(/(\d+(?:\.\d+)?)\s*(?:mm|thk|g|gauge|dia|ø|inch|ft|x|\b)/i);
+    return m ? parseFloat(m[1]) : null;
+  };
+  const itmDimNum = extractLeadingDim(itmDim) || extractLeadingDim(itmSku);
+
   // 1. Exact full string match
   for (const p of processedList) {
     const pName = (p.pName || p.product_requirement || '').toLowerCase().trim();
     const pDim = (p.dimensions || '').toLowerCase().trim();
     const pFull = `${pName} ${pDim}`.trim().toLowerCase();
-    if (pFull && itmFull && pFull === itmFull) {
+    if (pFull && itmFull && (pFull === itmFull || itmFull.includes(pFull) || pFull.includes(itmFull))) {
       return p;
     }
   }
 
-  // 2. Product family + Dimension match (extract thickness/gauge/mm numbers)
-  const extractLeadingDim = (str) => {
-    if (!str) return null;
-    const m = str.match(/(\d+(?:\.\d+)?)\s*(?:mm|thk|gauge|dia|x|\b)/i);
-    return m ? parseFloat(m[1]) : null;
-  };
+  // 2. Specific Sub-type Keywords Match (e.g. "Chequered Plate", "CR Sheet", "HR Coil", "Angle", "Pipe", "Beam", "Channel", "TMT")
+  const SUB_TYPES = [
+    { key: 'chequered', test: (s) => /chequered|checkered/i.test(s) },
+    { key: 'cr_sheet', test: (s) => /cr\s*sheet|cold\s*rolled\s*sheet/i.test(s) },
+    { key: 'cr_coil', test: (s) => /cr\s*coil|cold\s*rolled\s*coil|crca/i.test(s) },
+    { key: 'hr_coil', test: (s) => /hr\s*coil|hot\s*rolled\s*coil|hrpo/i.test(s) },
+    { key: 'ms_sheet', test: (s) => /ms\s*sheet/i.test(s) },
+    { key: 'ms_plate', test: (s) => /ms\s*plate/i.test(s) },
+    { key: 'tmt', test: (s) => /tmt|rebar|sariya/i.test(s) },
+    { key: 'angle', test: (s) => /angle/i.test(s) },
+    { key: 'channel', test: (s) => /channel|ismc/i.test(s) },
+    { key: 'beam', test: (s) => /beam|ismb|joist/i.test(s) },
+    { key: 'pipe', test: (s) => /pipe|tube|shs|rhs/i.test(s) },
+    { key: 'round_bar', test: (s) => /round\s*bar|bright\s*bar/i.test(s) }
+  ];
 
-  const itmDimNum = extractLeadingDim(itmDim) || extractLeadingDim(itmSku);
+  for (const sub of SUB_TYPES) {
+    if (sub.test(itmSku) || sub.test(itmFull)) {
+      const candidates = processedList.filter(p => {
+        const pStr = `${p.pName || p.product_requirement || ''} ${p.dimensions || ''}`;
+        return sub.test(pStr);
+      });
 
+      if (candidates.length === 1) {
+        return candidates[0];
+      } else if (candidates.length > 1) {
+        // Disambiguate multiple items in same sub-type by dimension
+        for (const c of candidates) {
+          const cDim = (c.dimensions || '').toLowerCase().trim();
+          const cDimNum = extractLeadingDim(cDim) || extractLeadingDim(c.pName || c.product_requirement || '');
+          if (itmDimNum !== null && cDimNum !== null && itmDimNum === cDimNum) {
+            return c;
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Product family + Dimension match
   for (const p of processedList) {
     const pName = (p.pName || p.product_requirement || '').toLowerCase().trim();
     const pDim = (p.dimensions || '').toLowerCase().trim();
@@ -195,16 +233,14 @@ function findMatchingProcessedItem(existingItem, processedList, fallbackIndex = 
     }
   }
 
-  // 3. Fallback to same SKU/Family if only single item of that family exists in processedList
-  const sameFamList = processedList.filter((p) => {
-    const pFam = getProductFamily(p.pName || p.product_requirement || '');
-    return existingFam && pFam && existingFam === pFam;
-  });
-  if (sameFamList.length === 1) {
-    return sameFamList[0];
+  // 4. Position match if explicit item index matches (1-indexed or 0-indexed)
+  for (const p of processedList) {
+    if (p.item_index !== undefined && (p.item_index === fallbackIndex || p.item_index === fallbackIndex + 1)) {
+      return p;
+    }
   }
 
-  // 4. Fallback index match if arrays have same length
+  // 5. Fallback index match if arrays have same length
   if (fallbackIndex >= 0 && fallbackIndex < processedList.length) {
     return processedList[fallbackIndex];
   }
@@ -281,6 +317,15 @@ function extractDeliveryLocation(text) {
 
 function detectInvalidUnitInMessage(text) {
   if (!text) return null;
+
+  // NEVER run unit validation if the message is a rate update, pricing update, field update, stage update, or confirmation
+  if (/\b(?:rate|rates|price|prices|pricing|unit\s*price|target\s*price|₹|@|\/mt|\/kg|upadte|updt|updte|update|set|change|add|remove|delete|status|stage|negotiation|qualified|quoted|won|lost|confirm|confirmed|yes|correct|proceed)\b/i.test(text)) {
+    return null;
+  }
+  if (/#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/i.test(text)) {
+    return null;
+  }
+
   const cleanText = text
     .replace(/#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/gi, '')
     .replace(/#?[A-F0-9]{6}\b/gi, '')
@@ -323,23 +368,31 @@ function detectInvalidUnitInMessage(text) {
     'tax', 'hsn', 'sac', 'pan', 'tan', 'cin', 'arn', 'e-way', 'eway',
     'user', 'confirmed', 'confirmation', 'reply', 'message', 'correct', 'option', 'inquiry', 'deal',
     'for', 'to', 'from', 'in', 'at', 'as', 'of', 'and', 'with', 'by', 'is', 'are', 'was', 'were',
-    'the', 'this', 'that', 'customer', 'company', 'client', 'status', 'stage', 'negotiation', 'qualified', 'quoted', 'won', 'lost'
+    'the', 'this', 'that', 'customer', 'company', 'client', 'status', 'stage', 'negotiation', 'qualified', 'quoted', 'won', 'lost',
+    'chequered', 'checkered', 'angle', 'angles', 'beam', 'beams', 'channel', 'channels',
+    'plate', 'plates', 'sheet', 'sheets', 'coil', 'coils', 'pipe', 'pipes', 'tube', 'tubes',
+    'bar', 'bars', 'tmt', 'rebar', 'sariya', 'round', 'square', 'flats', 'flange', 'joist',
+    'crca', 'hrpo', 'gp', 'gi', 'ms', 'hr', 'cr', 'ss', 'al', 'tin', 'steel', 'metal'
   ];
 
-  const genericQtyRegex = /\b(\d+(?:\\.\d+)?)\s+([a-zA-Z]{3,15})\b/g;
-  let match;
-  while ((match = genericQtyRegex.exec(cleanText)) !== null) {
-    const num = match[1];
-    const unitCandidate = match[2].toLowerCase();
+  // Match only within individual non-empty lines without crossing newline boundaries
+  const lines = cleanText.split(/[\r\n]+/);
+  for (const line of lines) {
+    const genericQtyRegex = /\b(\d+(?:\.\d+)?)[ \t]+([a-zA-Z]{3,15})\b/g;
+    let match;
+    while ((match = genericQtyRegex.exec(line)) !== null) {
+      const num = match[1];
+      const unitCandidate = match[2].toLowerCase();
 
-    if (VALID_STEEL_UNITS.includes(unitCandidate)) continue;
-    if (SKIP_WORDS.includes(unitCandidate)) continue;
-    if (hasValidSteelUnit) continue;
+      if (VALID_STEEL_UNITS.includes(unitCandidate)) continue;
+      if (SKIP_WORDS.includes(unitCandidate)) continue;
+      if (hasValidSteelUnit) continue;
 
-    return {
-      number: num,
-      invalidUnit: match[2],
-    };
+      return {
+        number: num,
+        invalidUnit: match[2],
+      };
+    }
   }
 
   return null;
@@ -456,18 +509,31 @@ async function syncInquiryFromDeal(inquiryId, dealObj, dealItems) {
       delivery_date: dealObj.delivery_date || existingAi.delivery_date,
       payment_terms: dealObj.payment_terms || existingAi.payment_terms,
       paymentTerms: dealObj.payment_terms || existingAi.paymentTerms,
+      contact_person: dealObj.contact_person || existingAi.contact_person || existingAi.contactPerson,
+      contactPerson: dealObj.contact_person || existingAi.contact_person || existingAi.contactPerson,
+      customer_phone: dealObj.customer_phone || existingAi.customer_phone || existingAi.customerPhone,
+      customerPhone: dealObj.customer_phone || existingAi.customer_phone || existingAi.customerPhone,
+      additional_notes: dealObj.notes || dealObj.additional_notes || existingAi.additional_notes || existingAi.additionalNotes,
+      additionalNotes: dealObj.notes || dealObj.additional_notes || existingAi.additional_notes || existingAi.additionalNotes,
       line_items: formattedLineItems,
       lineItems: formattedLineItems,
       unitPrice: formattedLineItems[0]?.rate || existingAi.unitPrice || null,
       total_amount: totalAmount > 0 ? totalAmount : existingAi.total_amount || null,
       totalAmount: totalAmount > 0 ? totalAmount : existingAi.totalAmount || null,
       quantityTons: quantityTons > 0 ? quantityTons : existingAi.quantityTons || 0,
+      subtotal: totalAmount > 0 ? totalAmount : existingAi.subtotal || null,
+      gst_amount: totalAmount > 0 ? Math.round(totalAmount * 0.18) : existingAi.gst_amount || null,
+      gstAmount: totalAmount > 0 ? Math.round(totalAmount * 0.18) : existingAi.gstAmount || null,
+      grand_total: totalAmount > 0 ? Math.round(totalAmount * 1.18) : existingAi.grand_total || null,
+      grandTotal: totalAmount > 0 ? Math.round(totalAmount * 1.18) : existingAi.grandTotal || null,
     };
 
     await supabase
       .from('inquiries')
       .update({
         ai_extraction_json: updatedAi,
+        customer_name: dealObj.customer_name || inq.customer_name,
+        sender_name: dealObj.customer_name || inq.sender_name,
       })
       .eq('id', inquiryId);
   } catch (err) {
@@ -1045,41 +1111,44 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     if (!data) {
       const isChoiceOrConfirmation =
-        /^(?:yes|correct|confirm|proceed|haan?|sahi\s+hai|update\s+(?:it|this|deal|inquiry)|ok|okay|yep|sure|ha|[1-9]|option\s*[1-9]|deal\s*[1-9]|#?(?:DEAL|INQ)-[A-F0-9]{4,6})\b/i.test((text || '').trim());
+        /^(?:yes|correct|confirm|confirmed|proceed|haan?|sahi\s+hai|update\s+(?:it|this|deal|inquiry|rates?)|ok|okay|yep|sure|ha|[1-9]|option\s*[1-9]|deal\s*[1-9]|#?(?:DEAL|INQ)-[A-F0-9]{4,8})\b/i.test((text || '').trim()) ||
+        /\b(?:yes\s+its\s+correct|just\s+update\s+the\s+rates?|update\s+the\s+rates?\s+provided|apply\s+these\s+rates?)\b/i.test(text || '');
 
       if (isChoiceOrConfirmation) {
         try {
           const { getRawChatHistory } = require('../core/memory');
           const history = await getRawChatHistory(senderPhone);
           const lastAssistantMsg = [...history].reverse().find((m) => m.role === 'assistant');
-          const lastUserMsg = [...history].reverse().find(
-            (m) => m.role === 'user' && m.content && m.content.trim() !== text.trim(),
+
+          // Search backwards through chat history for the most recent message that contained products, rates, or deal details
+          const reversedHistory = [...history].reverse();
+          const targetMsg = reversedHistory.find(
+            (m) => m.role === 'user' && m.content && m.content.trim() !== text.trim() &&
+            /\b(mt|tons?|tonne|kg|sheet|plate|coil|beam|channel|pipe|angle|bar|tmt|rate|price|rs|₹|@|dimension|spec|quantity|delivery|payment|note)\b/i.test(m.content)
           );
 
-          // If last assistant message asked for deal selection (contained "open inquiries" or "Which Inquiry/Deal ID")
+          // If last assistant message asked for deal selection
           if (lastAssistantMsg && /open\s+(?:inquiries|deals)|Which\s+(?:Inquiry|Deal)\s+ID/i.test(lastAssistantMsg.content)) {
             const numMatch = text.trim().match(/^(?:option\s*|#\s*|inquiry\s*|inq\s*|deal\s*)?([1-9])$/i);
             let selectedDealCode = null;
             if (numMatch) {
               const optIndex = parseInt(numMatch[1], 10);
-              const dealMatches = [...lastAssistantMsg.content.matchAll(/(?:^|\n)\s*(\d+)\.\s*\*#?((?:DEAL|INQ)-[A-F0-9]{4,6})\*/gi)];
+              const dealMatches = [...lastAssistantMsg.content.matchAll(/(?:^|\n)\s*(\d+)\.\s*\*#?((?:DEAL|INQ)-[A-F0-9]{4,8})\*/gi)];
               if (dealMatches.length >= optIndex) {
                 selectedDealCode = dealMatches[optIndex - 1][2];
               }
             } else {
-              const explicitCode = text.match(/#?((?:DEAL|INQ)-[A-F0-9]{4,6})/i);
+              const explicitCode = text.match(/#?((?:DEAL|INQ)-[A-F0-9]{4,8})/i);
               if (explicitCode) selectedDealCode = explicitCode[1];
             }
 
-            if (selectedDealCode && lastUserMsg && lastUserMsg.content) {
-              effectiveTextForLLM = `${lastUserMsg.content}\nfor inquiry id ${selectedDealCode}`;
+            if (selectedDealCode && targetMsg && targetMsg.content) {
+              effectiveTextForLLM = `${targetMsg.content}\nfor inquiry id ${selectedDealCode}\n\nConfirmed: ${text}`;
             }
-          } else if (lastUserMsg && lastUserMsg.content) {
-            const hContent = lastUserMsg.content;
-            const hasProdOrRateInHistory = /\b(mt|tons?|kg|sheet|plate|coil|beam|channel|pipe|angle|bar|tmt|rate|price|rs|₹|@)\b/i.test(hContent);
-            if (hasProdOrRateInHistory) {
-              effectiveTextForLLM = `${hContent}\n\nConfirmed: ${text}`;
-            }
+          } else if (targetMsg && targetMsg.content) {
+            const explicitCode = text.match(/#?((?:DEAL|INQ)-[A-F0-9]{4,8})/i);
+            const inqSuffix = explicitCode ? `\nfor inquiry id ${explicitCode[1]}` : '';
+            effectiveTextForLLM = `${targetMsg.content}${inqSuffix}\n\nConfirmed: ${text}`;
           }
         } catch (histErr) {
           console.warn('[SalesAgent] History lookup notice:', histErr.message);
@@ -1205,27 +1274,33 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           ruleStage = stageUpdateMatch[1].toLowerCase();
         }
 
-        // Check multi-item rate update list e.g. "MS Sheet 5MM THK - 10\nMS Sheet 6MM THK - 15"
+        // Check multi-item rate update list / inline updates / field updates
         const multiItemsParsed = [];
         const isRateUpdateContext =
-          /\b(upadte|updt|updte|update|set|new|give)\s+(?:the\s+)?(?:rates?|prices?)|(?:rates?|prices?)\s+for|rates?:/i.test(textRaw) ||
+          /\b(upadte|updt|updte|update|set|new|give|change)\s+(?:the\s+)?(?:rates?|prices?|pricing)|(?:rates?|prices?)\s+for|rates?:/i.test(textRaw) ||
           /\b(?:rates?|prices?)\b/i.test(textRaw);
-        if (isRateUpdateContext) {
+
+        if (isRateUpdateContext || /\b(?:rate|price|qty|quantity|unit)\b/i.test(textRaw)) {
           ruleAction = 'deal_update';
-          const lines = textRaw.split('\n');
+
+          // 1. Process line by line
+          const lines = textRaw.split(/[\r\n]+/);
           for (const line of lines) {
             const cleanLine = line.trim();
             if (
               !cleanLine ||
               /^(?:upadte|updt|updte|update|rates|prices|for|customer|company|deal|inquiry)\b/i.test(cleanLine) ||
-              /#?(?:DEAL|INQ)-[A-F0-9]{4,6}\b/i.test(cleanLine) ||
+              /#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/i.test(cleanLine) ||
               /deal\s+id/i.test(cleanLine)
             ) continue;
-            const lineMatch = cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s*[-:=@]\s*₹?\s*([\d,.]+)\s*$/i);
+
+            // Pattern A: "MS Sheet 5mm - 15", "CR sheet 1mm : 16", "Chequered Plate = 17", "HR Coil 3.15mm 12"
+            const lineMatch = cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s*(?:[-:=@—→]|rate\s+(?:is|to|of)?|price\s+(?:is|to|of)?)\s*₹?\s*([\d,.]+)\s*(?:\/?[a-zA-Z]+)?$/i) ||
+                              cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s+([\d,.]+)\s*$/i);
             if (lineMatch) {
-              const prodCandidate = lineMatch[1].trim();
+              const prodCandidate = lineMatch[1].trim().replace(/^[-•*]\s*/, '');
               const rateVal = parseFloat(lineMatch[2].replace(/,/g, ''));
-              if (prodCandidate && rateVal > 0) {
+              if (prodCandidate && rateVal > 0 && !/^(?:company|customer|inquiry|delivery|payment|stage|status)/i.test(prodCandidate)) {
                 const mmM = prodCandidate.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
                 multiItemsParsed.push({
                   product_requirement: prodCandidate,
@@ -1234,6 +1309,51 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
                   quantity_mt: 0,
                   unit: 'MT',
                   rate_per_mt: rateVal,
+                });
+              }
+            }
+          }
+
+          // 2. If no multiline matches, try inline comma/dash separated items: "MS Sheet 5mm=15, 6mm=18, HR Coil=12"
+          if (multiItemsParsed.length === 0) {
+            const inlineSegments = textRaw.split(/[,;]+/);
+            for (const seg of inlineSegments) {
+              const cleanSeg = seg.trim();
+              const segMatch = cleanSeg.match(/([A-Za-z0-9\s.()x/]+?)\s*(?:[-:=@—→]|rate\s+(?:is|to|of)?)\s*₹?\s*([\d,.]+)/i);
+              if (segMatch) {
+                const pCand = segMatch[1].trim().replace(/^(?:rates?|prices?|for|and|update)\s+/i, '');
+                const rVal = parseFloat(segMatch[2].replace(/,/g, ''));
+                if (pCand && rVal > 0) {
+                  const mmM = pCand.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
+                  multiItemsParsed.push({
+                    product_requirement: pCand,
+                    dimensions: mmM ? mmM[0] : null,
+                    quantity: 0,
+                    quantity_mt: 0,
+                    unit: 'MT',
+                    rate_per_mt: rVal,
+                  });
+                }
+              }
+            }
+          }
+
+          // 3. Check for specific single item rate update: "set rate of HR coil 3.15mm to 12"
+          if (multiItemsParsed.length === 0) {
+            const singleRateMatch = textRaw.match(/(?:rate|price)\s+of\s+([A-Za-z0-9\s.()x/]+?)\s+to\s+₹?\s*([\d,.]+)/i) ||
+                                   textRaw.match(/([A-Za-z0-9\s.()x/]+?)\s+rate\s+(?:is\s+|to\s+)?₹?\s*([\d,.]+)/i);
+            if (singleRateMatch) {
+              const pCand = singleRateMatch[1].trim();
+              const rVal = parseFloat(singleRateMatch[2].replace(/,/g, ''));
+              if (pCand && rVal > 0) {
+                const mmM = pCand.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
+                multiItemsParsed.push({
+                  product_requirement: pCand,
+                  dimensions: mmM ? mmM[0] : null,
+                  quantity: 0,
+                  quantity_mt: 0,
+                  unit: 'MT',
+                  rate_per_mt: rVal,
                 });
               }
             }
@@ -1687,13 +1807,17 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     }
 
     // ── SCENARIO 4: UPDATE TO EXISTING DEAL (WITH DEAL ID OR AUTO-ASSUMED) ─────
-    if (targetExplicitDeal && (explicitDealIdMatch || data.deal_id || !hasAnyProductName || data.action === 'deal_update' || isRateUpdateContext || hasRateUpdate || isRateOrPriceUpdate || isFieldUpdate)) {
+    const isAddItemAction = /\b(?:add\s+(?:item|line\s*item)|add\s+\d+|new\s+item)\b/i.test(effectiveTextForLLM || text) || data.action === 'add_item';
+    const isRemoveItemAction = /\b(?:remove\s+(?:item|line\s*item)|delete\s+(?:item|line\s*item)|remove\s+[A-Za-z]+|delete\s+item\s*\d+)\b/i.test(effectiveTextForLLM || text) || data.action === 'remove_item';
+
+    if (targetExplicitDeal && (explicitDealIdMatch || data.deal_id || !hasAnyProductName || data.action === 'deal_update' || isRateUpdateContext || hasRateUpdate || isRateOrPriceUpdate || isFieldUpdate || isAddItemAction || isRemoveItemAction)) {
       const dealId = targetExplicitDeal.id;
       const dealCode = getDealCode(targetExplicitDeal);
       const company = targetExplicitDeal.customer_name;
 
       const updateFields = {};
       const updatedLabels = [];
+      const unmatchedItems = [];
 
       if (extractedDeliveryLoc || data.delivery_location) {
         updateFields.delivery_location = extractedDeliveryLoc || data.delivery_location;
@@ -1719,12 +1843,14 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         updateFields.customer_phone = data.customer_phone;
       }
 
-      if (data.total_amount && Number(data.total_amount) > 0) {
-        updateFields.total_amount = Number(data.total_amount);
-        updatedLabels.push(`Total Rate (Rs. *${Number(data.total_amount).toLocaleString('en-IN')}*)`);
+      const notesMatch = textToInspect.match(/(?:notes?|remarks?|additional\s*notes?)\s*[:=-]\s*([^\n\r]+)/i);
+      const noteContent = notesMatch ? notesMatch[1].trim() : (data.notes || data.additional_notes || null);
+      if (noteContent) {
+        updateFields.notes = noteContent;
+        updatedLabels.push(`Notes (*${noteContent}*)`);
       }
 
-      // Update rate or qty on existing line items if provided
+      // Fetch existing line items for this deal
       let existingItems = targetExplicitDeal.deal_items || [];
       if (existingItems.length === 0) {
         const { data: dbItems } = await supabase
@@ -1737,7 +1863,75 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
       let updatedDealItems = [];
 
-      if (existingItems.length > 0 && (hasRateUpdate || hasQtyUpdate || processedItems.length > 0)) {
+      // A. REMOVE LINE ITEM ACTION
+      if (isRemoveItemAction && existingItems.length > 0) {
+        const idxMatch = textToInspect.match(/(?:item|line)\s*#?([1-9])/i);
+        let itemToDelete = null;
+        if (idxMatch) {
+          const itemIdx = parseInt(idxMatch[1], 10) - 1;
+          if (itemIdx >= 0 && itemIdx < existingItems.length) {
+            itemToDelete = existingItems[itemIdx];
+          }
+        } else if (processedItems.length > 0) {
+          itemToDelete = findMatchingProcessedItem(existingItems[0], processedItems) ||
+            existingItems.find(it => {
+              const p = processedItems[0];
+              const pN = (p.pName || p.product_requirement || '').toLowerCase();
+              return it.sku_text.toLowerCase().includes(pN) || pN.includes(it.sku_text.toLowerCase());
+            });
+        } else {
+          // Check product keywords in text
+          for (const itm of existingItems) {
+            const fam = getProductFamily(itm.sku_text);
+            if (fam && textToInspect.toLowerCase().includes(fam.replace(/_/g, ' '))) {
+              itemToDelete = itm;
+              break;
+            }
+          }
+        }
+
+        if (itemToDelete) {
+          await supabase.from('deal_items').delete().eq('id', itemToDelete.id);
+          updatedDealItems = existingItems.filter(it => it.id !== itemToDelete.id);
+          updatedLabels.push(`Removed *${itemToDelete.sku_text}${itemToDelete.dimensions ? ` (${itemToDelete.dimensions})` : ''}*`);
+        } else {
+          return `⚠️ Could not find the specified line item to remove from Inquiry ${dealCode}. Please verify the product name or item number.`;
+        }
+      }
+      // B. ADD LINE ITEM ACTION
+      else if (isAddItemAction && processedItems.length > 0) {
+        for (const newItem of processedItems) {
+          const sku = newItem.pName || newItem.product_requirement || 'Metal Product';
+          const dim = newItem.dimensions || '';
+          const qty = Number(newItem.qty || newItem.quantity || 0) || 1;
+          const unit = newItem.unit || 'MT';
+          const rate = Number(newItem.rate || newItem.rate_per_mt || 0);
+          const amount = rate > 0 ? Math.round(rate * qty) : 0;
+
+          const { data: insItem, error: insErr } = await supabase
+            .from('deal_items')
+            .insert({
+              deal_id: dealId,
+              sku_text: sku,
+              dimensions: dim,
+              quantity: qty,
+              unit: unit,
+              rate: rate > 0 ? rate : null,
+              amount: amount > 0 ? amount : null,
+            })
+            .select();
+
+          if (insItem && insItem.length > 0) {
+            existingItems.push(insItem[0]);
+            updatedDealItems = existingItems;
+            updatedLabels.push(`Added *${sku}${dim ? ` (${dim})` : ''}* (${qty} ${unit}${rate > 0 ? ` @ ₹${rate}/${unit}` : ''})`);
+          } else {
+            console.error('[SalesAgent] Error adding deal item:', insErr);
+          }
+        }
+      }
+      // C. UPDATE EXISTING LINE ITEMS (Rates, Quantities, Units)
+      else if (existingItems.length > 0 && (hasRateUpdate || hasQtyUpdate || processedItems.length > 0)) {
         const hasExplicitQtyInMsg = /\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|pcs|nos|sheets?|plates?|coils?|bars?)\b/i.test(
           (effectiveTextForLLM || text).replace(/rate\s+is\s+[\d,.]+/i, '')
               .replace(/@\s*[\d,.]+/i, '')
@@ -1748,12 +1942,20 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           ? (data.line_items?.[0]?.quantity || data.line_items?.[0]?.quantity_mt || (processedItems[0]?.qty > 0 ? processedItems[0]?.qty : null))
           : null;
 
+        const matchedProcessedIndices = new Set();
+
         for (let idx = 0; idx < existingItems.length; idx++) {
           const itm = existingItems[idx];
           const matchedP = findMatchingProcessedItem(itm, processedItems, existingItems.length === processedItems.length ? idx : -1);
+          if (matchedP) {
+            const pIdx = processedItems.indexOf(matchedP);
+            if (pIdx >= 0) matchedProcessedIndices.add(pIdx);
+          }
+
           const itemUpdates = {};
-          const matchedRate = matchedP?.rate || (matchedP?.rate_per_mt) || (processedItems.length === 1 ? firstRate : null);
-          const matchedQty = hasExplicitQtyInMsg ? (matchedP?.qty || (processedItems.length === 1 ? firstQty : null)) : null;
+          const matchedRate = matchedP?.rate || (matchedP?.rate_per_mt) || (existingItems.length === 1 && !hasAnyProductName ? firstRate : null);
+          const matchedQty = hasExplicitQtyInMsg ? (matchedP?.qty || (existingItems.length === 1 && !hasAnyProductName ? firstQty : null)) : null;
+          const matchedUnit = matchedP?.unit || null;
 
           if (matchedRate && Number(matchedRate) > 0) {
             itemUpdates.rate = Number(matchedRate);
@@ -1763,6 +1965,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             itemUpdates.quantity = Number(matchedQty);
             updatedLabels.push(`${itm.sku_text || 'Item'} Qty (*${matchedQty} ${itm.unit || 'MT'}*)`);
           }
+          if (matchedUnit && matchedUnit !== itm.unit) {
+            itemUpdates.unit = matchedUnit.toUpperCase();
+            updatedLabels.push(`${itm.sku_text || 'Item'} Unit (*${matchedUnit.toUpperCase()}*)`);
+          }
+
           const finalRate = itemUpdates.rate !== undefined ? itemUpdates.rate : itm.rate;
           const finalQty = itemUpdates.quantity !== undefined ? itemUpdates.quantity : itm.quantity;
           if (finalRate !== null && finalRate !== undefined && finalQty !== null && finalQty !== undefined) {
@@ -1773,6 +1980,13 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             updatedDealItems.push({ ...itm, ...itemUpdates });
           } else {
             updatedDealItems.push(itm);
+          }
+        }
+
+        // Track any unmatched items provided in user message
+        for (let pIdx = 0; pIdx < processedItems.length; pIdx++) {
+          if (!matchedProcessedIndices.has(pIdx) && !isAddItemAction) {
+            unmatchedItems.push(processedItems[pIdx]);
           }
         }
       } else {
@@ -1823,18 +2037,47 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         console.warn('[SalesAgent] Follow-up auto-resolution notice:', rErr.message);
       }
 
-      const updatedStr = updatedLabels.length > 0 ? `Updated: ${updatedLabels.join(', ')}\n` : '';
+      // Build verified itemized breakdown for manager response
+      const itemBreakdownLines = (updatedDealItems || []).map(item => {
+        const rateDisplay = item.rate > 0 ? ` @ ₹${Number(item.rate).toLocaleString('en-IN')}/${item.unit || 'MT'}` : ' (Rate pending)';
+        const amountDisplay = item.amount > 0 ? ` = *₹${Number(item.amount).toLocaleString('en-IN')}*` : '';
+        return `- *${item.sku_text || 'Item'}*${item.dimensions ? ` (${item.dimensions})` : ''}: ${item.quantity || 0} ${item.unit || 'MT'}${rateDisplay}${amountDisplay}`;
+      });
+
+      const subtotalVal = (updatedDealItems || []).reduce((s, i) => s + (Number(i.amount) || 0), 0);
+      const gstVal = Math.round(subtotalVal * 0.18);
+      const grandTotalVal = subtotalVal + gstVal;
+
+      const financialSummary = subtotalVal > 0
+        ? `\n*Financial Breakdown:*\n- Subtotal: *₹${subtotalVal.toLocaleString('en-IN')}*\n- GST (18%): *₹${gstVal.toLocaleString('en-IN')}*\n- Grand Total: *₹${grandTotalVal.toLocaleString('en-IN')}*\n`
+        : '';
+
+      const unmatchedWarning = unmatchedItems.length > 0
+        ? `\n⚠️ *${unmatchedItems.map(u => u.pName || u.product_requirement).join(', ')}* not found in Inquiry ${dealCode}. Please verify and resend.\n`
+        : '';
+
+      const updatedStr = updatedLabels.length > 0 ? `*Updated:* ${updatedLabels.join(', ')}\n\n` : '';
 
       if (completeness.isComplete) {
         return `*Inquiry Updated & Complete - ${dealCode}*\n\n` +
           `Customer: *${company}*\n` +
-          `Stage: *${(refreshedDeal.stage || 'NEW INQUIRY').toUpperCase()}*\n` +
+          `Stage: *${(refreshedDeal.stage || 'NEW INQUIRY').toUpperCase()}*\n\n` +
           updatedStr +
+          `*Current Line Items:*\n` +
+          itemBreakdownLines.join('\n') +
+          `\n` +
+          financialSummary +
+          unmatchedWarning +
           `\nAll mandatory fields complete. Logged to Sales Pipeline & Inquiries! 📈`;
       } else {
         return `*Inquiry Updated - ${dealCode}*\n\n` +
-          `Customer: *${company}*\n` +
+          `Customer: *${company}*\n\n` +
           updatedStr +
+          `*Current Line Items:*\n` +
+          itemBreakdownLines.join('\n') +
+          `\n` +
+          financialSummary +
+          unmatchedWarning +
           `\n*Still needed to complete:*\n` +
           completeness.missingFields.map(f => `• ${f}`).join('\n') +
           `\n\nLogged to Sales Pipeline & Inquiries!`;
