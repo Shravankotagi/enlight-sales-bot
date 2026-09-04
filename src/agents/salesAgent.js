@@ -2068,11 +2068,17 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
       // C. UPDATE EXISTING LINE ITEMS (Rates, Quantities, Units)
       else if (existingItems.length > 0 && (hasRateUpdate || hasQtyUpdate || processedItems.length > 0)) {
-        const hasExplicitQtyInMsg = /\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|pcs|nos|sheets?|plates?|coils?|bars?)\b/i.test(
-          (effectiveTextForLLM || text).replace(/rate\s+is\s+[\d,.]+/i, '')
+        const isQtyUpdateContext =
+          /\b(?:qty|quantity|tonnage|pieces|pcs|nos|bundles|increase|decrease|reduce|from\s+\d+\s+to\s+\d+|change\s+to\s+\d+|set\s+to\s+\d+|to\s+\d+)\b/i.test(
+            effectiveTextForLLM || text,
+          ) ||
+          /\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|pcs|nos|sheets?|plates?|coils?|bars?)\b/i.test(
+            (effectiveTextForLLM || text)
+              .replace(/rate\s+is\s+[\d,.]+/i, '')
               .replace(/@\s*[\d,.]+/i, '')
-              .replace(/\b(?:rs|inr|\/mt|\/kg)\b/gi, '')
-        );
+              .replace(/\b(?:rs|inr|\/mt|\/kg)\b/gi, ''),
+          );
+        const hasExplicitQtyInMsg = isQtyUpdateContext;
         const firstRate = data.line_items?.[0]?.rate_per_mt || (processedItems[0]?.rate > 0 ? processedItems[0]?.rate : null);
         const firstQty = hasExplicitQtyInMsg
           ? (data.line_items?.[0]?.quantity || data.line_items?.[0]?.quantity_mt || (processedItems[0]?.qty > 0 ? processedItems[0]?.qty : null))
@@ -2431,11 +2437,17 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
       if (existingDealItems && existingDealItems.length > 0) {
         // Update existing line items (e.g. rate or qty provided)
-        const hasExplicitQtyInMsg = /\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|pcs|nos|sheets?|plates?|coils?|bars?)\b/i.test(
-          text.replace(/rate\s+is\s+[\d,.]+/i, '')
+        const isQtyUpdateContext =
+          /\b(?:qty|quantity|tonnage|pieces|pcs|nos|bundles|increase|decrease|reduce|from\s+\d+\s+to\s+\d+|change\s+to\s+\d+|set\s+to\s+\d+|to\s+\d+)\b/i.test(
+            text,
+          ) ||
+          /\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|pcs|nos|sheets?|plates?|coils?|bars?)\b/i.test(
+            text
+              .replace(/rate\s+is\s+[\d,.]+/i, '')
               .replace(/@\s*[\d,.]+/i, '')
-              .replace(/\b(?:rs|inr|\/mt|\/kg)\b/gi, '')
-        );
+              .replace(/\b(?:rs|inr|\/mt|\/kg)\b/gi, ''),
+          );
+        const hasExplicitQtyInMsg = isQtyUpdateContext;
         const firstRate = processedItems[0]?.rate || data.line_items?.[0]?.rate_per_mt;
         const firstQty = hasExplicitQtyInMsg
           ? ((processedItems[0]?.qty > 0 ? processedItems[0]?.qty : null) || data.line_items?.[0]?.quantity)
