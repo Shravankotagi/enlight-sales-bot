@@ -872,7 +872,45 @@ async function getAllOpenDealsForCustomer(customerName, senderPhone) {
   }
 
   const { data } = await query;
-  return data || [];
+  const deals = data || [];
+  if (deals.length <= 1) return deals;
+
+  // Prioritize exact customer name matches if available
+  const targetClean = customerName.toLowerCase().trim();
+  const exactMatches = deals.filter(
+    (d) => (d.customer_name || '').toLowerCase().trim() === targetClean,
+  );
+  return exactMatches.length > 0 ? exactMatches : deals;
+}
+
+function formatOpenDealsListPrompt(customerName, openDeals) {
+  const dealListLines = openDeals
+    .map((d, idx) => {
+      const code = getDealCode(d);
+      let itemsDesc = '';
+      if (d.deal_items && d.deal_items.length > 0) {
+        itemsDesc = d.deal_items
+          .map((it) => {
+            const spec = it.dimensions ? ` ${it.dimensions}` : '';
+            const qty = it.quantity || it.quantity_mt || 0;
+            const unit = it.unit || 'MT';
+            const rate = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}` : '';
+            return `${it.sku_text || 'Item'}${spec} (${qty} ${unit}${rate})`;
+          })
+          .join(', ');
+      } else {
+        itemsDesc = `Total: ₹${Number(d.total_amount || 0).toLocaleString('en-IN')}`;
+      }
+      const stageStr = (d.stage || 'NEW INQUIRY').toUpperCase();
+      return `${idx + 1}. *${code}* — ${itemsDesc} [Stage: *${stageStr}*]`;
+    })
+    .join('\n');
+
+  return (
+    `There are ${openDeals.length} open inquiries/deals for *${customerName}*:\n\n` +
+    `${dealListLines}\n\n` +
+    `Which Deal ID would you like to update? Please reply with the Deal ID (e.g. *${getDealCode(openDeals[0])}*) or option number (e.g. *1*).`
+  );
 }
 
 async function findBestDeal(customerName, senderPhone) {
@@ -999,25 +1037,45 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       return await handleSendQuotationMessage(text, senderPhone);
     }
 
+    let effectiveTextForLLM = text;
     let data = (typeof overrideData === 'object' && overrideData !== null) ? overrideData : null;
 
     if (!data) {
-      let effectiveTextForLLM = text;
-      const isShortConfirmation = /^(?:yes|correct|confirm|proceed|haan?|sahi\s+hai|update\s+(?:it|this|deal|inquiry)|ok|okay|yep|sure|ha|1|option\s*1)\b/i.test((text || '').trim());
+      const isChoiceOrConfirmation =
+        /^(?:yes|correct|confirm|proceed|haan?|sahi\s+hai|update\s+(?:it|this|deal|inquiry)|ok|okay|yep|sure|ha|[1-9]|option\s*[1-9]|deal\s*[1-9]|#?(?:DEAL|INQ)-[A-F0-9]{4,6})\b/i.test((text || '').trim());
 
-      if (isShortConfirmation) {
+      if (isChoiceOrConfirmation) {
         try {
           const { getRawChatHistory } = require('../core/memory');
           const history = await getRawChatHistory(senderPhone);
-          for (let i = history.length - 1; i >= 0; i--) {
-            const hMsg = history[i];
-            if (hMsg.role === 'user' && hMsg.content && hMsg.content.trim() !== text.trim()) {
-              const hContent = hMsg.content;
-              const hasProdOrRateInHistory = /\b(mt|tons?|kg|sheet|plate|coil|beam|channel|pipe|angle|bar|tmt|rate|price|rs|₹|@)\b/i.test(hContent);
-              if (hasProdOrRateInHistory) {
-                effectiveTextForLLM = `${hContent}\n\nConfirmed: ${text}`;
-                break;
+          const lastAssistantMsg = [...history].reverse().find((m) => m.role === 'assistant');
+          const lastUserMsg = [...history].reverse().find(
+            (m) => m.role === 'user' && m.content && m.content.trim() !== text.trim(),
+          );
+
+          // If last assistant message asked for deal selection (contained "open inquiries/deals" or "Which Deal ID")
+          if (lastAssistantMsg && /open\s+(?:inquiries|deals)|Which\s+Deal\s+ID/i.test(lastAssistantMsg.content)) {
+            const numMatch = text.trim().match(/^(?:option\s*|#\s*|deal\s*)?([1-9])$/i);
+            let selectedDealCode = null;
+            if (numMatch) {
+              const optIndex = parseInt(numMatch[1], 10);
+              const dealMatches = [...lastAssistantMsg.content.matchAll(/(?:^|\n)\s*(\d+)\.\s*\*#?(DEAL-[A-F0-9]{4,6})\*/gi)];
+              if (dealMatches.length >= optIndex) {
+                selectedDealCode = dealMatches[optIndex - 1][2];
               }
+            } else {
+              const explicitCode = text.match(/#?(DEAL-[A-F0-9]{4,6})/i);
+              if (explicitCode) selectedDealCode = explicitCode[1];
+            }
+
+            if (selectedDealCode && lastUserMsg && lastUserMsg.content) {
+              effectiveTextForLLM = `${lastUserMsg.content}\nfor deal id ${selectedDealCode}`;
+            }
+          } else if (lastUserMsg && lastUserMsg.content) {
+            const hContent = lastUserMsg.content;
+            const hasProdOrRateInHistory = /\b(mt|tons?|kg|sheet|plate|coil|beam|channel|pipe|angle|bar|tmt|rate|price|rs|₹|@)\b/i.test(hContent);
+            if (hasProdOrRateInHistory) {
+              effectiveTextForLLM = `${hContent}\n\nConfirmed: ${text}`;
             }
           }
         } catch (histErr) {
@@ -1318,7 +1376,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     }
 
     // ── CONTEXT RESOLUTION FOR EXPLICIT DEAL ID & ACTIVE SESSIONS ──────────
-    const explicitDealIdMatch = text.match(/#?(?:DEAL|INQ)-([A-Za-z0-9_-]+)/i) || text.match(/#([A-Fa-f0-9]{6})\b/i);
+    const textToInspect = effectiveTextForLLM || text || '';
+    const explicitDealIdMatch = textToInspect.match(/#?(?:DEAL|INQ)-([A-Za-z0-9_-]+)/i) || textToInspect.match(/#([A-Fa-f0-9]{6})\b/i);
     let targetExplicitDeal = null;
     if (explicitDealIdMatch || data.deal_id) {
       const dealCodeToFind = (explicitDealIdMatch ? explicitDealIdMatch[1] : data.deal_id);
@@ -1454,8 +1513,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       let dealToUpdate = targetExplicitDeal;
       if (!dealToUpdate && customerName) {
         const openDeals = await getAllOpenDealsForCustomer(customerName, senderPhone);
-        if (openDeals.length > 0) {
+        if (openDeals.length === 1) {
           dealToUpdate = openDeals[0];
+        } else if (openDeals.length > 1) {
+          return formatOpenDealsListPrompt(customerName, openDeals);
         } else {
           dealToUpdate = await findBestDeal(customerName, senderPhone);
         }
@@ -1587,6 +1648,22 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         `Deal successfully moved to *${dbStage.toUpperCase()}* in Sales Pipeline! 📈`;
     }
 
+    // Disambiguation check for any deal update/rate update/field update without an explicit Deal ID
+    const isRateUpdateContext =
+      /\b(upadte|updt|updte|update|set|new|give)\s+(?:the\s+)?(?:rates?|prices?)|(?:rates?|prices?)\s+for|rates?:/i.test(effectiveTextForLLM || text) ||
+      /\b(?:rates?|prices?|target\s+price)\b/i.test(effectiveTextForLLM || text);
+    const isRateOrPriceUpdate = isRateUpdateContext || hasRateUpdate;
+    const isFieldUpdate = hasDeliveryUpdate || hasPaymentUpdate || !!data.delivery_date || !!data.contact_person;
+
+    if (!targetExplicitDeal && customerName && (isRateOrPriceUpdate || isFieldUpdate || data.action === 'deal_update' || !hasAnyProductName)) {
+      const openDeals = await getAllOpenDealsForCustomer(customerName, senderPhone);
+      if (openDeals.length === 1) {
+        targetExplicitDeal = openDeals[0];
+      } else if (openDeals.length > 1) {
+        return formatOpenDealsListPrompt(customerName, openDeals);
+      }
+    }
+
     // ── SCENARIO 3: PARTIAL UPDATE WITHOUT PRODUCT NAME ────────────────────────
     // If NO product name is provided AND not explicitly a stage_update:
     if (!hasAnyProductName && data.action !== 'stage_update') {
@@ -1597,7 +1674,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         if (openDeals.length === 1) {
           targetExplicitDeal = openDeals[0];
         } else if (openDeals.length > 1) {
-          return `Which deal is this update for? Please provide the Deal ID (e.g. ${getDealCode(openDeals[0])}) or company name.`;
+          return formatOpenDealsListPrompt(customerName, openDeals);
         } else {
           return `Which deal or inquiry is this update for? Please provide the Deal ID (e.g. #DEAL-XXXXXX) or company name.`;
         }
@@ -1607,7 +1684,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     }
 
     // ── SCENARIO 4: UPDATE TO EXISTING DEAL (WITH DEAL ID OR AUTO-ASSUMED) ─────
-    if (targetExplicitDeal && (explicitDealIdMatch || data.deal_id || !hasAnyProductName || data.action === 'deal_update' || isRateUpdateContext || hasRateUpdate)) {
+    if (targetExplicitDeal && (explicitDealIdMatch || data.deal_id || !hasAnyProductName || data.action === 'deal_update' || isRateUpdateContext || hasRateUpdate || isRateOrPriceUpdate || isFieldUpdate)) {
       const dealId = targetExplicitDeal.id;
       const dealCode = getDealCode(targetExplicitDeal);
       const company = targetExplicitDeal.customer_name;
@@ -1659,7 +1736,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
       if (existingItems.length > 0 && (hasRateUpdate || hasQtyUpdate || processedItems.length > 0)) {
         const hasExplicitQtyInMsg = /\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|pcs|nos|sheets?|plates?|coils?|bars?)\b/i.test(
-          text.replace(/rate\s+is\s+[\d,.]+/i, '')
+          (effectiveTextForLLM || text).replace(/rate\s+is\s+[\d,.]+/i, '')
               .replace(/@\s*[\d,.]+/i, '')
               .replace(/\b(?:rs|inr|\/mt|\/kg)\b/gi, '')
         );
