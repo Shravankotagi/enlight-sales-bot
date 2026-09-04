@@ -836,8 +836,8 @@ async function handleSendQuotationMessage(text, senderPhone, overrideEmail = nul
   // If no email provided, ask for email address
   if (!targetEmail) {
     await saveActiveSession(senderPhone, targetDeal.customer_name, 'waiting_for_quotation_email');
-    return `Please provide the email address to send the quotation to for *${targetDeal.customer_name}* (Deal *${dealCode}*).\n\n` +
-      `_Example:_ "Send quotation to client@example.com" or reply with the email address.`;
+    return `Please provide the email address to send the quotation to for ${targetDeal.customer_name} (Deal ${dealCode}).\n\n` +
+      `Example: "Send quotation to client@example.com" or reply with the email address.`;
   }
 
   // Email is present: Dispatch quotation!
@@ -848,9 +848,9 @@ async function handleSendQuotationMessage(text, senderPhone, overrideEmail = nul
 
   await saveActiveSession(senderPhone, targetDeal.customer_name, 'quotation_sent');
 
-  return `*Quotation Dispatched!* 📄\n\n` +
-    `Quotation successfully sent to *${targetEmail}* for *${targetDeal.customer_name}* (Deal *${dealCode}*).\n\n` +
-    `Deal status updated to *QUOTED* in Sales Pipeline! 📈`;
+  return `Quotation Dispatched!\n\n` +
+    `Quotation successfully sent to ${targetEmail} for ${targetDeal.customer_name} (Deal ${dealCode}).\n\n` +
+    `Deal status updated to QUOTED in Sales Pipeline!`;
 }
 
 async function findDealByCodeOrId(codeOrId, senderPhone) {
@@ -1004,14 +1004,14 @@ function formatOpenDealsListPrompt(customerName, openDeals) {
         itemsDesc = `Total: ₹${Number(d.total_amount || 0).toLocaleString('en-IN')}`;
       }
       const stageStr = (d.stage || 'NEW INQUIRY').toUpperCase();
-      return `${idx + 1}. *${code}* — ${itemsDesc} [Stage: *${stageStr}*]`;
+      return `${idx + 1}. ${code} — ${itemsDesc} [Stage: ${stageStr}]`;
     })
     .join('\n');
 
   return (
-    `There are ${openDeals.length} open inquiries for *${customerName}*:\n\n` +
+    `There are ${openDeals.length} open inquiries for ${customerName}:\n\n` +
     `${dealListLines}\n\n` +
-    `Which Inquiry ID would you like to update? Please reply with the Inquiry ID (e.g. *${getDealCode(openDeals[0])}*) or option number (e.g. *1*).`
+    `Which Inquiry ID would you like to update? Please reply with the Inquiry ID (e.g. ${getDealCode(openDeals[0])}) or option number (e.g. 1).`
   );
 }
 
@@ -1193,10 +1193,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       if (!isStageOrStatusUpdate) {
         const invalidUnitCheck = detectInvalidUnitInMessage(effectiveTextForLLM);
         if (invalidUnitCheck) {
-          return `*Invalid Quantity Unit*\n\n` +
-            `You specified *${invalidUnitCheck.number} ${invalidUnitCheck.invalidUnit}*.\n\n` +
-            `Metal products cannot be measured in *"${invalidUnitCheck.invalidUnit}"*.\n\n` +
-            `Please specify the quantity using a valid unit (e.g. *15 MT*, *1500 Kg*, *100 Sheets*, or *50 Pcs*).`;
+          return `Invalid Quantity Unit\n\n` +
+            `You specified ${invalidUnitCheck.number} ${invalidUnitCheck.invalidUnit}.\n\n` +
+            `Metal products cannot be measured in "${invalidUnitCheck.invalidUnit}".\n\n` +
+            `Please specify the quantity using a valid unit (e.g. 15 MT, 1500 Kg, 100 Sheets, or 50 Pcs).`;
         }
       }
 
@@ -1681,7 +1681,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
 
       if (!dealToUpdate) {
-        return `Which inquiry would you like to mark as *${dbStage.toUpperCase()}*? Please provide the Inquiry ID (e.g. #INQ-XXXXXX) or customer name.`;
+        return `Which inquiry would you like to mark as ${dbStage.toUpperCase()}? Please provide the Inquiry ID (e.g. #INQ-XXXXXX) or customer name.`;
       }
 
       const currentStage = (dealToUpdate.stage || 'new_inquiry').toLowerCase().trim();
@@ -1792,18 +1792,18 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
 
       if (dbStage === 'won') {
-        return `*DEAL WON & ORDER CONFIRMED!*\n\n` +
-          `Customer: *${dealToUpdate.customer_name}*\n` +
-          `Inquiry ID: *${dealCode}*\n` +
-          (dealToUpdate.po_number ? `Official PO Number: *${dealToUpdate.po_number}*\n` : '') +
-          `Total Value: *Rs. ${Number(dealToUpdate.total_amount || 0).toLocaleString('en-IN')}*\n\n` +
-          `Updated Sales Achievement Card! 🏆`;
+        return `DEAL WON & ORDER CONFIRMED!\n\n` +
+          `Customer: ${dealToUpdate.customer_name}\n` +
+          `Inquiry ID: ${dealCode}\n` +
+          (dealToUpdate.po_number ? `Official PO Number: ${dealToUpdate.po_number}\n` : '') +
+          `Total Value: Rs. ${Number(dealToUpdate.total_amount || 0).toLocaleString('en-IN')}\n\n` +
+          `Updated Sales Achievement Card!`;
       }
 
-      return `*Inquiry Updated - ${dealCode}*\n\n` +
-        `Customer: *${dealToUpdate.customer_name}*\n` +
-        `Stage: *${dbStage.toUpperCase()}*\n\n` +
-        `Inquiry successfully moved to *${dbStage.toUpperCase()}* in Sales Pipeline! 📈`;
+      return `Inquiry Updated - ${dealCode}\n\n` +
+        `Customer: ${dealToUpdate.customer_name}\n` +
+        `Stage: ${dbStage.toUpperCase()}\n\n` +
+        `Inquiry successfully moved to ${dbStage.toUpperCase()} in Sales Pipeline!`;
     }
 
     // Disambiguation check for any deal update/rate update/field update without an explicit Deal ID
@@ -1856,22 +1856,22 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
       if (extractedDeliveryLoc || data.delivery_location) {
         updateFields.delivery_location = extractedDeliveryLoc || data.delivery_location;
-        updatedLabels.push(`Delivery Location (*${updateFields.delivery_location}*)`);
+        updatedLabels.push(`Delivery Location (${updateFields.delivery_location})`);
       }
 
       if (data.payment_terms) {
         updateFields.payment_terms = data.payment_terms;
-        updatedLabels.push(`Payment Terms (*${updateFields.payment_terms}*)`);
+        updatedLabels.push(`Payment Terms (${updateFields.payment_terms})`);
       }
 
       if (data.delivery_date) {
         updateFields.delivery_date = data.delivery_date;
-        updatedLabels.push(`Delivery Date (*${updateFields.delivery_date}*)`);
+        updatedLabels.push(`Delivery Date (${updateFields.delivery_date})`);
       }
 
       if (data.contact_person) {
         updateFields.contact_person = data.contact_person;
-        updatedLabels.push(`Contact Person (*${updateFields.contact_person}*)`);
+        updatedLabels.push(`Contact Person (${updateFields.contact_person})`);
       }
 
       if (data.customer_phone) {
@@ -1882,7 +1882,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const noteContent = notesMatch ? notesMatch[1].trim() : (data.notes || data.additional_notes || null);
       if (noteContent) {
         updateFields.notes = noteContent;
-        updatedLabels.push(`Notes (*${noteContent}*)`);
+        updatedLabels.push(`Notes (${noteContent})`);
       }
 
       // Fetch existing line items for this deal
@@ -1928,7 +1928,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         if (itemToDelete) {
           await supabase.from('deal_items').delete().eq('id', itemToDelete.id);
           updatedDealItems = existingItems.filter(it => it.id !== itemToDelete.id);
-          updatedLabels.push(`Removed *${itemToDelete.sku_text}${itemToDelete.dimensions ? ` (${itemToDelete.dimensions})` : ''}*`);
+          updatedLabels.push(`Removed ${itemToDelete.sku_text}${itemToDelete.dimensions ? ` (${itemToDelete.dimensions})` : ''}`);
         } else {
           return `⚠️ Could not find the specified line item to remove from Inquiry ${dealCode}. Please verify the product name or item number.`;
         }
@@ -1959,7 +1959,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           if (insItem && insItem.length > 0) {
             existingItems.push(insItem[0]);
             updatedDealItems = existingItems;
-            updatedLabels.push(`Added *${sku}${dim ? ` (${dim})` : ''}* (${qty} ${unit}${rate > 0 ? ` @ ₹${rate}/${unit}` : ''})`);
+            updatedLabels.push(`Added ${sku}${dim ? ` (${dim})` : ''} (${qty} ${unit}${rate > 0 ? ` @ ₹${rate}/${unit}` : ''})`);
           } else {
             console.error('[SalesAgent] Error adding deal item:', insErr);
           }
@@ -1994,15 +1994,15 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
           if (matchedRate && Number(matchedRate) > 0) {
             itemUpdates.rate = Number(matchedRate);
-            updatedLabels.push(`${itm.sku_text || 'Item'} Rate (*Rs. ${Number(matchedRate).toLocaleString('en-IN')}*)`);
+            updatedLabels.push(`${itm.sku_text || 'Item'} Rate (Rs. ${Number(matchedRate).toLocaleString('en-IN')})`);
           }
           if (matchedQty && Number(matchedQty) > 0) {
             itemUpdates.quantity = Number(matchedQty);
-            updatedLabels.push(`${itm.sku_text || 'Item'} Qty (*${matchedQty} ${itm.unit || 'MT'}*)`);
+            updatedLabels.push(`${itm.sku_text || 'Item'} Qty (${matchedQty} ${itm.unit || 'MT'})`);
           }
           if (matchedUnit && matchedUnit !== itm.unit) {
             itemUpdates.unit = matchedUnit.toUpperCase();
-            updatedLabels.push(`${itm.sku_text || 'Item'} Unit (*${matchedUnit.toUpperCase()}*)`);
+            updatedLabels.push(`${itm.sku_text || 'Item'} Unit (${matchedUnit.toUpperCase()})`);
           }
 
           const finalRate = itemUpdates.rate !== undefined ? itemUpdates.rate : itm.rate;
@@ -2075,8 +2075,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       // Build verified itemized breakdown for manager response
       const itemBreakdownLines = (updatedDealItems || []).map(item => {
         const rateDisplay = item.rate > 0 ? ` @ ₹${Number(item.rate).toLocaleString('en-IN')}/${item.unit || 'MT'}` : ' (Rate pending)';
-        const amountDisplay = item.amount > 0 ? ` = *₹${Number(item.amount).toLocaleString('en-IN')}*` : '';
-        return `- *${item.sku_text || 'Item'}*${item.dimensions ? ` (${item.dimensions})` : ''}: ${item.quantity || 0} ${item.unit || 'MT'}${rateDisplay}${amountDisplay}`;
+        const amountDisplay = item.amount > 0 ? ` = ₹${Number(item.amount).toLocaleString('en-IN')}` : '';
+        return `- ${item.sku_text || 'Item'}${item.dimensions ? ` (${item.dimensions})` : ''}: ${item.quantity || 0} ${item.unit || 'MT'}${rateDisplay}${amountDisplay}`;
       });
 
       const subtotalVal = (updatedDealItems || []).reduce((s, i) => s + (Number(i.amount) || 0), 0);
@@ -2084,36 +2084,36 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const grandTotalVal = subtotalVal + gstVal;
 
       const financialSummary = subtotalVal > 0
-        ? `\n*Financial Breakdown:*\n- Subtotal: *₹${subtotalVal.toLocaleString('en-IN')}*\n- GST (18%): *₹${gstVal.toLocaleString('en-IN')}*\n- Grand Total: *₹${grandTotalVal.toLocaleString('en-IN')}*\n`
+        ? `\nFinancial Breakdown:\n- Subtotal: ₹${subtotalVal.toLocaleString('en-IN')}\n- GST (18%): ₹${gstVal.toLocaleString('en-IN')}\n- Grand Total: ₹${grandTotalVal.toLocaleString('en-IN')}\n`
         : '';
 
       const unmatchedWarning = unmatchedItems.length > 0
-        ? `\n⚠️ *${unmatchedItems.map(u => u.pName || u.product_requirement).join(', ')}* not found in Inquiry ${dealCode}. Please verify and resend.\n`
+        ? `\n⚠️ ${unmatchedItems.map(u => u.pName || u.product_requirement).join(', ')} not found in Inquiry ${dealCode}. Please verify and resend.\n`
         : '';
 
-      const updatedStr = updatedLabels.length > 0 ? `*Updated:* ${updatedLabels.join(', ')}\n\n` : '';
+      const updatedStr = updatedLabels.length > 0 ? `Updated: ${updatedLabels.join(', ')}\n\n` : '';
 
       if (completeness.isComplete) {
-        return `*Inquiry Updated & Complete - ${dealCode}*\n\n` +
-          `Customer: *${company}*\n` +
-          `Stage: *${(refreshedDeal.stage || 'NEW INQUIRY').toUpperCase()}*\n\n` +
+        return `Inquiry Updated & Complete - ${dealCode}\n\n` +
+          `Customer: ${company}\n` +
+          `Stage: ${(refreshedDeal.stage || 'NEW INQUIRY').toUpperCase()}\n\n` +
           updatedStr +
-          `*Current Line Items:*\n` +
+          `Current Line Items:\n` +
           itemBreakdownLines.join('\n') +
           `\n` +
           financialSummary +
           unmatchedWarning +
-          `\nAll mandatory fields complete. Logged to Sales Pipeline & Inquiries! 📈`;
+          `\nAll mandatory fields complete. Logged to Sales Pipeline & Inquiries!`;
       } else {
-        return `*Inquiry Updated - ${dealCode}*\n\n` +
-          `Customer: *${company}*\n\n` +
+        return `Inquiry Updated - ${dealCode}\n\n` +
+          `Customer: ${company}\n\n` +
           updatedStr +
-          `*Current Line Items:*\n` +
+          `Current Line Items:\n` +
           itemBreakdownLines.join('\n') +
           `\n` +
           financialSummary +
           unmatchedWarning +
-          `\n*Still needed to complete:*\n` +
+          `\nStill needed to complete:\n` +
           completeness.missingFields.map(f => `• ${f}`).join('\n') +
           `\n\nLogged to Sales Pipeline & Inquiries!`;
       }
@@ -2499,12 +2499,12 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     if (dbStage === 'won') {
       let resultMsg =
-        `*DEAL WON & ORDER CONFIRMED!*\n\n` +
-        `Customer: *${finalCustomerName}*\n` +
-        `Inquiry ID: *${dealCode}*\n` +
-        `Official PO Number: *${poNumber}*\n` +
-        `Total Value: *Rs. ${Number(activeTotalForSummary).toLocaleString('en-IN')}* + GST\n` +
-        (poDate ? `PO Date: *${poDate}*\n` : '') +
+        `DEAL WON & ORDER CONFIRMED!\n\n` +
+        `Customer: ${finalCustomerName}\n` +
+        `Inquiry ID: ${dealCode}\n` +
+        `Official PO Number: ${poNumber}\n` +
+        `Total Value: Rs. ${Number(activeTotalForSummary).toLocaleString('en-IN')} + GST\n` +
+        (poDate ? `PO Date: ${poDate}\n` : '') +
         `\nUpdated Sales Achievement Card!`;
       return resultMsg;
     }
@@ -2518,21 +2518,21 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           const qtyStr = pi.qty > 0 ? `: ${pi.qty} ${unitStr}` : '';
           const rateStr = pi.rate > 0 ? ` @ Rs. ${Number(pi.rate).toLocaleString('en-IN')}/${unitStr}` : '';
           const amtStr = pi.itemAmount > 0 ? ` = Rs. ${Number(pi.itemAmount).toLocaleString('en-IN')}` : '';
-          return `  • *${pi.pName}*${dimStr}${qtyStr}${rateStr}${amtStr}`;
+          return `  • ${pi.pName}${dimStr}${qtyStr}${rateStr}${amtStr}`;
         })
         .join('\n');
 
       const gstVal = calculateGst(activeTotalForSummary);
       const grandTot = calculateGrandTotal(activeTotalForSummary);
 
-      return `*Inquiry Logged & Complete - ${dealCode}*\n\n` +
-        `Customer: *${finalCustomerName}*\n` +
-        `Stage: *NEW INQUIRY*\n` +
+      return `Inquiry Logged & Complete - ${dealCode}\n\n` +
+        `Customer: ${finalCustomerName}\n` +
+        `Stage: NEW INQUIRY\n` +
         `Line Items:\n${itemsBreakdownStr}\n` +
-        (data.preferred_make ? `Preferred Make: *${data.preferred_make}*\n` : '') +
-        `Delivery Location: *${finalDeliveryLoc}*\n` +
-        `Payment Terms: *${finalPaymentTerms}*\n` +
-        (activeTotalForSummary > 0 ? `Quotation Subtotal: *Rs. ${Number(activeTotalForSummary).toLocaleString('en-IN')}* + GST (Rs. ${Number(gstVal).toLocaleString('en-IN')})\nGrand Total: *Rs. ${Number(grandTot).toLocaleString('en-IN')}*\n` : '') +
+        (data.preferred_make ? `Preferred Make: ${data.preferred_make}\n` : '') +
+        `Delivery Location: ${finalDeliveryLoc}\n` +
+        `Payment Terms: ${finalPaymentTerms}\n` +
+        (activeTotalForSummary > 0 ? `Quotation Subtotal: Rs. ${Number(activeTotalForSummary).toLocaleString('en-IN')} + GST (Rs. ${Number(gstVal).toLocaleString('en-IN')})\nGrand Total: Rs. ${Number(grandTot).toLocaleString('en-IN')}\n` : '') +
         `\nAll mandatory fields complete. Logged to Sales Pipeline & Inquiries!`;
     }
 
@@ -2542,16 +2542,16 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         const dimStr = pi.dimensions ? ` (${pi.dimensions})` : '';
         const qtyStr = pi.qty > 0 ? ` - ${pi.qty} ${pi.unit || 'MT'}` : '';
         const rateStr = pi.rate > 0 ? ` @ Rs. ${Number(pi.rate).toLocaleString('en-IN')}` : '';
-        return `• *${pi.pName}*${dimStr}${qtyStr}${rateStr}`;
+        return `• ${pi.pName}${dimStr}${qtyStr}${rateStr}`;
       })
       .join('\n');
 
-    return `*Inquiry Logged - Inquiry ID: ${dealCode}*\n\n` +
-      `Customer: *${finalCustomerName}*\n` +
+    return `Inquiry Logged - Inquiry ID: ${dealCode}\n\n` +
+      `Customer: ${finalCustomerName}\n` +
       `Product Requirement:\n${itemSummary}\n` +
-      (finalDeliveryLoc ? `Delivery Location: *${finalDeliveryLoc}*\n` : '') +
-      (finalPaymentTerms ? `Payment Terms: *${finalPaymentTerms}*\n` : '') +
-      `\n*Still needed to complete:*\n` +
+      (finalDeliveryLoc ? `Delivery Location: ${finalDeliveryLoc}\n` : '') +
+      (finalPaymentTerms ? `Payment Terms: ${finalPaymentTerms}\n` : '') +
+      `\nStill needed to complete:\n` +
       completeness.missingFields.map((f) => `• ${f}`).join('\n') +
       `\n\nLogged to Sales Pipeline & Inquiries!`;
   } catch (error) {

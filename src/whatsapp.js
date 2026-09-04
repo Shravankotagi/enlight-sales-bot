@@ -28,22 +28,27 @@ function formatForWhatsApp(text) {
   out = out.replace(/[ \t]{2,}/g, ' ');
 
   // 2. Convert markdown bullet lists (* item, - item, + item) to bullet symbol (• item)
-  // Must run BEFORE bold conversions so "* item" is not treated as unclosed bold formatting
   out = out.replace(/^(\s*)[*\-+]\s+/gm, '$1• ');
 
-  // 3. Convert markdown headers (### Header) to WhatsApp bold (*Header*)
-  out = out.replace(/^#{1,6}\s+(.+)$/gm, '*$1*');
+  // 3. Remove markdown headers (### Header) to plain Header
+  out = out.replace(/^#{1,6}\s+(.+)$/gm, '$1');
 
-  // 4. Convert markdown bold/italic combos ***text*** to *text*
-  out = out.replace(/\*\*\*([^*]+)\*\*\*/g, '*$1*');
+  // 4. Strip markdown bold/italic combos ***text*** to text
+  out = out.replace(/\*\*\*([^*]+)\*\*\*/g, '$1');
 
-  // 5. Convert markdown bold **text** to WhatsApp bold *text*
-  out = out.replace(/\*\*([^*]+)\*\*/g, '*$1*');
+  // 5. Strip markdown bold **text** to text
+  out = out.replace(/\*\*([^*]+)\*\*/g, '$1');
 
-  // 6. Clean citation tags [Source: Document]
+  // 6. Strip single asterisks / bold *text* to text
+  out = out.replace(/\*([^*]+)\*/g, '$1');
+
+  // 7. Strip any remaining stray asterisks
+  out = out.replace(/\*/g, '');
+
+  // 8. Clean citation tags [Source: Document]
   out = out.replace(/\[Source:\s*([^\]]+)\]/g, '\n(Source: $1)');
 
-  // 7. Clean up multiple empty lines and trailing whitespace
+  // 9. Clean up multiple empty lines and trailing whitespace
   out = out.replace(/\n{3,}/g, '\n\n');
   out = out
     .split('\n')
@@ -156,5 +161,6 @@ async function downloadMedia(mediaId) {
 
 module.exports = {
   sendTextMessage,
-  downloadMedia
+  downloadMedia,
+  formatForWhatsApp,
 };

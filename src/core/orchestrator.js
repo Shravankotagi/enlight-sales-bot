@@ -28,8 +28,8 @@ Your role is to manage and support salespersons on WhatsApp with their daily B2B
 
 ## STRICT WHATSAPP FORMATTING & CLEANLINESS RULES (MANDATORY)
 1. NO EMOJIS: Never use any emojis or emoticons anywhere in your response. Keep the tone professional, clean, and modern.
-2. NO ASTERISK BULLETS: When creating lists or item breakdowns, NEVER start bullet lines with asterisks (* Item). ALWAYS use hyphen-space (- Item) or numbered lists (1. Item).
-3. BOLD TEXT: To make text bold for WhatsApp, wrap in single asterisks (*Bold Text*), NEVER double asterisks (**Bold Text**). Do not leave unclosed asterisks.
+2. NO ASTERISKS OR BOLD TEXT: Never use asterisks (*) anywhere in your response. Do not use bold formatting (*text* or **text**). Output clean, simple plain text.
+3. BULLETS & LISTS: When creating lists or item breakdowns, use hyphen-space (- Item) or numbered lists (1. Item).
 
 ## Chain-of-Thought Instructions (Execute Mentally Before Responding)
 1. **Analyze Tool Results**: Check what activities were saved (Visit, Deal, Payment, Complaint).
@@ -46,16 +46,16 @@ Your role is to manage and support salespersons on WhatsApp with their daily B2B
 
 ## STRICT CARD NAMING RULES (MANDATORY)
 Always strictly use the official Card name when referencing updates, metrics, or logs:
-- **Sales Achievement Card** (for WON deals and PO confirmations ONLY - NEVER at inquiry creation stage)
-- **Sales Pipeline & Inquiries** (for new inquiries, quotations, and pipeline stage updates)
-- **New Customer Acquisition Card** (for new client onboardings and customer master)
-- **Customer Retention Card** (for re-orders, recurring customer follow-ups)
-- **Enquiry Conversion Card** (for inquiry-to-won conversion rate)
-- **Payment Collection Card** (for advances, cheque, UPI, full payments, outstanding)
-- **CRM Compliance Card** (for daily sales activity tracking)
-- **Zero Rejection Card** (for rejection-free deliveries)
-- **Customer Complaints Card** (for quality issues, damages, resolutions)
-- **Customer Visits Card** (for customer site visits, factory meetings)
+- Sales Achievement Card (for WON deals and PO confirmations ONLY - NEVER at inquiry creation stage)
+- Sales Pipeline & Inquiries (for new inquiries, quotations, and pipeline stage updates)
+- New Customer Acquisition Card (for new client onboardings and customer master)
+- Customer Retention Card (for re-orders, recurring customer follow-ups)
+- Enquiry Conversion Card (for inquiry-to-won conversion rate)
+- Payment Collection Card (for advances, cheque, UPI, full payments, outstanding)
+- CRM Compliance Card (for daily sales activity tracking)
+- Zero Rejection Card (for rejection-free deliveries)
+- Customer Complaints Card (for quality issues, damages, resolutions)
+- Customer Visits Card (for customer site visits, factory meetings)
 
 NEVER output generic numbers like "KRA 1", "KRA 2", "KRA 9", "KRA 5", etc. Always use the actual Card Name!
 
@@ -68,15 +68,15 @@ When confirming or discussing any text-based customer inquiry, requirement, or d
 User: "Visited ABC Steel Mumbai office today, discussed next HR Coil requirement and future monthly consumption. Customer showed positive interest."
 Tool Results: log_customer_visit returned success: Visit logged with ABC Steel, location: Mumbai, outcome: Positive, requirement: HR Coil / future monthly requirement, follow-up: Collect required quantity, expected PO/delivery date, and customer details.
 Assistant Response:
-Great work visiting *ABC Steel* at their *Mumbai* office today! It's fantastic that the meeting had a *Positive* outcome and that you discussed their upcoming *HR Coil* requirement and future monthly consumption.
+Great work visiting ABC Steel at their Mumbai office today! It's fantastic that the meeting had a Positive outcome and that you discussed their upcoming HR Coil requirement and future monthly consumption.
 
-I've successfully logged your visit details in our *Customer Visits Card*!
+I've successfully logged your visit details in our Customer Visits Card!
 
 To follow up effectively:
-1. *Contact Details:* Could you share the contact person's name & direct mobile number?
-2. *Quantity & Timeline:* What is their estimated tonnage (MT) and expected PO date?
+1. Contact Details: Could you share the contact person's name & direct mobile number?
+2. Quantity & Timeline: What is their estimated tonnage (MT) and expected PO date?
 
-*Potential Opportunity:* If you would like to create a sales pipeline deal for this requirement, simply reply "Create deal for ABC Steel".
+Potential Opportunity: If you would like to create a sales pipeline deal for this requirement, simply reply "Create deal for ABC Steel".
 
 Updated Customer Visits Card!
 
@@ -84,7 +84,7 @@ Updated Customer Visits Card!
 User: "Received 5 lakh advance from Delta Steel"
 Tool Results: Payment logged: Rs. 5,00,000 received.
 Assistant Response:
-Excellent progress! I've logged the *Rs. 5,00,000* advance payment received from *Delta Steel*.
+Excellent progress! I've logged the Rs. 5,00,000 advance payment received from Delta Steel.
 
 To keep our financial records 100% accurate:
 1. What was the payment mode (NEFT / RTGS / Cheque / UPI)?
@@ -96,7 +96,7 @@ Updated Payment Collection Card!
 User: "Mehta contact is Rajesh Shah 9822012345, need 50 MT total by 15th Aug"
 Tool Results: Updated customer profile and deal requirement.
 Assistant Response:
-Got it! Updated *Mehta Engineering's* profile with Contact Person *Rajesh Shah* (9822012345) and set the requirement to *50 MT* by *15th August 2026*.
+Got it! Updated Mehta Engineering's profile with Contact Person Rajesh Shah (9822012345) and set the requirement to 50 MT by 15th August 2026.
 
 I'll notify the pricing desk to prepare the quotation!
 
@@ -106,9 +106,9 @@ Updated New Customer Acquisition Card!
 User: "ABC Steel requires 25 MT HR Coil 8mm for delivery to Mumbai before 25 August. Please create an inquiry."
 Tool Results: Created inquiry #INQ-07578A.
 Assistant Response:
-Fantastic work, Max! I've successfully created an inquiry for *ABC Steel* for *25 MT HR Coil 8mm* for delivery to *Mumbai* before *25 August*.
+Fantastic work, Max! I've successfully created an inquiry for ABC Steel for 25 MT HR Coil 8mm for delivery to Mumbai before 25 August.
 
-The inquiry has been logged with *Inquiry ID #INQ-07578A* in our sales pipeline.
+The inquiry has been logged with Inquiry ID #INQ-07578A in our sales pipeline.
 
 Logged to Sales Pipeline & Inquiries!
 
@@ -416,6 +416,15 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
       }
     }
 
+function stripAsterisks(text) {
+  if (!text || typeof text !== 'string') return '';
+  return text
+    .replace(/\*\*\*([^*]+)\*\*\*/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/\*/g, '');
+}
+
     // Direct Forwarding: If any tool returned a direct prompt, structured summary, warning, stage gate rejection, or error
     for (const m of allMessages) {
       const content = typeof m.content === 'string' ? m.content : '';
@@ -423,9 +432,13 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
         content.startsWith('❌') ||
         content.startsWith('⚠️') ||
         content.startsWith('❓') ||
+        content.startsWith('Inquiry Updated') ||
         content.startsWith('*Inquiry Updated') ||
+        content.startsWith('Inquiry Logged') ||
         content.startsWith('*Inquiry Logged') ||
+        content.startsWith('DEAL WON') ||
         content.startsWith('*DEAL WON') ||
+        content.startsWith('Quotation Dispatched!') ||
         content.startsWith('*Quotation Dispatched!') ||
         content.startsWith('There are ') ||
         content.startsWith('I have found ') ||
@@ -439,13 +452,14 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
         content.startsWith('This deal is already marked as') ||
         content.startsWith('This inquiry is already marked as')
       ) {
-        await addChatHistory(senderPhone, text, content, {
+        const cleanContent = stripAsterisks(content);
+        await addChatHistory(senderPhone, text, cleanContent, {
           agent: turnAgent,
           deal_id: turnDealId,
           customer_name: turnCustomerName,
         });
-        console.log(`[Orchestrator] Direct tool message forwarded (${content.length} chars)`);
-        return content;
+        console.log(`[Orchestrator] Direct tool message forwarded (${cleanContent.length} chars)`);
+        return cleanContent;
       }
     }
 
@@ -474,27 +488,29 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
           if (dealCodeMatch) {
             const formattedCode = dealCodeMatch[0].toUpperCase().replace(/^#DEAL-/i, '#INQ-');
             if (!reply.toUpperCase().includes(dealCodeMatch[0].toUpperCase()) && !reply.toUpperCase().includes(formattedCode)) {
-              reply += `\n\n*Inquiry ID: ${formattedCode}*`;
+              reply += `\n\nInquiry ID: ${formattedCode}`;
             }
           }
         }
       }
     }
 
-    await addChatHistory(senderPhone, text, reply, {
+    const cleanFinalReply = stripAsterisks(reply);
+
+    await addChatHistory(senderPhone, text, cleanFinalReply, {
       agent: turnAgent,
       deal_id: turnDealId,
       customer_name: turnCustomerName,
     });
 
-    console.log(`[Orchestrator] Reply ready (${reply.length} chars)`);
-    return reply;
+    console.log(`[Orchestrator] Reply ready (${cleanFinalReply.length} chars)`);
+    return cleanFinalReply;
 
   } catch (err) {
     console.error('[Orchestrator] Fatal error:', err);
     const msg = err.message || '';
     if (msg.includes('429') || msg.includes('Quota') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('All Gemini API keys')) {
-      return `*Gemini Traffic Spike*\n\nGoogle Gemini rate limit reached. Please send your message again in 10 seconds.\n\n_(Tip: Add an additional Gemini API key in Railway under GEMINI_API_KEY_1 to double your quota!)_`;
+      return `Gemini Traffic Spike\n\nGoogle Gemini rate limit reached. Please send your message again in 10 seconds.\n\n(Tip: Add an additional Gemini API key in Railway under GEMINI_API_KEY_1 to double your quota!)`;
     }
     return `Something went wrong processing your message. Please try again.\n\nError: ${err.message}`;
   }
