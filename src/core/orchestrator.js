@@ -267,6 +267,21 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
     // Create tools with senderPhone and raw text pre-bound per request
     const TOOLS = createTools(senderPhone, text);
 
+    const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+
+    // Fetch active context, chat history, and user permissions ONCE concurrently for ultra-low latency
+    const [activeContextPrompt, historyMessages, userScope] = await Promise.all([
+      getActiveContextPrompt(senderPhone),
+      getChatHistory(senderPhone),
+      getAccessibleSalespersonPhonesForBot(senderPhone),
+    ]);
+
+    const roleDescription = userScope.isAdmin
+      ? 'Admin (Full Company-Wide Read & Write Access: can update, view, and manage any customer, salesperson, deal, or order frequency across the entire company)'
+      : (userScope.isManager
+          ? 'Sales Manager (Team Management Access: can manage assigned team salespersons and their customers)'
+          : 'Salesperson (Standard Access)');
+
     // Request-scoped Agent Node
     const inlineAgentNode = async (state) => {
       const { messages, senderPhone: sp, employeeName: en, messageType: mt } = state;
@@ -281,16 +296,6 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
         m => m._getType?.() === 'tool' || m.constructor?.name === 'ToolMessage'
       );
       const intentAnchor = hasToolResultsAlready ? '' : getDeterministicIntentHint(userText);
-      const activeContextPrompt = await getActiveContextPrompt(sp);
-      const historyMessages = await getChatHistory(sp);
-
-      const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
-      const userScope = await getAccessibleSalespersonPhonesForBot(sp);
-      const roleDescription = userScope.isAdmin
-        ? 'Admin (Full Company-Wide Read & Write Access: can update, view, and manage any customer, salesperson, deal, or order frequency across the entire company)'
-        : (userScope.isManager
-            ? 'Sales Manager (Team Management Access: can manage assigned team salespersons and their customers)'
-            : 'Salesperson (Standard Access)');
 
       const contextMessages = [
         new SystemMessage(
@@ -303,7 +308,8 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
 
       let response;
       try {
-        response = await invokeWithFallback(contextMessages, TOOLS);
+        const toolsToBind = hasToolResultsAlready ? null : TOOLS;
+        response = await invokeWithFallback(contextMessages, toolsToBind);
       } catch (err) {
         console.error('[Orchestrator] Model invocation failed:', err.message);
 
