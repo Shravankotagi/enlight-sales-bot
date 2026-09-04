@@ -104,6 +104,11 @@ CRITICAL RULES FOR THE 9 CORE STEEL PRODUCT CATEGORIES:
      Extract EACH diameter as a SEPARATE object in the line_items array with its own quantity and dimensions!
    - Extract Ductile grades (Fe500D, Fe550D) and units (Bundles, MT, Pcs).
 
+10. RATE UPDATES & PRICE LISTS:
+   - When a message says "update rates", "update the rates", "rates for", "new rates", or provides product rates (e.g. "MS Sheet 5MM THK - 10", "HR Coil 3.15MM - 12", "CR Sheet - 15"):
+     The numbers after hyphens/colons are unit RATES (rate_per_mt: 10), NOT quantities!
+     Set action: "deal_update" and extract each line item with its specified rate_per_mt.
+
 Return ONLY the JSON object.
 `;
 
@@ -149,6 +154,50 @@ function isDealProductMatch(deal, newProductNames) {
     }
   }
   return false;
+}
+
+function findMatchingProcessedItem(existingItem, processedList, fallbackIndex = -1) {
+  if (!processedList || processedList.length === 0) return null;
+  const itmSku = (existingItem.sku_text || '').toLowerCase().trim();
+  const itmDim = (existingItem.dimensions || '').toLowerCase().trim();
+  const itmFull = `${itmSku} ${itmDim}`.toLowerCase();
+  const existingFam = getProductFamily(existingItem.sku_text);
+
+  // 1. Exact string match
+  for (const p of processedList) {
+    const pName = (p.pName || p.product_requirement || '').toLowerCase().trim();
+    const pDim = (p.dimensions || '').toLowerCase().trim();
+    const pFull = `${pName} ${pDim}`.trim().toLowerCase();
+    if (pFull === itmFull || pName === itmSku) {
+      return p;
+    }
+  }
+
+  // 2. Extract numbers (e.g. 5, 6, 3.15, 1.00, 4.5) and product family
+  const itmNumbers = itmFull.match(/\d+(?:\.\d+)?/g) || [];
+  for (const p of processedList) {
+    const pName = (p.pName || p.product_requirement || '').toLowerCase().trim();
+    const pDim = (p.dimensions || '').toLowerCase().trim();
+    const pFull = `${pName} ${pDim}`.trim().toLowerCase();
+    const pFam = getProductFamily(pName);
+    const pNumbers = pFull.match(/\d+(?:\.\d+)?/g) || [];
+
+    if (existingFam && pFam && existingFam === pFam) {
+      // If numbers are present in both, ensure the primary dimension number matches
+      if (pNumbers.length > 0 && itmNumbers.length > 0) {
+        if (pNumbers[0] === itmNumbers[0]) return p;
+      } else if (pNumbers.length === 0 && itmNumbers.length === 0) {
+        return p;
+      }
+    }
+  }
+
+  // 3. Fallback to index match if arrays have same length
+  if (fallbackIndex >= 0 && fallbackIndex < processedList.length) {
+    return processedList[fallbackIndex];
+  }
+
+  return null;
 }
 
 const KNOWN_STEEL_CITIES = [
@@ -941,8 +990,35 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           ruleStage = stageUpdateMatch[1].toLowerCase();
         }
 
-        // Check multi-item TMT list e.g. "8mm - 5 MT, 10mm - 10 MT, 12mm - 15 MT"
+        // Check multi-item rate update list e.g. "MS Sheet 5MM THK - 10\nMS Sheet 6MM THK - 15"
         const multiItemsParsed = [];
+        const isRateUpdateContext = /\b(update\s+(?:the\s+)?rates?|new\s+rates?|rates?\s+for|rates?:)\b/i.test(textRaw);
+        if (isRateUpdateContext) {
+          ruleAction = 'deal_update';
+          const lines = textRaw.split('\n');
+          for (const line of lines) {
+            const cleanLine = line.trim();
+            if (!cleanLine || /^(?:update|rates|for|customer|company|deal|inquiry)\b/i.test(cleanLine)) continue;
+            const lineMatch = cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s*[-:=]\s*₹?\s*([\d,.]+)\s*$/i);
+            if (lineMatch) {
+              const prodCandidate = lineMatch[1].trim();
+              const rateVal = parseFloat(lineMatch[2].replace(/,/g, ''));
+              if (prodCandidate && rateVal > 0) {
+                const mmM = prodCandidate.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*\d+)+)/i);
+                multiItemsParsed.push({
+                  product_requirement: prodCandidate,
+                  dimensions: mmM ? mmM[0] : null,
+                  quantity: 0,
+                  quantity_mt: 0,
+                  unit: 'MT',
+                  rate_per_mt: rateVal,
+                });
+              }
+            }
+          }
+        }
+
+        // Check multi-item TMT list e.g. "8mm - 5 MT, 10mm - 10 MT, 12mm - 15 MT"
         const tmtMultiRegex = /(\d+(?:\.\d+)?\s*mm)\s*(?:[-:]|–)?\s*(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|bundles|pcs)?/gi;
         let tmtM;
         while ((tmtM = tmtMultiRegex.exec(textRaw)) !== null) {
@@ -1327,19 +1403,24 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           ? (data.line_items?.[0]?.quantity || data.line_items?.[0]?.quantity_mt || (processedItems[0]?.qty > 0 ? processedItems[0]?.qty : null))
           : null;
 
-        for (const itm of existingItems) {
+        for (let idx = 0; idx < existingItems.length; idx++) {
+          const itm = existingItems[idx];
+          const matchedP = findMatchingProcessedItem(itm, processedItems, existingItems.length === processedItems.length ? idx : -1);
           const itemUpdates = {};
-          if (firstRate && firstRate > 0) {
-            itemUpdates.rate = firstRate;
-            updatedLabels.push(`Rate (*Rs. ${Number(firstRate).toLocaleString('en-IN')}*)`);
+          const matchedRate = matchedP?.rate || (matchedP?.rate_per_mt) || (processedItems.length === 1 ? firstRate : null);
+          const matchedQty = hasExplicitQtyInMsg ? (matchedP?.qty || (processedItems.length === 1 ? firstQty : null)) : null;
+
+          if (matchedRate && Number(matchedRate) > 0) {
+            itemUpdates.rate = Number(matchedRate);
+            updatedLabels.push(`${itm.sku_text || 'Item'} Rate (*Rs. ${Number(matchedRate).toLocaleString('en-IN')}*)`);
           }
-          if (firstQty && firstQty > 0) {
-            itemUpdates.quantity = firstQty;
-            updatedLabels.push(`Quantity (*${firstQty} ${itm.unit || 'MT'}*)`);
+          if (matchedQty && Number(matchedQty) > 0) {
+            itemUpdates.quantity = Number(matchedQty);
+            updatedLabels.push(`${itm.sku_text || 'Item'} Qty (*${matchedQty} ${itm.unit || 'MT'}*)`);
           }
           const finalRate = itemUpdates.rate !== undefined ? itemUpdates.rate : itm.rate;
           const finalQty = itemUpdates.quantity !== undefined ? itemUpdates.quantity : itm.quantity;
-          if (finalRate && finalQty) {
+          if (finalRate !== null && finalRate !== undefined && finalQty !== null && finalQty !== undefined) {
             itemUpdates.amount = Number(finalRate) * Number(finalQty);
           }
           if (Object.keys(itemUpdates).length > 0) {
@@ -1640,17 +1721,22 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           ? ((processedItems[0]?.qty > 0 ? processedItems[0]?.qty : null) || data.line_items?.[0]?.quantity)
           : null;
 
-        for (const itm of existingDealItems) {
+        for (let idx = 0; idx < existingDealItems.length; idx++) {
+          const itm = existingDealItems[idx];
+          const matchedP = findMatchingProcessedItem(itm, processedItems, existingDealItems.length === processedItems.length ? idx : -1);
           const itemUpdates = {};
-          if (firstRate && firstRate > 0) {
-            itemUpdates.rate = firstRate;
+          const matchedRate = matchedP?.rate || (matchedP?.rate_per_mt) || (processedItems.length === 1 ? firstRate : null);
+          const matchedQty = hasExplicitQtyInMsg ? (matchedP?.qty || (processedItems.length === 1 ? firstQty : null)) : null;
+
+          if (matchedRate && Number(matchedRate) > 0) {
+            itemUpdates.rate = Number(matchedRate);
           }
-          if (firstQty && firstQty > 0) {
-            itemUpdates.quantity = firstQty;
+          if (matchedQty && Number(matchedQty) > 0) {
+            itemUpdates.quantity = Number(matchedQty);
           }
           const finalR = itemUpdates.rate !== undefined ? itemUpdates.rate : itm.rate;
           const finalQ = itemUpdates.quantity !== undefined ? itemUpdates.quantity : itm.quantity;
-          if (finalR && finalQ) {
+          if (finalR !== null && finalR !== undefined && finalQ !== null && finalQ !== undefined) {
             itemUpdates.amount = Number(finalR) * Number(finalQ);
           }
           if (Object.keys(itemUpdates).length > 0) {

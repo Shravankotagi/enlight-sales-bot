@@ -161,6 +161,7 @@ function getDeterministicIntentHint(text) {
     /\b(create|log|add|new|record|enter|post)\s+(?:new\s+)?(?:deal|inquiry|requirement|rfq|quote|quotation|order)\b/i.test(lower) ||
     /^(?:log\s+)?new\s+inquiry\b/i.test(lower) ||
     /\b(company\s+name|material|grade\/spec|target\s+price)\s*:/i.test(lower) ||
+    /\b(update\s+(?:the\s+)?rates?|new\s+rates?|rates?\s+for|set\s+rates?)\b/i.test(lower) ||
     /\b(mark\b.*?\b(won|lost)|move\b.*?\b(stage|won|lost|negotiation|pipeline)|change\b.*?\b(stage|won|lost)|.*?\b(deal|inquiry|order)\b.*?\b(won|lost|closed|negotiation|qualified)|deal\s+won|deal\s+lost|mark\s+as\s+won|mark\s+as\s+lost|stage\s+update|po\s+received|order\s+placed|order\s+confirmed)\b/i.test(lower);
 
   const isVisit = /\b(visited|met with|meeting at|site visit|factory visit|plant visit|market visit)\b/i.test(lower);
