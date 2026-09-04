@@ -356,9 +356,10 @@ async function getCustomerFactSheet(customerName, senderPhone) {
     }
 
     if (openDeals && openDeals.length > 0) {
-      factSheet += '\n\n- Active Pipeline Deals:';
+      factSheet += '\n\n- Active Pipeline Inquiries:';
       openDeals.forEach((d) => {
-        factSheet += '\n  • Deal #' + (d.deal_code || 'ID') + ' [Stage: ' + d.stage + ']';
+        const cleanCode = (d.deal_code || 'ID').replace(/^#?(?:DEAL|INQ)-?/i, '');
+        factSheet += '\n  • Inquiry #INQ-' + cleanCode + ' [Stage: ' + d.stage + ']';
       });
     }
 
@@ -422,14 +423,14 @@ async function getActiveContextPrompt(senderPhone) {
 
     return historySection + threadSection + factSheet + '\n\n## ACTIVE CONTEXT WINDOW (Memory for this Salesperson)\n' +
       '- Currently Active Customer: "' + activeCustomer + '"\n' +
-      '- Active Deal ID: ' + activeDealStr + '\n' +
+      '- Active Inquiry ID: ' + activeDealStr + '\n' +
       '- Last Action/Intent: ' + lastIntent + '\n\n' +
       'INSTRUCTIONS FOR CROSS-AGENT MEMORY & CONTEXT RESOLUTION:\n' +
-      '1. If the salesperson refers to "that deal", "the deal", "this customer", "the same customer", "update it", or provides details without naming the customer, resolve it to "' + activeCustomer + '" and Deal ' + (crossCtx.activeDealId ? '#' + crossCtx.activeDealId : 'active in context') + '!\n' +
+      '1. If the salesperson refers to "that inquiry", "the deal", "this customer", "the same customer", "update it", or provides details without naming the customer, resolve it to "' + activeCustomer + '" and Inquiry ' + (crossCtx.activeDealId ? '#' + crossCtx.activeDealId : 'active in context') + '!\n' +
       '2. If profile info (location/city, GST number, mobile phone, contact person/owner) is provided WITHOUT naming a company, attribute it to "' + activeCustomer + '" and call update_customer_profile.\n' +
       '3. NEVER ask "which company" or treat location/GST replies as order searches when an active customer "' + activeCustomer + '" is in this context window!\n' +
       '4. If a message specifies a requirement or quantity (e.g. "Need 25 MT", "wants HR Coil", "create deal") WITHOUT repeating the customer name, assume it refers to "' + activeCustomer + '".\n' +
-      '5. If the salesperson replies "Yes", "Confirm", "sahi hai", or gives a PO Number/Deal ID to a previous confirmation prompt, associate it with "' + activeCustomer + '".';
+      '5. If the salesperson replies "Yes", "Confirm", "sahi hai", or gives a PO Number/Inquiry ID to a previous confirmation prompt, associate it with "' + activeCustomer + '".';
   } catch (err) {
     console.error('[Memory] Error getting active context prompt:', err.message);
     return '';

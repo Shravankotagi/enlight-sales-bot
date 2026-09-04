@@ -95,9 +95,10 @@ function buildEnrichedFollowupAlert({
   salespersonName = null,
 }) {
   const isWon = stage === 'won' || Boolean(poNumber);
+  const cleanDealCode = dealId ? String(dealId).replace(/^#?(?:DEAL|INQ)-?/i, '') : '';
   const identifierStr = isWon
-    ? (poNumber ? `PO: *${poNumber}*` : (dealId ? `Deal ID: *#${dealId}*` : ''))
-    : (dealId ? `Deal ID: *#${dealId}*` : '');
+    ? (poNumber ? `PO: *${poNumber}*` : (cleanDealCode ? `Inquiry ID: *#INQ-${cleanDealCode}*` : ''))
+    : (cleanDealCode ? `Inquiry ID: *#INQ-${cleanDealCode}*` : '');
 
   const productStr = product || 'Metal Requirements';
   const roleHeader = recipientRole === 'manager'

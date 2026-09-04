@@ -741,7 +741,7 @@ Return ONLY the company name or "NONE":`;
         const { saveActiveSession } = require('./supabase');
         await saveActiveSession(senderPhone, 'Unknown', 'pending_company_for_deal_lookup');
       }
-      return `❓ Which company's Deal ID would you like to retrieve? Please reply with the customer/company name (e.g. _"Deal ID for Radhe Ispat"_).`;
+      return `❓ Which company's Inquiry ID would you like to retrieve? Please reply with the customer/company name (e.g. _"Inquiry ID for Radhe Ispat"_).`;
     }
 
     // 4. Query deals in Supabase
@@ -777,7 +777,7 @@ Return ONLY the company name or "NONE":`;
     }
 
     if (!deals || deals.length === 0) {
-      return `📋 *No Deals Found*\n\nNo deals or inquiries found for *${customerName}* in your pipeline.`;
+      return `📋 *No Inquiries Found*\n\nNo inquiries or deals found for *${customerName}* in your pipeline.`;
     }
 
     const { saveActiveSession } = require('./supabase');
@@ -786,7 +786,8 @@ Return ONLY the company name or "NONE":`;
     }
 
     const dealCards = deals.map((d, i) => {
-      const dealCode = d.deal_number ? `#${d.deal_number}` : (d.id ? `#DEAL-${d.id.substring(0, 6).toUpperCase()}` : '#DEAL-UNKNOWN');
+      const cleanNum = d.deal_number ? d.deal_number.replace(/^#?(?:DEAL|INQ)-?/i, '') : (d.id ? d.id.substring(0, 6).toUpperCase() : 'UNKNOWN');
+      const dealCode = `#INQ-${cleanNum}`;
       const stageStr = (d.stage || 'new_inquiry').toUpperCase();
       const items = d.deal_items || [];
       let itemStr = '';
@@ -812,13 +813,14 @@ Return ONLY the company name or "NONE":`;
     });
 
     const displayCustName = deals[0].customer_name || customerName;
+    const sampleInqCode = deals[0].deal_number ? `#INQ-${deals[0].deal_number.replace(/^#?(?:DEAL|INQ)-?/i, '')}` : (deals[0].id ? `#INQ-${deals[0].id.substring(0, 6).toUpperCase()}` : '#INQ-XXXXXX');
 
-    return `📋 *Active Deals & Inquiries - ${displayCustName}* (${deals.length} found)\n\n` +
+    return `📋 *Active Inquiries & Deals - ${displayCustName}* (${deals.length} found)\n\n` +
            dealCards.join('\n\n') +
-           `\n\n💡 *Tip:* To update any deal, reply with the Deal ID (e.g. _"${deals[0].id ? '#DEAL-' + deals[0].id.substring(0,6).toUpperCase() : '#DEAL-XXXXXX'} mark as quoted"_).`;
+           `\n\n💡 *Tip:* To update any inquiry, reply with the Inquiry ID (e.g. _"${sampleInqCode} mark as quoted"_).`;
   } catch (error) {
     console.error('getDealIdsForCompany error:', error);
-    return `❌ Could not fetch deal IDs: ${error.message}`;
+    return `❌ Could not fetch inquiry IDs: ${error.message}`;
   }
 }
 
@@ -2252,7 +2254,8 @@ async function getCustomer360(senderPhone, text, extractedName = null) {
             )
             .filter(Boolean)
             .join(', ');
-          return `• *Deal #${d.id.substring(0, 8)}* (${d.stage || 'inquiry'})\n  Value: ${amt}${items ? `\n  Items: ${items}` : ''}`;
+          const code = d.deal_number ? d.deal_number.replace(/^#?(?:DEAL|INQ)-?/i, '') : d.id.substring(0, 8);
+          return `• *Inquiry #${code}* (${d.stage || 'inquiry'})\n  Value: ${amt}${items ? `\n  Items: ${items}` : ''}`;
         })
         .join('\n\n');
     }

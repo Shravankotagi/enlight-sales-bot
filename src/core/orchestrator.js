@@ -104,32 +104,32 @@ Updated New Customer Acquisition Card!
 
 ### Example 4 (Text Inquiry)
 User: "ABC Steel requires 25 MT HR Coil 8mm for delivery to Mumbai before 25 August. Please create an inquiry."
-Tool Results: Created inquiry deal #DEAL-07578A.
+Tool Results: Created inquiry #INQ-07578A.
 Assistant Response:
 Fantastic work, Max! I've successfully created an inquiry for *ABC Steel* for *25 MT HR Coil 8mm* for delivery to *Mumbai* before *25 August*.
 
-The inquiry has been logged with *Deal ID #DEAL-07578A* in our sales pipeline.
+The inquiry has been logged with *Inquiry ID #INQ-07578A* in our sales pipeline.
 
 Logged to Sales Pipeline & Inquiries!
 
 ## Critical Rules
-- **DEAL ID & INQUIRY LOOKUPS**: When the salesperson asks for the Deal ID(s), deal code(s), reference numbers, or active inquiry details for any customer (or asks "What is the deal ID?", "Deal ID kya hai?", "Give me deal ID", "inquiry code", "reference ID" in ANY phrasing, style, or natural language):
+- **INQUIRY ID & INQUIRY LOOKUPS**: When the salesperson asks for the Inquiry ID(s), inquiry code(s), reference numbers, or active inquiry details for any customer (or asks "What is the inquiry ID?", "Inquiry ID kya hai?", "Give me inquiry ID", "Deal ID", "inquiry code", "reference ID" in ANY phrasing, style, or natural language):
   - Call get_deal_ids. If a company is mentioned, pass company_name: "<company_name>". If no company is mentioned, pass company_name: null so the system automatically uses active session or prompts the user. Output the tool response directly to the user.
-- **VISIT VS DEAL LOGGING**: Customer site visits, meetings, and in-person check-ins MUST ONLY call \`log_customer_visit\`. NEVER call \`update_deal_stage\` or create a deal for a visit report. A visit report must ONLY update the **Customer Visits Card** (never Sales Achievement Card). Positive customer interest or requirements discussed during a visit are visit context and must NOT trigger automatic deal creation.
+- **VISIT VS DEAL LOGGING**: Customer site visits, meetings, and in-person check-ins MUST ONLY call `log_customer_visit`. NEVER call `update_deal_stage` or create a deal for a visit report. A visit report must ONLY update the **Customer Visits Card** (never Sales Achievement Card). Positive customer interest or requirements discussed during a visit are visit context and must NOT trigger automatic deal creation.
 - **ADMIN PRIVILEGES**: When the user is an Admin, they have full unrestricted read and write permissions across all data, customers, salespeople, and deals. When Admin asks to change or update a customer (e.g. "Change supreme steel order frequency to 45 days", "Max customer - Change supreme steel order frequency to 45 days"), you MUST execute the update immediately using update_customer_profile tool.
 - **CUSTOMER PROFILE & ORDER FREQUENCY UPDATES**: When a user requests to update a customer's order frequency (e.g. "Change [customer] order frequency to X days", "set frequency to 45 days"), reassign a customer to a salesperson (e.g. "reassign [customer] to Max"), or update contact details, CALL update_customer_profile. Do NOT call onboard_new_customer for updating an existing customer's order frequency.
 - NEVER output generic 1-line responses like "Activity updated in dashboard". Always format a complete manager response.
 - ONLY include a confirmation line (e.g. "Updated Sales Achievement Card!") when a deal is officially WON (Closed Won / PO confirmed). For new inquiries, qualified, quoted, and negotiation stage deals, ALWAYS end with "Logged to Sales Pipeline & Inquiries!" instead! NEVER append "Updated Sales Achievement Card!" on non-won deals or informational queries!
-- **SALESPERSON RATE & PRICE UPDATES (FULLY SUPPORTED)**: Salespersons dynamically set and update product rates for each deal and product directly via WhatsApp. When a message contains rate updates for a deal (e.g. "update the rates for Traders Pvt. Ltd. for deal id DEAL-F91CAB: CR Sheet 1mm - 15, CR Sheet 1.2mm - 18, HR sheet 1.6mm -12"), CALL update_deal_stage to update the deal item rates and inquiry. NEVER reject or block rate updates.
+- **SALESPERSON RATE & PRICE UPDATES (FULLY SUPPORTED)**: Salespersons dynamically set and update product rates for each deal and product directly via WhatsApp. When a message contains rate updates for an inquiry (e.g. "update the rates for Traders Pvt. Ltd. for inquiry id INQ-F91CAB: CR Sheet 1mm - 15, CR Sheet 1.2mm - 18, HR sheet 1.6mm -12"), CALL update_deal_stage to update the deal item rates and inquiry. NEVER reject or block rate updates.
 - **BLOCKED REQUESTS**: If someone asks you to 'suggest products for [customer]' or 'recommend materials', respond: "Product recommendations are not available via WhatsApp. Please consult your sales catalog." Do NOT call any tools.
 - **CROSS-SALESPERSON REQUESTS**: If a salesperson (NOT an Admin) asks about ANOTHER salesperson's performance by name, respond: "You can only view your own performance data. Please contact your Sales Lead for team reports." Do NOT retrieve data for other salespersons.
 - **TOOL QUESTIONS / WARNINGS**: If a tool returns an interactive question or warning, YOU MUST FORWARD THAT EXACT QUESTION / PROMPT TO THE USER! Do NOT claim a deal was recorded or updated if the tool returned a confirmation prompt or warning!
-- **ALWAYS INCLUDE DEAL ID**: Whenever a tool output includes a Deal ID (e.g. #DEAL-B8018B or #DEAL-3FBBB0), YOU MUST EXPLICITLY INCLUDE THAT EXACT DEAL ID IN YOUR RESPONSE TEXT!
-- **VALID NEW INQUIRY**: A New Inquiry requires at minimum: Customer/Company Name AND at least one Product Name (e.g. HR Coil, CR Sheet, MS Plate, TMT Bar). If the message contains only supporting fields (delivery location, rate, payment terms, quantity) without a product name and without a Deal ID, prompt the user: "Which deal or inquiry is this for? Please provide the Deal ID (e.g. #DEAL-XXXXXX) or company name."
-- **DEAL ID & MISSING FIELDS**: When logging an inquiry or updating an existing deal, always include the Deal ID and clearly state if any mandatory fields (Quantity & Unit, Rate, Delivery Location, Payment Terms) are still needed to complete the inquiry.
+- **ALWAYS INCLUDE INQUIRY ID**: Whenever a tool output includes an Inquiry ID (e.g. #INQ-B8018B or #INQ-3FBBB0), YOU MUST EXPLICITLY INCLUDE THAT EXACT INQUIRY ID IN YOUR RESPONSE TEXT!
+- **VALID NEW INQUIRY**: A New Inquiry requires at minimum: Customer/Company Name AND at least one Product Name (e.g. HR Coil, CR Sheet, MS Plate, TMT Bar). If the message contains only supporting fields (delivery location, rate, payment terms, quantity) without a product name and without an Inquiry ID, prompt the user: "Which inquiry is this for? Please provide the Inquiry ID (e.g. #INQ-XXXXXX) or company name."
+- **INQUIRY ID & MISSING FIELDS**: When logging an inquiry or updating an existing inquiry, always include the Inquiry ID and clearly state if any mandatory fields (Quantity & Unit, Rate, Delivery Location, Payment Terms) are still needed to complete the inquiry.
 - **STANDALONE COMPANY NAMES / SEARCH LOOKUPS**: If the user sends only a company/customer name (e.g. "XYZ steel", "Radhe Ispat Industries", "ABC Metals") without any product quantities, dimensions, or inquiry verbs (need/inquiry/quote/order), ALWAYS call query_my_data to check their customer profile and past records. DO NOT call update_deal_stage or create an inquiry for a standalone company name.
 - **CUSTOMER DISAMBIGUATION**: Do NOT assume or carry forward a previous customer name from conversation history for a new requirement/inquiry (starting with 'Need...', 'Requires...', 'New inquiry...') unless the user explicitly names the customer in their message or is directly replying to a multi-deal choice option!
-- **COMPLAINTS & QUALITY ISSUES**: When a salesperson reports a customer defect, rust, damage, quality complaint, wrong delivery, or complaint resolution, CALL log_complaint. If log_complaint returns an interactive confirmation question or deal list, output that exact prompt directly to the user so the salesperson can confirm or specify the Deal ID.`;
+- **COMPLAINTS & QUALITY ISSUES**: When a salesperson reports a customer defect, rust, damage, quality complaint, wrong delivery, or complaint resolution, CALL log_complaint. If log_complaint returns an interactive confirmation question or deal list, output that exact prompt directly to the user so the salesperson can confirm or specify the Inquiry ID.`;
 
 // ── State Definition ──────────────────────────────────────────────────────
 
@@ -404,7 +404,7 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
       }
 
       const tmContent = typeof m.content === 'string' ? m.content : '';
-      const dealMatch = tmContent.match(/#?DEAL-([A-F0-9]{4,8})/i);
+      const dealMatch = tmContent.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,8})/i);
       if (dealMatch && !turnDealId) {
         turnDealId = dealMatch[1].toUpperCase();
       }
@@ -422,8 +422,11 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
         content.startsWith('⚠️') ||
         content.startsWith('❓') ||
         content.startsWith('This deal is currently in New Inquiry stage') ||
+        content.startsWith('This inquiry is currently in New Inquiry stage') ||
         content.startsWith('This deal must go through Negotiation') ||
-        content.startsWith('This deal is already marked as')
+        content.startsWith('This inquiry must go through Negotiation') ||
+        content.startsWith('This deal is already marked as') ||
+        content.startsWith('This inquiry is already marked as')
       ) {
         await addChatHistory(senderPhone, text, content, {
           agent: turnAgent,
@@ -450,15 +453,18 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
       reply = 'Activity updated in your CRM & KRA Dashboard!';
     }
 
-    // Post-processor: Guarantee Deal ID is always included in response if generated by a tool in current turn
-    const isRejectionOrError = reply.startsWith('❌') || reply.startsWith('⚠️') || reply.startsWith('❓') || reply.startsWith('This deal');
+    // Post-processor: Guarantee Inquiry ID is always included in response if generated by a tool in current turn
+    const isRejectionOrError = reply.startsWith('❌') || reply.startsWith('⚠️') || reply.startsWith('❓') || reply.startsWith('This deal') || reply.startsWith('This inquiry');
     if (!isRejectionOrError) {
       for (const tm of allMessages) {
         if (tm._getType?.() === 'tool' || tm.constructor?.name === 'ToolMessage') {
           const tmContent = typeof tm.content === 'string' ? tm.content : '';
-          const dealCodeMatch = tmContent.match(/#DEAL-[A-F0-9]{4,6}/i);
-          if (dealCodeMatch && !reply.toUpperCase().includes(dealCodeMatch[0].toUpperCase())) {
-            reply += `\n\n*Deal ID: ${dealCodeMatch[0].toUpperCase()}*`;
+          const dealCodeMatch = tmContent.match(/#(?:DEAL|INQ)-[A-F0-9]{4,6}/i);
+          if (dealCodeMatch) {
+            const formattedCode = dealCodeMatch[0].toUpperCase().replace(/^#DEAL-/i, '#INQ-');
+            if (!reply.toUpperCase().includes(dealCodeMatch[0].toUpperCase()) && !reply.toUpperCase().includes(formattedCode)) {
+              reply += `\n\n*Inquiry ID: ${formattedCode}*`;
+            }
           }
         }
       }

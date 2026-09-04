@@ -69,12 +69,12 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'send_quotation',
-      description: `Use this tool when the salesperson explicitly requests to send, email, mail, or dispatch a quotation / quote to an email address or customer (e.g. "Send quotation to client@gmail.com", "Mail quote to test@example.com", "Send quote for Deal #DEAL-A983FC").`,
+      description: `Use this tool when the salesperson explicitly requests to send, email, mail, or dispatch a quotation / quote to an email address or customer (e.g. "Send quotation to client@gmail.com", "Mail quote to test@example.com", "Send quote for Inquiry #INQ-A983FC").`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
         email: z.string().optional().nullable().describe('The email address if mentioned e.g. client@gmail.com, else null'),
         customer_name: z.string().optional().nullable().describe('Customer or company name if mentioned, else null'),
-        deal_id: z.string().optional().nullable().describe('Deal ID if mentioned e.g. #DEAL-A983FC, else null'),
+        deal_id: z.string().optional().nullable().describe('Inquiry ID if mentioned e.g. #INQ-A983FC, else null'),
       }),
     }
   );
@@ -266,7 +266,7 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'get_deal_ids',
-      description: `Use this tool when the salesperson asks for the Deal ID(s) or inquiry code(s) for a company (e.g. "What is the deal ID for Radhe Ispat?", "Deal ID for Apex Steel", "Give me deal ID", "Deal ID"). If company name is not provided in message, pass company_name as null so the system uses the active customer session or asks for the company name.`,
+      description: `Use this tool when the salesperson asks for the Inquiry ID(s) or inquiry code(s) for a company (e.g. "What is the inquiry ID for Radhe Ispat?", "Inquiry ID for Apex Steel", "Give me inquiry ID", "Inquiry ID", "Deal ID"). If company name is not provided in message, pass company_name as null so the system uses the active customer session or asks for the company name.`,
       schema: z.object({
         company_name: z.string().nullable().optional().describe('The customer/company name if mentioned, else null'),
         text: z.string().optional().describe('The user query text'),

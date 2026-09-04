@@ -33,7 +33,7 @@ Input message can be English, Hindi, or Hinglish.
 Extract into ONLY a JSON object (no markdown, no prose, no backticks):
 {
   "action": "inquiry|stage_update|purchase_order|deal_update", // Use "stage_update" whenever moving stage, updating status, or marking as won/lost/negotiation/quoted/qualified. Use "inquiry" for ALL new customer requirements, notes, RFQs, quotes. Use "purchase_order" ONLY if text explicitly contains "PO", "PO-...", "Purchase order", "Order confirmed", "Order placed", or "Won".
-  "deal_id": "<deal ID if mentioned e.g. #DEAL-C538B6, DEAL-C538B6, or C538B6, else null>",
+  "deal_id": "<inquiry ID if mentioned e.g. #INQ-C538B6, INQ-C538B6, #DEAL-C538B6, or C538B6, else null>",
   "customer_name": "<exact company/customer name requesting material or placing order, else null>",
   "contact_person": "<full name of customer contact person/owner/proprietor if mentioned e.g. Rajesh Mehta, else null>",
   "target_stage": "new_inquiry|qualified|negotiation|quoted|won|lost", // Stage if explicitly requested to update e.g. "update to negotiation", "mark as negotiation", "mark as won", "deal lost", else null
@@ -107,7 +107,7 @@ CRITICAL RULES FOR THE 9 CORE STEEL PRODUCT CATEGORIES:
    - When a message says "update rates", "update the rates", "upadte the rates", "rates for", "new rates", or provides product rates (e.g. "CR Sheet 1mm - 15\nCR Sheet 1.2mm - 18\nHR sheet 1.6mm -12" or "MS Sheet 5MM THK - 10"):
      The numbers after hyphens/colons/at-signs are unit RATES (rate_per_mt: 15), NOT quantities!
      Set action: "deal_update" and extract EACH product with its product_requirement, dimensions, and rate_per_mt.
-   - If a deal code or customer name is provided, extract deal_id (e.g. "DEAL-F91CAB") and customer_name.
+   - If an inquiry code, deal code or customer name is provided, extract deal_id (e.g. "INQ-F91CAB" or "DEAL-F91CAB") and customer_name.
 
 Return ONLY the JSON object.
 `;
@@ -400,10 +400,13 @@ function isInvalidCustomerName(name) {
 }
 
 function getDealCode(deal) {
-  if (!deal) return '#DEAL-UNKNOWN';
-  if (deal.deal_number) return `#${deal.deal_number}`;
+  if (!deal) return '#INQ-UNKNOWN';
+  if (deal.deal_number) {
+    const cleanNum = deal.deal_number.replace(/^#?(?:DEAL|INQ)-?/i, '');
+    return `#INQ-${cleanNum}`;
+  }
   const code = (deal.id || '').substring(0, 6).toUpperCase();
-  return `#DEAL-${code}`;
+  return `#INQ-${code}`;
 }
 
 /**
@@ -726,7 +729,7 @@ async function handleSendQuotationMessage(text, senderPhone, overrideEmail = nul
   }
 
   if (!targetDeal) {
-    return `Which customer's quotation would you like to send? Please specify the customer name or Deal ID.`;
+    return `Which customer's quotation would you like to send? Please specify the customer name or Inquiry ID.`;
   }
 
   const dealCode = getDealCode(targetDeal);
@@ -907,9 +910,9 @@ function formatOpenDealsListPrompt(customerName, openDeals) {
     .join('\n');
 
   return (
-    `There are ${openDeals.length} open inquiries/deals for *${customerName}*:\n\n` +
+    `There are ${openDeals.length} open inquiries for *${customerName}*:\n\n` +
     `${dealListLines}\n\n` +
-    `Which Deal ID would you like to update? Please reply with the Deal ID (e.g. *${getDealCode(openDeals[0])}*) or option number (e.g. *1*).`
+    `Which Inquiry ID would you like to update? Please reply with the Inquiry ID (e.g. *${getDealCode(openDeals[0])}*) or option number (e.g. *1*).`
   );
 }
 
@@ -1053,23 +1056,23 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
             (m) => m.role === 'user' && m.content && m.content.trim() !== text.trim(),
           );
 
-          // If last assistant message asked for deal selection (contained "open inquiries/deals" or "Which Deal ID")
-          if (lastAssistantMsg && /open\s+(?:inquiries|deals)|Which\s+Deal\s+ID/i.test(lastAssistantMsg.content)) {
-            const numMatch = text.trim().match(/^(?:option\s*|#\s*|deal\s*)?([1-9])$/i);
+          // If last assistant message asked for deal selection (contained "open inquiries" or "Which Inquiry/Deal ID")
+          if (lastAssistantMsg && /open\s+(?:inquiries|deals)|Which\s+(?:Inquiry|Deal)\s+ID/i.test(lastAssistantMsg.content)) {
+            const numMatch = text.trim().match(/^(?:option\s*|#\s*|inquiry\s*|inq\s*|deal\s*)?([1-9])$/i);
             let selectedDealCode = null;
             if (numMatch) {
               const optIndex = parseInt(numMatch[1], 10);
-              const dealMatches = [...lastAssistantMsg.content.matchAll(/(?:^|\n)\s*(\d+)\.\s*\*#?(DEAL-[A-F0-9]{4,6})\*/gi)];
+              const dealMatches = [...lastAssistantMsg.content.matchAll(/(?:^|\n)\s*(\d+)\.\s*\*#?((?:DEAL|INQ)-[A-F0-9]{4,6})\*/gi)];
               if (dealMatches.length >= optIndex) {
                 selectedDealCode = dealMatches[optIndex - 1][2];
               }
             } else {
-              const explicitCode = text.match(/#?(DEAL-[A-F0-9]{4,6})/i);
+              const explicitCode = text.match(/#?((?:DEAL|INQ)-[A-F0-9]{4,6})/i);
               if (explicitCode) selectedDealCode = explicitCode[1];
             }
 
             if (selectedDealCode && lastUserMsg && lastUserMsg.content) {
-              effectiveTextForLLM = `${lastUserMsg.content}\nfor deal id ${selectedDealCode}`;
+              effectiveTextForLLM = `${lastUserMsg.content}\nfor inquiry id ${selectedDealCode}`;
             }
           } else if (lastUserMsg && lastUserMsg.content) {
             const hContent = lastUserMsg.content;
@@ -1164,7 +1167,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
       if (!data || data.confidence < 0.3) {
         const textRaw = effectiveTextForLLM || text || '';
-        const textClean = textRaw.replace(/#?(?:DEAL-[A-F0-9]{4,6}|[A-F0-9]{6})\b/gi, '').replace(/\s+/g, ' ');
+        const textClean = textRaw.replace(/#?(?:DEAL-[A-F0-9]{4,6}|INQ-[A-F0-9]{4,6}|[A-F0-9]{6})\b/gi, '').replace(/\s+/g, ' ');
         const textLower = textClean.toLowerCase();
 
         let ruleDealId = null;
@@ -1383,7 +1386,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const dealCodeToFind = (explicitDealIdMatch ? explicitDealIdMatch[1] : data.deal_id);
       targetExplicitDeal = await findDealByCodeOrId(dealCodeToFind, senderPhone);
       if (!targetExplicitDeal && explicitDealIdMatch) {
-        return `❌ Deal ID #${dealCodeToFind.toUpperCase()} was not found in our records. Please check the Deal ID and try again.`;
+        return `❌ Inquiry ID #${dealCodeToFind.toUpperCase()} was not found in our records. Please check the Inquiry ID and try again.`;
       }
     }
 
@@ -1523,7 +1526,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
 
       if (!dealToUpdate) {
-        return `Which deal would you like to mark as *${dbStage.toUpperCase()}*? Please provide the Deal ID (e.g. #DEAL-XXXXXX) or customer name.`;
+        return `Which inquiry would you like to mark as *${dbStage.toUpperCase()}*? Please provide the Inquiry ID (e.g. #INQ-XXXXXX) or customer name.`;
       }
 
       const currentStage = (dealToUpdate.stage || 'new_inquiry').toLowerCase().trim();
@@ -1636,16 +1639,16 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       if (dbStage === 'won') {
         return `*DEAL WON & ORDER CONFIRMED!*\n\n` +
           `Customer: *${dealToUpdate.customer_name}*\n` +
-          `Deal ID: *${dealCode}*\n` +
+          `Inquiry ID: *${dealCode}*\n` +
           (dealToUpdate.po_number ? `Official PO Number: *${dealToUpdate.po_number}*\n` : '') +
           `Total Value: *Rs. ${Number(dealToUpdate.total_amount || 0).toLocaleString('en-IN')}*\n\n` +
           `Updated Sales Achievement Card! 🏆`;
       }
 
-      return `*Deal Updated - ${dealCode}*\n\n` +
+      return `*Inquiry Updated - ${dealCode}*\n\n` +
         `Customer: *${dealToUpdate.customer_name}*\n` +
         `Stage: *${dbStage.toUpperCase()}*\n\n` +
-        `Deal successfully moved to *${dbStage.toUpperCase()}* in Sales Pipeline! 📈`;
+        `Inquiry successfully moved to *${dbStage.toUpperCase()}* in Sales Pipeline! 📈`;
     }
 
     // Disambiguation check for any deal update/rate update/field update without an explicit Deal ID
@@ -1676,10 +1679,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         } else if (openDeals.length > 1) {
           return formatOpenDealsListPrompt(customerName, openDeals);
         } else {
-          return `Which deal or inquiry is this update for? Please provide the Deal ID (e.g. #DEAL-XXXXXX) or company name.`;
+          return `Which inquiry is this update for? Please provide the Inquiry ID (e.g. #INQ-XXXXXX) or company name.`;
         }
       } else {
-        return `Which deal or inquiry is this for? Please provide the Deal ID (e.g. #DEAL-XXXXXX).`;
+        return `Which inquiry is this for? Please provide the Inquiry ID (e.g. #INQ-XXXXXX).`;
       }
     }
 
@@ -1823,13 +1826,13 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const updatedStr = updatedLabels.length > 0 ? `Updated: ${updatedLabels.join(', ')}\n` : '';
 
       if (completeness.isComplete) {
-        return `*Deal Updated & Complete - ${dealCode}*\n\n` +
+        return `*Inquiry Updated & Complete - ${dealCode}*\n\n` +
           `Customer: *${company}*\n` +
           `Stage: *${(refreshedDeal.stage || 'NEW INQUIRY').toUpperCase()}*\n` +
           updatedStr +
           `\nAll mandatory fields complete. Logged to Sales Pipeline & Inquiries! 📈`;
       } else {
-        return `*Deal Updated - ${dealCode}*\n\n` +
+        return `*Inquiry Updated - ${dealCode}*\n\n` +
           `Customer: *${company}*\n` +
           updatedStr +
           `\n*Still needed to complete:*\n` +
@@ -2220,7 +2223,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       let resultMsg =
         `*DEAL WON & ORDER CONFIRMED!*\n\n` +
         `Customer: *${finalCustomerName}*\n` +
-        `Deal ID: *${dealCode}*\n` +
+        `Inquiry ID: *${dealCode}*\n` +
         `Official PO Number: *${poNumber}*\n` +
         `Total Value: *Rs. ${Number(activeTotalForSummary).toLocaleString('en-IN')}* + GST\n` +
         (poDate ? `PO Date: *${poDate}*\n` : '') +
@@ -2265,7 +2268,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       })
       .join('\n');
 
-    return `*Inquiry Logged - Deal ID: ${dealCode}*\n\n` +
+    return `*Inquiry Logged - Inquiry ID: ${dealCode}*\n\n` +
       `Customer: *${finalCustomerName}*\n` +
       `Product Requirement:\n${itemSummary}\n` +
       (finalDeliveryLoc ? `Delivery Location: *${finalDeliveryLoc}*\n` : '') +
