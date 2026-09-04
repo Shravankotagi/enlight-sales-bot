@@ -45,6 +45,36 @@ Extract into ONLY a JSON object (no prose, no markdown, no backticks):
 Return ONLY the JSON object.
 `;
 
+function normalizeCompanyName(name) {
+  if (!name) return '';
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/\b(private\s+limited|pvt\s+ltd|pvt\s+limited|private\s+ltd|co\s+ltd|co\s+limited|llp|limited|pvt|ltd|inc|corp|co|corporation)\b/gi, '')
+    .replace(/[^a-z0-9]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isExactDuplicate(name1, name2) {
+  if (!name1 || !name2) return false;
+  const str1 = name1.trim().toLowerCase();
+  const str2 = name2.trim().toLowerCase();
+  if (str1 === str2) return true;
+
+  const n1 = normalizeCompanyName(name1);
+  const n2 = normalizeCompanyName(name2);
+  if (n1 && n2 && n1 === n2) return true;
+
+  return false;
+}
+
+function cleanPhone(p) {
+  if (!p) return '';
+  const digits = String(p).replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : '';
+}
+
 /**
  * Check if KRA 2 was already logged for this customer by this salesperson this month.
  * Prevents duplicate KRA 2 logs when the same customer info is re-sent.
@@ -90,6 +120,74 @@ async function getMonthlyOnboardCount(senderPhone) {
 
 async function processCustomerMessage(text, senderPhone) {
   try {
+    const { getActiveSession, getFullActiveSession, saveActiveSession, getAccessibleSalespersonPhonesForBot } = require('../supabase');
+    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+    const senderCleanPhone = cleanPhone(senderPhone);
+
+    // ── 1. Check if user is responding to an ongoing Duplicate Confirmation Session ──
+    const fullSession = await getFullActiveSession(senderPhone);
+    if (fullSession && fullSession.last_intent && fullSession.last_intent.startsWith('duplicate_check|')) {
+      const cleanInput = text.trim().toLowerCase();
+      let payload = null;
+      try {
+        payload = JSON.parse(fullSession.last_intent.replace('duplicate_check|', ''));
+      } catch (e) { /* ignore parse error */ }
+
+      if (payload) {
+        const isYes = ['yes', 'y', 'ha', 'haa', 'haan', 'correct', 'confirm', 'sure', 'true', 'ok', 'okay', 'right', 'sahi', 'sahi hai'].includes(cleanInput) ||
+                      cleanInput.startsWith('yes') || cleanInput.startsWith('ha ') || cleanInput.startsWith('haa');
+
+        const isNo = ['no', 'n', 'nah', 'nahi', 'nope', 'cancel', 'wrong', 'galat', 'different'].includes(cleanInput) ||
+                     cleanInput.startsWith('no') || cleanInput.startsWith('nahi');
+
+        if (isYes) {
+          // User confirmed YES: Link existing company to this salesperson's portfolio
+          await saveActiveSession(senderPhone, payload.existingCustomerName, 'duplicate_confirmed');
+
+          const updateData = {
+            assigned_salesperson_phone: senderPhone,
+            updated_at: new Date().toISOString(),
+          };
+          if (payload.newPayload?.phone) updateData.customer_phone = payload.newPayload.phone;
+          if (payload.newPayload?.gst) updateData.customer_gst = payload.newPayload.gst;
+          if (payload.newPayload?.city) updateData.customer_address = payload.newPayload.city;
+          if (payload.newPayload?.contact_person) updateData.contact_person = payload.newPayload.contact_person;
+          if (payload.newPayload?.order_frequency_days) updateData.avg_order_frequency_days = Number(payload.newPayload.order_frequency_days);
+
+          await supabase
+            .from('recurring_customers')
+            .update(updateData)
+            .eq('id', payload.existingId);
+
+          // Log KRA 2
+          const alreadyLogged = await isKRA2AlreadyLogged(senderPhone, payload.existingCustomerName);
+          if (!alreadyLogged) {
+            await supabase.from('kra_logs').insert({
+              salesperson_phone: senderPhone,
+              kra_number: 2,
+              kra_type: 'new_customer',
+              customer_name: payload.existingCustomerName,
+              description: `Customer Linked: ${payload.existingCustomerName}`,
+              month: new Date().getMonth() + 1,
+              year: new Date().getFullYear(),
+            });
+          }
+
+          const currentCount = await getMonthlyOnboardCount(senderPhone);
+          return `✅ *Customer Linked Successfully!*\n\n` +
+            `Company: *${payload.existingCustomerName}* is now linked to your customer portfolio.\n` +
+            `Monthly Progress: *${currentCount} / 3 Onboarded*\n\n` +
+            `_Updated in Enlight Sales OS._ ✅`;
+
+        } else if (isNo) {
+          // User confirmed NO: Ask for the correct company name
+          await saveActiveSession(senderPhone, 'PENDING_CORRECT_NAME', 'duplicate_rejected');
+          return `Understood! 👍 Please tell me the correct *Company Name* (e.g. _"Apex Infra Works phone 9822... location Pune"_) so I can create the accurate record.`;
+        }
+      }
+    }
+
+    // ── 2. LLM Extraction ──────────────────────────────────────────────────
     const { invokeWithFallback } = require('../core/modelRouter');
     const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
     const response = await invokeWithFallback([
@@ -101,259 +199,155 @@ async function processCustomerMessage(text, senderPhone) {
     const data = safeParseJSON(rawText, null);
     if (!data) throw new Error('Could not parse customer onboarding JSON from LLM response');
 
-    const { getActiveSession, getFullActiveSession, saveActiveSession, verifyAndGetCustomerName, getAccessibleSalespersonPhonesForBot } = require('../supabase');
-    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
-
-    // ── Session Context & Pending Payload Resolution ──────────────────────
+    // ── 3. Session Context & Pending Resolution ─────────────────────────────
     let activeCustomer = await getActiveSession(senderPhone);
-    const fullSession  = await getFullActiveSession(senderPhone);
 
-    // If company name is missing, try to resolve from active customer session
-    if (!data.customer_name && activeCustomer && activeCustomer !== 'PENDING_PROFILE' && activeCustomer !== 'Unknown') {
+    if (!data.customer_name && activeCustomer && activeCustomer !== 'PENDING_PROFILE' && activeCustomer !== 'PENDING_CORRECT_NAME' && activeCustomer !== 'Unknown') {
       data.customer_name = activeCustomer;
-      console.log(`[CustomerAgent] Resolved missing company name from active session: "${activeCustomer}"`);
     }
 
-    // Check if there was a pending profile update payload from a previous turn
-    let pendingPayload = null;
-    if (fullSession && fullSession.last_intent && fullSession.last_intent.startsWith('pending_profile|')) {
-      try {
-        const jsonStr = fullSession.last_intent.replace('pending_profile|', '');
-        pendingPayload = JSON.parse(jsonStr);
-      } catch (e) { /* ignore parse error */ }
-    }
-
-    // Merge pending profile details if available
-    if (pendingPayload) {
-      data.phone          = data.phone          || pendingPayload.phone          || null;
-      data.contact_person = data.contact_person || pendingPayload.contact_person || null;
-      data.city           = data.city           || pendingPayload.city           || null;
-      data.gst            = data.gst            || pendingPayload.gst            || null;
-      data.order_frequency_days = data.order_frequency_days || pendingPayload.order_frequency_days || null;
-    }
-
-    // If STILL no customer name after session check
     if (!data.customer_name || data.customer_name.trim().toLowerCase() === 'unknown') {
       if (data.phone || data.contact_person || data.city || data.gst || data.order_frequency_days) {
         const payloadStr = JSON.stringify({
-          phone:                data.phone,
-          contact_person:       data.contact_person,
-          city:                 data.city,
-          gst:                  data.gst,
+          phone: data.phone,
+          contact_person: data.contact_person,
+          city: data.city,
+          gst: data.gst,
           order_frequency_days: data.order_frequency_days,
         });
         await saveActiveSession(senderPhone, 'PENDING_PROFILE', `pending_profile|${payloadStr}`);
         return `Oops! I missed getting the *Company Name* for this customer. 😅\n\n` +
           `Could you please tell me the Company Name for ${data.contact_person ? `*${data.contact_person}*` : 'this contact'}` +
           (data.phone ? ` with mobile number *${data.phone}*` : '') + `?\n\n` +
-          `Once I have that, I'll get their profile updated right away!`;
+          `Once I have that, I'll get their profile recorded right away!`;
       }
 
-      return `⚠️ *Customer Agent - Company Name Missing*\n\nPlease specify the *Customer / Company Name*.\nExample: _"Supreme Steel phone 9812345678 owner Mr Mehta order frequency 45 days"_`;
+      return `⚠️ *Customer Agent - Company Name Missing*\n\nPlease specify the *Customer / Company Name*.\nExample: _"Supreme Steel phone 9812345678 owner Mr Mehta location Pune order frequency 45 days"_`;
     }
 
     const customerName = data.customer_name.trim();
 
-    // Verify and get official customer name from registered customers
-    const officialCustomerName = await verifyAndGetCustomerName(customerName, senderPhone);
+    // ── 4. Duplicate Detection Check Across All Customers ──────────────────
+    const { data: allCustomers } = await supabase
+      .from('recurring_customers')
+      .select('id, customer_name, assigned_salesperson_phone, customer_phone, customer_gst, customer_address, contact_person, notes, avg_order_frequency_days');
 
-    let existing = null;
-    if (officialCustomerName) {
-      let query = supabase
-        .from('recurring_customers')
-        .select('id, assigned_salesperson_phone, customer_name, customer_phone, customer_gst, customer_address, contact_person, notes, avg_order_frequency_days')
-        .ilike('customer_name', officialCustomerName)
-        .limit(1);
+    const exactMatch = (allCustomers || []).find(c => isExactDuplicate(customerName, c.customer_name));
 
-      if (scope.phones !== null) {
-        if (scope.phones.length === 1) {
-          query = query.eq('assigned_salesperson_phone', scope.phones[0]);
-        } else if (scope.phones.length > 1) {
-          query = query.in('assigned_salesperson_phone', scope.phones);
-        }
-      }
+    if (exactMatch) {
+      const matchRepClean = cleanPhone(exactMatch.assigned_salesperson_phone);
 
-      let { data: found } = await query;
-      if ((!found || found.length === 0) && scope.isAdmin) {
-        const { data: globalFound } = await supabase
-          .from('recurring_customers')
-          .select('id, assigned_salesperson_phone, customer_name, customer_phone, customer_gst, customer_address, contact_person, notes, avg_order_frequency_days')
-          .ilike('customer_name', officialCustomerName)
-          .limit(1);
-        found = globalFound;
-      }
-      existing = found;
-    }
-
-    const finalCustomerName = officialCustomerName || customerName;
-    const notesText = data.contact_person ? `Owner: ${data.contact_person}` : null;
-    let isNewAcquisition = true;
-
-    if (existing && existing.length > 0) {
-      const record = existing[0];
-
-      // Same salesperson or Admin updating existing account
-      isNewAcquisition = false;
-
-      const updateFields = {
-        customer_phone:    data.phone                 || record.customer_phone    || null,
-        customer_gst:      data.gst                   || record.customer_gst      || null,
-        customer_address:  data.city                  || record.customer_address  || null,
-        contact_person:    data.contact_person        || record.contact_person    || null,
-        notes:             notesText                  || record.notes             || null,
-        is_active:         true,
-        updated_at:        new Date().toISOString(),
-      };
-      if (data.order_frequency_days) {
-        updateFields.avg_order_frequency_days = Number(data.order_frequency_days);
-      }
-      // If salesperson self-updating, ensure assigned phone is set
-      if (!scope.isAdmin && !scope.isManager) {
-        updateFields.assigned_salesperson_phone = senderPhone;
-      }
-
-      await supabase
-        .from('recurring_customers')
-        .update(updateFields)
-        .eq('id', record.id);
-    } else {
-      // Fuzzy search across accessible scope
-      let fuzzyQuery = supabase
-        .from('recurring_customers')
-        .select('id, customer_name, assigned_salesperson_phone, customer_phone, customer_gst, customer_address, contact_person, notes, avg_order_frequency_days')
-        .ilike('customer_name', `%${customerName.split(' ')[0]}%`)
-        .limit(1);
-
-      if (scope.phones !== null) {
-        if (scope.phones.length === 1) {
-          fuzzyQuery = fuzzyQuery.eq('assigned_salesperson_phone', scope.phones[0]);
-        } else if (scope.phones.length > 1) {
-          fuzzyQuery = fuzzyQuery.in('assigned_salesperson_phone', scope.phones);
-        }
-      }
-
-      let { data: fuzzyMatch } = await fuzzyQuery;
-      if ((!fuzzyMatch || fuzzyMatch.length === 0) && scope.isAdmin) {
-        const { data: globalFuzzy } = await supabase
-          .from('recurring_customers')
-          .select('id, customer_name, assigned_salesperson_phone, customer_phone, customer_gst, customer_address, contact_person, notes, avg_order_frequency_days')
-          .ilike('customer_name', `%${customerName.split(' ')[0]}%`)
-          .limit(1);
-        fuzzyMatch = globalFuzzy;
-      }
-
-      if (fuzzyMatch && fuzzyMatch.length > 0) {
-        const record = fuzzyMatch[0];
-        isNewAcquisition = false;
+      // Case A: Customer already exists under THIS salesperson
+      if (matchRepClean === senderCleanPhone || (!matchRepClean && !scope.isAdmin)) {
         const updateFields = {
-          customer_phone:   data.phone                 || record.customer_phone    || null,
-          customer_gst:     data.gst                   || record.customer_gst      || null,
-          customer_address: data.city                  || record.customer_address  || null,
-          contact_person:   data.contact_person        || record.contact_person    || null,
-          notes:            notesText                  || record.notes             || null,
-          is_active:        true,
-          updated_at:       new Date().toISOString(),
+          customer_phone: data.phone || exactMatch.customer_phone || null,
+          customer_gst: data.gst || exactMatch.customer_gst || null,
+          customer_address: data.city || exactMatch.customer_address || null,
+          contact_person: data.contact_person || exactMatch.contact_person || null,
+          is_active: true,
+          updated_at: new Date().toISOString(),
         };
         if (data.order_frequency_days) {
           updateFields.avg_order_frequency_days = Number(data.order_frequency_days);
+        }
+        if (!exactMatch.assigned_salesperson_phone) {
+          updateFields.assigned_salesperson_phone = senderPhone;
         }
 
         await supabase
           .from('recurring_customers')
           .update(updateFields)
-          .eq('id', record.id);
+          .eq('id', exactMatch.id);
 
         return `✅ *Customer Profile Updated!*\n\n` +
-          `Company: *${record.customer_name}*\n` +
+          `Company: *${exactMatch.customer_name}* is already in your account.\n` +
           (data.order_frequency_days ? `Order Frequency: *Every ${data.order_frequency_days} days*\n` : '') +
           (data.contact_person ? `Contact: *${data.contact_person}*\n` : '') +
-          (data.phone          ? `Phone: *${data.phone}*\n` : '') +
-          (data.city           ? `Location: *${data.city}*\n` : '') +
+          (data.phone ? `Phone: *${data.phone}*\n` : '') +
+          (data.city ? `Location: *${data.city}*\n` : '') +
           `\n_Profile updated in Enlight Sales OS._ ✅`;
-      } else {
-        // Genuinely brand new customer - only create if valid customerName
-        const { ensureCustomerRecord } = require('../supabase');
-        await ensureCustomerRecord(customerName, senderPhone, {
-          customer_phone: data.phone || null,
-          customer_gst: data.gst || null,
-          city: data.city || null,
-          contact_person: data.contact_person || null,
-          avg_order_frequency_days: data.order_frequency_days || 30,
-        });
       }
+
+      // Case B: Customer is recorded under ANOTHER salesperson
+      const { data: emps } = await supabase.from('employees').select('name, phone');
+      let otherRepName = 'another salesperson';
+      if (emps && exactMatch.assigned_salesperson_phone) {
+        const emp = emps.find(e => cleanPhone(e.phone) === matchRepClean);
+        if (emp && emp.name) otherRepName = emp.name;
+      }
+
+      // Save confirmation session
+      const checkPayload = JSON.stringify({
+        existingId: exactMatch.id,
+        existingCustomerName: exactMatch.customer_name,
+        existingPhone: exactMatch.customer_phone,
+        existingGst: exactMatch.customer_gst,
+        existingAddress: exactMatch.customer_address,
+        existingContact: exactMatch.contact_person,
+        newPayload: data,
+      });
+
+      await saveActiveSession(senderPhone, 'DUPLICATE_CHECK', `duplicate_check|${checkPayload}`);
+
+      return `⚠️ *${exactMatch.customer_name}* is already recorded under *${otherRepName}*.\n\n` +
+        `Is this the same customer?\n` +
+        `👉 Reply *YES* to confirm and link to your portfolio, or *NO* with the correct company name.`;
     }
 
-    // Sync contact_person and customer_phone to customer_visits rows for this customer
-    if (data.contact_person || data.phone) {
-      const visitUpdate = {};
-      if (data.contact_person) visitUpdate.person_met = data.contact_person;
-      if (data.phone)          visitUpdate.contact_no = data.phone;
+    // ── 5. Truly Brand New Customer: Create in Database ─────────────────────
+    const { ensureCustomerRecord } = require('../supabase');
+    await ensureCustomerRecord(customerName, senderPhone, {
+      customer_phone: data.phone || null,
+      customer_gst: data.gst || null,
+      city: data.city || null,
+      contact_person: data.contact_person || null,
+      avg_order_frequency_days: data.order_frequency_days || 30,
+    });
 
-      await supabase
-        .from('customer_visits')
-        .update(visitUpdate)
-        .ilike('customer_name', `%${finalCustomerName}%`)
-        .eq('salesperson_phone', senderPhone);
-    }
+    // Save active session
+    await saveActiveSession(senderPhone, customerName, 'onboarding_prompted');
 
-    // Save active customer session context
-    await saveActiveSession(senderPhone, finalCustomerName, 'onboarding_prompted');
-
-    // Log KRA 2 once per customer per salesperson per month
-    const alreadyLogged = await isKRA2AlreadyLogged(senderPhone, finalCustomerName);
-
+    // Log KRA 2
+    const alreadyLogged = await isKRA2AlreadyLogged(senderPhone, customerName);
     if (!alreadyLogged) {
       await supabase.from('kra_logs').insert({
         salesperson_phone: senderPhone,
-        kra_number:        2,
-        kra_type:          'new_customer',
-        customer_name:     finalCustomerName,
-        description:       `New Customer Onboarded: ${finalCustomerName}`,
-        month:             new Date().getMonth() + 1,
-        year:              new Date().getFullYear(),
+        kra_number: 2,
+        kra_type: 'new_customer',
+        customer_name: customerName,
+        description: `New Customer Onboarded: ${customerName}`,
+        month: new Date().getMonth() + 1,
+        year: new Date().getFullYear(),
       });
     }
 
-    // Edge Case 7: Distinct count for accurate monthly progress
     const currentCount = await getMonthlyOnboardCount(senderPhone);
 
-    // Prompt for missing info
     const missingInfo = [];
-    if (!data.phone)          missingInfo.push('• 📱 *Mobile Number*');
+    if (!data.phone) missingInfo.push('• 📱 *Mobile Number*');
     if (!data.contact_person) missingInfo.push('• 👤 *Owner / Contact Person Name*');
-    if (!data.city)           missingInfo.push('• 📍 *City / Location*');
-    if (!data.gst)            missingInfo.push('• 🧾 *GSTIN* (optional)');
+    if (!data.city) missingInfo.push('• 📍 *City / Location*');
+    if (!data.gst) missingInfo.push('• 🧾 *GSTIN* (optional)');
 
     const promptSuffix = missingInfo.length > 0
-      ? `\n\n📌 *To complete ${finalCustomerName}'s profile, reply with:*\n${missingInfo.join('\n')}` +
-        `\n\n_(e.g. "${finalCustomerName} phone 9876543210 owner Mr. Kapoor location Mumbai")_`
+      ? `\n\n📌 *To complete ${customerName}'s profile, reply with:*\n${missingInfo.join('\n')}` +
+        `\n\n_(e.g. "${customerName} phone 9876543210 owner Mr. Kapoor location Mumbai")_`
       : '';
 
-    if (alreadyLogged && !isNewAcquisition) {
-      return `✅ *Customer Profile Updated!*\n\n` +
-        `Company: *${finalCustomerName}*\n` +
-        (data.contact_person ? `Contact: *${data.contact_person}*\n` : '') +
-        (data.phone          ? `Phone: *${data.phone}*\n` : '') +
-        (data.city           ? `City: *${data.city}*\n` : '') +
-        `\n_Note: ${finalCustomerName} profile updated on your dashboard._` +
-        promptSuffix;
-    }
-
-    // Async Zoho Bigin Smart Sync (both new onboarding and profile update)
     syncActivity('new_customer', {
-      customerName:  finalCustomerName,
-      phone:         data.phone || null,
-      gst:           data.gst || null,
-      city:          data.city || null,
+      customerName,
+      phone: data.phone || null,
+      gst: data.gst || null,
+      city: data.city || null,
       contactPerson: data.contact_person || null,
       senderPhone,
     });
 
     return `👤 *New Customer Onboarded!*\n\n` +
-      `Company: *${finalCustomerName}*\n` +
+      `Company: *${customerName}*\n` +
       (data.contact_person ? `Contact/Owner: *${data.contact_person}*\n` : '') +
-      (data.phone          ? `Phone: *${data.phone}*\n` : '') +
-      (data.city           ? `City: *${data.city}*\n` : '') +
+      (data.phone ? `Phone: *${data.phone}*\n` : '') +
+      (data.city ? `City: *${data.city}*\n` : '') +
       `Monthly Progress: *${currentCount} / 3 Onboarded*\n\n` +
       `Updated New Customer Acquisition Card! ✅` +
       promptSuffix;
@@ -364,4 +358,5 @@ async function processCustomerMessage(text, senderPhone) {
   }
 }
 
-module.exports = { processCustomerMessage, isKRA2AlreadyLogged };
+module.exports = { processCustomerMessage, isKRA2AlreadyLogged, normalizeCompanyName, isExactDuplicate };
+

@@ -28,8 +28,8 @@ Your role is to manage and support salespersons on WhatsApp with their daily B2B
 
 ## STRICT WHATSAPP FORMATTING & CLEANLINESS RULES (MANDATORY)
 1. NO EMOJIS: Never use any emojis or emoticons anywhere in your response. Keep the tone professional, clean, and modern.
-2. NO ASTERISK BULLETS: When creating lists or item breakdowns, NEVER start bullet lines with asterisks (* Item). ALWAYS use hyphen-space (- Item) or numbered lists (1. Item).
-3. BOLD TEXT: To make text bold for WhatsApp, wrap in single asterisks (*Bold Text*), NEVER double asterisks (**Bold Text**). Do not leave unclosed asterisks.
+2. NO ASTERISKS OR BOLD TEXT: Never use asterisks (*) anywhere in your response. Do not use bold formatting (*text* or **text**). Output clean, simple plain text.
+3. BULLETS & LISTS: When creating lists or item breakdowns, use hyphen-space (- Item) or numbered lists (1. Item).
 
 ## Chain-of-Thought Instructions (Execute Mentally Before Responding)
 1. **Analyze Tool Results**: Check what activities were saved (Visit, Deal, Payment, Complaint).
@@ -46,16 +46,16 @@ Your role is to manage and support salespersons on WhatsApp with their daily B2B
 
 ## STRICT CARD NAMING RULES (MANDATORY)
 Always strictly use the official Card name when referencing updates, metrics, or logs:
-- **Sales Achievement Card** (for WON deals and PO confirmations ONLY - NEVER at inquiry creation stage)
-- **Sales Pipeline & Inquiries** (for new inquiries, quotations, and pipeline stage updates)
-- **New Customer Acquisition Card** (for new client onboardings and customer master)
-- **Customer Retention Card** (for re-orders, recurring customer follow-ups)
-- **Enquiry Conversion Card** (for inquiry-to-won conversion rate)
-- **Payment Collection Card** (for advances, cheque, UPI, full payments, outstanding)
-- **CRM Compliance Card** (for daily sales activity tracking)
-- **Zero Rejection Card** (for rejection-free deliveries)
-- **Customer Complaints Card** (for quality issues, damages, resolutions)
-- **Customer Visits Card** (for customer site visits, factory meetings)
+- Sales Achievement Card (for WON deals and PO confirmations ONLY - NEVER at inquiry creation stage)
+- Sales Pipeline & Inquiries (for new inquiries, quotations, and pipeline stage updates)
+- New Customer Acquisition Card (for new client onboardings and customer master)
+- Customer Retention Card (for re-orders, recurring customer follow-ups)
+- Enquiry Conversion Card (for inquiry-to-won conversion rate)
+- Payment Collection Card (for advances, cheque, UPI, full payments, outstanding)
+- CRM Compliance Card (for daily sales activity tracking)
+- Zero Rejection Card (for rejection-free deliveries)
+- Customer Complaints Card (for quality issues, damages, resolutions)
+- Customer Visits Card (for customer site visits, factory meetings)
 
 NEVER output generic numbers like "KRA 1", "KRA 2", "KRA 9", "KRA 5", etc. Always use the actual Card Name!
 
@@ -68,15 +68,15 @@ When confirming or discussing any text-based customer inquiry, requirement, or d
 User: "Visited ABC Steel Mumbai office today, discussed next HR Coil requirement and future monthly consumption. Customer showed positive interest."
 Tool Results: log_customer_visit returned success: Visit logged with ABC Steel, location: Mumbai, outcome: Positive, requirement: HR Coil / future monthly requirement, follow-up: Collect required quantity, expected PO/delivery date, and customer details.
 Assistant Response:
-Great work visiting *ABC Steel* at their *Mumbai* office today! It's fantastic that the meeting had a *Positive* outcome and that you discussed their upcoming *HR Coil* requirement and future monthly consumption.
+Great work visiting ABC Steel at their Mumbai office today! It's fantastic that the meeting had a Positive outcome and that you discussed their upcoming HR Coil requirement and future monthly consumption.
 
-I've successfully logged your visit details in our *Customer Visits Card*!
+I've successfully logged your visit details in our Customer Visits Card!
 
 To follow up effectively:
-1. *Contact Details:* Could you share the contact person's name & direct mobile number?
-2. *Quantity & Timeline:* What is their estimated tonnage (MT) and expected PO date?
+1. Contact Details: Could you share the contact person's name & direct mobile number?
+2. Quantity & Timeline: What is their estimated tonnage (MT) and expected PO date?
 
-*Potential Opportunity:* If you would like to create a sales pipeline deal for this requirement, simply reply "Create deal for ABC Steel".
+Potential Opportunity: If you would like to create a sales pipeline deal for this requirement, simply reply "Create deal for ABC Steel".
 
 Updated Customer Visits Card!
 
@@ -84,7 +84,7 @@ Updated Customer Visits Card!
 User: "Received 5 lakh advance from Delta Steel"
 Tool Results: Payment logged: Rs. 5,00,000 received.
 Assistant Response:
-Excellent progress! I've logged the *Rs. 5,00,000* advance payment received from *Delta Steel*.
+Excellent progress! I've logged the Rs. 5,00,000 advance payment received from Delta Steel.
 
 To keep our financial records 100% accurate:
 1. What was the payment mode (NEFT / RTGS / Cheque / UPI)?
@@ -96,7 +96,7 @@ Updated Payment Collection Card!
 User: "Mehta contact is Rajesh Shah 9822012345, need 50 MT total by 15th Aug"
 Tool Results: Updated customer profile and deal requirement.
 Assistant Response:
-Got it! Updated *Mehta Engineering's* profile with Contact Person *Rajesh Shah* (9822012345) and set the requirement to *50 MT* by *15th August 2026*.
+Got it! Updated Mehta Engineering's profile with Contact Person Rajesh Shah (9822012345) and set the requirement to 50 MT by 15th August 2026.
 
 I'll notify the pricing desk to prepare the quotation!
 
@@ -104,31 +104,32 @@ Updated New Customer Acquisition Card!
 
 ### Example 4 (Text Inquiry)
 User: "ABC Steel requires 25 MT HR Coil 8mm for delivery to Mumbai before 25 August. Please create an inquiry."
-Tool Results: Created inquiry deal #DEAL-07578A.
+Tool Results: Created inquiry #INQ-07578A.
 Assistant Response:
-Fantastic work, Max! I've successfully created an inquiry for *ABC Steel* for *25 MT HR Coil 8mm* for delivery to *Mumbai* before *25 August*.
+Fantastic work, Max! I've successfully created an inquiry for ABC Steel for 25 MT HR Coil 8mm for delivery to Mumbai before 25 August.
 
-The inquiry has been logged with *Deal ID #DEAL-07578A* in our sales pipeline.
+The inquiry has been logged with Inquiry ID #INQ-07578A in our sales pipeline.
 
 Logged to Sales Pipeline & Inquiries!
 
 ## Critical Rules
-- **DEAL ID & INQUIRY LOOKUPS**: When the salesperson asks for the Deal ID(s), deal code(s), reference numbers, or active inquiry details for any customer (or asks "What is the deal ID?", "Deal ID kya hai?", "Give me deal ID", "inquiry code", "reference ID" in ANY phrasing, style, or natural language):
+- **INQUIRY ID & INQUIRY LOOKUPS**: When the salesperson asks for the Inquiry ID(s), inquiry code(s), reference numbers, or active inquiry details for any customer (or asks "What is the inquiry ID?", "Inquiry ID kya hai?", "Give me inquiry ID", "Deal ID", "inquiry code", "reference ID" in ANY phrasing, style, or natural language):
   - Call get_deal_ids. If a company is mentioned, pass company_name: "<company_name>". If no company is mentioned, pass company_name: null so the system automatically uses active session or prompts the user. Output the tool response directly to the user.
-- **VISIT VS DEAL LOGGING**: Customer site visits, meetings, and in-person check-ins MUST ONLY call \`log_customer_visit\`. NEVER call \`update_deal_stage\` or create a deal for a visit report. A visit report must ONLY update the **Customer Visits Card** (never Sales Achievement Card). Positive customer interest or requirements discussed during a visit are visit context and must NOT trigger automatic deal creation.
+- **VISIT VS DEAL LOGGING**: Customer site visits, meetings, and in-person check-ins MUST ONLY call log_customer_visit. NEVER call update_deal_stage or create a deal for a visit report. A visit report must ONLY update the **Customer Visits Card** (never Sales Achievement Card). Positive customer interest or requirements discussed during a visit are visit context and must NOT trigger automatic deal creation.
 - **ADMIN PRIVILEGES**: When the user is an Admin, they have full unrestricted read and write permissions across all data, customers, salespeople, and deals. When Admin asks to change or update a customer (e.g. "Change supreme steel order frequency to 45 days", "Max customer - Change supreme steel order frequency to 45 days"), you MUST execute the update immediately using update_customer_profile tool.
 - **CUSTOMER PROFILE & ORDER FREQUENCY UPDATES**: When a user requests to update a customer's order frequency (e.g. "Change [customer] order frequency to X days", "set frequency to 45 days"), reassign a customer to a salesperson (e.g. "reassign [customer] to Max"), or update contact details, CALL update_customer_profile. Do NOT call onboard_new_customer for updating an existing customer's order frequency.
 - NEVER output generic 1-line responses like "Activity updated in dashboard". Always format a complete manager response.
 - ONLY include a confirmation line (e.g. "Updated Sales Achievement Card!") when a deal is officially WON (Closed Won / PO confirmed). For new inquiries, qualified, quoted, and negotiation stage deals, ALWAYS end with "Logged to Sales Pipeline & Inquiries!" instead! NEVER append "Updated Sales Achievement Card!" on non-won deals or informational queries!
-- **BLOCKED REQUESTS**: If someone asks you to 'suggest products for [customer]', 'recommend materials', 'lock the rate sheet', 'create/update/delete a rate sheet', respond: "I cannot perform rate sheet or administrative actions via WhatsApp. Please use the Enlight Sales Web Dashboard for administrative actions." Do NOT call any tools.
+- **SALESPERSON RATE & PRICE UPDATES (FULLY SUPPORTED)**: Salespersons dynamically set and update product rates for each deal and product directly via WhatsApp. When a message contains rate updates for an inquiry (e.g. "update the rates for Traders Pvt. Ltd. for inquiry id INQ-F91CAB: CR Sheet 1mm - 15, CR Sheet 1.2mm - 18, HR sheet 1.6mm -12"), CALL update_deal_stage to update the deal item rates and inquiry. NEVER reject or block rate updates.
+- **BLOCKED REQUESTS**: If someone asks you to 'suggest products for [customer]' or 'recommend materials', respond: "Product recommendations are not available via WhatsApp. Please consult your sales catalog." Do NOT call any tools.
 - **CROSS-SALESPERSON REQUESTS**: If a salesperson (NOT an Admin) asks about ANOTHER salesperson's performance by name, respond: "You can only view your own performance data. Please contact your Sales Lead for team reports." Do NOT retrieve data for other salespersons.
 - **TOOL QUESTIONS / WARNINGS**: If a tool returns an interactive question or warning, YOU MUST FORWARD THAT EXACT QUESTION / PROMPT TO THE USER! Do NOT claim a deal was recorded or updated if the tool returned a confirmation prompt or warning!
-- **ALWAYS INCLUDE DEAL ID**: Whenever a tool output includes a Deal ID (e.g. #DEAL-B8018B or #DEAL-3FBBB0), YOU MUST EXPLICITLY INCLUDE THAT EXACT DEAL ID IN YOUR RESPONSE TEXT!
-- **VALID NEW INQUIRY**: A New Inquiry requires at minimum: Customer/Company Name AND at least one Product Name (e.g. HR Coil, CR Sheet, MS Plate, TMT Bar). If the message contains only supporting fields (delivery location, rate, payment terms, quantity) without a product name and without a Deal ID, prompt the user: "Which deal or inquiry is this for? Please provide the Deal ID (e.g. #DEAL-XXXXXX) or company name."
-- **DEAL ID & MISSING FIELDS**: When logging an inquiry or updating an existing deal, always include the Deal ID and clearly state if any mandatory fields (Quantity & Unit, Rate, Delivery Location, Payment Terms) are still needed to complete the inquiry.
+- **ALWAYS INCLUDE INQUIRY ID**: Whenever a tool output includes an Inquiry ID (e.g. #INQ-B8018B or #INQ-3FBBB0), YOU MUST EXPLICITLY INCLUDE THAT EXACT INQUIRY ID IN YOUR RESPONSE TEXT!
+- **VALID NEW INQUIRY**: A New Inquiry requires at minimum: Customer/Company Name AND at least one Product Name (e.g. HR Coil, CR Sheet, MS Plate, TMT Bar). If the message contains only supporting fields (delivery location, rate, payment terms, quantity) without a product name and without an Inquiry ID, prompt the user: "Which inquiry is this for? Please provide the Inquiry ID (e.g. #INQ-XXXXXX) or company name."
+- **INQUIRY ID & MISSING FIELDS**: When logging an inquiry or updating an existing inquiry, always include the Inquiry ID and clearly state if any mandatory fields (Quantity & Unit, Rate, Delivery Location, Payment Terms) are still needed to complete the inquiry.
 - **STANDALONE COMPANY NAMES / SEARCH LOOKUPS**: If the user sends only a company/customer name (e.g. "XYZ steel", "Radhe Ispat Industries", "ABC Metals") without any product quantities, dimensions, or inquiry verbs (need/inquiry/quote/order), ALWAYS call query_my_data to check their customer profile and past records. DO NOT call update_deal_stage or create an inquiry for a standalone company name.
 - **CUSTOMER DISAMBIGUATION**: Do NOT assume or carry forward a previous customer name from conversation history for a new requirement/inquiry (starting with 'Need...', 'Requires...', 'New inquiry...') unless the user explicitly names the customer in their message or is directly replying to a multi-deal choice option!
-- **COMPLAINTS & QUALITY ISSUES**: When a salesperson reports a customer defect, rust, damage, quality complaint, wrong delivery, or complaint resolution, CALL log_complaint. If log_complaint returns an interactive confirmation question or deal list, output that exact prompt directly to the user so the salesperson can confirm or specify the Deal ID.`;
+- **COMPLAINTS & QUALITY ISSUES**: When a salesperson reports a customer defect, rust, damage, quality complaint, wrong delivery, or complaint resolution, CALL log_complaint. If log_complaint returns an interactive confirmation question or deal list, output that exact prompt directly to the user so the salesperson can confirm or specify the Inquiry ID.`;
 
 // ── State Definition ──────────────────────────────────────────────────────
 
@@ -157,11 +158,33 @@ function getDeterministicIntentHint(text) {
     return '\n[REQUIRED TOOL CALLS THIS TURN: CALL send_quotation. The salesperson is requesting to send, email, or dispatch a quotation to a customer or email address.]';
   }
 
+  const hasInquiryId = /#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/i.test(lower);
+  const isStatusOrQueryForInquiry =
+    hasInquiryId &&
+    /\b(check|status|details?|info|information|show|view|find|search|get|what\s+is|what's|tell\s+me|give\s+me|kya|dekh)\b/i.test(
+      lower,
+    ) &&
+    !/\b(upadte|updt|updte|update|set|change|mark|move|add|remove|delete|rates?|prices?|negotiation|qualified|quoted|won|lost|po|payment|delivery)\b/i.test(
+      lower,
+    );
+
+  if (isStatusOrQueryForInquiry) {
+    return '\n[REQUIRED TOOL CALLS THIS TURN: CALL query_my_data. The message is querying details or status of a specific inquiry/deal. Call query_my_data to fetch the inquiry records.]';
+  }
+
   const isExplicitDealCommand =
     /\b(create|log|add|new|record|enter|post)\s+(?:new\s+)?(?:deal|inquiry|requirement|rfq|quote|quotation|order)\b/i.test(lower) ||
     /^(?:log\s+)?new\s+inquiry\b/i.test(lower) ||
     /\b(company\s+name|material|grade\/spec|target\s+price)\s*:/i.test(lower) ||
-    /\b(mark\b.*?\b(won|lost)|move\b.*?\b(stage|won|lost|negotiation|pipeline)|change\b.*?\b(stage|won|lost)|.*?\b(deal|inquiry|order)\b.*?\b(won|lost|closed|negotiation|qualified)|deal\s+won|deal\s+lost|mark\s+as\s+won|mark\s+as\s+lost|stage\s+update|po\s+received|order\s+placed|order\s+confirmed)\b/i.test(lower);
+    /\b(upadte|updt|updte|update|set|give|enter|new|change)\s+(?:the\s+)?(?:rates?|prices?|pricing|qty|quantity|unit|payment\s*terms?|delivery\s*location|delivery\s*address|delivery\s*date|notes?)\b/i.test(lower) ||
+    /\b(?:rates?|prices?)\s+(?:for|of)\b/i.test(lower) ||
+    /\b(add\s+(?:item|line\s*item)|remove\s+(?:item|line\s*item)|delete\s+(?:item|line\s*item))\b/i.test(lower) ||
+    /\b(confirm|confirmed|proceed|haan?|sahi\s+hai|yes\s+its\s+correct|update\s+(?:it|this|deal|inquiry|rates?))\b/i.test(lower) ||
+    /\b(update|upadte|change|move|set|mark)\b.*?\b(status|stage|negotiation|qualified|quoted|won|lost)\b/i.test(lower) ||
+    /\b(status|stage)\b.*?\b(negotiation|qualified|quoted|won|lost)\b/i.test(lower) ||
+    /\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+)?(won|lost|quoted|negotiation|qualified)\b/i.test(lower) ||
+    /\b(deal\s+won|deal\s+lost|mark\s+as\s+won|mark\s+as\s+lost|stage\s+update|po\s+received|order\s+placed|order\s+confirmed)\b/i.test(lower) ||
+    hasInquiryId;
 
   const isVisit = /\b(visited|met with|meeting at|site visit|factory visit|plant visit|market visit)\b/i.test(lower);
   const isPayment = /\b(received payment|paid rs|paid inr|received advance|collected payment|advance of|payment received|neft done|upi done|cheque received)\b/i.test(lower);
@@ -262,6 +285,21 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
     // Create tools with senderPhone and raw text pre-bound per request
     const TOOLS = createTools(senderPhone, text);
 
+    const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+
+    // Fetch active context, chat history, and user permissions ONCE concurrently for ultra-low latency
+    const [activeContextPrompt, historyMessages, userScope] = await Promise.all([
+      getActiveContextPrompt(senderPhone),
+      getChatHistory(senderPhone),
+      getAccessibleSalespersonPhonesForBot(senderPhone),
+    ]);
+
+    const roleDescription = userScope.isAdmin
+      ? 'Admin (Full Company-Wide Read & Write Access: can update, view, and manage any customer, salesperson, deal, or order frequency across the entire company)'
+      : (userScope.isManager
+          ? 'Sales Manager (Team Management Access: can manage assigned team salespersons and their customers)'
+          : 'Salesperson (Standard Access)');
+
     // Request-scoped Agent Node
     const inlineAgentNode = async (state) => {
       const { messages, senderPhone: sp, employeeName: en, messageType: mt } = state;
@@ -276,16 +314,6 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
         m => m._getType?.() === 'tool' || m.constructor?.name === 'ToolMessage'
       );
       const intentAnchor = hasToolResultsAlready ? '' : getDeterministicIntentHint(userText);
-      const activeContextPrompt = await getActiveContextPrompt(sp);
-      const historyMessages = await getChatHistory(sp);
-
-      const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
-      const userScope = await getAccessibleSalespersonPhonesForBot(sp);
-      const roleDescription = userScope.isAdmin
-        ? 'Admin (Full Company-Wide Read & Write Access: can update, view, and manage any customer, salesperson, deal, or order frequency across the entire company)'
-        : (userScope.isManager
-            ? 'Sales Manager (Team Management Access: can manage assigned team salespersons and their customers)'
-            : 'Salesperson (Standard Access)');
 
       const contextMessages = [
         new SystemMessage(
@@ -298,7 +326,8 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
 
       let response;
       try {
-        response = await invokeWithFallback(contextMessages, TOOLS);
+        const toolsToBind = hasToolResultsAlready ? null : TOOLS;
+        response = await invokeWithFallback(contextMessages, toolsToBind);
       } catch (err) {
         console.error('[Orchestrator] Model invocation failed:', err.message);
 
@@ -391,7 +420,7 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
       }
 
       const tmContent = typeof m.content === 'string' ? m.content : '';
-      const dealMatch = tmContent.match(/#?DEAL-([A-F0-9]{4,8})/i);
+      const dealMatch = tmContent.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,8})/i);
       if (dealMatch && !turnDealId) {
         turnDealId = dealMatch[1].toUpperCase();
       }
@@ -401,17 +430,50 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
       }
     }
 
-    // Direct Forwarding: If any tool returned a direct prompt or error (starting with ❌, ⚠️, or ❓), forward it directly
+function stripAsterisks(text) {
+  if (!text || typeof text !== 'string') return '';
+  return text
+    .replace(/\*\*\*([^*]+)\*\*\*/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/\*/g, '');
+}
+
+    // Direct Forwarding: If any tool returned a direct prompt, structured summary, warning, stage gate rejection, or error
     for (const m of allMessages) {
       const content = typeof m.content === 'string' ? m.content : '';
-      if (content.startsWith('❌') || content.startsWith('⚠️') || content.startsWith('❓')) {
-        await addChatHistory(senderPhone, text, content, {
+      if (
+        content.startsWith('❌') ||
+        content.startsWith('⚠️') ||
+        content.startsWith('❓') ||
+        content.startsWith('Inquiry Updated') ||
+        content.startsWith('*Inquiry Updated') ||
+        content.startsWith('Inquiry Logged') ||
+        content.startsWith('*Inquiry Logged') ||
+        content.startsWith('DEAL WON') ||
+        content.startsWith('*DEAL WON') ||
+        content.startsWith('Quotation Dispatched!') ||
+        content.startsWith('*Quotation Dispatched!') ||
+        content.startsWith('There are ') ||
+        content.startsWith('I have found ') ||
+        content.startsWith('Which customer') ||
+        content.startsWith('Which inquiry') ||
+        content.startsWith('Which Inquiry') ||
+        content.startsWith('This deal is currently in New Inquiry stage') ||
+        content.startsWith('This inquiry is currently in New Inquiry stage') ||
+        content.startsWith('This deal must go through Negotiation') ||
+        content.startsWith('This inquiry must go through Negotiation') ||
+        content.startsWith('This deal is already marked as') ||
+        content.startsWith('This inquiry is already marked as')
+      ) {
+        const cleanContent = stripAsterisks(content);
+        await addChatHistory(senderPhone, text, cleanContent, {
           agent: turnAgent,
           deal_id: turnDealId,
           customer_name: turnCustomerName,
         });
-        console.log(`[Orchestrator] Direct tool warning/error forwarded (${content.length} chars)`);
-        return content;
+        console.log(`[Orchestrator] Direct tool message forwarded (${cleanContent.length} chars)`);
+        return cleanContent;
       }
     }
 
@@ -430,29 +492,39 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
       reply = 'Activity updated in your CRM & KRA Dashboard!';
     }
 
-    // Post-processor: Guarantee Deal ID is always included in response if generated by a tool
-    for (const tm of allMessages) {
-      const tmContent = typeof tm.content === 'string' ? tm.content : '';
-      const dealCodeMatch = tmContent.match(/#DEAL-[A-F0-9]{4,6}/i);
-      if (dealCodeMatch && !reply.toUpperCase().includes(dealCodeMatch[0].toUpperCase())) {
-        reply += `\n\n*Deal ID: ${dealCodeMatch[0].toUpperCase()}*`;
+    // Post-processor: Guarantee Inquiry ID is always included in response if generated by a tool in current turn
+    const isRejectionOrError = reply.startsWith('❌') || reply.startsWith('⚠️') || reply.startsWith('❓') || reply.startsWith('This deal') || reply.startsWith('This inquiry');
+    if (!isRejectionOrError) {
+      for (const tm of allMessages) {
+        if (tm._getType?.() === 'tool' || tm.constructor?.name === 'ToolMessage') {
+          const tmContent = typeof tm.content === 'string' ? tm.content : '';
+          const dealCodeMatch = tmContent.match(/#(?:DEAL|INQ)-[A-F0-9]{4,6}/i);
+          if (dealCodeMatch) {
+            const formattedCode = dealCodeMatch[0].toUpperCase().replace(/^#DEAL-/i, '#INQ-');
+            if (!reply.toUpperCase().includes(dealCodeMatch[0].toUpperCase()) && !reply.toUpperCase().includes(formattedCode)) {
+              reply += `\n\nInquiry ID: ${formattedCode}`;
+            }
+          }
+        }
       }
     }
 
-    await addChatHistory(senderPhone, text, reply, {
+    const cleanFinalReply = stripAsterisks(reply);
+
+    await addChatHistory(senderPhone, text, cleanFinalReply, {
       agent: turnAgent,
       deal_id: turnDealId,
       customer_name: turnCustomerName,
     });
 
-    console.log(`[Orchestrator] Reply ready (${reply.length} chars)`);
-    return reply;
+    console.log(`[Orchestrator] Reply ready (${cleanFinalReply.length} chars)`);
+    return cleanFinalReply;
 
   } catch (err) {
     console.error('[Orchestrator] Fatal error:', err);
     const msg = err.message || '';
     if (msg.includes('429') || msg.includes('Quota') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('All Gemini API keys')) {
-      return `*Gemini Traffic Spike*\n\nGoogle Gemini rate limit reached. Please send your message again in 10 seconds.\n\n_(Tip: Add an additional Gemini API key in Railway under GEMINI_API_KEY_1 to double your quota!)_`;
+      return `Gemini Traffic Spike\n\nGoogle Gemini rate limit reached. Please send your message again in 10 seconds.\n\n(Tip: Add an additional Gemini API key in Railway under GEMINI_API_KEY_1 to double your quota!)`;
     }
     return `Something went wrong processing your message. Please try again.\n\nError: ${err.message}`;
   }

@@ -841,7 +841,8 @@ router.post('/', async (req, res) => {
           const confidence = Math.round((extraction.overall_confidence || 0) * 100);
           const status = extraction.overall_confidence >= 0.85 ? '✅ Auto-logged' : '⚠️ Needs review';
           
-          replyMessage = `${status} - Deal #${deal.id.substring(0, 8)}\n\n` +
+          const code = deal.deal_number ? deal.deal_number.replace(/^#?(?:DEAL|INQ)-?/i, '') : deal.id.substring(0, 8);
+          replyMessage = `${status} - Inquiry #${code}\n\n` +
             `📋 *${extraction.inquiry_type === 'purchase_order' ? 'Purchase Order' : 'Inquiry'}*\n` +
             (extraction.customer?.name ? `🏢 Customer: ${extraction.customer.name}\n` : '') +
             (extraction.po_number ? `📄 PO: ${extraction.po_number}\n` : '') +
