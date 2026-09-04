@@ -2449,6 +2449,7 @@ async function extractOrderFilters(text) {
   const lower = text.toLowerCase();
 
   const filters = {
+    deal_id: null,
     delivery_location: null,
     customer_name: null,
     product: null,
@@ -2461,6 +2462,11 @@ async function extractOrderFilters(text) {
     year: null,
     target_salesperson: null,
   };
+
+  const idMatch = text.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,8})\b/i) || text.match(/\b([A-F0-9]{6})\b/i);
+  if (idMatch) {
+    filters.deal_id = idMatch[1].toUpperCase();
+  }
 
   // Rule-based fast regex extractors
   // 1. Delivery Location
@@ -2681,6 +2687,18 @@ async function getFilteredOrders(scopeOrPhone, text = '') {
     });
 
     // In-memory filters:
+    // 0. Deal / Inquiry ID filter
+    if (filters.deal_id) {
+      const targetCode = filters.deal_id.replace(/^#?(?:DEAL|INQ)-?/i, '').trim().toUpperCase();
+      deals = deals.filter((d) =>
+        (d.id || '').toUpperCase().startsWith(targetCode) ||
+        (d.id || '').replace(/-/g, '').toUpperCase().startsWith(targetCode) ||
+        (d.inquiry_id || '').toUpperCase().startsWith(targetCode) ||
+        (d.inquiry_id || '').replace(/-/g, '').toUpperCase().startsWith(targetCode) ||
+        (d.deal_number && d.deal_number.toUpperCase().includes(targetCode))
+      );
+    }
+
     // 1. Delivery Location filter
     if (filters.delivery_location) {
       const locQuery = filters.delivery_location.toLowerCase().trim();
@@ -2953,6 +2971,119 @@ async function routeToHandler(category, text, scope, supabase, extra = {}) {
   }
 }
 
+async function getInquiryOrDealByCode(scopeOrPhone, text, explicitCode = null) {
+  try {
+    const supabase = getSupabase();
+    const codeMatch = explicitCode
+      ? { 1: explicitCode }
+      : text.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,8})\b/i) || text.match(/\b([A-F0-9]{6})\b/i);
+
+    if (!codeMatch) return null;
+    const code = codeMatch[1].toUpperCase().replace(/^#?(?:DEAL|INQ)-?/i, '').trim();
+
+    const [dealsRes, inqsRes] = await Promise.all([
+      supabase
+        .from('deals')
+        .select('*, deal_items(*)')
+        .order('created_at', { ascending: false })
+        .limit(200),
+      supabase
+        .from('inquiries')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(200),
+    ]);
+
+    const deals = dealsRes?.data || [];
+    const matchedDeal = deals.find(
+      (d) =>
+        (d.id || '').toUpperCase().startsWith(code) ||
+        (d.id || '').replace(/-/g, '').toUpperCase().startsWith(code) ||
+        (d.inquiry_id || '').toUpperCase().startsWith(code) ||
+        (d.inquiry_id || '').replace(/-/g, '').toUpperCase().startsWith(code) ||
+        (d.deal_number && d.deal_number.toUpperCase().includes(code))
+    );
+
+    const inquiries = inqsRes?.data || [];
+    const matchedInq = inquiries.find(
+      (i) =>
+        (i.id || '').toUpperCase().startsWith(code) ||
+        (i.id || '').replace(/-/g, '').toUpperCase().startsWith(code)
+    );
+
+    if (!matchedDeal && !matchedInq) {
+      return `Inquiry #${code} was not found in the database. Please check the Inquiry ID.`;
+    }
+
+    const custName = matchedDeal?.customer_name || matchedInq?.sender_name || 'Customer';
+    const displayId = matchedDeal
+      ? (matchedDeal.deal_number || `#INQ-${(matchedDeal.id || '').substring(0, 6).toUpperCase()}`)
+      : `#INQ-${(matchedInq.id || '').substring(0, 6).toUpperCase()}`;
+
+    const stageStr = (matchedDeal?.stage || matchedInq?.status || 'NEW INQUIRY').toUpperCase();
+    const dateStr = (matchedDeal?.created_at || matchedInq?.created_at)
+      ? new Date(matchedDeal?.created_at || matchedInq?.created_at).toLocaleDateString('en-IN')
+      : 'Recent';
+
+    const dealItems = matchedDeal?.deal_items || [];
+    const inqAi = matchedInq?.ai_extraction_json || {};
+    const aiLineItems = inqAi.line_items || inqAi.lineItems || [];
+
+    let itemsText = '';
+    if (dealItems.length > 0) {
+      itemsText = dealItems.map((item) => {
+        const spec = item.dimensions ? ` (${item.dimensions})` : '';
+        const unit = item.unit || 'MT';
+        const qty = item.quantity || item.quantity_mt || 0;
+        const rate = Number(item.rate || 0);
+        const rateStr = rate > 0 ? ` @ ₹${rate.toLocaleString('en-IN')}/${unit}` : ' (Rate pending)';
+        const amtStr = rate > 0 && qty > 0 ? ` = ₹${Math.round(rate * qty).toLocaleString('en-IN')}` : '';
+        return `- ${item.sku_text || 'Item'}${spec}: ${qty} ${unit}${rateStr}${amtStr}`;
+      }).join('\n');
+    } else if (aiLineItems.length > 0) {
+      itemsText = aiLineItems.map((item) => {
+        const spec = item.dimensions ? ` (${item.dimensions})` : '';
+        const unit = item.unit || 'MT';
+        const qty = item.quantity || item.quantity_mt || 0;
+        const rate = Number(item.rate || 0);
+        const rateStr = rate > 0 ? ` @ ₹${rate.toLocaleString('en-IN')}/${unit}` : ' (Rate pending)';
+        const amtStr = rate > 0 && qty > 0 ? ` = ₹${Math.round(rate * qty).toLocaleString('en-IN')}` : '';
+        return `- ${item.sku_text || item.product_name || 'Item'}${spec}: ${qty} ${unit}${rateStr}${amtStr}`;
+      }).join('\n');
+    } else {
+      itemsText = `- Steel Requirement: Details in active pipeline`;
+    }
+
+    const baseAmt = Number(matchedDeal?.total_amount) || inqAi.total_amount || inqAi.totalAmount || 0;
+    const gstAmt = Math.round(baseAmt * 0.18);
+    const grandTotal = baseAmt + gstAmt;
+
+    const loc = matchedDeal?.delivery_location || inqAi.delivery_location || inqAi.deliveryLocation || '';
+    const payTerms = matchedDeal?.payment_terms || inqAi.payment_terms || inqAi.paymentTerms || '';
+
+    let out = `Inquiry Details - ${displayId}\n\n` +
+      `Customer: ${custName}\n` +
+      `Status: ${stageStr}\n` +
+      `Created: ${dateStr}\n\n` +
+      `Line Items:\n${itemsText}\n`;
+
+    if (baseAmt > 0) {
+      out += `\nFinancial Breakdown:\n` +
+        `- Subtotal: ₹${Number(baseAmt).toLocaleString('en-IN')}\n` +
+        `- GST (18%): ₹${Number(gstAmt).toLocaleString('en-IN')}\n` +
+        `- Grand Total: ₹${Number(grandTotal).toLocaleString('en-IN')}\n`;
+    }
+
+    if (loc) out += `\nDelivery Location: ${loc}`;
+    if (payTerms) out += `\nPayment Terms: ${payTerms}`;
+
+    return out.trim();
+  } catch (err) {
+    console.error('getInquiryOrDealByCode error:', err);
+    return null;
+  }
+}
+
 // Main query router with strict RBAC:
 // - Admin: can view all data or query any salesperson/manager by name
 // - Sales Manager: can view only their assigned salespersons' data; unauthorized to view other salespersons
@@ -2964,6 +3095,13 @@ async function handleQuery(text, senderPhone) {
   // 1. Resolve role and access scope for sender
   const userScope = await getAccessibleSalespersonPhonesForBot(senderPhone);
   let effectiveScope = { ...userScope };
+
+  // Fast path for Direct Inquiry ID lookup (e.g. "check for this inquiry number INQ-F59404", "status of INQ-F59404")
+  const directInqIdMatch = text.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,8})\b/i);
+  if (directInqIdMatch) {
+    const directRes = await getInquiryOrDealByCode(effectiveScope, text, directInqIdMatch[1]);
+    if (directRes) return directRes;
+  }
 
   // Fast path for Deal ID / Deal Code retrieval
   if (
@@ -3334,4 +3472,5 @@ module.exports = {
   getInquiriesThisMonth,
   getCustomer360,
   getDealIdsForCompany,
+  getInquiryOrDealByCode,
 };

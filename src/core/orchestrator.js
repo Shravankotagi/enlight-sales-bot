@@ -158,6 +158,20 @@ function getDeterministicIntentHint(text) {
     return '\n[REQUIRED TOOL CALLS THIS TURN: CALL send_quotation. The salesperson is requesting to send, email, or dispatch a quotation to a customer or email address.]';
   }
 
+  const hasInquiryId = /#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/i.test(lower);
+  const isStatusOrQueryForInquiry =
+    hasInquiryId &&
+    /\b(check|status|details?|info|information|show|view|find|search|get|what\s+is|what's|tell\s+me|give\s+me|kya|dekh)\b/i.test(
+      lower,
+    ) &&
+    !/\b(upadte|updt|updte|update|set|change|mark|move|add|remove|delete|rates?|prices?|negotiation|qualified|quoted|won|lost|po|payment|delivery)\b/i.test(
+      lower,
+    );
+
+  if (isStatusOrQueryForInquiry) {
+    return '\n[REQUIRED TOOL CALLS THIS TURN: CALL query_my_data. The message is querying details or status of a specific inquiry/deal. Call query_my_data to fetch the inquiry records.]';
+  }
+
   const isExplicitDealCommand =
     /\b(create|log|add|new|record|enter|post)\s+(?:new\s+)?(?:deal|inquiry|requirement|rfq|quote|quotation|order)\b/i.test(lower) ||
     /^(?:log\s+)?new\s+inquiry\b/i.test(lower) ||
@@ -170,7 +184,7 @@ function getDeterministicIntentHint(text) {
     /\b(status|stage)\b.*?\b(negotiation|qualified|quoted|won|lost)\b/i.test(lower) ||
     /\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+)?(won|lost|quoted|negotiation|qualified)\b/i.test(lower) ||
     /\b(deal\s+won|deal\s+lost|mark\s+as\s+won|mark\s+as\s+lost|stage\s+update|po\s+received|order\s+placed|order\s+confirmed)\b/i.test(lower) ||
-    /#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/i.test(lower);
+    hasInquiryId;
 
   const isVisit = /\b(visited|met with|meeting at|site visit|factory visit|plant visit|market visit)\b/i.test(lower);
   const isPayment = /\b(received payment|paid rs|paid inr|received advance|collected payment|advance of|payment received|neft done|upi done|cheque received)\b/i.test(lower);
