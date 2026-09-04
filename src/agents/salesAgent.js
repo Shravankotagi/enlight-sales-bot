@@ -181,20 +181,23 @@ function findMatchingProcessedItem(existingItem, processedList, fallbackIndex = 
     }
   }
 
-  // 2. Specific Sub-type Keywords Match (e.g. "Chequered Plate", "CR Sheet", "HR Coil", "Angle", "Pipe", "Beam", "Channel", "TMT")
+  // 2. Specific Sub-type Keywords Match (e.g. "Chequered Plate", "CR Sheet", "HR Coil", "Angle", "Pipe", "Beam", "Channel", "TMT", "Galvanized", "HR Plates")
   const SUB_TYPES = [
     { key: 'chequered', test: (s) => /chequered|checkered/i.test(s) },
-    { key: 'cr_sheet', test: (s) => /cr\s*sheet|cold\s*rolled\s*sheet/i.test(s) },
-    { key: 'cr_coil', test: (s) => /cr\s*coil|cold\s*rolled\s*coil|crca/i.test(s) },
-    { key: 'hr_coil', test: (s) => /hr\s*coil|hot\s*rolled\s*coil|hrpo/i.test(s) },
-    { key: 'ms_sheet', test: (s) => /ms\s*sheet/i.test(s) },
-    { key: 'ms_plate', test: (s) => /ms\s*plate/i.test(s) },
+    { key: 'galvanized', test: (s) => /galvanized|plain\s*sheets?|gp\s*sheets?|gi\s*sheets?/i.test(s) },
+    { key: 'erw_tube', test: (s) => /erw|structural\s*steel\s*tubes?|steel\s*tubes?|tubes?|pipes?/i.test(s) },
+    { key: 'hr_plate', test: (s) => /hr\s*plates?|plates?\s*\(is\s*2062|\bplates?\b/i.test(s) },
+    { key: 'cr_sheet', test: (s) => /cr\s*sheets?|cold\s*rolled\s*sheets?/i.test(s) },
+    { key: 'cr_coil', test: (s) => /cr\s*coils?|cold\s*rolled\s*coils?|crca/i.test(s) },
+    { key: 'hr_coil', test: (s) => /hr\s*coils?|hot\s*rolled\s*coils?|hrpo/i.test(s) },
+    { key: 'ms_sheet', test: (s) => /ms\s*sheets?/i.test(s) },
+    { key: 'ms_plate', test: (s) => /ms\s*plates?/i.test(s) },
     { key: 'tmt', test: (s) => /tmt|rebar|sariya/i.test(s) },
-    { key: 'angle', test: (s) => /angle/i.test(s) },
-    { key: 'channel', test: (s) => /channel|ismc/i.test(s) },
-    { key: 'beam', test: (s) => /beam|ismb|joist/i.test(s) },
-    { key: 'pipe', test: (s) => /pipe|tube|shs|rhs/i.test(s) },
-    { key: 'round_bar', test: (s) => /round\s*bar|bright\s*bar/i.test(s) }
+    { key: 'angle', test: (s) => /angles?|equal\s*angles?|unequal\s*angles?/i.test(s) },
+    { key: 'channel', test: (s) => /channels?|ismc/i.test(s) },
+    { key: 'beam', test: (s) => /beams?|ismb|joist/i.test(s) },
+    { key: 'pipe', test: (s) => /pipes?|shs|rhs/i.test(s) },
+    { key: 'round_bar', test: (s) => /round\s*bars?|bright\s*bars?/i.test(s) }
   ];
 
   for (const sub of SUB_TYPES) {
@@ -466,15 +469,42 @@ function getDealCode(deal) {
  * Synchronizes inquiries table ai_extraction_json with the latest deal and deal_items.
  */
 async function syncInquiryFromDeal(inquiryId, dealObj, dealItems) {
-  if (!inquiryId) return;
   try {
-    const { data: inqArr } = await supabase
-      .from('inquiries')
-      .select('*')
-      .eq('id', inquiryId)
-      .limit(1);
+    let targetInqId = inquiryId;
+    let inq = null;
 
-    const inq = inqArr?.[0];
+    if (targetInqId) {
+      const cleanInqId = String(targetInqId).replace(/^#?(?:DEAL|INQ)-?/i, '').trim();
+      let query = supabase.from('inquiries').select('*');
+      if (cleanInqId.length > 30) {
+        query = query.eq('id', cleanInqId);
+      } else {
+        query = query.or(`id.eq.${cleanInqId},id.ilike.%${cleanInqId}%`);
+      }
+      const { data: inqArr } = await query.limit(1);
+      if (inqArr && inqArr.length > 0) inq = inqArr[0];
+    }
+
+    if (!inq && dealObj?.id) {
+      const cleanDealId = String(dealObj.id).replace(/^#?(?:DEAL|INQ)-?/i, '').trim();
+      const { data: inqArr } = await supabase
+        .from('inquiries')
+        .select('*')
+        .or(`id.eq.${cleanDealId},id.ilike.%${cleanDealId}%`)
+        .limit(1);
+      if (inqArr && inqArr.length > 0) inq = inqArr[0];
+    }
+
+    if (!inq && dealObj?.customer_name) {
+      const { data: inqArr } = await supabase
+        .from('inquiries')
+        .select('*')
+        .ilike('sender_name', `%${dealObj.customer_name}%`)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      if (inqArr && inqArr.length > 0) inq = inqArr[0];
+    }
+
     if (!inq) return;
 
     const existingAi = inq.ai_extraction_json || {};
@@ -528,14 +558,17 @@ async function syncInquiryFromDeal(inquiryId, dealObj, dealItems) {
       grandTotal: totalAmount > 0 ? Math.round(totalAmount * 1.18) : existingAi.grandTotal || null,
     };
 
-    await supabase
+    const { error: inqUpdErr } = await supabase
       .from('inquiries')
       .update({
         ai_extraction_json: updatedAi,
-        customer_name: dealObj.customer_name || inq.customer_name,
         sender_name: dealObj.customer_name || inq.sender_name,
       })
-      .eq('id', inquiryId);
+      .eq('id', inq.id);
+
+    if (inqUpdErr) {
+      console.error('[SalesAgent] Failed to update inquiries row:', inqUpdErr);
+    }
   } catch (err) {
     console.warn('[SalesAgent] syncInquiryFromDeal error:', err.message);
   }
@@ -1108,11 +1141,12 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     let effectiveTextForLLM = text;
     let data = (typeof overrideData === 'object' && overrideData !== null) ? overrideData : null;
+    const cleanText = (text || '').replace(/[*_~`]/g, '').trim();
 
     if (!data) {
       const isChoiceOrConfirmation =
-        /^(?:yes|correct|confirm|confirmed|proceed|haan?|sahi\s+hai|update\s+(?:it|this|deal|inquiry|rates?)|ok|okay|yep|sure|ha|[1-9]|option\s*[1-9]|deal\s*[1-9]|#?(?:DEAL|INQ)-[A-F0-9]{4,8})\b/i.test((text || '').trim()) ||
-        /\b(?:yes\s+its\s+correct|just\s+update\s+the\s+rates?|update\s+the\s+rates?\s+provided|apply\s+these\s+rates?)\b/i.test(text || '');
+        /^(?:yes|correct|confirm|confirmed|proceed|haan?|sahi\s+hai|update\s+(?:it|this|deal|inquiry|rates?)|ok|okay|yep|sure|ha|[1-9]|option\s*[1-9]|deal\s*[1-9]|#?(?:DEAL|INQ)-[A-F0-9]{4,8}|[A-F0-9]{6})\b/i.test(cleanText) ||
+        /\b(?:yes\s+its\s+correct|just\s+update\s+the\s+rates?|update\s+the\s+rates?\s+provided|apply\s+these\s+rates?)\b/i.test(cleanText);
 
       if (isChoiceOrConfirmation) {
         try {
@@ -1123,32 +1157,32 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           // Search backwards through chat history for the most recent message that contained products, rates, or deal details
           const reversedHistory = [...history].reverse();
           const targetMsg = reversedHistory.find(
-            (m) => m.role === 'user' && m.content && m.content.trim() !== text.trim() &&
-            /\b(mt|tons?|tonne|kg|sheet|plate|coil|beam|channel|pipe|angle|bar|tmt|rate|price|rs|₹|@|dimension|spec|quantity|delivery|payment|note)\b/i.test(m.content)
+            (m) => m.role === 'user' && m.content && m.content.trim() !== text.trim() && m.content.replace(/[*_~`]/g, '').trim() !== cleanText &&
+            /\b(mts?|tons?|tonnes?|kgs?|sheets?|plates?|coils?|beams?|channels?|pipes?|tubes?|angles?|bars?|tmts?|rates?|prices?|pricing|rs\.?|inr|₹|@|dimensions?|specs?|quantity|quantities|delivery|payment|notes?|upadte|update)\b/i.test(m.content)
           );
 
-          // If last assistant message asked for deal selection
-          if (lastAssistantMsg && /open\s+(?:inquiries|deals)|Which\s+(?:Inquiry|Deal)\s+ID/i.test(lastAssistantMsg.content)) {
-            const numMatch = text.trim().match(/^(?:option\s*|#\s*|inquiry\s*|inq\s*|deal\s*)?([1-9])$/i);
+          // If last assistant message asked for deal selection or open inquiries
+          if (lastAssistantMsg && /(?:open\s+(?:inquiries|deals)|Which\s+(?:Inquiry|Deal)\s+ID|Please\s+let\s+me\s+know\s+which\s+one|reply\s+with\s+the\s+Inquiry\s+ID)/i.test(lastAssistantMsg.content)) {
+            const numMatch = cleanText.match(/^(?:option\s*|#\s*|inquiry\s*|inq\s*|deal\s*)?([1-9])$/i);
             let selectedDealCode = null;
             if (numMatch) {
               const optIndex = parseInt(numMatch[1], 10);
-              const dealMatches = [...lastAssistantMsg.content.matchAll(/(?:^|\n)\s*(\d+)\.\s*\*#?((?:DEAL|INQ)-[A-F0-9]{4,8})\*/gi)];
+              const dealMatches = [...lastAssistantMsg.content.matchAll(/(?:^|\n)\s*(\d+)\.\s*\*?#?((?:DEAL|INQ)-[A-F0-9]{4,8})\*?/gi)];
               if (dealMatches.length >= optIndex) {
                 selectedDealCode = dealMatches[optIndex - 1][2];
               }
             } else {
-              const explicitCode = text.match(/#?((?:DEAL|INQ)-[A-F0-9]{4,8})/i);
+              const explicitCode = cleanText.match(/#?((?:DEAL|INQ)-[A-F0-9]{4,8}|[A-F0-9]{6})/i);
               if (explicitCode) selectedDealCode = explicitCode[1];
             }
 
             if (selectedDealCode && targetMsg && targetMsg.content) {
-              effectiveTextForLLM = `${targetMsg.content}\nfor inquiry id ${selectedDealCode}\n\nConfirmed: ${text}`;
+              effectiveTextForLLM = `${targetMsg.content}\nfor inquiry id ${selectedDealCode}\n\nConfirmed: ${cleanText}`;
             }
           } else if (targetMsg && targetMsg.content) {
-            const explicitCode = text.match(/#?((?:DEAL|INQ)-[A-F0-9]{4,8})/i);
+            const explicitCode = cleanText.match(/#?((?:DEAL|INQ)-[A-F0-9]{4,8}|[A-F0-9]{6})/i);
             const inqSuffix = explicitCode ? `\nfor inquiry id ${explicitCode[1]}` : '';
-            effectiveTextForLLM = `${targetMsg.content}${inqSuffix}\n\nConfirmed: ${text}`;
+            effectiveTextForLLM = `${targetMsg.content}${inqSuffix}\n\nConfirmed: ${cleanText}`;
           }
         } catch (histErr) {
           console.warn('[SalesAgent] History lookup notice:', histErr.message);
@@ -1500,7 +1534,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     // ── CONTEXT RESOLUTION FOR EXPLICIT DEAL ID & ACTIVE SESSIONS ──────────
     const textToInspect = effectiveTextForLLM || text || '';
-    const explicitDealIdMatch = textToInspect.match(/#?(?:DEAL|INQ)-([A-Za-z0-9_-]+)/i) || textToInspect.match(/#([A-Fa-f0-9]{6})\b/i);
+    const cleanTextToInspect = textToInspect.replace(/[*_~`]/g, '').trim();
+    const explicitDealIdMatch = cleanTextToInspect.match(/#?(?:DEAL|INQ)-([A-Za-z0-9_-]+)/i) || cleanTextToInspect.match(/#?([A-Fa-f0-9]{6})\b/i);
     let targetExplicitDeal = null;
     if (explicitDealIdMatch || data.deal_id) {
       const dealCodeToFind = (explicitDealIdMatch ? explicitDealIdMatch[1] : data.deal_id);

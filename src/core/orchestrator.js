@@ -416,13 +416,22 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
       }
     }
 
-    // Direct Forwarding: If any tool returned a direct prompt, warning, stage gate rejection, or error
+    // Direct Forwarding: If any tool returned a direct prompt, structured summary, warning, stage gate rejection, or error
     for (const m of allMessages) {
       const content = typeof m.content === 'string' ? m.content : '';
       if (
         content.startsWith('❌') ||
         content.startsWith('⚠️') ||
         content.startsWith('❓') ||
+        content.startsWith('*Inquiry Updated') ||
+        content.startsWith('*Inquiry Logged') ||
+        content.startsWith('*DEAL WON') ||
+        content.startsWith('*Quotation Dispatched!') ||
+        content.startsWith('There are ') ||
+        content.startsWith('I have found ') ||
+        content.startsWith('Which customer') ||
+        content.startsWith('Which inquiry') ||
+        content.startsWith('Which Inquiry') ||
         content.startsWith('This deal is currently in New Inquiry stage') ||
         content.startsWith('This inquiry is currently in New Inquiry stage') ||
         content.startsWith('This deal must go through Negotiation') ||
@@ -435,7 +444,7 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
           deal_id: turnDealId,
           customer_name: turnCustomerName,
         });
-        console.log(`[Orchestrator] Direct tool warning/rejection/error forwarded (${content.length} chars)`);
+        console.log(`[Orchestrator] Direct tool message forwarded (${content.length} chars)`);
         return content;
       }
     }
