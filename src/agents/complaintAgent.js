@@ -175,15 +175,21 @@ async function resolveProductFromContext(dealId, poNumber, customerName, affecte
   // 3. Lookup from linked deal_items via dealId
   if (dealId) {
     try {
-      const cleanDeal = String(dealId).replace(/^#?DEAL-/i, '').trim().toLowerCase();
+      const cleanDeal = String(dealId).replace(/^#?(?:DEAL|INQ)-?/i, '').trim().toUpperCase();
       const { data: dealRows } = await supabase
         .from('deals')
         .select('id, deal_items(sku_text, dimensions, quantity, unit)')
-        .or(`id.eq.${cleanDeal},id.ilike.${cleanDeal}%`)
-        .limit(1);
+        .order('created_at', { ascending: false })
+        .limit(100);
 
-      if (dealRows && dealRows.length > 0 && dealRows[0].deal_items && dealRows[0].deal_items.length > 0) {
-        const items = dealRows[0].deal_items;
+      const foundDeal = (dealRows || []).find(
+        (d) =>
+          (d.id || '').toUpperCase().startsWith(cleanDeal) ||
+          (d.id || '').replace(/-/g, '').toUpperCase().startsWith(cleanDeal),
+      );
+
+      if (foundDeal && foundDeal.deal_items && foundDeal.deal_items.length > 0) {
+        const items = foundDeal.deal_items;
         const itemSummaries = items.map(it => {
           let s = it.sku_text || 'Steel Item';
           if (it.dimensions) s += ` ${it.dimensions}`;
