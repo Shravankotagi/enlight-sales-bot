@@ -156,99 +156,132 @@ function isDealProductMatch(deal, newProductNames) {
   return false;
 }
 
+function tokenizeItemText(str) {
+  if (!str) return [];
+  const clean = String(str).toLowerCase().replace(/[^a-z0-9.]+/g, ' ');
+  const tokens = clean.split(/\s+/).filter(Boolean);
+  const result = new Set();
+  tokens.forEach((t) => {
+    result.add(t);
+    const m = t.match(/^(\d+(?:\.\d+)?)([a-z]+)$/);
+    if (m) {
+      result.add(m[1]);
+      result.add(m[2]);
+    }
+  });
+  return Array.from(result);
+}
+
+function extractDimensionsFromText(str) {
+  if (!str) return [];
+  const dims = [];
+  const regex = /(\d+(?:\.\d+)?)\s*(?:mm|thk|g|gauge|dia|ø|inch|ft|x|mtr)\b/gi;
+  let m;
+  while ((m = regex.exec(str)) !== null) {
+    dims.push(parseFloat(m[1]));
+  }
+  const simpleRegex = /\b(\d+(?:\.\d+)?)\s*mm\b/gi;
+  while ((m = simpleRegex.exec(str)) !== null) {
+    const val = parseFloat(m[1]);
+    if (!dims.includes(val)) dims.push(val);
+  }
+  return dims;
+}
+
+function computeMatchScore(existingItem, processedItem) {
+  const existFull = `${existingItem.sku_text || ''} ${existingItem.dimensions || ''}`.trim();
+  const procFull = `${processedItem.pName || processedItem.product_requirement || ''} ${processedItem.dimensions || ''}`.trim();
+
+  const existTokens = tokenizeItemText(existFull);
+  const procTokens = tokenizeItemText(procFull);
+
+  // 1. Word / Token overlap count
+  let overlapCount = 0;
+  for (const pt of procTokens) {
+    if (existTokens.includes(pt)) {
+      overlapCount += 1;
+    }
+  }
+
+  let score = overlapCount * 2;
+
+  // 2. Specific dimension match / conflict
+  const existDims = extractDimensionsFromText(existFull);
+  const procDims = extractDimensionsFromText(procFull);
+
+  if (existDims.length > 0 && procDims.length > 0) {
+    const hasCommonDim = existDims.some((d) => procDims.includes(d));
+    if (hasCommonDim) {
+      score += 15; // Strong boost for matching specific dimension (e.g. 5mm, 6mm, 1mm, 3.15mm)
+    } else {
+      score -= 20; // Strong penalty if dimensions conflict (e.g. 5mm vs 6mm)
+    }
+  }
+
+  // 3. Product family match
+  const existFam = getProductFamily(existFull);
+  const procFam = getProductFamily(procFull);
+  if (existFam && procFam && existFam === procFam) {
+    score += 8;
+  }
+
+  // 4. Exact substring match
+  if (
+    existFull.toLowerCase().includes(procFull.toLowerCase()) ||
+    procFull.toLowerCase().includes(existFull.toLowerCase())
+  ) {
+    score += 10;
+  }
+
+  return score;
+}
+
+function matchProcessedItemsToExisting(existingItems, processedItems) {
+  if (!existingItems || existingItems.length === 0 || !processedItems || processedItems.length === 0) {
+    return { matchedMap: new Map(), unmatchedProcessed: processedItems || [] };
+  }
+
+  const scores = existingItems.map((e, eIdx) =>
+    processedItems.map((p, pIdx) => ({
+      eIdx,
+      pIdx,
+      score: computeMatchScore(e, p),
+    })),
+  );
+
+  const allPairs = [];
+  scores.forEach((row) => row.forEach((cell) => allPairs.push(cell)));
+  allPairs.sort((a, b) => b.score - a.score);
+
+  const matchedExisting = new Map();
+  const matchedProcessed = new Set();
+
+  for (const pair of allPairs) {
+    if (pair.score <= 0) continue;
+    if (!matchedExisting.has(pair.eIdx) && !matchedProcessed.has(pair.pIdx)) {
+      matchedExisting.set(pair.eIdx, processedItems[pair.pIdx]);
+      matchedProcessed.add(pair.pIdx);
+    }
+  }
+
+  return {
+    matchedMap: matchedExisting,
+    unmatchedProcessed: processedItems.filter((_, idx) => !matchedProcessed.has(idx)),
+  };
+}
+
 function findMatchingProcessedItem(existingItem, processedList, fallbackIndex = -1) {
   if (!processedList || processedList.length === 0) return null;
-  const itmSku = (existingItem.sku_text || '').toLowerCase().trim();
-  const itmDim = (existingItem.dimensions || '').toLowerCase().trim();
-  const itmFull = `${itmSku} ${itmDim}`.toLowerCase();
-  const existingFam = getProductFamily(existingItem.sku_text);
-
-  // Helper: extract leading thickness / diameter / gauge / mm numbers
-  const extractLeadingDim = (str) => {
-    if (!str) return null;
-    const m = str.match(/(\d+(?:\.\d+)?)\s*(?:mm|thk|g|gauge|dia|ø|inch|ft|x|\b)/i);
-    return m ? parseFloat(m[1]) : null;
-  };
-  const itmDimNum = extractLeadingDim(itmDim) || extractLeadingDim(itmSku);
-
-  // 1. Exact full string match
+  let bestItem = null;
+  let bestScore = 0;
   for (const p of processedList) {
-    const pName = (p.pName || p.product_requirement || '').toLowerCase().trim();
-    const pDim = (p.dimensions || '').toLowerCase().trim();
-    const pFull = `${pName} ${pDim}`.trim().toLowerCase();
-    if (pFull && itmFull && (pFull === itmFull || itmFull.includes(pFull) || pFull.includes(itmFull))) {
-      return p;
+    const score = computeMatchScore(existingItem, p);
+    if (score > bestScore) {
+      bestScore = score;
+      bestItem = p;
     }
   }
-
-  // 2. Specific Sub-type Keywords Match (e.g. "Chequered Plate", "CR Sheet", "HR Coil", "Angle", "Pipe", "Beam", "Channel", "TMT", "Galvanized", "HR Plates")
-  const SUB_TYPES = [
-    { key: 'chequered', test: (s) => /chequered|checkered/i.test(s) },
-    { key: 'galvanized', test: (s) => /galvanized|plain\s*sheets?|gp\s*sheets?|gi\s*sheets?/i.test(s) },
-    { key: 'erw_tube', test: (s) => /erw|structural\s*steel\s*tubes?|steel\s*tubes?|tubes?|pipes?/i.test(s) },
-    { key: 'hr_plate', test: (s) => /hr\s*plates?|plates?\s*\(is\s*2062|\bplates?\b/i.test(s) },
-    { key: 'cr_sheet', test: (s) => /cr\s*sheets?|cold\s*rolled\s*sheets?/i.test(s) },
-    { key: 'cr_coil', test: (s) => /cr\s*coils?|cold\s*rolled\s*coils?|crca/i.test(s) },
-    { key: 'hr_coil', test: (s) => /hr\s*coils?|hot\s*rolled\s*coils?|hrpo/i.test(s) },
-    { key: 'ms_sheet', test: (s) => /ms\s*sheets?/i.test(s) },
-    { key: 'ms_plate', test: (s) => /ms\s*plates?/i.test(s) },
-    { key: 'tmt', test: (s) => /tmt|rebar|sariya/i.test(s) },
-    { key: 'angle', test: (s) => /angles?|equal\s*angles?|unequal\s*angles?/i.test(s) },
-    { key: 'channel', test: (s) => /channels?|ismc/i.test(s) },
-    { key: 'beam', test: (s) => /beams?|ismb|joist/i.test(s) },
-    { key: 'pipe', test: (s) => /pipes?|shs|rhs/i.test(s) },
-    { key: 'round_bar', test: (s) => /round\s*bars?|bright\s*bars?/i.test(s) }
-  ];
-
-  for (const sub of SUB_TYPES) {
-    if (sub.test(itmSku) || sub.test(itmFull)) {
-      const candidates = processedList.filter(p => {
-        const pStr = `${p.pName || p.product_requirement || ''} ${p.dimensions || ''}`;
-        return sub.test(pStr);
-      });
-
-      if (candidates.length === 1) {
-        return candidates[0];
-      } else if (candidates.length > 1) {
-        // Disambiguate multiple items in same sub-type by dimension
-        for (const c of candidates) {
-          const cDim = (c.dimensions || '').toLowerCase().trim();
-          const cDimNum = extractLeadingDim(cDim) || extractLeadingDim(c.pName || c.product_requirement || '');
-          if (itmDimNum !== null && cDimNum !== null && itmDimNum === cDimNum) {
-            return c;
-          }
-        }
-      }
-    }
-  }
-
-  // 3. Product family + Dimension match
-  for (const p of processedList) {
-    const pName = (p.pName || p.product_requirement || '').toLowerCase().trim();
-    const pDim = (p.dimensions || '').toLowerCase().trim();
-    const pFam = getProductFamily(pName);
-    const pDimNum = extractLeadingDim(pDim) || extractLeadingDim(pName);
-
-    if (existingFam && pFam && existingFam === pFam) {
-      if (itmDimNum !== null && pDimNum !== null && itmDimNum === pDimNum) {
-        return p;
-      }
-    }
-  }
-
-  // 4. Position match if explicit item index matches (1-indexed or 0-indexed)
-  for (const p of processedList) {
-    if (p.item_index !== undefined && (p.item_index === fallbackIndex || p.item_index === fallbackIndex + 1)) {
-      return p;
-    }
-  }
-
-  // 5. Fallback index match if arrays have same length
-  if (fallbackIndex >= 0 && fallbackIndex < processedList.length) {
-    return processedList[fallbackIndex];
-  }
-
-  return null;
+  return bestItem;
 }
 
 const KNOWN_STEEL_CITIES = [
@@ -1119,6 +1152,71 @@ function evaluateMandatoryFields({ customerName, lineItems, deliveryLocation, pa
   };
 }
 
+function extractDeterministicRateItems(text) {
+  if (!text || typeof text !== 'string') return [];
+  const lines = text.split(/[\r\n]+/);
+  const items = [];
+
+  for (const line of lines) {
+    const cleanLine = line.trim();
+    if (
+      !cleanLine ||
+      /^(?:upadte|updt|updte|update|rates?|prices?|for|customer|company|deal|inquiry|inq)\b/i.test(cleanLine) ||
+      /#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/i.test(cleanLine) ||
+      /deal\s+id/i.test(cleanLine)
+    ) continue;
+
+    // Pattern: "MS Sheet 5MM THK E250 - 10", "CR sheet 1mm : 16", "Chequered Plate = 17", "HR Coil 3.15mm 12"
+    const lineMatch = cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s*(?:[-:=@—→]|rate\s+(?:is|to|of)?|price\s+(?:is|to|of)?)\s*₹?\s*([\d,.]+)\s*(?:\/?[a-zA-Z]+)?$/i) ||
+                      cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s+([\d,.]+)\s*$/i);
+    if (lineMatch) {
+      const prodCandidate = lineMatch[1].trim().replace(/^[-•*]\s*/, '');
+      const rateVal = parseFloat(lineMatch[2].replace(/,/g, ''));
+      if (prodCandidate && rateVal > 0 && !/^(?:company|customer|inquiry|delivery|payment|stage|status|notes?)/i.test(prodCandidate)) {
+        const mmM = prodCandidate.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
+        items.push({
+          product_requirement: prodCandidate,
+          pName: prodCandidate,
+          dimensions: mmM ? mmM[0] : null,
+          quantity: 0,
+          quantity_mt: 0,
+          unit: 'MT',
+          rate_per_mt: rateVal,
+          rate: rateVal,
+        });
+      }
+    }
+  }
+
+  // If no multi-line, try inline comma/dash separated items
+  if (items.length === 0) {
+    const inlineSegments = text.split(/[,;]+/);
+    for (const seg of inlineSegments) {
+      const cleanSeg = seg.trim();
+      const segMatch = cleanSeg.match(/([A-Za-z0-9\s.()x/]+?)\s*(?:[-:=@—→]|rate\s+(?:is|to|of)?)\s*₹?\s*([\d,.]+)/i);
+      if (segMatch) {
+        const pCand = segMatch[1].trim().replace(/^(?:rates?|prices?|for|and|update)\s+/i, '');
+        const rVal = parseFloat(segMatch[2].replace(/,/g, ''));
+        if (pCand && rVal > 0 && !/^(?:company|customer|inquiry|delivery|payment|stage|status)/i.test(pCand)) {
+          const mmM = pCand.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
+          items.push({
+            product_requirement: pCand,
+            pName: pCand,
+            dimensions: mmM ? mmM[0] : null,
+            quantity: 0,
+            quantity_mt: 0,
+            unit: 'MT',
+            rate_per_mt: rVal,
+            rate: rVal,
+          });
+        }
+      }
+    }
+  }
+
+  return items;
+}
+
 /**
  * Main text message handler.
  */
@@ -1576,8 +1674,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     }
 
     // Check line items & product name extraction
+    const deterministicRateItems = extractDeterministicRateItems(effectiveTextForLLM || text);
     let rawItems = [];
-    if (Array.isArray(data.line_items) && data.line_items.length > 0) {
+    if (deterministicRateItems.length > 0) {
+      rawItems = deterministicRateItems;
+    } else if (Array.isArray(data.line_items) && data.line_items.length > 0) {
       rawItems = data.line_items;
     } else if (data.product_requirement || data.quantity_mt || data.quantity) {
       rawItems = [{
@@ -1977,15 +2078,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           ? (data.line_items?.[0]?.quantity || data.line_items?.[0]?.quantity_mt || (processedItems[0]?.qty > 0 ? processedItems[0]?.qty : null))
           : null;
 
-        const matchedProcessedIndices = new Set();
+        const { matchedMap, unmatchedProcessed } = matchProcessedItemsToExisting(existingItems, processedItems);
 
         for (let idx = 0; idx < existingItems.length; idx++) {
           const itm = existingItems[idx];
-          const matchedP = findMatchingProcessedItem(itm, processedItems, existingItems.length === processedItems.length ? idx : -1);
-          if (matchedP) {
-            const pIdx = processedItems.indexOf(matchedP);
-            if (pIdx >= 0) matchedProcessedIndices.add(pIdx);
-          }
+          const matchedP = matchedMap.get(idx) || (existingItems.length === 1 && !hasAnyProductName ? processedItems[0] : null);
 
           const itemUpdates = {};
           const matchedRate = matchedP?.rate || (matchedP?.rate_per_mt) || (existingItems.length === 1 && !hasAnyProductName ? firstRate : null);
@@ -2019,9 +2116,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         }
 
         // Track any unmatched items provided in user message
-        for (let pIdx = 0; pIdx < processedItems.length; pIdx++) {
-          if (!matchedProcessedIndices.has(pIdx) && !isAddItemAction) {
-            unmatchedItems.push(processedItems[pIdx]);
+        if (!isAddItemAction && unmatchedProcessed.length > 0) {
+          for (const u of unmatchedProcessed) {
+            unmatchedItems.push(u);
           }
         }
       } else {
@@ -2344,9 +2441,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           ? ((processedItems[0]?.qty > 0 ? processedItems[0]?.qty : null) || data.line_items?.[0]?.quantity)
           : null;
 
+        const { matchedMap } = matchProcessedItemsToExisting(existingDealItems, processedItems);
+
         for (let idx = 0; idx < existingDealItems.length; idx++) {
           const itm = existingDealItems[idx];
-          const matchedP = findMatchingProcessedItem(itm, processedItems, existingDealItems.length === processedItems.length ? idx : -1);
+          const matchedP = matchedMap.get(idx) || (processedItems.length === 1 ? processedItems[0] : null);
           const itemUpdates = {};
           const matchedRate = matchedP?.rate || (matchedP?.rate_per_mt) || (processedItems.length === 1 ? firstRate : null);
           const matchedQty = hasExplicitQtyInMsg ? (matchedP?.qty || (processedItems.length === 1 ? firstQty : null)) : null;
