@@ -41,6 +41,7 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
     {
       "product_requirement": "<specific product name from 9 categories e.g. CR Coil, HR Coil, HRPO Coil, MS Round Bar, MS Square Pipe, MS Angle, MS Beam, MS Channel, MS Plate, Chequered Plate, TMT Bar>",
       "dimensions": "<exact dimensions/spec/thickness/gauge e.g. 0.80mm x 320mm Slit, 20G, 3.15mm HRPO, 25mm Dia, 50x50x2mm, 50x50x6mm, ISMB 200, ISMC 100, 12mm 5ft x 20ft, 8mm Fe550D, else null>",
+      "hsn_code": "<HSN or SAC code if mentioned e.g. 72085110, 7208, 7214, 7306, else null>",
       "quantity": <numeric quantity e.g. 300, 200, 20>,
       "quantity_mt": <numeric quantity in MT or same as quantity>,
       "unit": "<exact unit mentioned: MT, Kg, Nos, Pcs, Sheets, Plates, Lengths, Bundles, default MT>",
@@ -48,9 +49,9 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
     }
   ],
   "total_amount": <numeric total deal value in rupees ONLY if explicitly mentioned in text, else 0>,
-  "delivery_location": "<full exact address/city/location if mentioned e.g. Hunsal Village, Khopoli, Raigad, Maharashtra - 410203, Pune, else null>",
+  "delivery_location": "<full exact address/city/location if mentioned e.g. Plot 42, MIDC Chakan, Pune - 410501, Uchgaon, Kolhapur, else null>",
   "delivery_date": "<delivery deadline in YYYY-MM-DD format using current year 2026 if mentioned e.g. 2026-08-25 for 'before 25 August', else null>",
-  "payment_terms": "<payment terms e.g. 45 days, 30 days credit, 100% advance, else null>",
+  "payment_terms": "<payment terms e.g. 30 days credit, 45 days, 100% advance, PDC, else null>",
   "preferred_make": "<preferred make/brand if stated e.g. Tata, JSW, SAIL, Jindal, RINL, else null>",
   "po_number": "<PO number if mentioned, else null>",
   "po_date": "<PO date / target PO date in YYYY-MM-DD format using year 2026 e.g. 2026-08-28 for '28 August', else null>",
@@ -108,6 +109,10 @@ CRITICAL RULES FOR THE 9 CORE STEEL PRODUCT CATEGORIES:
      The numbers after hyphens/colons/at-signs are unit RATES (rate_per_mt: 15), NOT quantities!
      Set action: "deal_update" and extract EACH product with its product_requirement, dimensions, and rate_per_mt.
    - If an inquiry code, deal code or customer name is provided, extract deal_id (e.g. "INQ-F91CAB" or "DEAL-F91CAB") and customer_name.
+
+11. FIELD & SPECIFICATION UPDATES (DELIVERY ADDRESS, PAYMENT TERMS, HSN/SAC, UNIT):
+   - When a message updates delivery location or address (e.g. "update delivery address to Plot 42, MIDC Chakan, Pune"), payment terms (e.g. "payment terms 30 days credit"), HSN/SAC code (e.g. "HSN code of MS Plate is 72085110"), or unit (e.g. "change unit of MS Plate to Pcs"):
+     Set action: "deal_update" and extract the corresponding deal_id, delivery_location, payment_terms, and line_items with updated hsn_code, unit, etc.
 
 Return ONLY the JSON object.
 `;
@@ -294,10 +299,35 @@ const KNOWN_STEEL_CITIES = [
   'Indore', 'Bhopal', 'Jaipur', 'Bhilwara', 'Khopoli'
 ];
 
+const NOISE_WORDS = new Set([
+  'update', 'change', 'set', 'the', 'this', 'that', 'for', 'of', 'inquiry', 'deal',
+  'bhai', 'please', 'to', 'is', 'in', 'and', 'with', 'item', 'product'
+]);
+
+function cleanProductCandidate(candidate) {
+  if (!candidate || typeof candidate !== 'string') return null;
+  const cleaned = candidate
+    .replace(/#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/gi, '')
+    .replace(/^['"]|['"]$/g, '')
+    .trim();
+  const words = cleaned.toLowerCase().split(/\s+/).filter(w => !NOISE_WORDS.has(w));
+  if (words.length === 0) return null;
+  return cleaned.replace(/^(?:bhai|please|update|change|set|the|for|of)\s+/i, '').trim();
+}
+
 function extractDeliveryLocation(text) {
   if (!text || typeof text !== 'string') return null;
-  const lower = text.toLowerCase();
 
+  // 1. Explicit field updates: "update delivery address to Plot 42, MIDC Chakan, Pune for inquiry INQ-0B1D1A"
+  const explicitMatch = text.match(/(?:update|change|set|give)?\s*(?:the\s+)?(?:delivery\s+address|delivery\s+location|delivery\s+site|ship\s+to|destination|delivery\s+city|delivery\s+pe|delivery|address)\s*(?:to|is|:|=|-)\s*([^\n\r]+?)(?:\s*(?:,|;)?\s*(?:payment\s*terms?|payment|credit\s*terms?|credit|hsn\s*code|hsn|sac|unit|for\s+(?:inquiry|deal)|in\s+inquiry|inq-|deal-)|\.|$|\n)/i);
+  if (explicitMatch && explicitMatch[1]) {
+    const cand = explicitMatch[1].trim().replace(/^['"]|['"]$/g, '').replace(/#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/gi, '').trim();
+    if (cand.length >= 2 && !/^(?:site|credit|advance|days|payment|terms|hsn|sac|unit)$/i.test(cand)) {
+      return cand;
+    }
+  }
+
+  // 2. Structured address line with pincode
   const lines = text.split(/\r?\n/);
   for (const line of lines) {
     const trimmed = line.trim();
@@ -306,7 +336,8 @@ function extractDeliveryLocation(text) {
     }
   }
 
-  // 1. Check for Known Steel Cities in text first
+  // 3. Known Steel Cities
+  const lower = text.toLowerCase();
   for (const city of KNOWN_STEEL_CITIES) {
     const cityRegex = new RegExp(`\\b${city}\\b`, 'i');
     if (cityRegex.test(lower)) {
@@ -314,48 +345,212 @@ function extractDeliveryLocation(text) {
     }
   }
 
-  // 2. Structured location label (e.g. "Location: Pune" or "Delivery Location: Mumbai")
-  const structLoc = text.match(/(?:delivery\s+location|delivery\s+address|delivery\s+city|delivery\s+site|location|destination|ship\s+to|deliver\s+to|delivery\s+at|site\s+delivery)\s*[:=-]\s*([^\n\r,]+)/i);
-  if (structLoc) {
-    const cand = structLoc[1].trim().replace(/^['"]|['"]$/g, '');
-    if (cand.length >= 2 && !['site', 'credit', 'advance', 'days', 'payment', 'terms'].includes(cand.toLowerCase())) {
+  // 4. Preposition matches: "deliver to Chakan Phase 2, Pune"
+  const phraseMatch = text.match(/(?:for\s+delivery\s+to|delivery\s+to|delivery\s+at|deliver\s+to|ship\s+to|transport\s+to|bhejna\s+hai|deliver\s+karna\s+hai|delivering\s+to)\s+([A-Za-z0-9\s,.-]+?)(?:\s*(?:,|;)?\s*(?:payment\s*terms?|payment|credit|hsn|sac|unit|for\s+(?:inquiry|deal)|in\s+inquiry|inq-|deal-)|\s+before|\s+by|\s+on|\s+within|\s+rate|\s+price|\.|\n|$)/i);
+  if (phraseMatch && phraseMatch[1]) {
+    const cand = phraseMatch[1].trim().replace(/^['"]|['"]$/g, '');
+    if (cand.length >= 2 && !/^(?:the|and|with|metal|steel|credit|advance|payment|days|day)$/i.test(cand)) {
       return cand;
-    }
-  }
-
-  // 3. Phrasing matches with delivery prepositions (e.g. "delivery to Pune", "deliver to Chakan", "delivery Pune")
-  const phrases = [
-    /(?:for\s+delivery\s+to|delivery\s+to|delivery\s+at|deliver\s+to|ship\s+to|destination|transport\s+to|bhejna\s+hai|deliver\s+karna\s+hai|delivering\s+to|delivery|deliver)\s+([A-Za-z\s]+?)(?:\s+before|\s+by|\s+on|\s+within|\s+payment|\s+credit|\s+rate|\s+price|\.|\n|$)/i,
-    /([A-Za-z]+)\s+(?:delivery|mein\s+deliver|pe\s+deliver)/i
-  ];
-
-  const INVALID_LOC_WORDS = new Set([
-    'the', 'and', 'with', 'metal', 'steel', 'coil', 'coils', 'sheet', 'sheets', 'plate', 'plates',
-    'deal', 'order', 'quotation', 'rate', 'price', 'bar', 'bars', 'pipe', 'pipes', 'tube', 'tubes',
-    'tmt', 'angle', 'angles', 'channel', 'channels', 'beam', 'beams', 'chahiye', 'hai', 'karna',
-    'credit', 'advance', 'payment', 'days', 'day', 'site', 'inquiry', 'requirement', 'kg', 'mt', 'ton'
-  ]);
-
-  for (const p of phrases) {
-    const m = text.match(p);
-    if (m && m[1]) {
-      const cand = m[1].trim();
-      const matchedCity = KNOWN_STEEL_CITIES.find(c => c.toLowerCase() === cand.toLowerCase());
-      if (matchedCity) return matchedCity;
-      if (cand.length >= 3 && !INVALID_LOC_WORDS.has(cand.toLowerCase())) {
-        return cand;
-      }
     }
   }
 
   return null;
 }
 
+function extractPaymentTerms(text) {
+  if (!text || typeof text !== 'string') return null;
+
+  // 1. Explicit field updates: "update payment terms to 30 days credit for inquiry INQ-0B1D1A"
+  const explicitMatch = text.match(/(?:update|change|set|give)?\s*(?:the\s+)?(?:payment\s*terms?|payment|credit\s*terms?|credit)\s*(?:to|is|:|=|-)\s*([^\n\r]+?)(?:\s*(?:,|;)?\s*(?:delivery\s+address|delivery\s+location|delivery|address|hsn\s*code|hsn|sac|unit|for\s+(?:inquiry|deal)|in\s+inquiry|inq-|deal-)|\.|$|\n)/i);
+  if (explicitMatch && explicitMatch[1]) {
+    let cand = explicitMatch[1].trim().replace(/^['"]|['"]$/g, '').replace(/#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/gi, '').trim();
+    if (/^\d+\s*days?$/i.test(cand)) {
+      cand = `${cand} Credit`;
+    }
+    if (cand.length >= 2 && !/^(?:delivery|address|hsn|sac|unit)$/i.test(cand)) {
+      return cand;
+    }
+  }
+
+  // 2. Common credit patterns
+  const matchDays = text.match(/\b(15|30|45|60|90|120)\s*days?\s*(?:credit|pdc|net)?\b/i);
+  if (matchDays) {
+    return `${matchDays[1]} Days Credit`;
+  }
+
+  if (/\b(?:100%\s*advance|full\s*advance|advance\s+payment|advance)\b/i.test(text)) {
+    return '100% Advance';
+  }
+
+  if (/\b(?:against\s+pi|advance\s+against\s+pi)\b/i.test(text)) {
+    return 'Advance against PI';
+  }
+
+  if (/\b(?:against\s+delivery|cash\s+on\s+delivery|cod)\b/i.test(text)) {
+    return 'Against Delivery';
+  }
+
+  return null;
+}
+
+function extractHsnUpdates(text) {
+  if (!text || typeof text !== 'string') return [];
+  const results = [];
+
+  // Pattern A1: "update HSN code of MS Plate to 72085110", "HSN code of SS 304 Pipe is 73063090"
+  const patternA1 = /(?:update|change|set)?\s*(?:the\s+)?(?:hsn\s*code|sac\s*code|hsn\/sac|hsn|sac)\s*(?:of|for)\s+([A-Za-z0-9\s.()x/]+?)\s*(?:to|is|:|=|-)\s*([0-9]{4,8})/gi;
+  let mA1;
+  while ((mA1 = patternA1.exec(text)) !== null) {
+    const prod = cleanProductCandidate(mA1[1]);
+    results.push({
+      productCandidate: prod,
+      hsnCode: mA1[2].trim(),
+    });
+  }
+
+  // Pattern A2: "set HSN/SAC to 72142090 for TMT Rebar", "update HSN to 72085110 for MS Plate"
+  const patternA2 = /(?:update|change|set)?\s*(?:the\s+)?(?:hsn\s*code|sac\s*code|hsn\/sac|hsn|sac)\s*(?:to|is|:|=|-)\s*([0-9]{4,8})\s*(?:for|of)\s+([A-Za-z0-9\s.()x/]+?)(?:\s+(?:in\s+inquiry|for\s+inquiry|inq-|deal-)|\.|$|\n)/gi;
+  let mA2;
+  while ((mA2 = patternA2.exec(text)) !== null) {
+    const prod = cleanProductCandidate(mA2[2]);
+    if (!results.some(r => r.hsnCode === mA2[1].trim())) {
+      results.push({
+        productCandidate: prod,
+        hsnCode: mA2[1].trim(),
+      });
+    }
+  }
+
+  // Pattern B: "MS Plate HSN is 72085110", "TMT Rebar HSN: 72142090"
+  const patternB = /([A-Za-z0-9\s.()x/]+?)\s*(?:hsn\s*code|sac\s*code|hsn\/sac|hsn|sac)\s*(?:is|to|:|=|-)?\s*([0-9]{4,8})/gi;
+  let mB;
+  while ((mB = patternB.exec(text)) !== null) {
+    const prod = cleanProductCandidate(mB[1]);
+    if (prod && !results.some(r => r.hsnCode === mB[2].trim())) {
+      results.push({
+        productCandidate: prod,
+        hsnCode: mB[2].trim(),
+      });
+    }
+  }
+
+  // Pattern C: Single generic HSN without product: "update HSN to 72085110", "HSN code: 72085110"
+  if (results.length === 0) {
+    const singleM = text.match(/(?:hsn\s*code|sac\s*code|hsn\/sac|hsn|sac)\s*(?:is|to|:|=|-)?\s*([0-9]{4,8})/i);
+    if (singleM) {
+      results.push({
+        productCandidate: null,
+        hsnCode: singleM[1].trim(),
+      });
+    }
+  }
+
+  return results;
+}
+
+function extractUnitUpdates(text) {
+  if (!text || typeof text !== 'string') return [];
+  const results = [];
+
+  const VALID_UNITS_MAP = {
+    mt: 'MT', ton: 'MT', tons: 'MT', tonne: 'MT', tonnes: 'MT',
+    kg: 'KG', kgs: 'KG', kilogram: 'KG', kilograms: 'KG',
+    pcs: 'PCS', pc: 'PCS', piece: 'PCS', pieces: 'PCS',
+    nos: 'NOS', no: 'NOS', number: 'NOS', numbers: 'NOS',
+    sheet: 'SHEETS', sheets: 'SHEETS',
+    plate: 'PLATES', plates: 'PLATES',
+    coil: 'COILS', coils: 'COILS',
+    bundle: 'BUNDLES', bundles: 'BUNDLES',
+    length: 'LENGTHS', lengths: 'LENGTHS', rmtr: 'LENGTHS', meter: 'LENGTHS', meters: 'LENGTHS'
+  };
+
+  // Pattern A1: "change unit of MS Plate to Pcs", "set unit for SS 304 Pipe to Nos"
+  const patternA1 = /(?:update|change|set)?\s*(?:the\s+)?(?:unit)\s*(?:of|for)\s+([A-Za-z0-9\s.()x/]+?)\s*(?:from\s+[a-zA-Z]+\s+)?(?:to|is|:|=|-)\s*([a-zA-Z]+)/gi;
+  let mA1;
+  while ((mA1 = patternA1.exec(text)) !== null) {
+    const unitRaw = mA1[2].trim().toLowerCase();
+    const mappedUnit = VALID_UNITS_MAP[unitRaw] || unitRaw.toUpperCase();
+    const prod = cleanProductCandidate(mA1[1]);
+    if (VALID_UNITS_MAP[unitRaw]) {
+      results.push({
+        productCandidate: prod,
+        unit: mappedUnit,
+      });
+    }
+  }
+
+  // Pattern A2: "update unit to Sheets for MS Sheet", "change unit to Pcs for MS Plate"
+  const patternA2 = /(?:update|change|set)?\s*(?:the\s+)?(?:unit)\s*(?:from\s+[a-zA-Z]+\s+)?(?:to|is|:|=|-)\s*([a-zA-Z]+)\s*(?:for|of)\s+([A-Za-z0-9\s.()x/]+?)(?:\s+(?:in\s+inquiry|for\s+inquiry|inq-|deal-)|\.|$|\n)/gi;
+  let mA2;
+  while ((mA2 = patternA2.exec(text)) !== null) {
+    const unitRaw = mA2[1].trim().toLowerCase();
+    const mappedUnit = VALID_UNITS_MAP[unitRaw] || unitRaw.toUpperCase();
+    const prod = cleanProductCandidate(mA2[2]);
+    if (VALID_UNITS_MAP[unitRaw] && !results.some(r => r.unit === mappedUnit && r.productCandidate === prod)) {
+      results.push({
+        productCandidate: prod,
+        unit: mappedUnit,
+      });
+    }
+  }
+
+  // Pattern A3: "change MS Plate unit from MT to Pcs", "change MS Plate unit to Pcs"
+  const patternA3 = /(?:update|change|set)?\s*(?:the\s+)?([A-Za-z0-9\s.()x/]+?)\s+unit\s+(?:from\s+[a-zA-Z]+\s+)?(?:to|is|:|=|-)\s*([a-zA-Z]+)/gi;
+  let mA3;
+  while ((mA3 = patternA3.exec(text)) !== null) {
+    const prod = cleanProductCandidate(mA3[1]);
+    const unitRaw = mA3[2].trim().toLowerCase();
+    const mappedUnit = VALID_UNITS_MAP[unitRaw] || unitRaw.toUpperCase();
+    if (VALID_UNITS_MAP[unitRaw] && prod) {
+      if (!results.some(r => r.unit === mappedUnit && r.productCandidate === prod)) {
+        results.push({
+          productCandidate: prod,
+          unit: mappedUnit,
+        });
+      }
+    }
+  }
+
+  // Pattern B: "MS Plate unit: Pcs", "TMT Rebar unit is Bundles"
+  const patternB = /([A-Za-z0-9\s.()x/]+?)\s*unit\s*(?:is|to|:|=|-)?\s*([a-zA-Z]+)/gi;
+  let mB;
+  while ((mB = patternB.exec(text)) !== null) {
+    const prod = cleanProductCandidate(mB[1]);
+    const unitRaw = mB[2].trim().toLowerCase();
+    const mappedUnit = VALID_UNITS_MAP[unitRaw] || unitRaw.toUpperCase();
+    if (prod && VALID_UNITS_MAP[unitRaw]) {
+      if (!results.some(r => r.productCandidate === prod)) {
+        results.push({
+          productCandidate: prod,
+          unit: mappedUnit,
+        });
+      }
+    }
+  }
+
+  // Pattern C: Generic unit without product: "change unit to Pcs", "unit: Sheets"
+  if (results.length === 0) {
+    const singleM = text.match(/(?:update|change|set)?\s*(?:the\s+)?unit\s*(?:from\s+[a-zA-Z]+\s+)?(?:is|to|:|=|-)\s*([a-zA-Z]+)/i);
+    if (singleM) {
+      const unitRaw = singleM[1].trim().toLowerCase();
+      const mappedUnit = VALID_UNITS_MAP[unitRaw] || unitRaw.toUpperCase();
+      if (VALID_UNITS_MAP[unitRaw]) {
+        results.push({
+          productCandidate: null,
+          unit: mappedUnit,
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
 function detectInvalidUnitInMessage(text) {
   if (!text) return null;
 
   // NEVER run unit validation if the message is a rate update, pricing update, field update, stage update, or confirmation
-  if (/\b(?:rate|rates|price|prices|pricing|unit\s*price|target\s*price|₹|@|\/mt|\/kg|upadte|updt|updte|update|set|change|add|remove|delete|status|stage|negotiation|qualified|quoted|won|lost|confirm|confirmed|yes|correct|proceed)\b/i.test(text)) {
+  if (/\b(?:rate|rates|price|prices|pricing|unit\s*price|target\s*price|₹|@|\/mt|\/kg|upadte|updt|updte|update|set|change|add|remove|delete|status|stage|negotiation|qualified|quoted|won|lost|confirm|confirmed|yes|correct|proceed|delivery|address|payment|credit|hsn|sac|unit)\b/i.test(text)) {
     return null;
   }
   if (/#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/i.test(text)) {
@@ -541,18 +736,20 @@ async function syncInquiryFromDeal(inquiryId, dealObj, dealItems) {
     if (!inq) return;
 
     const existingAi = inq.ai_extraction_json || {};
-    const formattedLineItems = (dealItems || []).map((di) => {
+    const formattedLineItems = (dealItems || []).map((di, idx) => {
       const skuText = di.sku_text || di.product_requirement || 'Steel Material';
       const dim = di.dimensions || '';
       const qty = Number(di.quantity || di.quantity_mt || 0);
       const unit = di.unit || 'MT';
       const rate = Number(di.rate || di.rate_per_mt || 0);
       const amount = Number(di.amount || (rate > 0 && qty > 0 ? rate * qty : 0));
+      const existingHsn = existingAi.line_items?.[idx]?.hsn_code || existingAi.lineItems?.[idx]?.hsn_code;
+      const hsn = di.hsn_code || existingHsn || detectHsnCode(skuText, dim);
 
       return {
         sku_text: skuText,
         dimensions: dim,
-        hsn_code: di.hsn_code || detectHsnCode(skuText, dim),
+        hsn_code: hsn,
         quantity: qty,
         unit: unit,
         rate: rate > 0 ? rate : null,
@@ -1691,14 +1888,14 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }];
     }
 
-    const GENERIC_PRODUCT_REGEX = /^(steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined)$/i;
+    const GENERIC_PRODUCT_REGEX = /^(steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined|address|delivery|delivery address|delivery location|location|destination|payment|payment terms|terms|credit|hsn|sac|unit)$/i;
 
     let processedItems = [];
     let calculatedTotal = 0;
 
     for (const item of rawItems) {
       let pName = item.product_requirement ? item.product_requirement.trim() : null;
-      if (pName && GENERIC_PRODUCT_REGEX.test(pName)) {
+      if (pName && (GENERIC_PRODUCT_REGEX.test(pName) || KNOWN_STEEL_CITIES.some(c => c.toLowerCase() === pName.toLowerCase()))) {
         pName = null;
       }
 
@@ -1733,10 +1930,71 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
     }
 
+    const extractedDeliveryLoc = extractDeliveryLocation(effectiveTextForLLM || text);
+    const extractedPaymentTermsVal = extractPaymentTerms(effectiveTextForLLM || text);
+    const extractedHsnList = extractHsnUpdates(effectiveTextForLLM || text);
+    const extractedUnitList = extractUnitUpdates(effectiveTextForLLM || text);
+
+    if (extractedHsnList.length > 0) {
+      for (const hItem of extractedHsnList) {
+        const existingP = processedItems.find(p => {
+          if (!p.pName || !hItem.productCandidate) return false;
+          const p1 = p.pName.toLowerCase();
+          const p2 = hItem.productCandidate.toLowerCase();
+          if (p1 === p2 || p1.includes(p2) || p2.includes(p1)) return true;
+          const fam1 = getProductFamily(p1);
+          const fam2 = getProductFamily(p2);
+          return !!(fam1 && fam2 && fam1 === fam2);
+        });
+        if (existingP) {
+          existingP.hsn_code = hItem.hsnCode;
+        } else if (hItem.productCandidate) {
+          processedItems.push({
+            pName: hItem.productCandidate,
+            product_requirement: hItem.productCandidate,
+            hsn_code: hItem.hsnCode,
+            dimensions: null,
+            qty: 0,
+            unit: 'MT',
+            rate: null,
+            itemAmount: null,
+          });
+        }
+      }
+    }
+
+    if (extractedUnitList.length > 0) {
+      for (const uItem of extractedUnitList) {
+        const existingP = processedItems.find(p => {
+          if (!p.pName || !uItem.productCandidate) return false;
+          const p1 = p.pName.toLowerCase();
+          const p2 = uItem.productCandidate.toLowerCase();
+          if (p1 === p2 || p1.includes(p2) || p2.includes(p1)) return true;
+          const fam1 = getProductFamily(p1);
+          const fam2 = getProductFamily(p2);
+          return !!(fam1 && fam2 && fam1 === fam2);
+        });
+        if (existingP) {
+          existingP.unit = uItem.unit;
+        } else if (uItem.productCandidate) {
+          processedItems.push({
+            pName: uItem.productCandidate,
+            product_requirement: uItem.productCandidate,
+            unit: uItem.unit,
+            dimensions: null,
+            qty: 0,
+            rate: null,
+            itemAmount: null,
+          });
+        }
+      }
+    }
+
     const hasAnyProductName = processedItems.length > 0;
-    const extractedDeliveryLoc = extractDeliveryLocation(text);
     const hasDeliveryUpdate = !!(extractedDeliveryLoc || data.delivery_location);
-    const hasPaymentUpdate = !!data.payment_terms;
+    const hasPaymentUpdate = !!(extractedPaymentTermsVal || data.payment_terms);
+    const hasHsnUpdate = extractedHsnList.length > 0 || !!(data.line_items?.some(i => i.hsn_code)) || !!data.hsn_code;
+    const hasUnitUpdate = extractedUnitList.length > 0 || /\b(?:change|set|update)\s+unit\b/i.test(effectiveTextForLLM || text);
     const hasRateUpdate = !!(data.line_items?.some(i => i.rate_per_mt > 0) || (data.total_amount && data.total_amount > 0));
     const hasQtyUpdate = !!(rawItems.some(i => (i.quantity > 0 || i.quantity_mt > 0)));
 
@@ -1912,7 +2170,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       /\b(upadte|updt|updte|update|set|new|give)\s+(?:the\s+)?(?:rates?|prices?)|(?:rates?|prices?)\s+for|rates?:/i.test(effectiveTextForLLM || text) ||
       /\b(?:rates?|prices?|target\s+price)\b/i.test(effectiveTextForLLM || text);
     const isRateOrPriceUpdate = isRateUpdateContext || hasRateUpdate;
-    const isFieldUpdate = hasDeliveryUpdate || hasPaymentUpdate || !!data.delivery_date || !!data.contact_person;
+    const isFieldUpdate = hasDeliveryUpdate || hasPaymentUpdate || hasHsnUpdate || hasUnitUpdate || !!data.delivery_date || !!data.contact_person;
 
     if (!targetExplicitDeal && customerName && (isRateOrPriceUpdate || isFieldUpdate || data.action === 'deal_update' || !hasAnyProductName)) {
       const openDeals = await getAllOpenDealsForCustomer(customerName, senderPhone);
@@ -1955,14 +2213,16 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const updatedLabels = [];
       const unmatchedItems = [];
 
-      if (extractedDeliveryLoc || data.delivery_location) {
-        updateFields.delivery_location = extractedDeliveryLoc || data.delivery_location;
-        updatedLabels.push(`Delivery Location (${updateFields.delivery_location})`);
+      const delLocToUpdate = extractedDeliveryLoc || data.delivery_location;
+      if (delLocToUpdate) {
+        updateFields.delivery_location = delLocToUpdate;
+        updatedLabels.push(`Delivery Address (${delLocToUpdate})`);
       }
 
-      if (data.payment_terms) {
-        updateFields.payment_terms = data.payment_terms;
-        updatedLabels.push(`Payment Terms (${updateFields.payment_terms})`);
+      const payTermsToUpdate = extractedPaymentTermsVal || data.payment_terms;
+      if (payTermsToUpdate) {
+        updateFields.payment_terms = payTermsToUpdate;
+        updatedLabels.push(`Payment Terms (${payTermsToUpdate})`);
       }
 
       if (data.delivery_date) {
@@ -2066,8 +2326,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           }
         }
       }
-      // C. UPDATE EXISTING LINE ITEMS (Rates, Quantities, Units)
-      else if (existingItems.length > 0 && (hasRateUpdate || hasQtyUpdate || processedItems.length > 0)) {
+      // C. UPDATE EXISTING LINE ITEMS (Rates, Quantities, Units, HSN/SAC)
+      else if (existingItems.length > 0 && (hasRateUpdate || hasQtyUpdate || hasHsnUpdate || hasUnitUpdate || processedItems.length > 0)) {
         const isQtyUpdateContext =
           /\b(?:qty|quantity|tonnage|pieces|pcs|nos|bundles|increase|decrease|reduce|from\s+\d+\s+to\s+\d+|change\s+to\s+\d+|set\s+to\s+\d+|to\s+\d+)\b/i.test(
             effectiveTextForLLM || text,
@@ -2090,10 +2350,28 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           const itm = existingItems[idx];
           const matchedP = matchedMap.get(idx) || (existingItems.length === 1 && !hasAnyProductName ? processedItems[0] : null);
 
+          // Check if extractedUnitList or extractedHsnList has a match for this item
+          let matchedUnit = matchedP?.unit || null;
+          if (!matchedUnit && extractedUnitList.length > 0) {
+            const unitMatch = extractedUnitList.find(u => {
+              if (!u.productCandidate) return existingItems.length === 1 || idx === 0;
+              return computeMatchScore(itm, { pName: u.productCandidate }) > 0;
+            });
+            if (unitMatch) matchedUnit = unitMatch.unit;
+          }
+
+          let matchedHsn = matchedP?.hsn_code || null;
+          if (!matchedHsn && extractedHsnList.length > 0) {
+            const hsnMatch = extractedHsnList.find(h => {
+              if (!h.productCandidate) return existingItems.length === 1 || idx === 0;
+              return computeMatchScore(itm, { pName: h.productCandidate }) > 0;
+            });
+            if (hsnMatch) matchedHsn = hsnMatch.hsnCode;
+          }
+
           const itemUpdates = {};
           const matchedRate = matchedP?.rate || (matchedP?.rate_per_mt) || (existingItems.length === 1 && !hasAnyProductName ? firstRate : null);
           const matchedQty = hasExplicitQtyInMsg ? (matchedP?.qty || (existingItems.length === 1 && !hasAnyProductName ? firstQty : null)) : null;
-          const matchedUnit = matchedP?.unit || null;
 
           if (matchedRate && Number(matchedRate) > 0) {
             itemUpdates.rate = Number(matchedRate);
@@ -2101,11 +2379,14 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           }
           if (matchedQty && Number(matchedQty) > 0) {
             itemUpdates.quantity = Number(matchedQty);
-            updatedLabels.push(`${itm.sku_text || 'Item'} Qty (${matchedQty} ${itm.unit || 'MT'})`);
+            updatedLabels.push(`${itm.sku_text || 'Item'} Qty (${matchedQty} ${matchedUnit || itm.unit || 'MT'})`);
           }
-          if (matchedUnit && matchedUnit !== itm.unit) {
+          if (matchedUnit && matchedUnit.toUpperCase() !== (itm.unit || '').toUpperCase()) {
             itemUpdates.unit = matchedUnit.toUpperCase();
             updatedLabels.push(`${itm.sku_text || 'Item'} Unit (${matchedUnit.toUpperCase()})`);
+          }
+          if (matchedHsn) {
+            updatedLabels.push(`${itm.sku_text || 'Item'} HSN/SAC (${matchedHsn})`);
           }
 
           const finalRate = itemUpdates.rate !== undefined ? itemUpdates.rate : itm.rate;
@@ -2115,16 +2396,24 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           }
           if (Object.keys(itemUpdates).length > 0) {
             await supabase.from('deal_items').update(itemUpdates).eq('id', itm.id);
-            updatedDealItems.push({ ...itm, ...itemUpdates });
+            updatedDealItems.push({ ...itm, ...itemUpdates, hsn_code: matchedHsn || itm.hsn_code });
           } else {
-            updatedDealItems.push(itm);
+            updatedDealItems.push({ ...itm, hsn_code: matchedHsn || itm.hsn_code });
           }
         }
 
         // Track any unmatched items provided in user message
         if (!isAddItemAction && unmatchedProcessed.length > 0) {
           for (const u of unmatchedProcessed) {
-            unmatchedItems.push(u);
+            const uName = (u.pName || u.product_requirement || '').toLowerCase();
+            const fam = getProductFamily(uName);
+            const isAlreadyMatchedFamily = fam && Array.from(matchedMap.values()).some(m => {
+              const mName = (m.pName || m.product_requirement || '').toLowerCase();
+              return getProductFamily(mName) === fam;
+            });
+            if (!isAlreadyMatchedFamily) {
+              unmatchedItems.push(u);
+            }
           }
         }
       } else {
@@ -2179,7 +2468,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const itemBreakdownLines = (updatedDealItems || []).map(item => {
         const rateDisplay = item.rate > 0 ? ` @ ₹${Number(item.rate).toLocaleString('en-IN')}/${item.unit || 'MT'}` : ' (Rate pending)';
         const amountDisplay = item.amount > 0 ? ` = ₹${Number(item.amount).toLocaleString('en-IN')}` : '';
-        return `- ${item.sku_text || 'Item'}${item.dimensions ? ` (${item.dimensions})` : ''}: ${item.quantity || 0} ${item.unit || 'MT'}${rateDisplay}${amountDisplay}`;
+        const hsnDisplay = item.hsn_code ? ` [HSN: ${item.hsn_code}]` : '';
+        return `- ${item.sku_text || 'Item'}${item.dimensions ? ` (${item.dimensions})` : ''}${hsnDisplay}: ${item.quantity || 0} ${item.unit || 'MT'}${rateDisplay}${amountDisplay}`;
       });
 
       const subtotalVal = (updatedDealItems || []).reduce((s, i) => s + (Number(i.amount) || 0), 0);
@@ -2189,6 +2479,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const financialSummary = subtotalVal > 0
         ? `\nFinancial Breakdown:\n- Subtotal: ₹${subtotalVal.toLocaleString('en-IN')}\n- GST (18%): ₹${gstVal.toLocaleString('en-IN')}\n- Grand Total: ₹${grandTotalVal.toLocaleString('en-IN')}\n`
         : '';
+
+      const termsSummary = [];
+      if (refreshedDeal.delivery_location) termsSummary.push(`Delivery Address: ${refreshedDeal.delivery_location}`);
+      if (refreshedDeal.payment_terms) termsSummary.push(`Payment Terms: ${refreshedDeal.payment_terms}`);
+      const termsSection = termsSummary.length > 0 ? `\nTerms & Logistics:\n- ${termsSummary.join('\n- ')}\n` : '';
 
       const unmatchedWarning = unmatchedItems.length > 0
         ? `\n⚠️ ${unmatchedItems.map(u => u.pName || u.product_requirement).join(', ')} not found in Inquiry ${dealCode}. Please verify and resend.\n`
@@ -2205,6 +2500,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           itemBreakdownLines.join('\n') +
           `\n` +
           financialSummary +
+          termsSection +
           unmatchedWarning +
           `\nAll mandatory fields complete. Logged to Sales Pipeline & Inquiries!`;
       } else {
@@ -2215,6 +2511,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           itemBreakdownLines.join('\n') +
           `\n` +
           financialSummary +
+          termsSection +
           unmatchedWarning +
           `\nStill needed to complete:\n` +
           completeness.missingFields.map(f => `• ${f}`).join('\n') +
