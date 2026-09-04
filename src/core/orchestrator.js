@@ -120,7 +120,8 @@ Logged to Sales Pipeline & Inquiries!
 - **CUSTOMER PROFILE & ORDER FREQUENCY UPDATES**: When a user requests to update a customer's order frequency (e.g. "Change [customer] order frequency to X days", "set frequency to 45 days"), reassign a customer to a salesperson (e.g. "reassign [customer] to Max"), or update contact details, CALL update_customer_profile. Do NOT call onboard_new_customer for updating an existing customer's order frequency.
 - NEVER output generic 1-line responses like "Activity updated in dashboard". Always format a complete manager response.
 - ONLY include a confirmation line (e.g. "Updated Sales Achievement Card!") when a deal is officially WON (Closed Won / PO confirmed). For new inquiries, qualified, quoted, and negotiation stage deals, ALWAYS end with "Logged to Sales Pipeline & Inquiries!" instead! NEVER append "Updated Sales Achievement Card!" on non-won deals or informational queries!
-- **BLOCKED REQUESTS**: If someone asks you to 'suggest products for [customer]', 'recommend materials', 'lock the rate sheet', 'create/update/delete a rate sheet', respond: "I cannot perform rate sheet or administrative actions via WhatsApp. Please use the Enlight Sales Web Dashboard for administrative actions." Do NOT call any tools.
+- **SALESPERSON RATE & PRICE UPDATES (FULLY SUPPORTED)**: Salespersons dynamically set and update product rates for each deal and product directly via WhatsApp. When a message contains rate updates for a deal (e.g. "update the rates for Traders Pvt. Ltd. for deal id DEAL-F91CAB: CR Sheet 1mm - 15, CR Sheet 1.2mm - 18, HR sheet 1.6mm -12"), CALL update_deal_stage to update the deal item rates and inquiry. NEVER reject or block rate updates.
+- **BLOCKED REQUESTS**: If someone asks you to 'suggest products for [customer]' or 'recommend materials', respond: "Product recommendations are not available via WhatsApp. Please consult your sales catalog." Do NOT call any tools.
 - **CROSS-SALESPERSON REQUESTS**: If a salesperson (NOT an Admin) asks about ANOTHER salesperson's performance by name, respond: "You can only view your own performance data. Please contact your Sales Lead for team reports." Do NOT retrieve data for other salespersons.
 - **TOOL QUESTIONS / WARNINGS**: If a tool returns an interactive question or warning, YOU MUST FORWARD THAT EXACT QUESTION / PROMPT TO THE USER! Do NOT claim a deal was recorded or updated if the tool returned a confirmation prompt or warning!
 - **ALWAYS INCLUDE DEAL ID**: Whenever a tool output includes a Deal ID (e.g. #DEAL-B8018B or #DEAL-3FBBB0), YOU MUST EXPLICITLY INCLUDE THAT EXACT DEAL ID IN YOUR RESPONSE TEXT!
@@ -161,8 +162,9 @@ function getDeterministicIntentHint(text) {
     /\b(create|log|add|new|record|enter|post)\s+(?:new\s+)?(?:deal|inquiry|requirement|rfq|quote|quotation|order)\b/i.test(lower) ||
     /^(?:log\s+)?new\s+inquiry\b/i.test(lower) ||
     /\b(company\s+name|material|grade\/spec|target\s+price)\s*:/i.test(lower) ||
-    /\b(update\s+(?:the\s+)?rates?|new\s+rates?|rates?\s+for|set\s+rates?)\b/i.test(lower) ||
-    /\b(update|change|move|set|mark)\b.*?\b(status|stage|negotiation|qualified|quoted|won|lost)\b/i.test(lower) ||
+    /\b(upadte|updt|updte|update|set|give|enter|new)\s+(?:the\s+)?(?:rates?|prices?|pricing)\b/i.test(lower) ||
+    /\b(?:rates?|prices?)\s+(?:for|of)\b/i.test(lower) ||
+    /\b(update|upadte|change|move|set|mark)\b.*?\b(status|stage|negotiation|qualified|quoted|won|lost)\b/i.test(lower) ||
     /\b(status|stage)\b.*?\b(negotiation|qualified|quoted|won|lost)\b/i.test(lower) ||
     /\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+)?(won|lost|quoted|negotiation|qualified)\b/i.test(lower) ||
     /\b(deal\s+won|deal\s+lost|mark\s+as\s+won|mark\s+as\s+lost|stage\s+update|po\s+received|order\s+placed|order\s+confirmed)\b/i.test(lower) ||

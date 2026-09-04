@@ -104,16 +104,17 @@ CRITICAL RULES FOR THE 9 CORE STEEL PRODUCT CATEGORIES:
    - Extract Ductile grades (Fe500D, Fe550D) and units (Bundles, MT, Pcs).
 
 10. RATE UPDATES & PRICE LISTS:
-   - When a message says "update rates", "update the rates", "rates for", "new rates", or provides product rates (e.g. "MS Sheet 5MM THK - 10", "HR Coil 3.15MM - 12", "CR Sheet - 15"):
-     The numbers after hyphens/colons are unit RATES (rate_per_mt: 10), NOT quantities!
-     Set action: "deal_update" and extract each line item with its specified rate_per_mt.
+   - When a message says "update rates", "update the rates", "upadte the rates", "rates for", "new rates", or provides product rates (e.g. "CR Sheet 1mm - 15\nCR Sheet 1.2mm - 18\nHR sheet 1.6mm -12" or "MS Sheet 5MM THK - 10"):
+     The numbers after hyphens/colons/at-signs are unit RATES (rate_per_mt: 15), NOT quantities!
+     Set action: "deal_update" and extract EACH product with its product_requirement, dimensions, and rate_per_mt.
+   - If a deal code or customer name is provided, extract deal_id (e.g. "DEAL-F91CAB") and customer_name.
 
 Return ONLY the JSON object.
 `;
 
 const PRODUCT_FAMILIES = {
   cr_coil: ['cr coil', 'cold rolled coil', 'cr slit coil', 'crca coil', 'cr strip', 'cr2', 'cr1', 'edd cr', 'cr sheet'],
-  hr_coil: ['hr coil', 'hot rolled coil', 'hrpo', 'hrpo coil', 'pickled and oiled', 'pickled & oiled', 'hr strip', 'e350 hr', 'sailma'],
+  hr_coil: ['hr coil', 'hot rolled coil', 'hrpo', 'hrpo coil', 'pickled and oiled', 'pickled & oiled', 'hr strip', 'e350 hr', 'sailma', 'hr sheet'],
   ms_round_bar: ['round bar', 'ms round bar', 'bright bar', 'round rod', 'en8', 'en19', 'c45', 'ms rod', 'bright round'],
   ms_square_pipe: ['square pipe', 'box pipe', 'shs', 'square tube', 'rectangular pipe', 'rhs', 'gp square pipe', 'hollow section', 'box tube'],
   ms_angle: ['angle', 'ms angle', 'equal angle', 'unequal angle', 'l-angle', 'isa', 'patra angle'],
@@ -162,36 +163,48 @@ function findMatchingProcessedItem(existingItem, processedList, fallbackIndex = 
   const itmFull = `${itmSku} ${itmDim}`.toLowerCase();
   const existingFam = getProductFamily(existingItem.sku_text);
 
-  // 1. Exact string match
+  // 1. Exact full string match
   for (const p of processedList) {
     const pName = (p.pName || p.product_requirement || '').toLowerCase().trim();
     const pDim = (p.dimensions || '').toLowerCase().trim();
     const pFull = `${pName} ${pDim}`.trim().toLowerCase();
-    if (pFull === itmFull || pName === itmSku) {
+    if (pFull && itmFull && pFull === itmFull) {
       return p;
     }
   }
 
-  // 2. Extract numbers (e.g. 5, 6, 3.15, 1.00, 4.5) and product family
-  const itmNumbers = itmFull.match(/\d+(?:\.\d+)?/g) || [];
+  // 2. Product family + Dimension match (extract thickness/gauge/mm numbers)
+  const extractLeadingDim = (str) => {
+    if (!str) return null;
+    const m = str.match(/(\d+(?:\.\d+)?)\s*(?:mm|thk|gauge|dia|x|\b)/i);
+    return m ? parseFloat(m[1]) : null;
+  };
+
+  const itmDimNum = extractLeadingDim(itmDim) || extractLeadingDim(itmSku);
+
   for (const p of processedList) {
     const pName = (p.pName || p.product_requirement || '').toLowerCase().trim();
     const pDim = (p.dimensions || '').toLowerCase().trim();
-    const pFull = `${pName} ${pDim}`.trim().toLowerCase();
     const pFam = getProductFamily(pName);
-    const pNumbers = pFull.match(/\d+(?:\.\d+)?/g) || [];
+    const pDimNum = extractLeadingDim(pDim) || extractLeadingDim(pName);
 
     if (existingFam && pFam && existingFam === pFam) {
-      // If numbers are present in both, ensure the primary dimension number matches
-      if (pNumbers.length > 0 && itmNumbers.length > 0) {
-        if (pNumbers[0] === itmNumbers[0]) return p;
-      } else if (pNumbers.length === 0 && itmNumbers.length === 0) {
+      if (itmDimNum !== null && pDimNum !== null && itmDimNum === pDimNum) {
         return p;
       }
     }
   }
 
-  // 3. Fallback to index match if arrays have same length
+  // 3. Fallback to same SKU/Family if only single item of that family exists in processedList
+  const sameFamList = processedList.filter((p) => {
+    const pFam = getProductFamily(p.pName || p.product_requirement || '');
+    return existingFam && pFam && existingFam === pFam;
+  });
+  if (sameFamList.length === 1) {
+    return sameFamList[0];
+  }
+
+  // 4. Fallback index match if arrays have same length
   if (fallbackIndex >= 0 && fallbackIndex < processedList.length) {
     return processedList[fallbackIndex];
   }
@@ -747,7 +760,7 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
   const [dealsRes, inqsRes] = await Promise.all([
     supabase
       .from('deals')
-      .select('id, deal_number, inquiry_id, customer_name, stage, status, total_amount, salesperson_phone, po_number, created_at, deal_items(*)')
+      .select('id, inquiry_id, customer_name, stage, status, total_amount, salesperson_phone, po_number, created_at, deal_items(*)')
       .order('created_at', { ascending: false })
       .limit(200),
     supabase
@@ -762,8 +775,10 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
     const found = deals.find(
       (d) =>
         (d.id || '').toUpperCase().startsWith(clean) ||
+        (d.id || '').replace(/-/g, '').toUpperCase().startsWith(clean) ||
         (d.inquiry_id || '').toUpperCase().startsWith(clean) ||
-        (d.deal_number && d.deal_number.toUpperCase().includes(clean))
+        (d.inquiry_id || '').replace(/-/g, '').toUpperCase().startsWith(clean) ||
+        (d.id || '').toUpperCase().includes(clean)
     );
     if (found) return found;
   }
@@ -984,7 +999,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       return await handleSendQuotationMessage(text, senderPhone);
     }
 
-    let data = overrideData;
+    let data = (typeof overrideData === 'object' && overrideData !== null) ? overrideData : null;
 
     if (!data) {
       let effectiveTextForLLM = text;
@@ -1131,19 +1146,26 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
         // Check multi-item rate update list e.g. "MS Sheet 5MM THK - 10\nMS Sheet 6MM THK - 15"
         const multiItemsParsed = [];
-        const isRateUpdateContext = /\b(update\s+(?:the\s+)?rates?|new\s+rates?|rates?\s+for|rates?:)\b/i.test(textRaw);
+        const isRateUpdateContext =
+          /\b(upadte|updt|updte|update|set|new|give)\s+(?:the\s+)?(?:rates?|prices?)|(?:rates?|prices?)\s+for|rates?:/i.test(textRaw) ||
+          /\b(?:rates?|prices?)\b/i.test(textRaw);
         if (isRateUpdateContext) {
           ruleAction = 'deal_update';
           const lines = textRaw.split('\n');
           for (const line of lines) {
             const cleanLine = line.trim();
-            if (!cleanLine || /^(?:update|rates|for|customer|company|deal|inquiry)\b/i.test(cleanLine)) continue;
-            const lineMatch = cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s*[-:=]\s*₹?\s*([\d,.]+)\s*$/i);
+            if (
+              !cleanLine ||
+              /^(?:upadte|updt|updte|update|rates|prices|for|customer|company|deal|inquiry)\b/i.test(cleanLine) ||
+              /#?(?:DEAL|INQ)-[A-F0-9]{4,6}\b/i.test(cleanLine) ||
+              /deal\s+id/i.test(cleanLine)
+            ) continue;
+            const lineMatch = cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s*[-:=@]\s*₹?\s*([\d,.]+)\s*$/i);
             if (lineMatch) {
               const prodCandidate = lineMatch[1].trim();
               const rateVal = parseFloat(lineMatch[2].replace(/,/g, ''));
               if (prodCandidate && rateVal > 0) {
-                const mmM = prodCandidate.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*\d+)+)/i);
+                const mmM = prodCandidate.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
                 multiItemsParsed.push({
                   product_requirement: prodCandidate,
                   dimensions: mmM ? mmM[0] : null,
@@ -1265,7 +1287,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         let delLoc = extractDeliveryLocation(textRaw);
 
         let finalLineItems = [];
-        if (multiItemsParsed.length > 1) {
+        if (multiItemsParsed.length > 0) {
           finalLineItems = multiItemsParsed;
         } else if (pReq) {
           finalLineItems = [{
@@ -1585,7 +1607,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     }
 
     // ── SCENARIO 4: UPDATE TO EXISTING DEAL (WITH DEAL ID OR AUTO-ASSUMED) ─────
-    if (targetExplicitDeal && (!hasAnyProductName || data.action === 'deal_update')) {
+    if (targetExplicitDeal && (explicitDealIdMatch || data.deal_id || !hasAnyProductName || data.action === 'deal_update' || isRateUpdateContext || hasRateUpdate)) {
       const dealId = targetExplicitDeal.id;
       const dealCode = getDealCode(targetExplicitDeal);
       const company = targetExplicitDeal.customer_name;
@@ -1623,7 +1645,16 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
 
       // Update rate or qty on existing line items if provided
-      const existingItems = targetExplicitDeal.deal_items || [];
+      let existingItems = targetExplicitDeal.deal_items || [];
+      if (existingItems.length === 0) {
+        const { data: dbItems } = await supabase
+          .from('deal_items')
+          .select('*')
+          .eq('deal_id', dealId);
+        if (dbItems && dbItems.length > 0) {
+          existingItems = dbItems;
+        }
+      }
       let updatedDealItems = [];
 
       if (existingItems.length > 0 && (hasRateUpdate || hasQtyUpdate || processedItems.length > 0)) {
