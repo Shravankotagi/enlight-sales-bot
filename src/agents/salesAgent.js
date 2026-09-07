@@ -1578,74 +1578,18 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         }
       }
 
-      // ── LATENCY OPTIMIZATION: FAST-PATH RULE EXTRACTOR FOR PURE STAGE UPDATES ──
-      const textRaw = effectiveTextForLLM || text || '';
-      const isClearStageUpdate =
-        /\b(?:mark|move|update|set|change)\b.*?\b(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|quotated|negotiation|qualified)\b/i.test(textRaw) ||
-        /\b(?:status|stage)\b.*?\b(negotiation|qualified|quoted|quotated|won|lost)\b/i.test(textRaw) ||
-        /\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+)?(won|lost|quoted|quotated|negotiation|qualified)\b/i.test(textRaw);
-
-      const hasLineItemKeywords = /\b(mt|ton|tons|tonne|kg|kgs|sheet|sheets|plate|plates|coil|coils|pipe|pipes|beam|beams|angle|angles|channel|channels|bar|bars|tmt|dia|gauge|thk)\b/i.test(textRaw);
-
-      if (isClearStageUpdate && !hasLineItemKeywords) {
-        let ruleDealId = null;
-        const dealIdMatch = textRaw.match(/#?(DEAL-[A-Za-z0-9_-]+|INQ-[A-Za-z0-9_-]+|[A-Fa-f0-9]{6})/i);
-        if (dealIdMatch) {
-          ruleDealId = dealIdMatch[1].toUpperCase();
-        }
-
-        let ruleCustomer = null;
-        const structComp = textRaw.match(/(?:company\s+name|customer\s+name|client\s+name)\s*[:=-]\s*([^\n\r]+)/i);
-        if (structComp) {
-          ruleCustomer = structComp[1].trim().replace(/^['"]|['"]$/g, '');
-        } else {
-          const custMatch =
-            textRaw.match(/\b(?:update|set|change|mark)\s+(?:the\s+|this\s+)?(?:status|stage)\s+(?:for\s+|of\s+)?([A-Z0-9\s&.-]{2,50}?)\s+(?:deal\s+)?to\s+(?:won|lost|quoted|quotated|negotiation|qualified)\b/i) ||
-            textRaw.match(/\b(?:mark|move|update|set|change)\s+(?:the\s+|this\s+)?(?:status\s+to\s+\w+\s+for\s+(?:deal\s+id\s+[\w-]+\s+for\s+)?(?:customer\s+)?)?([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|quotated|negotiation|qualified)\b/i) ||
-            textRaw.match(/(?:for\s+customer\s+|for\s+)([A-Z0-9\s&.-]{2,40}?)(?:\s+deal|\s+to|\.|$)/i) ||
-            textRaw.match(/\b(?:mark|move|update|set|change)\s+(?:the\s+|this\s+)?([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?/i);
-          if (custMatch && custMatch[1]) {
-            const cand = custMatch[1].trim();
-            if (!['the', 'this', 'that', 'a', 'an', 'deal', 'customer', 'status', 'stage'].includes(cand.toLowerCase())) {
-              ruleCustomer = cand;
-            }
-          }
-        }
-
-        let ruleStage = 'new_inquiry';
-        const stageMatch = textRaw.match(/\b(negotiation|won|lost|quoted|quotated|qualified)\b/i);
-        if (stageMatch) {
-          const rawStage = stageMatch[1].toLowerCase();
-          ruleStage = (rawStage === 'quotated' || rawStage === 'quoted') ? 'quoted' : rawStage;
-        }
-
-        data = {
-          action: 'stage_update',
-          deal_id: ruleDealId,
-          customer_name: ruleCustomer,
-          contact_person: null,
-          target_stage: ruleStage,
-          customer_phone: null,
-          line_items: [],
-          total_amount: 0,
-          delivery_location: null,
-          payment_terms: null,
-          delivery_date: null,
-          confidence: 1.0,
-        };
-      } else {
-        try {
-          const { invokeWithFallback } = require('../core/modelRouter');
-          const response = await invokeWithFallback([
-            new SystemMessage(SALES_AGENT_PROMPT),
-            new HumanMessage('Salesperson message:\n' + effectiveTextForLLM),
-          ]);
-          const rawText = typeof response.content === 'string' ? response.content : JSON.stringify(response.content || '');
-          const { safeParseJSON } = require('../utils/jsonUtils');
-          data = safeParseJSON(rawText, null);
-        } catch (llmErr) {
-          console.warn('[SalesAgent] LLM extraction notice, utilizing rule-based engine:', llmErr.message);
-        }
+      // ── PURE LLM EXTRACTION AS PRIMARY ENGINE ──
+      try {
+        const { invokeWithFallback } = require('../core/modelRouter');
+        const response = await invokeWithFallback([
+          new SystemMessage(SALES_AGENT_PROMPT),
+          new HumanMessage('Salesperson message:\n' + effectiveTextForLLM),
+        ]);
+        const rawText = typeof response.content === 'string' ? response.content : JSON.stringify(response.content || '');
+        const { safeParseJSON } = require('../utils/jsonUtils');
+        data = safeParseJSON(rawText, null);
+      } catch (llmErr) {
+        console.warn('[SalesAgent] LLM extraction notice, utilizing rule-based engine:', llmErr.message);
       }
 
       if (!data || data.confidence < 0.3) {
