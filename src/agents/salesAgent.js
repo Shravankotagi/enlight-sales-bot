@@ -1005,17 +1005,10 @@ async function handleSendQuotationMessage(text, senderPhone, overrideEmail = nul
   let targetDeal = null;
 
   // 1. Check if specific deal ID mentioned
-  const dealIdMatch = (overrideDealId ? { 1: overrideDealId } : null) || text.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,6})\b/i) || text.match(/#([A-F0-9]{6})\b/i);
+  const dealIdMatch = (overrideDealId ? { 1: overrideDealId } : null) || text.match(/#?(?:DEAL|INQ)[-_:#]*([A-Za-z0-9_-]{4,36})\b/i) || text.match(/#([A-Fa-f0-9]{4,8})\b/i);
   if (dealIdMatch) {
-    const code = dealIdMatch[1].toUpperCase().replace(/^(?:DEAL|INQ)-?/, '');
-    const { data: matchedDeals } = await supabase
-      .from('deals')
-      .select('*, deal_items(*)')
-      .or(`id.ilike.%${code}%,inquiry_id.ilike.%${code}%`)
-      .limit(1);
-    if (matchedDeals && matchedDeals.length > 0) {
-      targetDeal = matchedDeals[0];
-    }
+    const code = dealIdMatch[1].toUpperCase();
+    targetDeal = await findDealByCodeOrId(code, senderPhone);
   }
 
   // 2. Check customer name
@@ -1085,42 +1078,93 @@ async function handleSendQuotationMessage(text, senderPhone, overrideEmail = nul
 
 async function findDealByCodeOrId(codeOrId, senderPhone) {
   if (!codeOrId) return null;
-  const clean = codeOrId.replace(/^#?(?:DEAL|INQ)-?/i, '').trim().toUpperCase();
-  if (clean.length < 4) return null;
+  const clean = String(codeOrId)
+    .replace(/^#+/, '')
+    .replace(/^(?:DEAL|INQ)[-_:#]*/i, '')
+    .replace(/^#+/, '')
+    .trim()
+    .toUpperCase();
+  if (clean.length < 3) return null;
 
-  // Run deals and inquiries lookups concurrently with lean projections for ultra-low latency
+  // 1. Direct UUID lookup if clean is a standard UUID
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clean);
+  if (isUuid) {
+    const { data: directDeal } = await supabase
+      .from('deals')
+      .select('*, deal_items(*)')
+      .eq('id', clean.toLowerCase())
+      .limit(1);
+    if (directDeal && directDeal.length > 0) return directDeal[0];
+
+    const { data: directInqDeal } = await supabase
+      .from('deals')
+      .select('*, deal_items(*)')
+      .eq('inquiry_id', clean.toLowerCase())
+      .limit(1);
+    if (directInqDeal && directInqDeal.length > 0) return directInqDeal[0];
+
+    const { data: directInq } = await supabase
+      .from('inquiries')
+      .select('*')
+      .eq('id', clean.toLowerCase())
+      .limit(1);
+    if (directInq && directInq.length > 0) {
+      return convertInquiryToDealStub(directInq[0], senderPhone);
+    }
+  }
+
+  // 2. Fetch recent deals and inquiries in parallel for high-speed in-memory prefix & token matching
   const [dealsRes, inqsRes] = await Promise.all([
     supabase
       .from('deals')
-      .select('id, inquiry_id, customer_name, stage, status, total_amount, salesperson_phone, po_number, created_at, deal_items(*)')
+      .select('id, inquiry_id, customer_name, stage, status, total_amount, salesperson_phone, po_number, bigin_deal_id, delivery_location, payment_terms, created_at, deal_items(*)')
       .order('created_at', { ascending: false })
-      .limit(200),
+      .limit(500),
     supabase
       .from('inquiries')
       .select('id, sender_name, status, sender_phone, raw_text, created_at')
       .order('created_at', { ascending: false })
-      .limit(200),
+      .limit(500),
   ]);
 
-  const deals = dealsRes?.data;
-  if (deals && deals.length > 0) {
-    const found = deals.find(
+  const deals = dealsRes?.data || [];
+  if (deals.length > 0) {
+    // Exact prefix match on Deal ID (with or without hyphens)
+    let found = deals.find(
       (d) =>
         (d.id || '').toUpperCase().startsWith(clean) ||
         (d.id || '').replace(/-/g, '').toUpperCase().startsWith(clean) ||
         (d.inquiry_id || '').toUpperCase().startsWith(clean) ||
-        (d.inquiry_id || '').replace(/-/g, '').toUpperCase().startsWith(clean) ||
-        (d.id || '').toUpperCase().includes(clean)
+        (d.inquiry_id || '').replace(/-/g, '').toUpperCase().startsWith(clean)
     );
+    if (found) return found;
+
+    // Match on po_number or bigin_deal_id
+    found = deals.find(
+      (d) =>
+        (d.po_number && d.po_number.toUpperCase().includes(clean)) ||
+        (d.bigin_deal_id && String(d.bigin_deal_id).includes(clean))
+    );
+    if (found) return found;
+
+    // Substring match on Deal UUID
+    found = deals.find((d) => (d.id || '').toUpperCase().includes(clean));
     if (found) return found;
   }
 
-  const inquiries = inqsRes?.data;
-  if (inquiries && inquiries.length > 0) {
+  const inquiries = inqsRes?.data || [];
+  if (inquiries.length > 0) {
     const foundInq = inquiries.find(
-      (inq) => (inq.id || '').toUpperCase().startsWith(clean)
+      (inq) =>
+        (inq.id || '').toUpperCase().startsWith(clean) ||
+        (inq.id || '').replace(/-/g, '').toUpperCase().startsWith(clean) ||
+        (inq.id || '').toUpperCase().includes(clean)
     );
     if (foundInq) {
+      // Check if there is already a deal created for this inquiry
+      const linkedDeal = deals.find((d) => d.inquiry_id === foundInq.id);
+      if (linkedDeal) return linkedDeal;
+
       const inqStatus = (foundInq.status || '').toLowerCase().trim();
       let derivedStage = 'new_inquiry';
       if (['confirmed', 'saved', 'processed', 'qualified'].includes(inqStatus)) {
@@ -1133,8 +1177,6 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
         derivedStage = 'won';
       } else if (inqStatus === 'lost') {
         derivedStage = 'lost';
-      } else {
-        derivedStage = 'new_inquiry';
       }
 
       let cName = foundInq.sender_name;
@@ -1158,6 +1200,16 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
     }
   }
 
+  // 3. Fallback: Search deals by customer name tokens if clean looks like a company name
+  const cleanWords = clean.split(/\s+/).filter(w => w.length >= 3 && !['PVT', 'LTD', 'STEEL', 'PROJECTS', 'INFRASTRUCTURE', 'INDUSTRIES'].includes(w));
+  if (cleanWords.length > 0 && deals.length > 0) {
+    const foundByCust = deals.find(d => {
+      const cName = (d.customer_name || '').toUpperCase();
+      return cleanWords.every(w => cName.includes(w));
+    });
+    if (foundByCust) return foundByCust;
+  }
+
   return null;
 }
 
@@ -1175,6 +1227,7 @@ function getPhoneVariants(phone) {
 
 async function getAllOpenDealsForCustomer(customerName, senderPhone) {
   if (!customerName) return [];
+  const cleanCust = customerName.replace(/[.,'"]/g, '').trim();
   const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
   const scope = senderPhone
     ? await getAccessibleSalespersonPhonesForBot(senderPhone)
@@ -1183,7 +1236,7 @@ async function getAllOpenDealsForCustomer(customerName, senderPhone) {
   let query = supabase
     .from('deals')
     .select('*, deal_items(*)')
-    .ilike('customer_name', `%${customerName}%`)
+    .ilike('customer_name', `%${cleanCust}%`)
     .not('stage', 'in', '("won","lost")')
     .order('created_at', { ascending: false });
 
@@ -1203,14 +1256,39 @@ async function getAllOpenDealsForCustomer(customerName, senderPhone) {
     }
   }
 
-  const { data } = await query;
-  const deals = data || [];
+  let { data } = await query;
+  let deals = data || [];
+
+  // If no deals found with full customer string, try word tokens
+  if (deals.length === 0) {
+    const words = cleanCust.split(/\s+/).filter(w => w.length >= 3 && !['pvt', 'ltd', 'steel', 'company', 'enterprises', 'industries', 'projects', 'infrastructure'].includes(w.toLowerCase()));
+    if (words.length > 0) {
+      const orClause = words.map(w => `customer_name.ilike.%${w}%`).join(',');
+      let wordQuery = supabase
+        .from('deals')
+        .select('*, deal_items(*)')
+        .or(orClause)
+        .not('stage', 'in', '("won","lost")')
+        .order('created_at', { ascending: false });
+      if (scope.phones !== null) {
+        const allPhones = new Set();
+        for (const p of scope.phones) getPhoneVariants(p).forEach(pv => allPhones.add(pv));
+        if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => allPhones.add(pv));
+        wordQuery = wordQuery.in('salesperson_phone', Array.from(allPhones));
+      }
+      const { data: wordDeals } = await wordQuery;
+      if (wordDeals && wordDeals.length > 0) {
+        deals = wordDeals;
+      }
+    }
+  }
+
   if (deals.length <= 1) return deals;
 
   // Prioritize exact customer name matches if available
-  const targetClean = customerName.toLowerCase().trim();
+  const targetClean = cleanCust.toLowerCase().trim();
   const exactMatches = deals.filter(
-    (d) => (d.customer_name || '').toLowerCase().trim() === targetClean,
+    (d) => (d.customer_name || '').replace(/[.,'"]/g, '').toLowerCase().trim() === targetClean,
   );
   return exactMatches.length > 0 ? exactMatches : deals;
 }
@@ -1420,10 +1498,15 @@ function extractDeterministicRateItems(text) {
 async function processSalesMessage(text, senderPhone, overrideData = null) {
   try {
     // 0. Check if this is an explicit request to send / email a quotation or answering email prompt
+    const isStageOrStatusUpdate =
+      /\b(?:status|stage|mark|move|update\s+status|update\s+stage|change\s+status|change\s+stage)\b/i.test(text) ||
+      /\b(?:to\s+(?:quoted|quotated|won|lost|negotiation|qualified))\b/i.test(text);
+
     const isQuotationSend =
-      /\b(?:send|mail|email|forward|share|dispatch)\b.*?\b(?:quotation|quote|pdf)\b/i.test(text) ||
-      /\b(?:quotation|quote)\b.*?\b(?:bhejo|bhej|send|mail|email|share|forward)\b/i.test(text) ||
-      (/\b(?:send\s+to|mail\s+to|email\s+to)\b/i.test(text) && /\b(?:quotation|quote)\b/i.test(text));
+      !isStageOrStatusUpdate &&
+      (/\b(?:send|mail|email|forward|share|dispatch)\b.*?\b(?:quotation|quote|pdf)\b/i.test(text) ||
+       /\b(?:quotation|quote)\b.*?\b(?:bhejo|bhej|send|mail|email|share|forward)\b/i.test(text) ||
+       (/\b(?:send\s+to|mail\s+to|email\s+to)\b/i.test(text) && /\b(?:quotation|quote)\b/i.test(text)));
 
     const { getFullActiveSession } = require('../supabase');
     const activeSess = await getFullActiveSession(senderPhone);
@@ -1484,8 +1567,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         }
       }
 
-      const isStageOrStatusUpdate = /\b(?:mark|move|update|set|change|status|stage|negotiation|won|lost|quoted|qualified)\b/i.test(effectiveTextForLLM);
-      if (!isStageOrStatusUpdate) {
+      const isStageOrStatusExplicit = /\b(?:mark|move|update|set|change|status|stage|negotiation|won|lost|quoted|quotated|qualified)\b/i.test(effectiveTextForLLM);
+      if (!isStageOrStatusExplicit) {
         const invalidUnitCheck = detectInvalidUnitInMessage(effectiveTextForLLM);
         if (invalidUnitCheck) {
           return `Invalid Quantity Unit\n\n` +
@@ -1498,9 +1581,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       // ── LATENCY OPTIMIZATION: FAST-PATH RULE EXTRACTOR FOR PURE STAGE UPDATES ──
       const textRaw = effectiveTextForLLM || text || '';
       const isClearStageUpdate =
-        /\b(?:mark|move|update|set|change)\b.*?\b(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|negotiation|qualified)\b/i.test(textRaw) ||
-        /\b(?:status|stage)\b.*?\b(negotiation|qualified|quoted|won|lost)\b/i.test(textRaw) ||
-        /\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+)?(won|lost|quoted|negotiation|qualified)\b/i.test(textRaw);
+        /\b(?:mark|move|update|set|change)\b.*?\b(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|quotated|negotiation|qualified)\b/i.test(textRaw) ||
+        /\b(?:status|stage)\b.*?\b(negotiation|qualified|quoted|quotated|won|lost)\b/i.test(textRaw) ||
+        /\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+)?(won|lost|quoted|quotated|negotiation|qualified)\b/i.test(textRaw);
 
       const hasLineItemKeywords = /\b(mt|ton|tons|tonne|kg|kgs|sheet|sheets|plate|plates|coil|coils|pipe|pipes|beam|beams|angle|angles|channel|channels|bar|bars|tmt|dia|gauge|thk)\b/i.test(textRaw);
 
@@ -1517,7 +1600,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           ruleCustomer = structComp[1].trim().replace(/^['"]|['"]$/g, '');
         } else {
           const custMatch =
-            textRaw.match(/\b(?:mark|move|update|set|change)\s+(?:the\s+|this\s+)?(?:status\s+to\s+\w+\s+for\s+(?:deal\s+id\s+[\w-]+\s+for\s+)?(?:customer\s+)?)?([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|negotiation|qualified)\b/i) ||
+            textRaw.match(/\b(?:update|set|change|mark)\s+(?:the\s+|this\s+)?(?:status|stage)\s+(?:for\s+|of\s+)?([A-Z0-9\s&.-]{2,50}?)\s+(?:deal\s+)?to\s+(?:won|lost|quoted|quotated|negotiation|qualified)\b/i) ||
+            textRaw.match(/\b(?:mark|move|update|set|change)\s+(?:the\s+|this\s+)?(?:status\s+to\s+\w+\s+for\s+(?:deal\s+id\s+[\w-]+\s+for\s+)?(?:customer\s+)?)?([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|quotated|negotiation|qualified)\b/i) ||
             textRaw.match(/(?:for\s+customer\s+|for\s+)([A-Z0-9\s&.-]{2,40}?)(?:\s+deal|\s+to|\.|$)/i) ||
             textRaw.match(/\b(?:mark|move|update|set|change)\s+(?:the\s+|this\s+)?([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?/i);
           if (custMatch && custMatch[1]) {
@@ -1529,9 +1613,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         }
 
         let ruleStage = 'new_inquiry';
-        const stageMatch = textRaw.match(/\b(negotiation|won|lost|quoted|qualified)\b/i);
+        const stageMatch = textRaw.match(/\b(negotiation|won|lost|quoted|quotated|qualified)\b/i);
         if (stageMatch) {
-          ruleStage = stageMatch[1].toLowerCase();
+          const rawStage = stageMatch[1].toLowerCase();
+          ruleStage = (rawStage === 'quotated' || rawStage === 'quoted') ? 'quoted' : rawStage;
         }
 
         data = {
@@ -1830,14 +1915,24 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     // ── CONTEXT RESOLUTION FOR EXPLICIT DEAL ID & ACTIVE SESSIONS ──────────
     const textToInspect = effectiveTextForLLM || text || '';
     const cleanTextToInspect = textToInspect.replace(/[*_~`]/g, '').trim();
-    const explicitDealIdMatch = cleanTextToInspect.match(/#?(?:DEAL|INQ)-([A-Za-z0-9_-]+)/i) || cleanTextToInspect.match(/#?([A-Fa-f0-9]{6})\b/i);
+    const explicitDealIdMatch = cleanTextToInspect.match(/#?(?:DEAL|INQ)[-_:#]*([A-Za-z0-9_-]{4,36})\b/i) || cleanTextToInspect.match(/#([A-Fa-f0-9]{4,8})\b/i);
     let targetExplicitDeal = null;
     if (explicitDealIdMatch || data.deal_id) {
       const dealCodeToFind = (explicitDealIdMatch ? explicitDealIdMatch[1] : data.deal_id);
       targetExplicitDeal = await findDealByCodeOrId(dealCodeToFind, senderPhone);
       if (!targetExplicitDeal && explicitDealIdMatch) {
-        return `❌ Inquiry ID #${dealCodeToFind.toUpperCase()} was not found in our records. Please check the Inquiry ID and try again.`;
+        return `❌ Inquiry ID #${dealCodeToFind.toUpperCase().replace(/^#+/, '')} was not found in our records. Please check the Inquiry ID and try again.`;
       }
+    }
+
+    if (data.line_items && Array.isArray(data.line_items)) {
+      data.line_items = data.line_items.filter(item => {
+        const p = (item.product_requirement || item.pName || item.sku_text || '').toLowerCase().trim();
+        if (!p) return false;
+        if (/^(?:for\s+)?(?:this\s+)?(?:inquiry|inq|deal|order)(?:\s+id|\s+is|\s+no)?/i.test(p)) return false;
+        if (/\b(?:this\s+inqiry|this\s+inquiry|inquiry\s+id|deal\s+id|inq\s+id)\b/i.test(p)) return false;
+        return true;
+      });
     }
 
     let customerName = data.customer_name;
@@ -1870,6 +1965,14 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
     }
 
+    if (data.product_requirement) {
+      const p = String(data.product_requirement).toLowerCase().trim();
+      if (/^(?:for\s+)?(?:this\s+)?(?:inquiry|inq|deal|order)(?:\s+id|\s+is|\s+no)?/i.test(p) ||
+          /\b(?:this\s+inqiry|this\s+inquiry|inquiry\s+id|deal\s+id|inq\s+id|inq-)\b/i.test(p)) {
+        data.product_requirement = null;
+      }
+    }
+
     // Check line items & product name extraction
     const deterministicRateItems = extractDeterministicRateItems(effectiveTextForLLM || text);
     let rawItems = [];
@@ -1888,14 +1991,18 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }];
     }
 
-    const GENERIC_PRODUCT_REGEX = /^(steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined|address|delivery|delivery address|delivery location|location|destination|payment|payment terms|terms|credit|hsn|sac|unit)$/i;
+    const GENERIC_PRODUCT_REGEX = /^(?:steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined|address|delivery|delivery address|delivery location|location|destination|payment|payment terms|terms|credit|hsn|sac|unit|this inquiry|this inqiry|this inqiry is inq|inquiry id|deal id)$/i;
 
     let processedItems = [];
     let calculatedTotal = 0;
 
     for (const item of rawItems) {
       let pName = item.product_requirement ? item.product_requirement.trim() : null;
-      if (pName && (GENERIC_PRODUCT_REGEX.test(pName) || KNOWN_STEEL_CITIES.some(c => c.toLowerCase() === pName.toLowerCase()))) {
+      if (pName && (
+        GENERIC_PRODUCT_REGEX.test(pName) ||
+        /\b(?:this\s+inqiry|this\s+inquiry|inquiry\s+id|deal\s+id|inq\s+id|inq-)\b/i.test(pName) ||
+        KNOWN_STEEL_CITIES.some(c => c.toLowerCase() === pName.toLowerCase())
+      )) {
         pName = null;
       }
 
@@ -2007,14 +2114,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     if (isExplicitStageUpdate) {
       let targetStageName = data.target_stage;
       if (!targetStageName || targetStageName === 'new_inquiry') {
-        const stageMatch = text.match(/\b(negotiation|won|lost|quoted|qualified)\b/i);
+        const stageMatch = text.match(/\b(negotiation|won|lost|quoted|quotated|qualified)\b/i);
         if (stageMatch) {
-          targetStageName = stageMatch[1].toLowerCase();
+          const rawStage = stageMatch[1].toLowerCase();
+          targetStageName = (rawStage === 'quotated' || rawStage === 'quoted') ? 'quoted' : rawStage;
         }
-      }
-
-      if (targetStageName === 'quoted' || text.toLowerCase().includes('quoted')) {
-        return await handleSendQuotationMessage(text, senderPhone);
       }
 
       const stageMap = {

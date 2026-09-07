@@ -1,16 +1,12 @@
-const { createClient } = require('@supabase/supabase-js');
 const { getPaymentSummary } = require('./kra5');
 const { getComplaintSummary } = require('./kra8');
 const { generateFullKRAReport } = require('./kraReport');
 const { getNewCustomerSummary } = require('./kra2');
 const { handleConversationalQuery } = require('./agents/assistantAgent');
-const { getAccessibleSalespersonPhonesForBot } = require('./supabase');
+const { getAccessibleSalespersonPhonesForBot, supabase } = require('./supabase');
 
 function getSupabase() {
-  return createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_ROLE_KEY,
-  );
+  return supabase;
 }
 
 // Operational action logging patterns (inquiries, deals, visits, payments, complaints, onboarding)
@@ -748,18 +744,18 @@ Return ONLY the company name or "NONE":`;
     let query = supabase
       .from('deals')
       .select('*, deal_items(*)')
-      .ilike('customer_name', `%${customerName.trim()}%`)
+      .ilike('customer_name', `%${customerName.replace(/[.,'"]/g, '').trim()}%`)
       .order('created_at', { ascending: false })
       .limit(10);
 
     query = applySalespersonFilter(query, scope.phones, 'salesperson_phone');
 
     let { data: deals, error } = await query;
-    if (error) throw error;
+    if (error) console.warn('getDealIdsForCompany deals query notice:', error.message);
 
-    // If no deals found with exact substring, try word token matching (e.g. "Radhe" -> "Radhe Ispat")
+    // If no deals found with exact substring, try word token matching (e.g. "Rathi" -> "RATHI INFRASTRUCTURE PROJECTS LTD.")
     if (!deals || deals.length === 0) {
-      const words = customerName.trim().split(/\s+/).filter(w => w.length > 2 && !['pvt', 'ltd', 'steel', 'company', 'enterprises', 'industries'].includes(w.toLowerCase()));
+      const words = customerName.replace(/[.,'"]/g, '').trim().split(/\s+/).filter(w => w.length > 2 && !['pvt', 'ltd', 'steel', 'company', 'enterprises', 'industries', 'projects', 'infrastructure'].includes(w.toLowerCase()));
       if (words.length > 0) {
         const orClause = words.map(w => `customer_name.ilike.%${w}%`).join(',');
         let wordQuery = supabase
@@ -773,6 +769,29 @@ Return ONLY the company name or "NONE":`;
         if (wordDeals && wordDeals.length > 0) {
           deals = wordDeals;
         }
+      }
+    }
+
+    // If still no deals found, check inquiries table
+    if (!deals || deals.length === 0) {
+      let inqQuery = supabase
+        .from('inquiries')
+        .select('*')
+        .ilike('sender_name', `%${customerName.replace(/[.,'"]/g, '').trim()}%`)
+        .order('created_at', { ascending: false })
+        .limit(10);
+      inqQuery = applySalespersonFilter(inqQuery, scope.phones, 'salesperson_phone');
+      const { data: inqs } = await inqQuery;
+      if (inqs && inqs.length > 0) {
+        deals = inqs.map(inq => ({
+          id: inq.id,
+          inquiry_id: inq.id,
+          customer_name: inq.sender_name || customerName,
+          stage: inq.status || 'new_inquiry',
+          total_amount: inq.ai_extraction_json?.total_amount || 0,
+          inquiry_type: inq.inquiry_type || inq.ai_extraction_json?.product_requirement || 'Requirement',
+          deal_items: inq.ai_extraction_json?.line_items || [],
+        }));
       }
     }
 

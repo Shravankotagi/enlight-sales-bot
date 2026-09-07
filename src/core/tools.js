@@ -52,7 +52,7 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'update_deal_stage',
-      description: `Use this tool when the salesperson creates a new inquiry, updates deal rates, updates quantities or units, adds/removes line items, updates payment terms, delivery address, delivery date, notes, customer details, or updates deal stage. DO NOT call this tool for customer site visits (use log_customer_visit) or customer quality complaints / rejection reports (use log_complaint).`,
+      description: `Use this tool when the salesperson creates a new inquiry, updates deal rates, updates quantities or units, adds/removes line items, updates payment terms, delivery address, delivery date, notes, customer details, or updates deal stage/status (e.g. "update status to quoted", "mark as won", "deal lost", "update stage to negotiation", "status is quotated"). DO NOT call this tool for emailing/dispatching PDF quotations (use send_quotation), customer site visits (use log_customer_visit), or complaints (use log_complaint).`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
       }),
@@ -69,7 +69,7 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'send_quotation',
-      description: `Use this tool when the salesperson explicitly requests to send, email, mail, or dispatch a quotation / quote to an email address or customer (e.g. "Send quotation to client@gmail.com", "Mail quote to test@example.com", "Send quote for Inquiry #INQ-A983FC").`,
+      description: `Use this tool ONLY when the salesperson explicitly requests to send, email, mail, or dispatch a quotation / quote PDF document to an email address or recipient (e.g. "Send quotation to client@gmail.com", "Mail quote to test@example.com", "Send quote to customer via email"). DO NOT use this tool when the user is simply updating the deal status or stage to quoted/quotated (use update_deal_stage instead).`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
         email: z.string().optional().nullable().describe('The email address if mentioned e.g. client@gmail.com, else null'),
