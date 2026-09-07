@@ -606,8 +606,8 @@ const STAGE_MAP = {
   lost:        'Closed Lost',
   negotiation: 'Negotiation/Review',
   quoted:      'Proposal/Price Quote',
-  qualified:   'New Inquiry',
-  new_inquiry: 'New Inquiry',
+  qualified:   'Qualification',
+  new_inquiry: 'Qualification',
 };
 
 async function upsertDeal({
