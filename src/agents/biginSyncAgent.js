@@ -584,15 +584,21 @@ async function getDealsLayout(token) {
     const res = await axios.get(`${ZOHO_BIGIN_BASE}/settings/layouts?module=Deals`, {
       headers: zohoHeaders(token),
     });
-    const layout = res.data?.layouts?.[0];
+    const layouts = res.data?.layouts || [];
+    const sales = layouts.find(l => /sale/i.test(l.name));
+    if (sales && sales.id) {
+      cachedDealsLayout = { id: sales.id, name: sales.name, pipeline: 'Sales Standard' };
+      return cachedDealsLayout;
+    }
+    const layout = layouts[0];
     if (layout && layout.id) {
-      cachedDealsLayout = { id: layout.id, name: layout.name || 'Sales Pipeline' };
+      cachedDealsLayout = { id: layout.id, name: layout.name, pipeline: layout.name === 'Assigned Accounts' ? 'Accounts' : 'Sales Standard' };
       return cachedDealsLayout;
     }
   } catch (err) {
     console.error('[BiginSync] getDealsLayout error:', err.message);
   }
-  return { id: '1384628000000000173', name: 'Sales Pipeline' };
+  return { id: '931435000000644718', name: 'Sales', pipeline: 'Sales Standard' };
 }
 
 const STAGE_MAP = {
@@ -600,8 +606,8 @@ const STAGE_MAP = {
   lost:        'Closed Lost',
   negotiation: 'Negotiation/Review',
   quoted:      'Proposal/Price Quote',
-  qualified:   'Qualification',
-  new_inquiry: 'Qualification',
+  qualified:   'New Inquiry',
+  new_inquiry: 'New Inquiry',
 };
 
 async function upsertDeal({
@@ -612,14 +618,25 @@ async function upsertDeal({
   const primaryItem = (dealItems && dealItems[0] && dealItems[0].sku_text)
     ? `${dealItems[0].sku_text}${dealItems[0].quantity ? ` (${dealItems[0].quantity} ${dealItems[0].unit || 'MT'})` : ''}`
     : 'Metal Deal';
-  const shortId = dbDealId ? ` [#${dbDealId.substring(0, 6)}]` : '';
+  const shortId = dbDealId ? ` [#${dbDealId.substring(0, 6).toUpperCase()}]` : '';
   const dealName = `${name} - ${primaryItem}${shortId}`.trim();
 
   const existing = await findDeal(dealName, biginDealId, token);
 
   const layoutObj = await getDealsLayout(token);
-  const layoutId = layoutObj?.id || '1384628000000000173';
-  const layoutName = layoutObj?.name || 'Sales Pipeline';
+  const layoutId = layoutObj?.id || '931435000000644718';
+  const pipeline = layoutObj?.pipeline || 'Sales Standard';
+
+  // Ensure contact / account exists
+  let validContactId = contactId;
+  let validAccountId = null;
+  try {
+    const custProfile = await getCustomerProfile(name);
+    validAccountId = await upsertAccount(name, custProfile, salespersonName, token);
+    if (!validContactId || typeof validContactId !== 'string' || validContactId.length < 5) {
+      validContactId = await upsertContact(custProfile, salespersonName, token);
+    }
+  } catch {}
 
   // Build payload - only include valid fields accepted by Bigin API
   const dealPayload = {
@@ -628,13 +645,15 @@ async function upsertDeal({
     Amount:       Number(amount) || 0,
     Closing_Date: new Date().toISOString().split('T')[0],
     Description:  summary || '',
-    Pipeline:     `${layoutName} Standard`,
+    Pipeline:     pipeline,
     Layout:       { id: layoutId },
   };
 
-  // Link to Contact if valid contact ID exists
-  if (contactId && typeof contactId === 'string' && contactId.length > 5) {
-    dealPayload.Contact_Name = { id: contactId };
+  if (validAccountId) {
+    dealPayload.Account_Name = { id: validAccountId };
+  }
+  if (validContactId && typeof validContactId === 'string' && validContactId.length > 5) {
+    dealPayload.Contact_Name = { id: validContactId };
   }
 
   if (poNumber) {
@@ -858,18 +877,48 @@ async function syncActivity(activityType, data) {
         case 'deal_stage': {
           summary = `Stage updated to ${(data.stage || 'unknown').toUpperCase()} for ${customerName} by ${salespersonName} on ${new Date().toLocaleDateString('en-IN')}.`;
 
-          const existingDeal = await findDeal(customerName, token);
+          const existingDeal = await findDeal(customerName, data.biginDealId, token);
           if (existingDeal) {
-            await axios.put(`${ZOHO_BIGIN_BASE}/Deals/${existingDeal.id}`, {
-              data: [{ Stage: STAGE_MAP[data.stage] || 'Qualification' }],
-            }, { headers: zohoHeaders(token) });
+            try {
+              await axios.put(`${ZOHO_BIGIN_BASE}/Deals/${existingDeal.id}`, {
+                data: [{ Stage: STAGE_MAP[data.stage] || 'New Inquiry' }],
+              }, { headers: zohoHeaders(token) });
 
-            await addNote({
-              parentId:     existingDeal.id,
-              parentModule: 'Deals',
-              noteTitle:    `Stage Update - ${new Date().toLocaleDateString('en-IN')}`,
-              noteContent:  summary,
+              await addNote({
+                parentId:     existingDeal.id,
+                parentModule: 'Deals',
+                noteTitle:    `Stage Update - ${new Date().toLocaleDateString('en-IN')}`,
+                noteContent:  summary,
+              }, token);
+
+              if (data.dealId) {
+                const sb = getSupabase();
+                await sb.from('deals').update({ bigin_deal_id: existingDeal.id }).eq('id', data.dealId);
+              }
+            } catch (err) {
+              console.error('[BiginSync] Stage update error:', err.response?.data || err.message);
+            }
+          } else {
+            const zohoDealId = await upsertDeal({
+              customerName,
+              stage:        data.stage,
+              amount:       data.amount || 0,
+              poNumber:     data.poNumber,
+              salespersonName,
+              summary,
+              contactId:    zohoContactId,
+              dbDealId:     data.dealId,
+              biginDealId:  data.biginDealId,
             }, token);
+
+            if (zohoDealId) {
+              await addNote({
+                parentId:     zohoDealId,
+                parentModule: 'Deals',
+                noteTitle:    `Stage Update - ${new Date().toLocaleDateString('en-IN')}`,
+                noteContent:  summary,
+              }, token);
+            }
           }
 
           await logKRA6Event({
@@ -1358,7 +1407,10 @@ async function pullBiginToDatabase() {
       'Closed Lost': 'lost',
       'Negotiation/Review': 'negotiation',
       'Proposal/Price Quote': 'quoted',
-      'Qualification': 'new_inquiry',
+      'New Inquiry': 'new_inquiry',
+      'Inquiry Received': 'new_inquiry',
+      'Waiting for Inquiry': 'new_inquiry',
+      'Qualification': 'qualified',
       'Needs Analysis': 'qualified',
     };
 

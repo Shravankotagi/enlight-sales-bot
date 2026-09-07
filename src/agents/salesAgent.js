@@ -2140,6 +2140,23 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       await saveActiveSession(senderPhone, dealToUpdate.customer_name, 'deal_stage_update');
 
       try {
+        const syncType = dbStage === 'won' ? 'deal_won' : (dbStage === 'lost' ? 'deal_lost' : 'deal_stage');
+        syncActivity(syncType, {
+          customerName: dealToUpdate.customer_name,
+          stage: dbStage,
+          amount: dealToUpdate.total_amount || 0,
+          poNumber: dealToUpdate.po_number || data.po_number,
+          paymentTerms: dealToUpdate.payment_terms,
+          dealId: dealToUpdate.id,
+          biginDealId: dealToUpdate.bigin_deal_id,
+          lossReason: data.loss_reason,
+          senderPhone,
+        }).catch((e) => console.warn('[SalesAgent] Bigin live sync notice:', e.message));
+      } catch (syncErr) {
+        console.warn('[SalesAgent] Bigin sync dispatch notice:', syncErr?.message);
+      }
+
+      try {
         logBotActivity({
           salesperson_phone: senderPhone,
           description: `Deal ${dealCode} for ${dealToUpdate.customer_name} moved to ${dbStage.toUpperCase()}`,
@@ -2878,6 +2895,16 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     } catch (actErr) {
       console.warn('[SalesAgent] Activity log notice:', actErr?.message);
     }
+
+    try {
+      syncActivity('deal_stage', {
+        customerName: finalCustomerName,
+        stage: effectiveStage || 'new_inquiry',
+        amount: dealAmount || 0,
+        dealId: dealId,
+        senderPhone,
+      }).catch((e) => console.warn('[SalesAgent] Bigin live sync notice:', e.message));
+    } catch (sErr) {}
 
     const dealCode = getDealCode(activeDealObj || { id: dealId });
 
