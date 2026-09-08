@@ -106,6 +106,18 @@ Example: "20 MT CR Coil 1.2mm and 15 MT HR Coil 3.15mm"
 NEVER: CR Coil dimensions: 3.15mm
 If a product does not have dimensions specified in its own segment, set dimensions to null.
 
+CRITICAL COMPLETENESS RULE:
+Read the ENTIRE message from start to finish before extracting anything.
+Count how many distinct products are mentioned — extract ALL of them.
+If a message mentions 5 products, line_items array must have 5 entries.
+Never stop at the first product found.
+
+CRITICAL FIELD PURITY RULES:
+- customer_name: ONLY company or person name. Never a city, product, or deal ID.
+- product_requirement: ONLY a steel product name. Never a city, company name, or deal ID.
+- delivery_location: ONLY a delivery address or city. Never a product or company name.
+- Each field must contain ONLY what its label says — nothing else.
+
 CRITICAL RULES FOR THE 9 CORE STEEL PRODUCT CATEGORIES:
 1. CR COILS:
    - Handle Gauges (e.g. "20 Gauge" -> 0.90mm, "24 Gauge" -> 0.60mm, "16 Gauge" -> 1.60mm).
@@ -451,6 +463,217 @@ function extractProductSegmentDimension(fullText, pName, itemIndex = 0, allItems
   return null;
 }
 
+const COMPANY_INDICATORS_REGEX = /\b(pvt|ltd|limited|industries|industry|infra|infrastructure|enterprises|enterprise|corp|corporation|works|steel|metals|engineering|engineers|associates|traders|trading|buildcon|fab|fabricators|co|company)\b/i;
+const STEEL_PRODUCT_TERMS = /\b(coil|coils|sheet|sheets|plate|plates|bar|bars|pipe|pipes|tube|tubes|angle|angles|beam|beams|channel|channels|tmt|rebar|sariya|crca|hrpo|gp|gi|ms|hr|cr|ismb|ismc|chequered|checkered)\b/i;
+
+function countDistinctProductFamiliesInText(text) {
+  if (!text || typeof text !== 'string') return 0;
+  const lower = text.toLowerCase();
+  const matchedFamilies = new Set();
+  for (const [family, aliases] of Object.entries(PRODUCT_FAMILIES)) {
+    if (aliases.some((alias) => lower.includes(alias))) {
+      matchedFamilies.add(family);
+    }
+  }
+  return matchedFamilies.size;
+}
+
+function extractRuleBasedLineItems(textRaw) {
+  if (!textRaw || typeof textRaw !== 'string') return [];
+  const items = [];
+
+  // 1. Check deterministic rate items first
+  const rateItems = extractDeterministicRateItems(textRaw);
+  if (rateItems.length > 0) {
+    return rateItems;
+  }
+
+  // 2. Check multi-item TMT list
+  const tmtMultiRegex = /(\d+(?:\.\d+)?\s*mm)\s*(?:[-:]|–)?\s*(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|bundles|pcs)?/gi;
+  let tmtM;
+  const tmtItems = [];
+  while ((tmtM = tmtMultiRegex.exec(textRaw)) !== null) {
+    tmtItems.push({
+      product_requirement: 'TMT Bar',
+      pName: 'TMT Bar',
+      dimensions: tmtM[1].replace(/\s+/g, ''),
+      quantity_mt: parseFloat(tmtM[2]),
+      quantity: parseFloat(tmtM[2]),
+      unit: tmtM[3] ? tmtM[3].toUpperCase() : 'MT',
+      rate_per_mt: null,
+    });
+  }
+  if (tmtItems.length > 1) {
+    return tmtItems;
+  }
+
+  // 3. Multi-product Catalog regex
+  const KNOWN_CATALOG_PRODUCTS = [
+    { name: 'HRPO Coil', regex: /\b(hrpo|pickled\s*&\s*oiled)\b/i },
+    { name: 'HR Coil', regex: /\b(hr\s*coil|hot\s*rolled\s*coil)\b/i },
+    { name: 'CR Coil', regex: /\b(cr\s*coil|cold\s*rolled\s*coil|crca)\b/i },
+    { name: 'CR Sheet', regex: /\b(cr\s*sheet|cold\s*rolled\s*sheet)\b/i },
+    { name: 'Chequered Plate', regex: /\b(chequered|checkered)\s*(?:plate|sheet)?\b/i },
+    { name: 'MS Plate', regex: /\b(ms\s*plate|plates|bq\s*plate|boiler\s*plate|hardox)\b/i },
+    { name: 'MS Sheet', regex: /\b(ms\s*sheet)\b/i },
+    { name: 'MS Round Bar', regex: /\b(round\s*bar|bright\s*bar|en8|en19|round\s*rod)\b/i },
+    { name: 'MS Square Pipe', regex: /\b(square\s*pipe|box\s*pipe|shs|square\s*tube|rectangular\s*pipe|rhs|gp\s*square\s*pipe)\b/i },
+    { name: 'MS Angle', regex: /\b(angle|angles|equal\s*angle|unequal\s*angle|l-angle)\b/i },
+    { name: 'MS Beam', regex: /\b(beam|beams|ismb|joist|i-beam|h-beam|girder|npb|wpb)\b/i },
+    { name: 'MS Channel', regex: /\b(channel|channels|ismc|c-channel)\b/i },
+    { name: 'TMT Bar', regex: /\b(tmt\s*bar|tmt|sariya|rebar)\b/i },
+  ];
+
+  const multiProdRegex = /(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|kgs|pcs|piece|pieces|nos|sheet|sheets|plate|plates|coil|coils|bar|bars|lengths|bundles)\s+([A-Za-z0-9\s.()x/]+?)(?=(?:and\s+\d|,\s*(?:\d|[a-zA-Z]+\s+delivery|delivery|payment|contact|terms|credit)|(?:\.|\?|!)(?:\s+|$)|$|\s+for\s+delivery|\s+delivery|\s+payment|\s+contact|\s+before|\s+by\s+\d|\s+rate|\s+price|\s+po|\s+attn|\s+terms|\s+credit|\s+advance))/gi;
+  let mProd;
+  while ((mProd = multiProdRegex.exec(textRaw)) !== null) {
+    const mQty = parseFloat(mProd[1]);
+    const mUnitRaw = mProd[2].toUpperCase();
+    const rawP = mProd[3].trim().replace(/\s+(?:thk|thick|thickness|approx|approx\.)\b/i, '');
+
+    let matchedPName = null;
+    for (const kp of KNOWN_CATALOG_PRODUCTS) {
+      if (kp.regex.test(rawP)) {
+        matchedPName = kp.name;
+        break;
+      }
+    }
+    if (!matchedPName) matchedPName = rawP;
+
+    const ismbM = rawP.match(/\b(ismb\s*\d+|ismc\s*\d+|npb\s*[\dx]+|wpb\s*[\dx]+|uc\s*[\dx]+|ub\s*[\dx]+)\b/i);
+    const boxSizeM = rawP.match(/(\d+\s*x\s*\d+(?:\s*x\s*[\d.]+)?\s*mm)/i);
+    const mmM = rawP.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft)(?:\s*x\s*[\d.]+\s*(?:mm|ft|inch|mtr)?)?)/i);
+    const simpleMmM = rawP.match(/(\d+(?:\.\d+)?\s*mm)/i);
+    const mDim = ismbM ? ismbM[0].toUpperCase() : (boxSizeM ? boxSizeM[0] : (mmM ? mmM[0] : (simpleMmM ? simpleMmM[0] : null)));
+
+    items.push({
+      product_requirement: matchedPName,
+      pName: matchedPName,
+      dimensions: mDim,
+      quantity: mQty,
+      quantity_mt: mUnitRaw.startsWith('K') ? mQty / 1000 : mQty,
+      unit: mUnitRaw.startsWith('TON') ? 'MT' : mUnitRaw,
+      rate_per_mt: null,
+    });
+  }
+
+  return items;
+}
+
+function mergeIncompleteLineItems(data, rawText) {
+  if (!data || !rawText) return data;
+  const distinctFamilyCount = countDistinctProductFamiliesInText(rawText);
+  const currentItems = Array.isArray(data.line_items) ? data.line_items : [];
+
+  const ruleItems = extractRuleBasedLineItems(rawText);
+
+  if (ruleItems.length > currentItems.length || distinctFamilyCount > currentItems.length) {
+    const existingFamilies = new Set(currentItems.map(i => getProductFamily(i.product_requirement || i.pName)).filter(Boolean));
+    const merged = [...currentItems];
+
+    for (let rIdx = 0; rIdx < ruleItems.length; rIdx++) {
+      const rItem = ruleItems[rIdx];
+      const rFam = getProductFamily(rItem.product_requirement || rItem.pName);
+      const isAlreadyIncluded = currentItems.some(i => {
+        const iName = (i.product_requirement || i.pName || '').toLowerCase();
+        const rName = (rItem.product_requirement || rItem.pName || '').toLowerCase();
+        return iName === rName || (rFam && rFam === getProductFamily(iName));
+      });
+
+      if (!isAlreadyIncluded) {
+        if (!rItem.dimensions) {
+          rItem.dimensions = extractProductSegmentDimension(rawText, rItem.product_requirement, rIdx, ruleItems);
+        }
+        merged.push(rItem);
+        if (rFam) existingFamilies.add(rFam);
+      }
+    }
+    data.line_items = merged;
+  }
+
+  return data;
+}
+
+function applyFieldPurityChecks(data) {
+  if (!data || typeof data !== 'object') return data;
+
+  // 1. Check customer_name purity
+  if (data.customer_name) {
+    const cName = data.customer_name.trim();
+    // Check if customer_name is a known steel city
+    const isCity = KNOWN_STEEL_CITIES.some(city => city.toLowerCase() === cName.toLowerCase());
+    if (isCity) {
+      if (!data.delivery_location) data.delivery_location = cName;
+      data.customer_name = null;
+    } else {
+      // Check if customer_name is purely a steel product
+      const isPureProduct = STEEL_PRODUCT_TERMS.test(cName) && !COMPANY_INDICATORS_REGEX.test(cName);
+      if (isPureProduct) {
+        if (!data.line_items || data.line_items.length === 0) {
+          data.line_items = [{
+            product_requirement: cName,
+            quantity: data.quantity || 0,
+            quantity_mt: data.quantity || 0,
+            unit: data.unit || 'MT',
+            rate_per_mt: data.rate_per_mt || null,
+          }];
+        }
+        data.customer_name = null;
+      }
+    }
+  }
+
+  // 2. Check delivery_location purity
+  if (data.delivery_location) {
+    const loc = data.delivery_location.trim();
+    const isPureProduct = STEEL_PRODUCT_TERMS.test(loc) && !KNOWN_STEEL_CITIES.some(c => loc.toLowerCase().includes(c.toLowerCase()));
+    if (isPureProduct) {
+      if (!data.line_items || data.line_items.length === 0) {
+        data.line_items = [{
+          product_requirement: loc,
+          quantity: data.quantity || 0,
+          quantity_mt: data.quantity || 0,
+          unit: data.unit || 'MT',
+        }];
+      }
+      data.delivery_location = null;
+    } else {
+      const isCompanyOnly = COMPANY_INDICATORS_REGEX.test(loc) && !KNOWN_STEEL_CITIES.some(c => loc.toLowerCase().includes(c.toLowerCase())) && !/\b(?:plot|phase|near|opp|road|midc|street|gat|survey|sector)\b/i.test(loc);
+      if (isCompanyOnly) {
+        if (!data.customer_name) data.customer_name = loc;
+        data.delivery_location = null;
+      }
+    }
+  }
+
+  // 3. Check line_items product_requirement purity
+  if (Array.isArray(data.line_items) && data.line_items.length > 0) {
+    data.line_items = data.line_items.map(item => {
+      const pName = (item.product_requirement || item.pName || '').trim();
+      if (!pName) return item;
+
+      // Check if pName is a known steel city
+      const isCity = KNOWN_STEEL_CITIES.some(c => c.toLowerCase() === pName.toLowerCase());
+      if (isCity) {
+        if (!data.delivery_location) data.delivery_location = pName;
+        return { ...item, product_requirement: null, pName: null };
+      }
+
+      // Check if pName has company indicators and NO steel product terms
+      const hasCompany = COMPANY_INDICATORS_REGEX.test(pName);
+      const hasSteel = STEEL_PRODUCT_TERMS.test(pName);
+      if (hasCompany && !hasSteel) {
+        if (!data.customer_name) data.customer_name = pName;
+        return { ...item, product_requirement: null, pName: null };
+      }
+
+      return item;
+    }).filter(i => (i.product_requirement && i.product_requirement.trim().length > 0) || (i.rate_per_mt && i.rate_per_mt > 0));
+  }
+
+  return data;
+}
+
 function sanitizeLLMExtraction(extractedData, rawText) {
   if (!extractedData || typeof extractedData !== 'object') return extractedData;
   const clean = (rawText || '').toLowerCase();
@@ -494,7 +717,7 @@ function sanitizeLLMExtraction(extractedData, rawText) {
     }
   }
 
-  // 5. Sanitize line_items:
+  // 5. Sanitize line_items for rate-only / generic messages:
   if (Array.isArray(extractedData.line_items) && extractedData.line_items.length > 0) {
     const hasAnySteelKeywords = /\b(coil|coils|sheet|sheets|plate|plates|bar|bars|pipe|pipes|tube|tubes|angle|angles|beam|beams|channel|channels|tmt|rebar|sariya|crca|hrpo|gp|gi|ms|hr|cr|steel|metal|iron|ismb|ismc|chequered)\b/i.test(clean);
 
@@ -515,8 +738,14 @@ function sanitizeLLMExtraction(extractedData, rawText) {
       }
 
       return item;
-    }).filter(i => i.product_requirement || i.rate_per_mt || i.quantity > 0);
+    }).filter(i => (i.product_requirement && i.product_requirement.trim().length > 0) || (i.rate_per_mt && i.rate_per_mt > 0));
   }
+
+  // 6. Apply Issue 4 Field Purity Checks
+  extractedData = applyFieldPurityChecks(extractedData);
+
+  // 7. Apply Issue 3 Completeness check (recover silently dropped products)
+  extractedData = mergeIncompleteLineItems(extractedData, rawText);
 
   return extractedData;
 }
@@ -2197,8 +2426,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     for (const item of rawItems) {
       let pName = item.product_requirement ? item.product_requirement.trim() : null;
+      const hasCompanyIndicatorOnly = pName && COMPANY_INDICATORS_REGEX.test(pName) && !STEEL_PRODUCT_TERMS.test(pName);
       if (pName && (
         GENERIC_PRODUCT_REGEX.test(pName) ||
+        hasCompanyIndicatorOnly ||
         /\b(?:this\s+inqiry|this\s+inquiry|inquiry\s+id|deal\s+id|inq\s+id|inq-)\b/i.test(pName) ||
         KNOWN_STEEL_CITIES.some(c => c.toLowerCase() === pName.toLowerCase())
       )) {
