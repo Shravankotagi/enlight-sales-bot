@@ -928,7 +928,7 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   }
   if (rawStatus && rawStatus !== 'all') {
     if (rawStatus === 'won' || rawStatus === 'converted' || rawStatus === 'orders') {
-      filtered = filtered.filter((m) => m.deal_stage === 'won' || m.status === 'won' || Boolean(m.po_number));
+      filtered = filtered.filter((m) => m.deal_stage === 'won' || m.status === 'won');
     } else if (rawStatus === 'lost' || rawStatus === 'not_converted') {
       filtered = filtered.filter((m) => m.deal_stage === 'lost' || m.status === 'lost');
     } else if (rawStatus === 'pending' || rawStatus === 'review') {
@@ -1655,7 +1655,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   if (poFilter) filtered = filtered.filter((d) => (d.po_number || '').toLowerCase().includes(poFilter));
   if (locFilter) filtered = filtered.filter((d) => (d.delivery_location || '').toLowerCase().includes(locFilter));
   if (stageFilter && stageFilter !== 'all') {
-    if (stageFilter === 'won' || stageFilter === 'orders') filtered = filtered.filter((d) => d.stage === 'won' || Boolean(d.po_number));
+    if (stageFilter === 'won' || stageFilter === 'orders') filtered = filtered.filter((d) => d.stage === 'won');
     else if (stageFilter === 'lost') filtered = filtered.filter((d) => d.stage === 'lost');
     else if (stageFilter === 'open') filtered = filtered.filter((d) => d.stage !== 'won' && d.stage !== 'lost');
     else filtered = filtered.filter((d) => d.stage.toLowerCase() === stageFilter);
@@ -1665,7 +1665,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   const stageCounts = {};
 
   filtered.forEach((d) => {
-    const isWon = d.stage === 'won' || Boolean(d.po_number);
+    const isWon = d.stage === 'won';
     totalVal += d.total_amount_inr;
     totalTonnage += d.tonnage_mt;
     if (isWon) {
