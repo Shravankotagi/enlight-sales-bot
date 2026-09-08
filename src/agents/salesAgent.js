@@ -24,6 +24,37 @@ const { syncActivity } = require('./biginSyncAgent');
 const { logBotActivity } = require('../utils/activityLogger');
 const { detectHsnCode } = require('../utils/hsnDetector');
 
+function extractDealIdFromText(text) {
+  if (!text || typeof text !== 'string') return null;
+  const clean = text.replace(/[*_~`]/g, '').trim();
+
+  // 1. Explicit ID indicators e.g. "inquiry id INQ-B76516", "inquiry with id B76516", "deal id: #INQ-B76516", "inquiry no. B76516"
+  const structuredMatch = clean.match(/(?:inquiry|inq|deal|order)\s*(?:with\s+)?(?:id|no|num|number)?\s*[:=-]?\s*#?((?:(?:DEAL|INQ)[-_:#\s]*)?[A-Fa-f0-9]{4,36})\b/i);
+  if (structuredMatch) {
+    const code = structuredMatch[1].replace(/^(?:DEAL|INQ)[-_:#\s]*/i, '').replace(/^#+/, '').trim();
+    if (code && code.length >= 3 && !/^(?:uiry|uire|status|update|stage|rate|details?|notes?|with|from|for)$/i.test(code)) {
+      return code.toUpperCase();
+    }
+  }
+
+  // 2. Direct prefixed pattern: #INQ-XXXXXX, INQ-XXXXXX, DEAL-XXXXXX, #DEAL-XXXXXX (requires at least one separator: -, _, :, #)
+  const prefixMatch = clean.match(/(?:^|[\s#(,])(?:DEAL|INQ)[-_:#]+([A-Za-z0-9_-]{4,36})\b/i);
+  if (prefixMatch) {
+    const code = prefixMatch[1].replace(/^#+/, '').trim();
+    if (code && code.length >= 3 && !/^(?:uiry|uire|status|update|stage|rate|details?|notes?)$/i.test(code)) {
+      return code.toUpperCase();
+    }
+  }
+
+  // 3. Hex code with hash e.g. #B76516 or #C538B6
+  const hashHexMatch = clean.match(/#([A-Fa-f0-9]{4,8})\b/i);
+  if (hashHexMatch) {
+    return hashHexMatch[1].toUpperCase();
+  }
+
+  return null;
+}
+
 const SALES_AGENT_PROMPT = `
 You are the Specialized Sales Achievement & Pipeline Agent for Enlight Metals (B2B Steel Distributor).
 Your job is to analyze salesperson messages reporting sales actions, deal status updates, stage changes, customer product requirements/inquiries, or updates to existing deals.
@@ -33,10 +64,10 @@ Input message can be English, Hindi, or Hinglish.
 Extract into ONLY a JSON object (no markdown, no prose, no backticks):
 {
   "action": "inquiry|stage_update|purchase_order|deal_update", // Use "stage_update" whenever moving stage, updating status, or marking as won/lost/negotiation/quoted/on_hold. Use "inquiry" for ALL new customer requirements, notes, RFQs, quotes. Use "purchase_order" ONLY if text explicitly contains "PO", "PO-...", "Purchase order", "Order confirmed", "Order placed", or "Won".
-  "deal_id": "<inquiry ID if mentioned e.g. #INQ-C538B6, INQ-C538B6, #DEAL-C538B6, or C538B6, else null>",
+  "deal_id": "<exact alphanumeric inquiry/deal ID code if mentioned e.g. INQ-B76516, DEAL-B76516, #INQ-B76516, or B76516. Must NEVER be words like 'uiry', 'inquiry', 'deal', or 'null'>",
   "customer_name": "<exact company/customer name requesting material or placing order, else null>",
   "contact_person": "<full name of customer contact person/owner/proprietor if mentioned e.g. Rajesh Mehta, else null>",
-  "target_stage": "new_inquiry|quoted|negotiation|on_hold|won|lost", // Stage if explicitly requested to update e.g. "update to negotiation", "mark as negotiation", "mark as won", "deal lost", "put on hold", else null
+  "target_stage": "new_inquiry|quoted|negotiation|on_hold|won|lost", // Stage if explicitly requested to update e.g. "update to negotiation", "mark as negotiation", "mark as won", "deal lost", "put on hold", "is on hold", else null
   "line_items": [
     {
       "product_requirement": "<specific product name from 9 categories e.g. CR Coil, HR Coil, HRPO Coil, MS Round Bar, MS Square Pipe, MS Angle, MS Beam, MS Channel, MS Plate, Chequered Plate, TMT Bar>",
@@ -1005,10 +1036,9 @@ async function handleSendQuotationMessage(text, senderPhone, overrideEmail = nul
   let targetDeal = null;
 
   // 1. Check if specific deal ID mentioned
-  const dealIdMatch = (overrideDealId ? { 1: overrideDealId } : null) || text.match(/#?(?:DEAL|INQ)[-_:#]*([A-Za-z0-9_-]{4,36})\b/i) || text.match(/#([A-Fa-f0-9]{4,8})\b/i);
-  if (dealIdMatch) {
-    const code = dealIdMatch[1].toUpperCase();
-    targetDeal = await findDealByCodeOrId(code, senderPhone);
+  const dealIdCode = overrideDealId ? String(overrideDealId).replace(/^#?(?:DEAL|INQ)[-_:#]*/i, '').replace(/^#+/, '').trim().toUpperCase() : extractDealIdFromText(text);
+  if (dealIdCode) {
+    targetDeal = await findDealByCodeOrId(dealIdCode, senderPhone);
   }
 
   // 2. Check customer name
@@ -1117,7 +1147,7 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
   const [dealsRes, inqsRes] = await Promise.all([
     supabase
       .from('deals')
-      .select('id, inquiry_id, customer_name, stage, status, total_amount, salesperson_phone, po_number, bigin_deal_id, delivery_location, payment_terms, created_at, deal_items(*)')
+      .select('id, inquiry_id, deal_number, customer_name, stage, status, total_amount, salesperson_phone, po_number, bigin_deal_id, delivery_location, payment_terms, created_at, deal_items(*)')
       .order('created_at', { ascending: false })
       .limit(500),
     supabase
@@ -1129,9 +1159,11 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
 
   const deals = dealsRes?.data || [];
   if (deals.length > 0) {
-    // Exact prefix match on Deal ID (with or without hyphens)
+    // Exact prefix match on Deal ID or deal_number (with or without hyphens)
     let found = deals.find(
       (d) =>
+        (d.deal_number && d.deal_number.toUpperCase().replace(/^#?(?:DEAL|INQ)[-_:#]*/i, '').startsWith(clean)) ||
+        (d.deal_number && d.deal_number.toUpperCase().includes(clean)) ||
         (d.id || '').toUpperCase().startsWith(clean) ||
         (d.id || '').replace(/-/g, '').toUpperCase().startsWith(clean) ||
         (d.inquiry_id || '').toUpperCase().startsWith(clean) ||
@@ -1173,6 +1205,8 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
         derivedStage = 'quoted';
       } else if (inqStatus === 'negotiation') {
         derivedStage = 'negotiation';
+      } else if (inqStatus === 'on_hold' || inqStatus === 'hold') {
+        derivedStage = 'on_hold';
       } else if (inqStatus === 'won') {
         derivedStage = 'won';
       } else if (inqStatus === 'lost') {
@@ -1597,11 +1631,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         const textClean = textRaw.replace(/#?(?:DEAL-[A-F0-9]{4,6}|INQ-[A-F0-9]{4,6}|[A-F0-9]{6})\b/gi, '').replace(/\s+/g, ' ');
         const textLower = textClean.toLowerCase();
 
-        let ruleDealId = null;
-        const dealIdMatch = textRaw.match(/#?(DEAL-[A-F0-9]{4,6}|INQ-[A-F0-9]{4,6}|[A-F0-9]{6})/i);
-        if (dealIdMatch) {
-          ruleDealId = dealIdMatch[1].toUpperCase();
-        }
+        let ruleDealId = extractDealIdFromText(textRaw);
 
         let ruleCustomer = null;
         const structComp = textRaw.match(/(?:company\s+name|customer\s+name|client\s+name)\s*[:=-]\s*([^\n\r]+)/i);
@@ -1610,7 +1640,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         } else {
           const reqMatch = textClean.match(/(?:inquiry\s+for|order\s+for|deal\s+for|quote\s+for|requirement\s+for|for)\s+([A-Z0-9\s&.-]{2,40}?)(?:\s+\d+\s*(?:mt|ton|tons|tonne|kg|pcs|sheet|sheets|plate|plates|mm|coil|coils|bar|bars)|\s+requires|\s+needs|\s+before|\.|$)/i) ||
             textClean.match(/(?:inquiry\s+from|order\s+from|rfq\s+from|from)\s+([A-Z0-9\s&.-]{2,40}?)(?:\s+requires|\s+needs|\s+for|\s+before|\.|$)/i) ||
-            textClean.match(/\b(?:mark|move|update|set|change)\s+(?:the\s+|this\s+)?([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|negotiation|qualified)\b/i) ||
+            textClean.match(/\b(?:mark|move|update|set|change|put)\s+(?:the\s+|this\s+)?([A-Z0-9\s&.-]{2,40}?)\s+(?:deal\s+)?(?:as\s+|to\s+|on\s+)?(won|lost|quoted|quotated|negotiation|qualified|on\s+hold|hold)\b/i) ||
             textClean.match(/^(?!new\b|log\b|create\b|add\b)([A-Z0-9\s&.-]{2,40}?)\s+(?:requires|require|needs|need|inquiry|rfq|po|order|want)\b/i) ||
             textClean.match(/(?:customer|company|client|pvt\.?\s*ltd\.?|ltd\.?|infra|steel|engineering|industries)\s+([A-Z0-9\s&.-]{3,35})/i);
           if (reqMatch) {
@@ -1623,13 +1653,15 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
         let ruleAction = 'inquiry';
         let ruleStage = 'new_inquiry';
-        const stageUpdateMatch = textClean.match(/\b(?:mark|move|update|set|change)\s+(?:the\s+|this\s+)?(?:deal\s+)?(?:as\s+|to\s+)?(won|lost|quoted|negotiation|qualified)\b/i) ||
-          textClean.match(/\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+)?(won|lost|quoted|negotiation|qualified)\b/i) ||
-          textClean.match(/\b(won|lost|quoted|negotiation|qualified)\b/i);
+        const stageUpdateMatch = textClean.match(/\b(?:mark|move|update|set|change|put)\s+(?:the\s+|this\s+)?(?:deal\s+)?(?:as\s+|to\s+|on\s+)?(won|lost|quoted|quotated|negotiation|qualified|on\s+hold|hold)\b/i) ||
+          textClean.match(/\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+|put\s+on\s+)?(won|lost|quoted|quotated|negotiation|qualified|on\s+hold|hold)\b/i) ||
+          textClean.match(/\b(?:is\s+on\s+hold|put\s+on\s+hold)\b/i) ||
+          textClean.match(/\b(won|lost|quoted|quotated|negotiation|qualified|on\s+hold|hold)\b/i);
 
         if (stageUpdateMatch) {
           ruleAction = 'stage_update';
-          ruleStage = stageUpdateMatch[1].toLowerCase();
+          const rawSt = stageUpdateMatch[1] ? stageUpdateMatch[1].toLowerCase().replace(/\s+/g, '_') : (stageUpdateMatch[0].includes('hold') ? 'on_hold' : stageUpdateMatch[0].toLowerCase());
+          ruleStage = (rawSt === 'hold' || rawSt === 'on_hold') ? 'on_hold' : (rawSt === 'quotated' ? 'quoted' : rawSt);
         }
 
         // Check multi-item rate update list / inline updates / field updates
@@ -1718,18 +1750,70 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           }
         }
 
-        // Check multi-item TMT list e.g. "8mm - 5 MT, 10mm - 10 MT, 12mm - 15 MT"
-        const tmtMultiRegex = /(\d+(?:\.\d+)?\s*mm)\s*(?:[-:]|–)?\s*(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|bundles|pcs)?/gi;
-        let tmtM;
-        while ((tmtM = tmtMultiRegex.exec(textRaw)) !== null) {
+        // Check multi-item list e.g. "15 MT HR Coil 3.15mm thk and 10 MT CR Sheet 1.2mm" or "8mm - 5 MT, 10mm - 10 MT"
+        const KNOWN_CATALOG_PRODUCTS = [
+          { name: 'HRPO Coil', regex: /\b(hrpo|pickled\s*&\s*oiled)\b/i },
+          { name: 'HR Coil', regex: /\b(hr\s*coil|hot\s*rolled\s*coil)\b/i },
+          { name: 'CR Coil', regex: /\b(cr\s*coil|cold\s*rolled\s*coil|crca)\b/i },
+          { name: 'CR Sheet', regex: /\b(cr\s*sheet|cold\s*rolled\s*sheet)\b/i },
+          { name: 'Chequered Plate', regex: /\b(chequered|checkered)\s*(?:plate|sheet)?\b/i },
+          { name: 'MS Plate', regex: /\b(ms\s*plate|plates|bq\s*plate|boiler\s*plate|hardox)\b/i },
+          { name: 'MS Sheet', regex: /\b(ms\s*sheet)\b/i },
+          { name: 'MS Round Bar', regex: /\b(round\s*bar|bright\s*bar|en8|en19|round\s*rod)\b/i },
+          { name: 'MS Square Pipe', regex: /\b(square\s*pipe|box\s*pipe|shs|square\s*tube|rectangular\s*pipe|rhs)\b/i },
+          { name: 'MS Angle', regex: /\b(angle|angles|equal\s*angle|unequal\s*angle|l-angle)\b/i },
+          { name: 'MS Beam', regex: /\b(beam|beams|ismb|joist|i-beam|h-beam|girder|npb|wpb)\b/i },
+          { name: 'MS Channel', regex: /\b(channel|channels|ismc|c-channel)\b/i },
+          { name: 'TMT Bar', regex: /\b(tmt\s*bar|tmt|sariya|rebar)\b/i },
+        ];
+
+        // Check multi-item Quantity + Unit + Product pattern
+        const multiProdRegex = /(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|kgs|pcs|piece|pieces|nos|sheet|sheets|plate|plates|coil|coils|bar|bars|lengths|bundles)\s+([A-Za-z0-9\s.()x/]+?)(?=(?:and\s+\d|,\s*(?:\d|[a-zA-Z]+\s+delivery|delivery|payment|contact|terms|credit)|(?:\.|\?|!)(?:\s+|$)|$|\s+for\s+delivery|\s+delivery|\s+payment|\s+contact|\s+before|\s+by\s+\d|\s+rate|\s+price|\s+po|\s+attn|\s+terms|\s+credit|\s+advance))/gi;
+        let mProd;
+        while ((mProd = multiProdRegex.exec(textRaw)) !== null) {
+          const mQty = parseFloat(mProd[1]);
+          const mUnitRaw = mProd[2].toUpperCase();
+          const rawP = mProd[3].trim().replace(/\s+(?:thk|thick|thickness|approx|approx\.)\b/i, '');
+
+          let matchedPName = null;
+          for (const kp of KNOWN_CATALOG_PRODUCTS) {
+            if (kp.regex.test(rawP)) {
+              matchedPName = kp.name;
+              break;
+            }
+          }
+          if (!matchedPName) matchedPName = rawP;
+
+          const ismbM = rawP.match(/\b(ismb\s*\d+|ismc\s*\d+|npb\s*[\dx]+|wpb\s*[\dx]+|uc\s*[\dx]+|ub\s*[\dx]+)\b/i);
+          const boxSizeM = rawP.match(/(\d+\s*x\s*\d+(?:\s*x\s*[\d.]+)?\s*mm)/i);
+          const mmM = rawP.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft)(?:\s*x\s*[\d.]+\s*(?:mm|ft|inch|mtr)?)?)/i);
+          const simpleMmM = rawP.match(/(\d+(?:\.\d+)?\s*mm)/i);
+          const mDim = ismbM ? ismbM[0].toUpperCase() : (boxSizeM ? boxSizeM[0] : (mmM ? mmM[0] : (simpleMmM ? simpleMmM[0] : null)));
+
           multiItemsParsed.push({
-            product_requirement: 'TMT Bar',
-            dimensions: tmtM[1].replace(/\s+/g, ''),
-            quantity_mt: parseFloat(tmtM[2]),
-            quantity: parseFloat(tmtM[2]),
-            unit: tmtM[3] ? tmtM[3].toUpperCase() : 'MT',
+            product_requirement: matchedPName,
+            dimensions: mDim,
+            quantity: mQty,
+            quantity_mt: mUnitRaw.startsWith('K') ? mQty / 1000 : mQty,
+            unit: mUnitRaw.startsWith('TON') ? 'MT' : mUnitRaw,
             rate_per_mt: null,
           });
+        }
+
+        // Check multi-item TMT list e.g. "8mm - 5 MT, 10mm - 10 MT, 12mm - 15 MT"
+        if (multiItemsParsed.length === 0) {
+          const tmtMultiRegex = /(\d+(?:\.\d+)?\s*mm)\s*(?:[-:]|–)?\s*(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|bundles|pcs)?/gi;
+          let tmtM;
+          while ((tmtM = tmtMultiRegex.exec(textRaw)) !== null) {
+            multiItemsParsed.push({
+              product_requirement: 'TMT Bar',
+              dimensions: tmtM[1].replace(/\s+/g, ''),
+              quantity_mt: parseFloat(tmtM[2]),
+              quantity: parseFloat(tmtM[2]),
+              unit: tmtM[3] ? tmtM[3].toUpperCase() : 'MT',
+              rate_per_mt: null,
+            });
+          }
         }
 
         let qty = 0;
@@ -1791,10 +1875,14 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         }
 
         let ruleRate = null;
-        const structPrice = textRaw.match(/(?:target\s+price|rate|price|unit\s+price)\s*(?::|is|=|-|\s)\s*₹?\s*([\d,.]+)(?:\s*\/\s*[a-zA-Z]+)?/i) ||
+        const structPrice = textRaw.match(/\b(?:target\s+price|unit\s+price|rate|price)\s*[:=-]\s*₹?\s*([\d,.]+)(?:\s*\/\s*[a-zA-Z]+)?/i) ||
+          textRaw.match(/\b(?:target\s+price|unit\s+price|rate|price)\s+(?:is\s+|to\s+)?₹?\s*([\d,.]+)(?:\s*\/\s*[a-zA-Z]+)?/i) ||
           textRaw.match(/@\s*₹?\s*([\d,.]+)/i);
         if (structPrice) {
-          ruleRate = Number(structPrice[1].replace(/,/g, '')) || null;
+          const rVal = parseFloat(structPrice[1].replace(/,/g, ''));
+          if (rVal > 0 && rVal < 10000000 && !/^[6-9]\d{9}$/.test(String(Math.round(rVal)))) {
+            ruleRate = rVal;
+          }
         }
 
         let rulePayment = null;
@@ -1859,13 +1947,12 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     // ── CONTEXT RESOLUTION FOR EXPLICIT DEAL ID & ACTIVE SESSIONS ──────────
     const textToInspect = effectiveTextForLLM || text || '';
     const cleanTextToInspect = textToInspect.replace(/[*_~`]/g, '').trim();
-    const explicitDealIdMatch = cleanTextToInspect.match(/#?(?:DEAL|INQ)[-_:#]*([A-Za-z0-9_-]{4,36})\b/i) || cleanTextToInspect.match(/#([A-Fa-f0-9]{4,8})\b/i);
+    const explicitDealCode = extractDealIdFromText(cleanTextToInspect) || (data && data.deal_id ? extractDealIdFromText(data.deal_id) || data.deal_id : null);
     let targetExplicitDeal = null;
-    if (explicitDealIdMatch || data.deal_id) {
-      const dealCodeToFind = (explicitDealIdMatch ? explicitDealIdMatch[1] : data.deal_id);
-      targetExplicitDeal = await findDealByCodeOrId(dealCodeToFind, senderPhone);
-      if (!targetExplicitDeal && explicitDealIdMatch) {
-        return `❌ Inquiry ID #${dealCodeToFind.toUpperCase().replace(/^#+/, '')} was not found in our records. Please check the Inquiry ID and try again.`;
+    if (explicitDealCode) {
+      targetExplicitDeal = await findDealByCodeOrId(explicitDealCode, senderPhone);
+      if (!targetExplicitDeal) {
+        return `❌ Inquiry ID #${String(explicitDealCode).toUpperCase().replace(/^#+/, '')} was not found in our records. Please check the Inquiry ID and try again.`;
       }
     }
 
@@ -2052,8 +2139,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     // ── STAGE UPDATE HANDLER (e.g. "mark the deal as won", "deal is lost", "mark as negotiation", "put on hold") ───
     const isExplicitStageUpdate = data.action === 'stage_update' ||
       (data.target_stage && ['negotiation', 'won', 'lost', 'quoted', 'on_hold', 'hold', 'qualified'].includes(data.target_stage)) ||
-      /\b(?:mark|move|update|set|change|put)\b.*?\b(negotiation|won|lost|quoted|on\s+hold|hold|qualified)\b/i.test(text) ||
-      /\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+|put\s+on\s+)?(negotiation|won|lost|quoted|on\s+hold|hold|qualified)\b/i.test(text);
+      /\b(?:mark|move|update|set|change|put)\b.*?\b(negotiation|won|lost|quoted|quotated|on\s+hold|hold|qualified)\b/i.test(text) ||
+      /\b(?:deal|inquiry).*?\b(is\s+on\s+hold|is\s+lost|is\s+won|is\s+negotiation|is\s+quoted|moved\s+to|marked\s+as|put\s+on\s+hold|on\s+hold)\b/i.test(text) ||
+      /\b(?:is\s+on\s+hold|put\s+on\s+hold|on\s+hold|hold)\b/i.test(text);
 
     if (isExplicitStageUpdate) {
       let targetStageName = data.target_stage;
@@ -2240,7 +2328,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     const isRateOrPriceUpdate = isRateUpdateContext || hasRateUpdate;
     const isFieldUpdate = hasDeliveryUpdate || hasPaymentUpdate || hasHsnUpdate || hasUnitUpdate || !!data.delivery_date || !!data.contact_person;
 
-    if (!targetExplicitDeal && customerName && (isRateOrPriceUpdate || isFieldUpdate || data.action === 'deal_update' || !hasAnyProductName)) {
+    const isExplicitNewInquiry = (data.action === 'inquiry' && hasAnyProductName) || /^(?:new\s+inquiry|inquiry\s+for|inquiry\s+from|need|requires?|create\s+inquiry|add\s+inquiry)\b/i.test(effectiveTextForLLM || text);
+
+    if (!targetExplicitDeal && customerName && !isExplicitNewInquiry && (isRateOrPriceUpdate || isFieldUpdate || data.action === 'deal_update' || !hasAnyProductName)) {
       const openDeals = await getAllOpenDealsForCustomer(customerName, senderPhone);
       if (openDeals.length === 1) {
         targetExplicitDeal = openDeals[0];
@@ -2272,7 +2362,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     const isAddItemAction = /\b(?:add\s+(?:item|line\s*item)|add\s+\d+|new\s+item)\b/i.test(effectiveTextForLLM || text) || data.action === 'add_item';
     const isRemoveItemAction = /\b(?:remove\s+(?:item|line\s*item)|delete\s+(?:item|line\s*item)|remove\s+[A-Za-z]+|delete\s+item\s*\d+)\b/i.test(effectiveTextForLLM || text) || data.action === 'remove_item';
 
-    if (targetExplicitDeal && (explicitDealIdMatch || data.deal_id || !hasAnyProductName || data.action === 'deal_update' || isRateUpdateContext || hasRateUpdate || isRateOrPriceUpdate || isFieldUpdate || isAddItemAction || isRemoveItemAction)) {
+    if (targetExplicitDeal && (explicitDealCode || data.deal_id || (!isExplicitNewInquiry && (!hasAnyProductName || data.action === 'deal_update' || isRateUpdateContext || hasRateUpdate || isRateOrPriceUpdate || isFieldUpdate || isAddItemAction || isRemoveItemAction)))) {
       const dealId = targetExplicitDeal.id;
       const dealCode = getDealCode(targetExplicitDeal);
       const company = targetExplicitDeal.customer_name;
