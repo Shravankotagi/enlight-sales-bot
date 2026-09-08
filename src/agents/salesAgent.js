@@ -2200,13 +2200,17 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         return `This deal is already marked as ${currentStage.toUpperCase()} and cannot be updated further.`;
       }
 
+      if (currentStage === dbStage) {
+        return `Inquiry ${dealCode} for ${dealToUpdate.customer_name} is already in ${dbStage.toUpperCase().replace('_', ' ')} stage.`;
+      }
+
       // Stage Gate 2: On Hold is ONLY allowed from Price Quote (quoted/qualified) stage
       if (dbStage === 'on_hold') {
         if (isNewInquiryStage) {
           return `❌ Cannot put inquiry on hold.\n\nInquiry ${dealCode} for ${dealToUpdate.customer_name} is currently in NEW INQUIRY stage without quoted rates.\n\nPlease enter unit rates first to move it to PRICE QUOTE stage before putting it on hold.`;
         }
         if (currentStage !== 'quoted' && currentStage !== 'qualified') {
-          return `❌ Cannot put inquiry on hold.\n\nInquiry ${dealCode} for ${dealToUpdate.customer_name} is currently in ${currentStage.toUpperCase()} stage. An inquiry must be in PRICE QUOTE stage before it can be placed on hold.`;
+          return `❌ Cannot put inquiry on hold.\n\nInquiry ${dealCode} for ${dealToUpdate.customer_name} is currently in ${currentStage.toUpperCase().replace('_', ' ')} stage. An inquiry must be in PRICE QUOTE stage before it can be placed on hold.`;
         }
       }
 
@@ -2214,6 +2218,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       if (dbStage === 'negotiation') {
         if (isNewInquiryStage) {
           return `❌ Cannot move inquiry to Negotiation.\n\nInquiry ${dealCode} for ${dealToUpdate.customer_name} is currently in NEW INQUIRY stage without quoted rates.\n\nPlease enter unit rates first to move it to PRICE QUOTE stage before entering Negotiation.`;
+        }
+        if (currentStage === 'on_hold') {
+          return `❌ Cannot move inquiry to Negotiation.\n\nInquiry ${dealCode} for ${dealToUpdate.customer_name} is currently ON HOLD. From On Hold stage, an inquiry can only be marked as WON or LOST.`;
         }
       }
 
