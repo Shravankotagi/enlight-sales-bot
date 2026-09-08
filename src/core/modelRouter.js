@@ -1,13 +1,10 @@
 /**
- * modelRouter.js - Google Gemini Model Router
+ * modelRouter.js - Google Gemini 3.7 Flash Model Router
  *
- * HEAVY USE CASES (Vision/OCR, Multi-page PO Documents, Complex Agent Decisions):
+ * UNIFIED HIGH-ACCURACY MODEL CONFIGURATION:
+ * - Model: gemini-3.7-flash
  * - Key: process.env.GEMINI_PAID_API_KEY || process.env.GEMINI_API_KEY
- * - Model: gemini-2.5-flash
- *
- * NORMAL USE CASES (Intent Classification, Query Routing, Field Extractions, FAQ):
- * - Key: process.env.GEMINI_PAID_API_KEY || process.env.GEMINI_API_KEY
- * - Model: gemini-3.1-flash-lite
+ * - All tasks (Vision/OCR, Multi-page PO Documents, Agent Decisions, Intent Classification, Query Routing, Extractions)
  */
 
 const { ChatGoogleGenerativeAI } = require('@langchain/google-genai');
@@ -16,13 +13,14 @@ const GEMINI_API_KEY =
   process.env.GEMINI_PAID_API_KEY ||
   process.env.GEMINI_API_KEY;
 
+const PRIMARY_MODEL = 'gemini-3.7-flash';
+
 /**
- * Heavy use case model for Image Processing, OCR, PDFs, & Complex Reasoning.
- * Powered by gemini-2.5-flash.
+ * High-accuracy Gemini 3.7 Flash model for Image Processing, OCR, PDFs, & Complex Reasoning.
  */
 function getPaidHighAccuracyModel(tools = null) {
   const model = new ChatGoogleGenerativeAI({
-    model: 'gemini-2.5-flash',
+    model: PRIMARY_MODEL,
     apiKey: GEMINI_API_KEY,
     temperature: 0.1,
     maxRetries: 2,
@@ -32,12 +30,11 @@ function getPaidHighAccuracyModel(tools = null) {
 }
 
 /**
- * Normal use case model for Simple Tasks (Intent routing, greetings, query classification, standard extractions).
- * Powered by gemini-3.1-flash-lite.
+ * Standard Gemini 3.7 Flash model for Intent routing, greetings, query classification, and line item extractions.
  */
 function getLightweightModel(tools = null) {
   const model = new ChatGoogleGenerativeAI({
-    model: 'gemini-3.1-flash-lite',
+    model: PRIMARY_MODEL,
     apiKey: GEMINI_API_KEY,
     temperature: 0.1,
     maxRetries: 2,
@@ -47,34 +44,20 @@ function getLightweightModel(tools = null) {
 }
 
 function getModel(tools = null) {
-  return getLightweightModel(tools);
+  return getPaidHighAccuracyModel(tools);
 }
 
 /**
- * Invoke model with automatic routing:
- * - If isPaidTask === true (heavy tasks: images, OCR, PDFs, complex reasoning), uses gemini-2.5-flash
- * - If isPaidTask === false (normal tasks: intent classification, query routing), uses gemini-3.1-flash-lite
+ * Invoke Gemini 3.7 Flash with automatic retry.
  */
 async function invokeWithFallback(messages, tools = null, isPaidTask = false) {
-  if (isPaidTask) {
-    try {
-      const heavyModel = getPaidHighAccuracyModel(tools);
-      return await heavyModel.invoke(messages);
-    } catch (err) {
-      console.warn(`[ModelRouter] Heavy model (gemini-2.5-flash) invocation error: ${err.message}. Retrying...`);
-      const retryModel = getPaidHighAccuracyModel(tools);
-      return await retryModel.invoke(messages);
-    }
-  }
-
-  // Normal use case (gemini-3.1-flash-lite) with fallback to gemini-2.5-flash
   try {
-    const normalModel = getLightweightModel(tools);
-    return await normalModel.invoke(messages);
+    const model = getPaidHighAccuracyModel(tools);
+    return await model.invoke(messages);
   } catch (err) {
-    console.warn(`[ModelRouter] Normal model (gemini-3.1-flash-lite) warning: ${err.message}. Falling back to gemini-2.5-flash.`);
-    const fallbackModel = getPaidHighAccuracyModel(tools);
-    return await fallbackModel.invoke(messages);
+    console.warn(`[ModelRouter] Primary model (${PRIMARY_MODEL}) error: ${err.message}. Retrying...`);
+    const retryModel = getPaidHighAccuracyModel(tools);
+    return await retryModel.invoke(messages);
   }
 }
 

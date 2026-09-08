@@ -274,8 +274,8 @@ async function extractFromImageOrDoc(buffer, mimeType) {
     const cleanBase64 = buffer.toString('base64');
     const cleanMime = mimeType || 'application/pdf';
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-    // Using gemini-2.5-flash - highest accuracy multimodal model for PO vs Inquiry differentiation
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key=${apiKey}`;
+    // Using gemini-3.7-flash - highest accuracy multimodal model for PO vs Inquiry differentiation
 
     const response = await axios.post(
       url,
