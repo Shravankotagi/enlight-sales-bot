@@ -3590,4 +3590,9 @@ module.exports = {
   detectInvalidUnitInMessage,
   extractDeliveryLocation,
   evaluateMandatoryFields,
+  extractDeterministicRateItems,
+  getProductFamily,
+  extractRuleBasedLineItems,
+  mergeIncompleteLineItems,
+  applyFieldPurityChecks,
 };
