@@ -2186,18 +2186,41 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
 
       const currentStage = (dealToUpdate.stage || 'new_inquiry').toLowerCase().trim();
+      const dealAmount = Number(dealToUpdate.total_amount) || 0;
+      const dealCode = getDealCode(dealToUpdate);
+
+      // Check if deal is in New Inquiry / Unquoted stage
+      const isNewInquiryStage =
+        ['new_inquiry', 'review', 'auto_created', 'pending', 'draft', 'needs_review'].includes(currentStage) ||
+        (dealToUpdate.is_inquiry_source && currentStage === 'new_inquiry') ||
+        (dealAmount === 0 && currentStage === 'new_inquiry');
 
       // Stage Gate 1: If deal is already closed
       if (currentStage === 'won' || currentStage === 'lost') {
         return `This deal is already marked as ${currentStage.toUpperCase()} and cannot be updated further.`;
       }
 
-      // Stage Gate 2: If deal is in New Inquiry stage and trying to mark Won without PO/items
-      if (['new_inquiry', 'review', 'auto_created', 'pending', 'draft', 'needs_review'].includes(currentStage) && dbStage === 'won' && !data.po_number && data.action !== 'purchase_order') {
-        return `This deal is currently in New Inquiry stage. Please quote the deal or provide a Purchase Order (PO) to mark it as Won.`;
+      // Stage Gate 2: On Hold is ONLY allowed from Price Quote (quoted/qualified) stage
+      if (dbStage === 'on_hold') {
+        if (isNewInquiryStage) {
+          return `❌ Cannot put inquiry on hold.\n\nInquiry ${dealCode} for ${dealToUpdate.customer_name} is currently in NEW INQUIRY stage without quoted rates.\n\nPlease enter unit rates first to move it to PRICE QUOTE stage before putting it on hold.`;
+        }
+        if (currentStage !== 'quoted' && currentStage !== 'qualified') {
+          return `❌ Cannot put inquiry on hold.\n\nInquiry ${dealCode} for ${dealToUpdate.customer_name} is currently in ${currentStage.toUpperCase()} stage. An inquiry must be in PRICE QUOTE stage before it can be placed on hold.`;
+        }
       }
 
-      const dealCode = getDealCode(dealToUpdate);
+      // Stage Gate 3: Negotiation is ONLY allowed from Price Quote (quoted/qualified) stage
+      if (dbStage === 'negotiation') {
+        if (isNewInquiryStage) {
+          return `❌ Cannot move inquiry to Negotiation.\n\nInquiry ${dealCode} for ${dealToUpdate.customer_name} is currently in NEW INQUIRY stage without quoted rates.\n\nPlease enter unit rates first to move it to PRICE QUOTE stage before entering Negotiation.`;
+        }
+      }
+
+      // Stage Gate 4: If deal is in New Inquiry stage and trying to mark Won without PO/items
+      if (isNewInquiryStage && dbStage === 'won' && !data.po_number && data.action !== 'purchase_order') {
+        return `❌ Cannot mark inquiry as Won.\n\nInquiry ${dealCode} is currently in NEW INQUIRY stage. Please quote the deal or provide a Purchase Order (PO) to mark it as Won.`;
+      }
 
       if (dealToUpdate.is_inquiry_source) {
         // Insert pipeline deal in deals table linked to this inquiry
