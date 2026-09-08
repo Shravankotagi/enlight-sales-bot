@@ -1147,7 +1147,7 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
   const [dealsRes, inqsRes] = await Promise.all([
     supabase
       .from('deals')
-      .select('id, inquiry_id, deal_number, customer_name, stage, status, total_amount, salesperson_phone, po_number, bigin_deal_id, delivery_location, payment_terms, created_at, deal_items(*)')
+      .select('id, inquiry_id, customer_name, stage, status, total_amount, salesperson_phone, po_number, bigin_deal_id, delivery_location, payment_terms, created_at, deal_items(*)')
       .order('created_at', { ascending: false })
       .limit(500),
     supabase
@@ -1159,11 +1159,9 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
 
   const deals = dealsRes?.data || [];
   if (deals.length > 0) {
-    // Exact prefix match on Deal ID or deal_number (with or without hyphens)
+    // Exact prefix match on Deal ID (with or without hyphens)
     let found = deals.find(
       (d) =>
-        (d.deal_number && d.deal_number.toUpperCase().replace(/^#?(?:DEAL|INQ)[-_:#]*/i, '').startsWith(clean)) ||
-        (d.deal_number && d.deal_number.toUpperCase().includes(clean)) ||
         (d.id || '').toUpperCase().startsWith(clean) ||
         (d.id || '').replace(/-/g, '').toUpperCase().startsWith(clean) ||
         (d.inquiry_id || '').toUpperCase().startsWith(clean) ||
