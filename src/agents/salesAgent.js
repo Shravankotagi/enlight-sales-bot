@@ -118,6 +118,18 @@ CRITICAL FIELD PURITY RULES:
 - delivery_location: ONLY a delivery address or city. Never a product or company name.
 - Each field must contain ONLY what its label says — nothing else.
 
+STRICT NULL RULES — when in doubt, always use null:
+- If customer name is not explicitly stated → customer_name: null
+- If quantity is not explicitly stated with a valid unit → quantity: 0, quantity_mt: 0
+- If dimensions are not explicitly stated → dimensions: null
+- If delivery location is not explicitly stated → delivery_location: null
+- If payment terms are not explicitly stated → payment_terms: null
+- If rate is not explicitly stated → rate_per_mt: null
+- NEVER infer, guess, or derive a value from context or common knowledge
+- NEVER use a value from a previous message to fill a missing field in the current message
+- A missing field is always better than a wrong field
+- If uncertain between two possible values → null
+
 CRITICAL RULES FOR THE 9 CORE STEEL PRODUCT CATEGORIES:
 1. CR COILS:
    - Handle Gauges (e.g. "20 Gauge" -> 0.90mm, "24 Gauge" -> 0.60mm, "16 Gauge" -> 1.60mm).
@@ -463,6 +475,40 @@ function extractProductSegmentDimension(fullText, pName, itemIndex = 0, allItems
   return null;
 }
 
+function extractProductSegmentQuantity(fullText, pName, itemIndex = 0, allItems = []) {
+  if (!fullText || typeof fullText !== 'string' || !pName) return null;
+
+  // 1. Extract from product's isolated segment if multi-item
+  const segment = getProductTextSegment(fullText, pName, itemIndex, allItems);
+  if (segment) {
+    const qtyMatch = segment.match(/(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|kgs|pcs|nos|sheets?|plates?|coils?|bars?|lengths?|bundles?)/i);
+    if (qtyMatch) {
+      const u = qtyMatch[2].toUpperCase();
+      return {
+        qty: parseFloat(qtyMatch[1]),
+        unit: u.startsWith('TON') ? 'MT' : (u.startsWith('K') ? 'KG' : u),
+      };
+    }
+  }
+
+  // 2. Fallback: Check context around product in fullText
+  const lower = fullText.toLowerCase();
+  const pIndex = lower.indexOf(pName.toLowerCase());
+  if (pIndex >= 0) {
+    const sliceSeg = fullText.slice(Math.max(0, pIndex - 30), Math.min(fullText.length, pIndex + pName.length + 45));
+    const qtyMatch = sliceSeg.match(/(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|kgs|pcs|nos|sheets?|plates?|coils?|bars?|lengths?|bundles?)/i);
+    if (qtyMatch) {
+      const u = qtyMatch[2].toUpperCase();
+      return {
+        qty: parseFloat(qtyMatch[1]),
+        unit: u.startsWith('TON') ? 'MT' : (u.startsWith('K') ? 'KG' : u),
+      };
+    }
+  }
+
+  return null;
+}
+
 const COMPANY_INDICATORS_REGEX = /\b(pvt|ltd|limited|industries|industry|infra|infrastructure|enterprises|enterprise|corp|corporation|works|steel|metals|engineering|engineers|associates|traders|trading|buildcon|fab|fabricators|co|company)\b/i;
 const STEEL_PRODUCT_TERMS = /\b(coil|coils|sheet|sheets|plate|plates|bar|bars|pipe|pipes|tube|tubes|angle|angles|beam|beams|channel|channels|tmt|rebar|sariya|crca|hrpo|gp|gi|ms|hr|cr|ismb|ismc|chequered|checkered)\b/i;
 
@@ -674,40 +720,85 @@ function applyFieldPurityChecks(data) {
   return data;
 }
 
-function sanitizeLLMExtraction(extractedData, rawText) {
+function verifyExtractionAgainstCurrentMessage(data, currentMessage, hasActiveSession = false) {
+  if (!data || typeof data !== 'object') return data;
+  const msg = (currentMessage || '').toLowerCase();
+
+  // 1. Check customer name actually appears in current message
+  if (data.customer_name) {
+    const custClean = data.customer_name.toLowerCase().trim();
+    const custWords = custClean.split(/[^a-z0-9]+/i).filter(w => w.length >= 3 && !['pvt', 'ltd', 'limited', 'the', 'and', 'for'].includes(w));
+    const custInMessage = msg.includes(custClean) || (custWords.length > 0 && custWords.some(w => msg.includes(w)));
+    if (!custInMessage && !hasActiveSession) {
+      data.customer_name = null; // Hallucinated from history
+    }
+  }
+
+  // 2. Check delivery location actually appears in current message
+  if (data.delivery_location) {
+    const locClean = data.delivery_location.toLowerCase().trim();
+    const locWords = locClean.split(/[^a-z0-9]+/i).filter(w => w.length >= 3 && !['plot', 'phase', 'near', 'opp', 'road', 'midc', 'gat', 'survey', 'sector'].includes(w));
+    const locInMessage = msg.includes(locClean) || (locWords.length > 0 && locWords.some(w => msg.includes(w)));
+    if (!locInMessage) {
+      data.delivery_location = null; // Hallucinated from history
+    }
+  }
+
+  // 3. Check payment terms actually appear in current message
+  if (data.payment_terms) {
+    const ptClean = data.payment_terms.toLowerCase().trim();
+    const termWords = ptClean.split(/[^a-z0-9]+/i).filter(w => w.length >= 3);
+    const hasTermInMsg = termWords.length > 0 ? termWords.some(w => msg.includes(w)) : msg.includes(ptClean);
+    const hasPaymentKeyword = /\b(?:days?|credit|advance|pdc|against|cash|net|rtgs|cheque|cod|lc|cad|immediate|payment)\b/i.test(msg) ||
+                              /\b(?:on|upon|before|after|against)\s+delivery\b/i.test(msg);
+    if (!hasTermInMsg && !hasPaymentKeyword) {
+      data.payment_terms = null; // Hallucinated from history
+    }
+  }
+
+  return data;
+}
+
+function shouldFallbackToActiveSession(text, data, targetExplicitDeal) {
+  if (targetExplicitDeal) return true;
+  const cleanMsg = (text || '').toLowerCase();
+
+  // 1. Explicit pronoun or reference to active deal/session
+  const hasSessionPronoun = /\b(?:it|that deal|this deal|same customer|update it|same party|same inq|same inquiry|that inq|that inquiry)\b/i.test(cleanMsg);
+  if (hasSessionPronoun) return true;
+
+  // 2. Explicit stage update
+  const isStageUpdate = data?.action === 'stage_update' ||
+    /\b(?:mark|move|update|set|change|put)\b.*?\b(negotiation|won|lost|quoted|quotated|on\s+hold|hold|qualified)\b/i.test(cleanMsg) ||
+    /\b(?:deal|inquiry).*?\b(is\s+on\s+hold|is\s+lost|is\s+won|is\s+negotiation|is\s+quoted|moved\s+to|marked\s+as|put\s+on\s+hold|on\s+hold)\b/i.test(cleanMsg) ||
+    /\b(?:is\s+on\s+hold|put\s+on\s+hold|on\s+hold|hold)\b/i.test(cleanMsg);
+
+  // 3. Explicit field update
+  const isFieldUpdate =
+    /\b(?:update\s+delivery|change\s+delivery|delivery\s+address|update\s+payment|payment\s+terms|hsn\s+code|change\s+unit|update\s+rates?|new\s+rates?)\b/i.test(cleanMsg);
+
+  // Check if message appears to be a new inquiry (contains product name + quantity)
+  const hasProductKeywords = /\b(coil|coils|sheet|sheets|plate|plates|bar|bars|pipe|pipes|tube|tubes|angle|angles|beam|beams|channel|channels|tmt|rebar|sariya|crca|hrpo|gp|gi|ms|hr|cr)\b/i.test(cleanMsg);
+  const hasQuantityMatch = /\b\d+(?:\.\d+)?\s*(?:mt|ton|tons|tonne|kg|kgs|pcs|nos|sheets?|plates?|coils?|bars?|lengths?|bundles?)\b/i.test(cleanMsg);
+  const isNewInquiry = (hasProductKeywords && hasQuantityMatch) || /^(?:new\s+inquiry|inquiry\s+for|inquiry\s+from|need|requires?|create\s+inquiry|add\s+inquiry)\b/i.test(cleanMsg);
+
+  if (isNewInquiry && !hasSessionPronoun && !targetExplicitDeal) {
+    return false;
+  }
+
+  if (isStageUpdate || isFieldUpdate) return true;
+
+  return false;
+}
+
+function sanitizeLLMExtraction(extractedData, rawText, hasActiveSession = false) {
   if (!extractedData || typeof extractedData !== 'object') return extractedData;
   const clean = (rawText || '').toLowerCase();
 
-  // 1. Sanitize customer_name: Must have actual token presence in current message unless choice/code
-  if (extractedData.customer_name) {
-    const custClean = extractedData.customer_name.toLowerCase().trim();
-    const custWords = custClean.split(/[^a-z0-9]+/i).filter(w => w.length >= 3 && !['pvt', 'ltd', 'limited', 'steel', 'metals', 'the', 'and', 'for'].includes(w));
-    const isPresent = custWords.length > 0 ? custWords.some(w => clean.includes(w)) : clean.includes(custClean);
-    if (!isPresent) {
-      extractedData.customer_name = null;
-    }
-  }
+  // 1. Post-extraction contamination check (Issue 9)
+  extractedData = verifyExtractionAgainstCurrentMessage(extractedData, rawText, hasActiveSession);
 
-  // 2. Sanitize delivery_location
-  if (extractedData.delivery_location) {
-    const locClean = extractedData.delivery_location.toLowerCase().trim();
-    const locWords = locClean.split(/[^a-z0-9]+/i).filter(w => w.length >= 3 && !['plot', 'phase', 'near', 'opp', 'road', 'midc'].includes(w));
-    const isPresent = locWords.length > 0 ? locWords.some(w => clean.includes(w)) : clean.includes(locClean);
-    if (!isPresent) {
-      extractedData.delivery_location = null;
-    }
-  }
-
-  // 3. Sanitize payment_terms
-  if (extractedData.payment_terms) {
-    const ptClean = extractedData.payment_terms.toLowerCase().trim();
-    const hasPaymentKeyword = /\b(?:days?|credit|advance|pdc|against|pi|delivery|cash|net|rtgs|cheque|cod)\b/i.test(clean);
-    if (!hasPaymentKeyword && !clean.includes(ptClean)) {
-      extractedData.payment_terms = null;
-    }
-  }
-
-  // 4. Sanitize contact_person
+  // 2. Sanitize contact_person
   if (extractedData.contact_person) {
     const cpClean = extractedData.contact_person.toLowerCase().trim();
     const cpWords = cpClean.split(/[^a-z0-9]+/i).filter(w => w.length >= 3);
@@ -717,7 +808,7 @@ function sanitizeLLMExtraction(extractedData, rawText) {
     }
   }
 
-  // 5. Sanitize line_items for rate-only / generic messages:
+  // 3. Sanitize line_items for rate-only / generic messages:
   if (Array.isArray(extractedData.line_items) && extractedData.line_items.length > 0) {
     const hasAnySteelKeywords = /\b(coil|coils|sheet|sheets|plate|plates|bar|bars|pipe|pipes|tube|tubes|angle|angles|beam|beams|channel|channels|tmt|rebar|sariya|crca|hrpo|gp|gi|ms|hr|cr|steel|metal|iron|ismb|ismc|chequered)\b/i.test(clean);
 
@@ -741,10 +832,10 @@ function sanitizeLLMExtraction(extractedData, rawText) {
     }).filter(i => (i.product_requirement && i.product_requirement.trim().length > 0) || (i.rate_per_mt && i.rate_per_mt > 0));
   }
 
-  // 6. Apply Issue 4 Field Purity Checks
+  // 4. Apply Issue 4 Field Purity Checks
   extractedData = applyFieldPurityChecks(extractedData);
 
-  // 7. Apply Issue 3 Completeness check (recover silently dropped products)
+  // 5. Apply Issue 3 Completeness check (recover silently dropped products)
   extractedData = mergeIncompleteLineItems(extractedData, rawText);
 
   return extractedData;
@@ -2380,16 +2471,14 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       customerName = targetExplicitDeal.customer_name;
     }
 
-    // Check if this is an explicit new inquiry or new requirement
-    const isExplicitNewInquiryIntent =
-      data.action === 'inquiry' ||
-      /^(?:new\s+inquiry|inquiry\s+for|inquiry\s+from|need|requires?|create\s+inquiry|add\s+inquiry)\b/i.test(effectiveTextForLLM || text);
-
-    // If still no customer name in message, check active conversation session ONLY for non-new-inquiry updates
-    if (!customerName && !isExplicitNewInquiryIntent && !targetExplicitDeal) {
-      const activeSessionCustomer = await getActiveSession(senderPhone);
-      if (activeSessionCustomer && !isInvalidCustomerName(activeSessionCustomer)) {
-        customerName = activeSessionCustomer;
+    // If still no customer name in message, check active conversation session ONLY if conditions are met (Issue 10)
+    if (!customerName && !targetExplicitDeal) {
+      const canFallbackToSession = shouldFallbackToActiveSession(effectiveTextForLLM || text, data, targetExplicitDeal);
+      if (canFallbackToSession) {
+        const activeSessionCustomer = await getActiveSession(senderPhone);
+        if (activeSessionCustomer && !isInvalidCustomerName(activeSessionCustomer)) {
+          customerName = activeSessionCustomer;
+        }
       }
     }
 
@@ -2436,34 +2525,47 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         pName = null;
       }
 
-      const qty = Number(item.quantity || item.quantity_mt || item.qty || 0) || 0;
-      const unit = item.unit || 'MT';
+      // Only push items to processedItems where pName is a valid non-null non-generic product name
+      if (!pName) continue;
+
+      let qty = Number(item.quantity || item.quantity_mt || item.qty || 0) || 0;
+      let unit = item.unit || 'MT';
+
+      // Issue 7: Recover zero quantity from surrounding context in message
+      if (qty === 0 && pName) {
+        const recovered = extractProductSegmentQuantity(effectiveTextForLLM || text, pName, rawItems.indexOf(item), rawItems);
+        if (recovered && recovered.qty > 0) {
+          qty = recovered.qty;
+          if (recovered.unit) unit = recovered.unit;
+        }
+      }
+
       const rawRate = item.rate_per_mt !== undefined && item.rate_per_mt !== null && item.rate_per_mt !== '' ? Number(item.rate_per_mt) : (item.rate ? Number(item.rate) : null);
       const rate = rawRate && rawRate > 0 ? rawRate : null;
       const rawDim = item.dimensions || extractProductSegmentDimension(effectiveTextForLLM || text, pName, rawItems.indexOf(item), rawItems);
 
-      if (pName) {
-        if (qty > 0 && rate && rate > 0) {
-          const lineCalc = calculateLineItem({ quantity: qty, rate, unit });
-          calculatedTotal += lineCalc.amount;
-          processedItems.push({
-            pName,
-            dimensions: rawDim,
-            qty,
-            unit,
-            rate: lineCalc.rate || rate,
-            itemAmount: lineCalc.amount,
-          });
-        } else {
-          processedItems.push({
-            pName,
-            dimensions: rawDim,
-            qty,
-            unit,
-            rate: rate || null,
-            itemAmount: null,
-          });
-        }
+      if (qty > 0 && rate && rate > 0) {
+        const lineCalc = calculateLineItem({ quantity: qty, rate, unit });
+        calculatedTotal += lineCalc.amount;
+        processedItems.push({
+          pName,
+          product_requirement: pName,
+          dimensions: rawDim,
+          qty,
+          unit,
+          rate: lineCalc.rate || rate,
+          itemAmount: lineCalc.amount,
+        });
+      } else {
+        processedItems.push({
+          pName,
+          product_requirement: pName,
+          dimensions: rawDim,
+          qty: qty > 0 ? qty : 0,
+          unit,
+          rate: rate || null,
+          itemAmount: null,
+        });
       }
     }
 
@@ -3595,4 +3697,7 @@ module.exports = {
   extractRuleBasedLineItems,
   mergeIncompleteLineItems,
   applyFieldPurityChecks,
+  verifyExtractionAgainstCurrentMessage,
+  shouldFallbackToActiveSession,
+  extractProductSegmentQuantity,
 };

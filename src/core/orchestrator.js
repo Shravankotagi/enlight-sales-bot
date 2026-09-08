@@ -136,6 +136,7 @@ Logged to Sales Pipeline & Inquiries!
   - product_requirement: ONLY a steel product name. Never a city, company name, or deal ID.
   - delivery_location: ONLY a delivery address or city. Never a product or company name.
   - Each field must contain ONLY what its label says — nothing else.
+- **STRICT NULL RULES**: When in doubt, always use null. If customer name, dimensions, delivery location, payment terms, or rate is not explicitly stated in the CURRENT message, set it to null. NEVER infer, guess, or derive a value from context or previous messages. A missing field is always better than a wrong field.
 - **CUSTOMER DISAMBIGUATION**: Do NOT assume or carry forward a previous customer name from conversation history for a new requirement/inquiry (starting with 'Need...', 'Requires...', 'New inquiry...') unless the user explicitly names the customer in their message or is directly replying to a multi-deal choice option!
 - **COMPLAINTS & QUALITY ISSUES**: When a salesperson reports a customer defect, rust, damage, quality complaint, wrong delivery, or complaint resolution, CALL log_complaint. If log_complaint returns an interactive confirmation question or deal list, output that exact prompt directly to the user so the salesperson can confirm or specify the Inquiry ID.`;
 
