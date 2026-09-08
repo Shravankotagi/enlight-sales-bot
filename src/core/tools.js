@@ -1,16 +1,27 @@
 /**
- * tools.js - All LangGraph Tool Definitions
+ * tools.js - All LangGraph Tool Definitions for WhatsApp Bot
  *
- * Each tool wraps an existing agent function or Supabase query.
- * The LLM (orchestrator) uses these tools to perform any action.
- * Tools are the ONLY way the LLM touches the database - no hardcoded routing.
- *
- * Tool factory `createTools(senderPhone)` pre-binds the salesperson's phone
- * so the LLM does not need to guess or pass senderPhone in tool arguments.
+ * Combines:
+ * - 10 Operational Write Tools (salesAgent, visitAgent, complaintAgent, paymentAgent, ocrAgent, retentionAgent, customerAgent)
+ * - 11 Data Retrieval & Intelligence Tools (get_inquiries, get_visits, get_complaints, get_customer_360, get_my_open_deals, get_reorder_queue, get_team_pipeline, get_churn_radar, get_loss_analytics, get_deal_ids, search_knowledge_base)
  */
 
 const { tool } = require('@langchain/core/tools');
 const { z }    = require('zod');
+const {
+  resolveCallerContext,
+  executeGetInquiries,
+  executeGetVisits,
+  executeGetComplaints,
+  executeGetCustomer360,
+  executeGetMyOpenDeals,
+  executeGetReorderQueue,
+  executeGetTeamPipeline,
+  executeGetChurnRadar,
+  executeGetLossAnalytics,
+  executeGetDealIds,
+  executeSearchKnowledgeBase,
+} = require('./retrievalTools');
 
 // ─── Lazy-load agents to avoid circular deps ──────────────────────────────
 
@@ -25,6 +36,8 @@ function getQueryHandler()   { return require('../queryhandler');          }
 function getSupabase()       { return require('../supabase');              }
 
 function createTools(senderPhone, rawUserText = '') {
+  // ─── Operational Write Tools ──────────────────────────────────────────────
+
   const logCustomerVisitTool = tool(
     async ({ text }) => {
       try {
@@ -147,41 +160,36 @@ function createTools(senderPhone, rawUserText = '') {
     }
   );
 
-  const queryMyDataTool = tool(
-    async ({ text }) => {
+  const updateCustomerProfileTool = tool(
+    async ({ customer_name, order_frequency_days, contact_person, phone, gst, address_or_city, assigned_salesperson, text }) => {
       try {
-        return await getQueryHandler().handleQuery(text, senderPhone);
-      } catch (err) {
-        return `Error fetching data: ${err.message}`;
-      }
-    },
-    {
-      name: 'query_my_data',
-      description: `Use this tool when the salesperson is ASKING for information: Customer 360 overview, company profile, SOP / company policy, MOQ (minimum order quantity), quotation validity, payment terms, outstanding payments, deal pipeline, visit history, KRA performance, customer list, metal rates, sales reports, or any question about existing data.`,
-      schema: z.object({
-        text: z.string().describe('The query question from the salesperson'),
-      }),
-    }
-  );
-
-  const getContextTool = tool(
-    async () => {
-      try {
-        const { getFullActiveSession } = getSupabase();
-        const session = await getFullActiveSession(senderPhone);
-        return JSON.stringify({
-          activeCustomer: session?.active_customer_name || null,
-          lastIntent: session?.last_intent || null,
-          sessionUpdatedAt: session?.updated_at || null,
+        const { updateCustomerProfileRecord } = getSupabase();
+        const res = await updateCustomerProfileRecord(senderPhone, customer_name, {
+          order_frequency_days,
+          contact_person,
+          phone,
+          gst,
+          address_or_city,
+          assigned_salesperson,
         });
+        return res.message || JSON.stringify(res);
       } catch (err) {
-        return JSON.stringify({ activeCustomer: null, lastIntent: null });
+        return `Error updating customer: ${err.message}`;
       }
     },
     {
-      name: 'get_conversation_context',
-      description: `Use this FIRST when the message is ambiguous or references "the customer" without naming them. Returns the active customer from the current session.`,
-      schema: z.object({}),
+      name: 'update_customer_profile',
+      description: `Use this tool when updating an existing customer's order frequency (e.g. 45 days, 30 days, 60 days), contact details (phone, owner name, city, GST), active status, or reassigning a customer to a salesperson. Finds the customer across the database and updates their record in place with zero duplicates.`,
+      schema: z.object({
+        customer_name: z.string().optional().nullable().describe('The name of the company or customer to update. If omitted in user message, pass null or the active customer name from context.'),
+        order_frequency_days: z.number().optional().nullable().describe('New order frequency in number of days (e.g. 45, 30, 60)'),
+        contact_person: z.string().optional().nullable().describe('New contact person / owner name'),
+        phone: z.string().optional().nullable().describe('New phone or mobile number'),
+        gst: z.string().optional().nullable().describe('New GST number'),
+        address_or_city: z.string().optional().nullable().describe('New address or city/location'),
+        assigned_salesperson: z.string().optional().nullable().describe('Salesperson name to reassign or associate with this customer (e.g. "Max", "Rahul")'),
+        text: z.string().optional().nullable().describe('The original message text'),
+      }),
     }
   );
 
@@ -223,71 +231,311 @@ function createTools(senderPhone, rawUserText = '') {
     }
   );
 
-  const updateCustomerProfileTool = tool(
-    async ({ customer_name, order_frequency_days, contact_person, phone, gst, address_or_city, assigned_salesperson, text }) => {
+  const getContextTool = tool(
+    async () => {
       try {
-        const { updateCustomerProfileRecord } = getSupabase();
-        const res = await updateCustomerProfileRecord(senderPhone, customer_name, {
-          order_frequency_days,
-          contact_person,
-          phone,
-          gst,
-          address_or_city,
-          assigned_salesperson,
+        const { getFullActiveSession } = getSupabase();
+        const session = await getFullActiveSession(senderPhone);
+        return JSON.stringify({
+          activeCustomer: session?.active_customer_name || null,
+          lastIntent: session?.last_intent || null,
+          sessionUpdatedAt: session?.updated_at || null,
         });
-        return res.message || JSON.stringify(res);
       } catch (err) {
-        return `Error updating customer: ${err.message}`;
+        return JSON.stringify({ activeCustomer: null, lastIntent: null });
       }
     },
     {
-      name: 'update_customer_profile',
-      description: `Use this tool when updating an existing customer's order frequency (e.g. 45 days, 30 days, 60 days), contact details (phone, owner name, city, GST), active status, or reassigning a customer to a salesperson. Finds the customer across the database and updates their record in place with zero duplicates.`,
+      name: 'get_conversation_context',
+      description: `Use this FIRST when the message is ambiguous or references "the customer" without naming them. Returns the active customer from the current session.`,
+      schema: z.object({}),
+    }
+  );
+
+  // ─── 11 Data Retrieval & Intelligence Tools ────────────────────────────────
+
+  const getInquiriesTool = tool(
+    async (args) => {
+      try {
+        const caller = await resolveCallerContext(senderPhone);
+        const res = await executeGetInquiries(args, caller);
+        return JSON.stringify(res.data, null, 2);
+      } catch (err) {
+        return `Error fetching inquiries: ${err.message}`;
+      }
+    },
+    {
+      name: 'get_inquiries',
+      description: `Retrieves customer inquiries, raw WhatsApp messages, and resulting deal status. Supports direct inquiry ID lookups (#INQ-XXXXXX), channel breakdown (WhatsApp vs Dashboard), conversion breakdown, highest tonnage inquiry, salesperson conversion rankings, open inquiries from dormant buyers, month-over-month comparison, and monthly summary.`,
       schema: z.object({
-        customer_name: z.string().optional().nullable().describe('The name of the company or customer to update. If omitted in user message, pass null or the active customer name from context.'),
-        order_frequency_days: z.number().optional().nullable().describe('New order frequency in number of days (e.g. 45, 30, 60)'),
-        contact_person: z.string().optional().nullable().describe('New contact person / owner name'),
-        phone: z.string().optional().nullable().describe('New phone or mobile number'),
-        gst: z.string().optional().nullable().describe('New GST number'),
-        address_or_city: z.string().optional().nullable().describe('New address or city/location'),
-        assigned_salesperson: z.string().optional().nullable().describe('Salesperson name to reassign or associate with this customer (e.g. "Max", "Rahul")'),
-        text: z.string().optional().nullable().describe('The original message text'),
+        inquiry_id: z.string().optional().nullable().describe('Optional specific Inquiry ID or Deal ID (e.g. "#INQ-2C788F", "INQ-2C788F", or UUID) to fetch status and details for that exact inquiry.'),
+        status_filter: z.string().optional().nullable().describe('Optional filter by inquiry status or deal outcome: "all", "won" / "orders", "lost", "review", "pending", "quoted", "negotiation".'),
+        source_channel: z.string().optional().nullable().describe('Optional filter by incoming channel: "all", "whatsapp", "dashboard", "whatsapp_text", "web_dashboard".'),
+        source_type: z.string().optional().nullable().describe('Optional filter by inquiry format: "all", "ocr_document" (documents/PDFs/images), "text".'),
+        date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "this_week", "this_month", "all".'),
+        customer_name_search: z.string().optional().nullable().describe('Optional search term for customer or company name.'),
+        mode: z.string().optional().nullable().describe('Query mode: "list", "conversion_breakdown", "rep_conversion", "open_inquiries_dormant_buyers", "month_comparison", "monthly_summary", "at_risk_inquiries", "highest_tonnage", "channel_breakdown".'),
+        limit: z.number().optional().nullable().describe('Maximum number of inquiries to return (default: 20).'),
+      }),
+    }
+  );
+
+  const getVisitsTool = tool(
+    async (args) => {
+      try {
+        const caller = await resolveCallerContext(senderPhone);
+        const res = await executeGetVisits(args, caller);
+        return JSON.stringify(res.data, null, 2);
+      } catch (err) {
+        return `Error fetching visits: ${err.message}`;
+      }
+    },
+    {
+      name: 'get_visits',
+      description: `Retrieves customer site and field visit logs, visit outcomes (positive, neutral, negative), location filtering (e.g. "Mumbai", "Pune", "Nashik"), salesperson visit leaderboard, week-over-week visit comparison, duplicate visits, and visits missing location or contact person.`,
+      schema: z.object({
+        customer_name_search: z.string().optional().nullable().describe('Optional search term for customer name.'),
+        salesperson_name: z.string().optional().nullable().describe('Optional filter by salesperson name (e.g. "Max", "Rishabh Makwana").'),
+        location: z.string().optional().nullable().describe('Optional filter by visit city or destination (e.g. "Nashik", "Pune", "Mumbai").'),
+        outcome_filter: z.string().optional().nullable().describe('Optional filter by visit outcome: "positive", "neutral", "negative", "all".'),
+        date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "this_week", "last_week", "this_month", "all".'),
+        mode: z.string().optional().nullable().describe('Query mode: "list", "rep_leaderboard", "week_comparison", "duplicates", "missing_location", "missing_contact_person".'),
+        limit: z.number().optional().nullable().describe('Maximum number of visits to return (default: 20).'),
+      }),
+    }
+  );
+
+  const getComplaintsTool = tool(
+    async (args) => {
+      try {
+        const caller = await resolveCallerContext(senderPhone);
+        const res = await executeGetComplaints(args, caller);
+        return JSON.stringify(res.data, null, 2);
+      } catch (err) {
+        return `Error fetching complaints: ${err.message}`;
+      }
+    },
+    {
+      name: 'get_complaints',
+      description: `Retrieves customer quality and delivery complaints, 48-hour SLA performance, open vs resolved tracking, sales rep complaints leaderboard / comparison, product category breakdown (Coil vs Plate vs Structural Steel), and negative visit correlation patterns.`,
+      schema: z.object({
+        customer_name: z.string().optional().nullable().describe('Optional filter by customer or company name.'),
+        salesperson_name: z.string().optional().nullable().describe('Optional filter by salesperson name.'),
+        status_filter: z.string().optional().nullable().describe('Optional filter: "open", "resolved", "all".'),
+        date_range: z.string().optional().nullable().describe('Optional date filter: "today", "this_week", "this_month", "all".'),
+        mode: z.string().optional().nullable().describe('Query mode: "list", "rep_complaints", "product_category_breakdown", "visit_correlation".'),
+        limit: z.number().optional().nullable().describe('Maximum number of complaints to return (default: 20).'),
+      }),
+    }
+  );
+
+  const getCustomer360Tool = tool(
+    async (args) => {
+      try {
+        const caller = await resolveCallerContext(senderPhone);
+        const res = await executeGetCustomer360(args, caller);
+        return JSON.stringify(res.data, null, 2);
+      } catch (err) {
+        return `Error fetching customer profile: ${err.message}`;
+      }
+    },
+    {
+      name: 'get_customer_360',
+      description: `Retrieves comprehensive Customer 360 overview for a specific customer (profile, pipeline deals, payments, site visits, complaints, segment, health status), OR customer count, directory, and segmentation breakdown (New, Key Account, Growth) when customer_name is omitted.`,
+      schema: z.object({
+        customer_name: z.string().optional().nullable().describe('Optional name of customer or company (e.g. "Supreme Steel"). Omit to retrieve directory and segmentation stats.'),
+        segment_filter: z.string().optional().nullable().describe('Optional segment filter: "all", "key_account", "growth", "new".'),
+        limit: z.number().optional().nullable().describe('Maximum number of customer records (default: 50).'),
+      }),
+    }
+  );
+
+  const getMyOpenDealsTool = tool(
+    async (args) => {
+      try {
+        const caller = await resolveCallerContext(senderPhone);
+        const res = await executeGetMyOpenDeals(args, caller);
+        return JSON.stringify(res.data, null, 2);
+      } catch (err) {
+        return `Error fetching deals: ${err.message}`;
+      }
+    },
+    {
+      name: 'get_my_open_deals',
+      description: `Retrieves deals and confirmed orders (negotiations, quotations, won orders, or lost deals). Can filter by stage (e.g. stage_filter="won" for orders), customer name, date range, PO number, or delivery location. Always returns total order value, won deal total value, volume in MT, and #INQ-XXXXXX IDs.`,
+      schema: z.object({
+        stage_filter: z.string().optional().nullable().describe('Optional filter by deal stage: "all", "won" (orders), "quoted", "negotiation", "review", "lost".'),
+        customer_name: z.string().optional().nullable().describe('Optional customer name filter.'),
+        po_number: z.string().optional().nullable().describe('Optional PO number filter.'),
+        delivery_location: z.string().optional().nullable().describe('Optional delivery destination city.'),
+        date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "this_week", "this_month", "all".'),
+        limit: z.number().optional().nullable().describe('Maximum number of deals to return (default: 20).'),
+      }),
+    }
+  );
+
+  const getReorderQueueTool = tool(
+    async (args) => {
+      try {
+        const caller = await resolveCallerContext(senderPhone);
+        const res = await executeGetReorderQueue(args, caller);
+        return JSON.stringify(res.data, null, 2);
+      } catch (err) {
+        return `Error fetching reorder queue: ${err.message}`;
+      }
+    },
+    {
+      name: 'get_reorder_queue',
+      description: `Retrieves recurring customer reorder predictions, list of customers due for repeat orders, and average reorder cycle (cadence) analytics across all tracked customer accounts.`,
+      schema: z.object({
+        mode: z.string().optional().nullable().describe('Query mode: "list", "average_cycle" (calculates average reorder cycle and cadence distribution across all tracked accounts).'),
+        max_results: z.number().optional().nullable().describe('Maximum number of records to return (default: 20).'),
+      }),
+    }
+  );
+
+  const getTeamPipelineTool = tool(
+    async (args) => {
+      try {
+        const caller = await resolveCallerContext(senderPhone);
+        const res = await executeGetTeamPipeline(args, caller);
+        return JSON.stringify(res.data, null, 2);
+      } catch (err) {
+        return `Error fetching team pipeline: ${err.message}`;
+      }
+    },
+    {
+      name: 'get_team_pipeline',
+      description: `Retrieves team-wide sales pipeline summary and sales rep conversion rankings (which rep converts the most inquiries into orders).`,
+      schema: z.object({
+        stage_filter: z.string().optional().nullable().describe('Optional deal stage filter.'),
+        mode: z.string().optional().nullable().describe('Query mode: "pipeline_summary", "rep_conversion".'),
+      }),
+    }
+  );
+
+  const getChurnRadarTool = tool(
+    async (args) => {
+      try {
+        const caller = await resolveCallerContext(senderPhone);
+        const res = await executeGetChurnRadar(args, caller);
+        return JSON.stringify(res.data, null, 2);
+      } catch (err) {
+        return `Error fetching churn radar: ${err.message}`;
+      }
+    },
+    {
+      name: 'get_churn_radar',
+      description: `Identifies customer accounts at risk of churn based on order frequency, days since last order, and purchasing inactivity.`,
+      schema: z.object({
+        risk_level: z.string().optional().nullable().describe('Optional risk level: "high", "medium", "low".'),
+      }),
+    }
+  );
+
+  const getLossAnalyticsTool = tool(
+    async (args) => {
+      try {
+        const caller = await resolveCallerContext(senderPhone);
+        const res = await executeGetLossAnalytics(args, caller);
+        return JSON.stringify(res.data, null, 2);
+      } catch (err) {
+        return `Error fetching loss analytics: ${err.message}`;
+      }
+    },
+    {
+      name: 'get_loss_analytics',
+      description: `Analyzes lost deals, common loss reasons, total lost revenue, and lost deal trends.`,
+      schema: z.object({
+        timeframe_days: z.number().optional().nullable().describe('Optional timeframe in days (e.g. 30, 90).'),
       }),
     }
   );
 
   const getDealIdsTool = tool(
-    async ({ company_name, text }) => {
+    async ({ company_name, customer_name }) => {
       try {
-        return await getQueryHandler().getDealIdsForCompany(senderPhone, text || rawUserText || '', company_name || null);
+        const target = company_name || customer_name || '';
+        const caller = await resolveCallerContext(senderPhone);
+        const res = await executeGetDealIds({ company_name: target }, caller);
+        return JSON.stringify(res.data, null, 2);
       } catch (err) {
         return `Error fetching deal IDs: ${err.message}`;
       }
     },
     {
       name: 'get_deal_ids',
-      description: `Use this tool when the salesperson asks for the Inquiry ID(s) or inquiry code(s) for a company (e.g. "What is the inquiry ID for Radhe Ispat?", "Inquiry ID for Apex Steel", "Give me inquiry ID", "Inquiry ID", "Deal ID"). If company name is not provided in message, pass company_name as null so the system uses the active customer session or asks for the company name.`,
+      description: `Use this tool when the salesperson asks for the Inquiry ID(s) or inquiry code(s) for a company (e.g. "What is the inquiry ID for Radhe Ispat?", "Inquiry ID for Apex Steel", "Give me inquiry ID", "Inquiry ID", "Deal ID").`,
       schema: z.object({
-        company_name: z.string().nullable().optional().describe('The customer/company name if mentioned, else null'),
-        text: z.string().optional().describe('The user query text'),
+        company_name: z.string().optional().nullable().describe('The customer/company name if mentioned, else null'),
+        customer_name: z.string().optional().nullable().describe('Customer name alias'),
+      }),
+    }
+  );
+
+  const searchKnowledgeBaseTool = tool(
+    async ({ query }) => {
+      try {
+        const caller = await resolveCallerContext(senderPhone);
+        const res = await executeSearchKnowledgeBase({ query }, caller);
+        return JSON.stringify(res.data, null, 2);
+      } catch (err) {
+        return `Error searching knowledge base: ${err.message}`;
+      }
+    },
+    {
+      name: 'search_knowledge_base',
+      description: `Searches company Knowledge Base documents (SOPs, product specifications, steel grade tables, discount policies, MOQ, and quotation validity).`,
+      schema: z.object({
+        query: z.string().describe('The search query or policy question to look up in the Knowledge Base.'),
+      }),
+    }
+  );
+
+  const queryMyDataTool = tool(
+    async ({ text }) => {
+      try {
+        return await getQueryHandler().handleQuery(text, senderPhone);
+      } catch (err) {
+        return `Error fetching data: ${err.message}`;
+      }
+    },
+    {
+      name: 'query_my_data',
+      description: `Use this tool when the salesperson is ASKING for information about deals, customers, visits, complaints, payments, KRA metrics, or general data.`,
+      schema: z.object({
+        text: z.string().describe('The query question from the salesperson'),
       }),
     }
   );
 
   return [
-    getDealIdsTool,
-    logCustomerVisitTool,
+    // Operational Write Tools
     updateDealStageTool,
+    logCustomerVisitTool,
     sendQuotationTool,
     logPaymentTool,
     logComplaintTool,
     logRetentionFollowupTool,
     onboardNewCustomerTool,
     updateCustomerProfileTool,
-    queryMyDataTool,
-    getContextTool,
     processSalesImageTool,
     processPaymentImageTool,
+
+    // Data Retrieval & Intelligence Tools
+    getInquiriesTool,
+    getVisitsTool,
+    getComplaintsTool,
+    getCustomer360Tool,
+    getMyOpenDealsTool,
+    getReorderQueueTool,
+    getTeamPipelineTool,
+    getChurnRadarTool,
+    getLossAnalyticsTool,
+    getDealIdsTool,
+    searchKnowledgeBaseTool,
+    queryMyDataTool,
+    getContextTool,
   ];
 }
 
