@@ -249,7 +249,175 @@ function detectHsnCode(productName, dimensions) {
   return '';
 }
 
+// Map short forms & full forms to official master product name and resolve HSN
+function normalizeProductToCatalog(productName, dimensions = null) {
+  if (!productName || typeof productName !== 'string') {
+    return { isValid: false, catalogName: null, category: null, hsnCode: null };
+  }
+
+  const p = productName.toLowerCase().trim();
+  const d = (dimensions || '').toLowerCase().trim();
+  const combined = `${p} ${d}`.trim();
+  const t = extractThickness(dimensions) || extractThickness(productName);
+  const h = extractHeight(dimensions) || extractHeight(productName);
+
+  // 1. Value Added Products
+  if (/\b(?:gi\s*)?earthing\s*strip\b|\bearthing\s*patti\b|\bearthing\s*strip\b/i.test(combined) || /\bearthing\b/i.test(p)) {
+    return { isValid: true, catalogName: 'GI Earthing Strip', category: 'Value Added Products', hsnCode: '73082019' };
+  }
+  if (/\bcable\s*tray\s*(?:–|-)?\s*ladder\b|\bladder\s*(?:cable\s*)?tray\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'Cable Tray – Ladder', category: 'Value Added Products', hsnCode: '73089090' };
+  }
+  if (/\bcable\s*tray\s*(?:–|-)?\s*perforated\b|\bperforated\s*(?:cable\s*)?tray\b|\bcable\s*tray\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'Cable Tray – Perforated', category: 'Value Added Products', hsnCode: '73089090' };
+  }
+  if (/\bsolar\s*(?:mounting)?\s*structure\b|\bsolar\b|\bz\s*purlin\b|\bhat\s*section\b|\bc\s*purlin\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'Solar Mounting Structure', category: 'Value Added Products', hsnCode: '73089090' };
+  }
+  if (/\bslotted\s*angle\b|\bslotted\s*rack\b|\bslotted\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'Slotted Angle', category: 'Value Added Products', hsnCode: '72169930' };
+  }
+
+  // 2. Pipes and Tubes (Round, Square, Rectangular)
+  if (/\brectangular\s*(?:pipe|tube|tubing)\b|\brhs\b/i.test(combined) || (/\brectangular\b/i.test(p) && /\b(?:pipe|tube)\b/i.test(combined))) {
+    return { isValid: true, catalogName: 'MS Rectangular Tube', category: 'Pipes and Tubes', hsnCode: '73063090' };
+  }
+  if (/\bsquare\s*(?:pipe|tube|tubing)\b|\bshs\b|\bbox\s*(?:pipe|tube|section)\b/i.test(combined) || (/\bsquare\b/i.test(p) && /\b(?:pipe|tube)\b/i.test(combined))) {
+    return { isValid: true, catalogName: 'MS Square Pipe', category: 'Pipes and Tubes', hsnCode: '73063090' };
+  }
+  if (/\b(?:round\s*pipe|erw\s*pipe|seamless\s*pipe|ms\s*pipe|gi\s*pipe|round\s*tube|ms\s*tube|pipe|tube)\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'MS Round Pipe', category: 'Pipes and Tubes', hsnCode: '73063090' };
+  }
+
+  // 3. Structural Steel (Round Bar, Flat Bar, Square Bar, TMT Bar, Angle, Channel, Beam)
+  if (/\btmt\b|\brebar\b|\breinforcement\b|\bfe\s*500\b|\bfe\s*550\b|\bfe\s*500d\b|\bfe\s*550d\b|\bsariya\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'TMT Bar', category: 'Structural Steel', hsnCode: '72142090' };
+  }
+  if (/\bround\s*bar\b|\bbright\s*bar\b|\bround\s*rod\b|\bms\s*round\b|\bms\s*rod\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'MS Round Bar', category: 'Structural Steel', hsnCode: '72149990' };
+  }
+  if (/\bflat\s*bar\b|\bms\s*flat\b|\bflats\b|\bpatti\b|\bms\s*patti\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'MS Flat Bar', category: 'Structural Steel', hsnCode: '72111410' };
+  }
+  if (/\bsquare\s*bar\b|\bsq\s*bar\b|\bms\s*sq\s*bar\b|\bsquare\s*rod\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'MS Square Bar', category: 'Structural Steel', hsnCode: '72149990' };
+  }
+  if (/\bangle\b|\bisa\b|\bl-angle\b|\bequal\s*angle\b|\bpatra\s*angle\b/i.test(combined)) {
+    const code = h !== null && h >= 80 ? '72162200' : '72162100';
+    return { isValid: true, catalogName: 'MS Angle', category: 'Structural Steel', hsnCode: code };
+  }
+  if (/\bchannel\b|\bismc\b|\bisjc\b|\bispc\b|\bc-channel\b|\bu-channel\b|\bgate\s*channel\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'MS Channel', category: 'Structural Steel', hsnCode: '72163100' };
+  }
+  if (/\bbeam\b|\bismb\b|\bisnb\b|\bjoist\b|\bi-beam\b|\bh-beam\b|\bnpb\b|\bwfb\b|\buc\s*column\b|\bub\s*beam\b|\bgirder\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'MS Beam', category: 'Structural Steel', hsnCode: '72163200' };
+  }
+
+  // 4. Flat Steel (HR, CR, GP, Galvalume, Chequered)
+  // Chequered
+  if (/\bchequered\s*coil\b|\bcheckered\s*coil\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'Chequered Coil', category: 'Flat Steel', hsnCode: '72081000' };
+  }
+  if (/\bchequered\b|\bcheckered\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'Chequered Sheet', category: 'Flat Steel', hsnCode: '72081000' };
+  }
+
+  // Galvalume
+  if (/\bgalvalume\s*coil\b|\bgl\s*coil\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'Galvalume Coil', category: 'Flat Steel', hsnCode: '72106100' };
+  }
+  if (/\bgalvalume\b|\bgl\s*sheet\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'Galvalume Sheet', category: 'Flat Steel', hsnCode: '72106100' };
+  }
+
+  // Galvanized Plain (GP / GI)
+  if (/\bgp\s*coil\b|\bgalvanized\s*plain\s*coil\b|\bgi\s*coil\b|\bgalvanized\s*coil\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'GP Coil', category: 'Flat Steel', hsnCode: '72104900' };
+  }
+  if (/\bgp\s*sheet\b|\bgalvanized\s*plain\s*sheet\b|\bgi\s*sheet\b|\bgalvanized\s*sheet\b|\bgp\b|\bgi\s*patra\b|\bgp\s*patra\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'GP Sheet', category: 'Flat Steel', hsnCode: '72104900' };
+  }
+
+  // HRPO
+  if (/\bhrpo\s*coil\b|\bpickled\s*(?:&|and)\s*oiled\s*coil\b/i.test(combined)) {
+    let code = '72082590';
+    if (t !== null && t < 3.00) code = '72083940';
+    else if (t !== null && t < 4.75) code = '72083840';
+    return { isValid: true, catalogName: 'HRPO Coil', category: 'Flat Steel', hsnCode: code };
+  }
+  if (/\bhrpo\s*sheet\b|\bpickled\s*(?:&|and)\s*oiled\s*sheet\b|\bhrpo\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'HRPO Sheet', category: 'Flat Steel', hsnCode: '72082590' };
+  }
+
+  // CR (Cold Rolled)
+  if (/\bcr\s*coil\b|\bcold\s*rolled\s*coil\b|\bcrca\s*coil\b|\bcr\s*slit\b/i.test(combined) || (/\bcr\b|\bcold\s*rolled\b|\bcrca\b/i.test(p) && /\bcoil\b/i.test(combined))) {
+    let code = '72091790';
+    if (t !== null && t < 0.50) code = '72091890';
+    else if (t !== null && t <= 1.00) code = '72091790';
+    else if (t !== null && t > 1.00) code = '72091690';
+    return { isValid: true, catalogName: 'CR Coil', category: 'Flat Steel', hsnCode: code };
+  }
+  if (/\bcr\s*sheet\b|\bcold\s*rolled\s*sheet\b|\bcrca\s*sheet\b|\bcr\b|\bcrca\b|\bcold\s*rolled\b/i.test(combined)) {
+    let code = '72092720';
+    if (t !== null && t < 0.50) code = '72092820';
+    else if (t !== null && t <= 1.00) code = '72092720';
+    else if (t !== null && t > 1.00) code = '72092620';
+    return { isValid: true, catalogName: 'CR Sheet', category: 'Flat Steel', hsnCode: code };
+  }
+
+  // HR Plate (14mm+)
+  if (/\bhr\s*plate\b|\bhot\s*rolled\s*plate\b|\bms\s*plate\b|\bplate\b/i.test(combined)) {
+    if (t !== null && t < 12.00) {
+      return { isValid: true, catalogName: 'HR Sheet', category: 'Flat Steel', hsnCode: '72083730' };
+    }
+    return { isValid: true, catalogName: 'HR Plate', category: 'Flat Steel', hsnCode: '72085110' };
+  }
+
+  // HR Sheet
+  if (/\bhr\s*sheet\b|\bhot\s*rolled\s*sheet\b|\bms\s*sheet\b/i.test(combined)) {
+    let code = '72083830';
+    if (t !== null && t < 3.00) code = '72083930';
+    else if (t !== null && t < 4.75) code = '72083830';
+    else if (t !== null && t <= 12.00) code = '72083730';
+    return { isValid: true, catalogName: 'HR Sheet', category: 'Flat Steel', hsnCode: code };
+  }
+
+  // HR Coil
+  if (/\bhr\s*coil\b|\bhot\s*rolled\s*coil\b|\bhr\b|\bhot\s*rolled\b/i.test(combined)) {
+    let code = '72083840';
+    if (t !== null && t < 3.00) code = '72083940';
+    else if (t !== null && t < 4.75) code = '72083840';
+    else if (t !== null) code = '72083740';
+    return { isValid: true, catalogName: 'HR Coil', category: 'Flat Steel', hsnCode: code };
+  }
+
+  // Stainless Steel
+  if (/\bstainless\b|\bss\s*(?:sheet|coil|plate|pipe|bar|304|316)\b/i.test(combined)) {
+    return { isValid: true, catalogName: 'Stainless Steel', category: 'Specialty Steel', hsnCode: '72193390' };
+  }
+
+  // Generic / Unrecognized
+  return { isValid: false, catalogName: null, category: null, hsnCode: null };
+}
+
+function isValidCatalogProduct(productName) {
+  return normalizeProductToCatalog(productName).isValid;
+}
+
+function getUnknownProductClarificationMessage(invalidProductName) {
+  return `⚠️ *Unrecognized Product: "${invalidProductName}"*\n\n` +
+    `Please verify the product name. We supply standard steel products across these categories:\n\n` +
+    `📋 *Flat Steel:* HR Coil, HR Sheet, HR Plate, HRPO Coil, HRPO Sheet, CR Coil, CR Sheet, GP Coil, GP Sheet, Galvalume Coil/Sheet, Chequered Coil/Sheet\n` +
+    `🏗️ *Structural Steel:* MS Round Bar, MS Flat Bar, MS Square Bar, TMT Bar, MS Angle, MS Channel, MS Beam\n` +
+    `🔘 *Pipes & Tubes:* MS Round Pipe, MS Square Pipe, MS Rectangular Tube\n` +
+    `⚡ *Value Added:* Slotted Angle, Solar Mounting Structure, Cable Tray (Perforated/Ladder), GI Earthing Strip\n\n` +
+    `Please reply with the matching product name.`;
+}
+
 module.exports = {
   detectHsnCode,
+  normalizeProductToCatalog,
+  isValidCatalogProduct,
+  getUnknownProductClarificationMessage,
   MASTER_PRODUCTS_CATALOG,
 };

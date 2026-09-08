@@ -22,7 +22,7 @@ const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
 const { supabase, verifyAndGetCustomerName, saveActiveSession, getActiveSession } = require('../supabase');
 const { syncActivity } = require('./biginSyncAgent');
 const { logBotActivity } = require('../utils/activityLogger');
-const { detectHsnCode } = require('../utils/hsnDetector');
+const { detectHsnCode, normalizeProductToCatalog, isValidCatalogProduct, getUnknownProductClarificationMessage, MASTER_PRODUCTS_CATALOG } = require('../utils/hsnDetector');
 
 function extractDealIdFromText(text) {
   if (!text || typeof text !== 'string') return null;
@@ -98,12 +98,6 @@ If a field is not explicitly stated in the current message — set it to null.
 History is for identity resolution only — NOT for data extraction.
 
 CRITICAL DIMENSION RULE:
-For multi-product messages, assign dimensions ONLY to the product they appear immediately adjacent to in the text.
-NEVER assign a dimension value to a product it was not mentioned with.
-Example: "20 MT CR Coil 1.2mm and 15 MT HR Coil 3.15mm"
--> CR Coil dimensions: 1.2mm ONLY
--> HR Coil dimensions: 3.15mm ONLY
-NEVER: CR Coil dimensions: 3.15mm
 If a product does not have dimensions specified in its own segment, set dimensions to null.
 
 CRITICAL COMPLETENESS RULE:
@@ -189,15 +183,41 @@ Return ONLY the JSON object.
 `;
 
 const PRODUCT_FAMILIES = {
-  cr_coil: ['cr coil', 'cold rolled coil', 'cr slit coil', 'crca coil', 'cr strip', 'cr2', 'cr1', 'edd cr', 'cr sheet'],
-  hr_coil: ['hr coil', 'hot rolled coil', 'hrpo', 'hrpo coil', 'pickled and oiled', 'pickled & oiled', 'hr strip', 'e350 hr', 'sailma', 'hr sheet'],
+  // Flat Steel
+  hr_coil: ['hr coil', 'hot rolled coil', 'hr strip', 'e350 hr', 'sailma', 'hot rolled slit', 'hr slit coil'],
+  hr_sheet: ['hr sheet', 'hot rolled sheet', 'ms sheet'],
+  hr_plate: ['hr plate', 'hot rolled plate', 'ms plate', 'ms plates', 'boiler plate', 'bq plate', 'hardox', 'e350 plate', 'plate'],
+  hrpo_coil: ['hrpo coil', 'pickled and oiled coil', 'pickled & oiled coil', 'hrpo slit'],
+  hrpo_sheet: ['hrpo sheet', 'pickled and oiled sheet', 'pickled & oiled sheet', 'hrpo'],
+  cr_coil: ['cr coil', 'cold rolled coil', 'cr slit coil', 'crca coil', 'cr strip', 'cr2', 'cr1', 'edd cr'],
+  cr_sheet: ['cr sheet', 'cold rolled sheet', 'crca sheet', 'cr patra'],
+  gp_coil: ['gp coil', 'galvanized plain coil', 'gi coil', 'galvanized coil'],
+  gp_sheet: ['gp sheet', 'galvanized plain sheet', 'gi sheet', 'galvanized sheet', 'gp patra', 'gi patra'],
+  galvalume_coil: ['galvalume coil', 'gl coil'],
+  galvalume_sheet: ['galvalume sheet', 'gl sheet', 'galvalume corrugation', 'corrugated sheet', 'galvalume'],
+  chequered_coil: ['chequered coil', 'checkered coil', 'tear drop coil'],
+  chequered_sheet: ['chequered sheet', 'checkered sheet', 'chequered plate', 'checkered plate', 'tear drop sheet'],
+  
+  // Structural Steel
   ms_round_bar: ['round bar', 'ms round bar', 'bright bar', 'round rod', 'en8', 'en19', 'c45', 'ms rod', 'bright round'],
-  ms_square_pipe: ['square pipe', 'box pipe', 'shs', 'square tube', 'rectangular pipe', 'rhs', 'gp square pipe', 'hollow section', 'box tube'],
-  ms_angle: ['angle', 'ms angle', 'equal angle', 'unequal angle', 'l-angle', 'isa', 'patra angle'],
-  ms_beam: ['beam', 'ms beam', 'ismb', 'joist', 'i-beam', 'h-beam', 'girder', 'npb', 'wpb', 'uc', 'ub', 'column'],
-  ms_channel: ['channel', 'ms channel', 'ismc', 'c-channel', 'u-channel', 'gate channel', 'shutter channel'],
-  ms_plate: ['ms plate', 'ms plates', 'ms sheet', 'chequered plate', 'checkered plate', 'boiler plate', 'bq plate', 'hardox', 'e350 plate'],
+  ms_flat_bar: ['ms flat bar', 'flat bar', 'ms flat', 'flats', 'patti', 'ms patti'],
+  ms_square_bar: ['ms square bar', 'square bar', 'sq bar', 'ms sq bar', 'square rod'],
   tmt_bar: ['tmt bar', 'tmt bars', 'tmt rebar', 'rebars', 'tmt', 'fe 500', 'fe 500d', 'fe 550', 'fe 550d', 'fe 600', 'sariya'],
+  ms_angle: ['angle', 'ms angle', 'equal angle', 'unequal angle', 'l-angle', 'isa', 'patra angle'],
+  ms_channel: ['channel', 'ms channel', 'ismc', 'c-channel', 'u-channel', 'gate channel', 'shutter channel'],
+  ms_beam: ['beam', 'ms beam', 'ismb', 'joist', 'i-beam', 'h-beam', 'girder', 'npb', 'wpb', 'uc', 'ub', 'column'],
+
+  // Pipes and Tubes
+  ms_round_pipe: ['ms round pipe', 'round pipe', 'erw pipe', 'seamless pipe', 'ms pipe', 'gi pipe', 'round tube', 'pipe', 'tube'],
+  ms_square_pipe: ['ms square pipe', 'square pipe', 'box pipe', 'shs', 'square tube', 'gp square pipe'],
+  ms_rectangular_tube: ['ms rectangular tube', 'rectangular pipe', 'rectangular tube', 'rhs', 'box tube'],
+
+  // Value Added Products
+  slotted_angle: ['slotted angle', 'slotted', 'slotted rack'],
+  solar_mounting_structure: ['solar mounting structure', 'solar mounting', 'solar structure', 'z purlin', 'c purlin', 'hat section'],
+  cable_tray_perforated: ['cable tray – perforated', 'cable tray perforated', 'perforated cable tray', 'cable tray'],
+  cable_tray_ladder: ['cable tray – ladder', 'cable tray ladder', 'ladder cable tray'],
+  gi_earthing_strip: ['gi earthing strip', 'earthing strip', 'galvanized strip', 'earthing patti', 'earthing'],
 };
 
 function getProductFamily(name) {
@@ -3398,15 +3418,18 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       quantityTons: totalQty || processedItems[0]?.qty || 0,
       unitPrice: processedItems[0]?.rate > 0 ? processedItems[0]?.rate : null,
       total_amount: dealAmount > 0 ? dealAmount : (pricingSummary.subtotal > 0 ? pricingSummary.subtotal : null),
-      line_items: processedItems.map((pi) => ({
-        sku_text: pi.pName,
-        dimensions: pi.dimensions || '',
-        hsn_code: detectHsnCode(pi.pName, pi.dimensions),
-        quantity: pi.qty,
-        unit: pi.unit || 'MT',
-        rate: pi.rate > 0 ? pi.rate : null,
-        amount: pi.itemAmount > 0 ? pi.itemAmount : null,
-      })),
+      line_items: processedItems.map((pi) => {
+        const norm = normalizeProductToCatalog(pi.pName, pi.dimensions);
+        return {
+          sku_text: norm.isValid ? norm.catalogName : pi.pName,
+          dimensions: pi.dimensions || '',
+          hsn_code: pi.hsn_code || (norm.isValid ? norm.hsnCode : detectHsnCode(pi.pName, pi.dimensions)),
+          quantity: pi.qty,
+          unit: pi.unit || 'MT',
+          rate: pi.rate > 0 ? pi.rate : null,
+          amount: pi.itemAmount > 0 ? pi.itemAmount : null,
+        };
+      }),
       preferred_make: data.preferred_make || null,
       overall_confidence: data.confidence || 0.95,
     };
@@ -3514,9 +3537,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         }
       } else if (processedItems.length > 0) {
         for (const pItem of processedItems) {
+          const norm = normalizeProductToCatalog(pItem.pName, pItem.dimensions);
+          const skuText = norm.isValid ? norm.catalogName : pItem.pName;
           const { data: insItem } = await supabase.from('deal_items').insert({
             deal_id: dealId,
-            sku_text: pItem.pName,
+            sku_text: skuText,
             dimensions: pItem.dimensions || (pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null),
             quantity: pItem.qty > 0 ? pItem.qty : null,
             unit: pItem.unit || 'MT',
@@ -3572,9 +3597,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         dealId = newDeal.id;
         activeDealObj = newDeal;
         for (const pItem of processedItems) {
+          const norm = normalizeProductToCatalog(pItem.pName, pItem.dimensions);
+          const skuText = norm.isValid ? norm.catalogName : pItem.pName;
           const { data: insItem } = await supabase.from('deal_items').insert({
             deal_id: dealId,
-            sku_text: pItem.pName,
+            sku_text: skuText,
             dimensions: pItem.dimensions || (pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pItem.pName?.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null),
             quantity: pItem.qty > 0 ? pItem.qty : null,
             unit: pItem.unit || 'MT',
