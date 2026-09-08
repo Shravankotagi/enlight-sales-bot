@@ -2981,7 +2981,14 @@ async function routeToHandler(category, text, scope, supabase, extra = {}) {
     case 'payment_aging':
       return await getPaymentAging(scope);
     case 'lost_deals':
+    case 'loss_analytics':
       return await getLostDeals(scope, text);
+    case 'team_pipeline': {
+      if (scope && scope.role === 'salesperson' && !scope.isManager && !scope.isAdmin) {
+        return `⚠️ *Access Denied*\n\nTeam reports are only accessible by Sales Managers and Admins. You can only view your own pipeline and performance metrics.`;
+      }
+      return await getSalesThisMonth(scope, text);
+    }
     case 'inactive_customers':
     case 'churn_risk':
       return await getInactiveCustomers(scope);

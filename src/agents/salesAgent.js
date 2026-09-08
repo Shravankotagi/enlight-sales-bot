@@ -1611,6 +1611,21 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
     .toUpperCase();
   if (clean.length < 3) return null;
 
+  const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+  const scope = senderPhone
+    ? await getAccessibleSalespersonPhonesForBot(senderPhone)
+    : { phones: null, isAdmin: true };
+
+  const isPhoneAccessible = (dealPhone) => {
+    if (!dealPhone) return true;
+    if (scope.isAdmin || scope.phones === null) return true;
+    const dealVariants = getPhoneVariants(dealPhone);
+    const accessibleSet = new Set();
+    for (const p of scope.phones) getPhoneVariants(p).forEach(pv => accessibleSet.add(pv));
+    if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => accessibleSet.add(pv));
+    return dealVariants.some(dv => accessibleSet.has(dv));
+  };
+
   // 1. Direct UUID lookup if clean is a standard UUID
   const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clean);
   if (isUuid) {
@@ -1619,21 +1634,25 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
       .select('*, deal_items(*)')
       .eq('id', clean.toLowerCase())
       .limit(1);
-    if (directDeal && directDeal.length > 0) return directDeal[0];
+    if (directDeal && directDeal.length > 0 && isPhoneAccessible(directDeal[0].salesperson_phone)) {
+      return directDeal[0];
+    }
 
     const { data: directInqDeal } = await supabase
       .from('deals')
       .select('*, deal_items(*)')
       .eq('inquiry_id', clean.toLowerCase())
       .limit(1);
-    if (directInqDeal && directInqDeal.length > 0) return directInqDeal[0];
+    if (directInqDeal && directInqDeal.length > 0 && isPhoneAccessible(directInqDeal[0].salesperson_phone)) {
+      return directInqDeal[0];
+    }
 
     const { data: directInq } = await supabase
       .from('inquiries')
       .select('*')
       .eq('id', clean.toLowerCase())
       .limit(1);
-    if (directInq && directInq.length > 0) {
+    if (directInq && directInq.length > 0 && isPhoneAccessible(directInq[0].salesperson_phone || directInq[0].sender_phone)) {
       return convertInquiryToDealStub(directInq[0], senderPhone);
     }
   }
@@ -1652,7 +1671,7 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
       .limit(500),
   ]);
 
-  const deals = dealsRes?.data || [];
+  const deals = (dealsRes?.data || []).filter(d => isPhoneAccessible(d.salesperson_phone));
   if (deals.length > 0) {
     // Exact prefix match on Deal ID (with or without hyphens)
     let found = deals.find(
@@ -1677,7 +1696,7 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
     if (found) return found;
   }
 
-  const inquiries = inqsRes?.data || [];
+  const inquiries = (inqsRes?.data || []).filter(inq => isPhoneAccessible(inq.sender_phone));
   if (inquiries.length > 0) {
     const foundInq = inquiries.find(
       (inq) =>
@@ -1851,25 +1870,42 @@ function formatOpenDealsListPrompt(customerName, openDeals) {
 }
 
 async function findBestDeal(customerName, senderPhone) {
-  const { data: ownActive } = await supabase
+  const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+  const scope = senderPhone
+    ? await getAccessibleSalespersonPhonesForBot(senderPhone)
+    : { phones: null };
+
+  let queryActive = supabase
     .from('deals')
     .select('*, deal_items(*)')
     .ilike('customer_name', `%${customerName}%`)
-    .eq('salesperson_phone', senderPhone)
     .not('stage', 'in', '("won","lost")')
-    .order('created_at', { ascending: false })
-    .limit(1);
+    .order('created_at', { ascending: false });
 
+  if (scope.phones !== null) {
+    const allPhones = new Set();
+    for (const p of scope.phones) getPhoneVariants(p).forEach(pv => allPhones.add(pv));
+    if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => allPhones.add(pv));
+    queryActive = queryActive.in('salesperson_phone', Array.from(allPhones));
+  }
+
+  const { data: ownActive } = await queryActive.limit(1);
   if (ownActive && ownActive.length > 0) return ownActive[0];
 
-  const { data: ownAny } = await supabase
+  let queryAny = supabase
     .from('deals')
     .select('*, deal_items(*)')
     .ilike('customer_name', `%${customerName}%`)
-    .eq('salesperson_phone', senderPhone)
-    .order('created_at', { ascending: false })
-    .limit(1);
+    .order('created_at', { ascending: false });
 
+  if (scope.phones !== null) {
+    const allPhones = new Set();
+    for (const p of scope.phones) getPhoneVariants(p).forEach(pv => allPhones.add(pv));
+    if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => allPhones.add(pv));
+    queryAny = queryAny.in('salesperson_phone', Array.from(allPhones));
+  }
+
+  const { data: ownAny } = await queryAny.limit(1);
   return ownAny && ownAny.length > 0 ? ownAny[0] : null;
 }
 
