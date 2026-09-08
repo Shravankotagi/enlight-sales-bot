@@ -21,6 +21,7 @@
  */
 
 const { supabase, getEmployeeByPhone } = require('../supabase');
+const { convertLineItemToMt } = require('../utils/pricingEngine');
 
 // ─── RBAC Role Helper Functions ─────────────────────────────────────────────
 
@@ -479,15 +480,9 @@ function cleanLegalSuffixes(str) {
 function getDealTonnage(deal) {
   if (!deal) return 0;
   if (Array.isArray(deal.deal_items) && deal.deal_items.length > 0) {
-    return deal.deal_items.reduce((sum, item) => {
-      const q = Number(item.quantity ?? item.quantity_mt ?? item.qty ?? 0) || 0;
-      const unit = (item.unit || 'MT').toUpperCase().trim();
-      return sum + (unit === 'KG' || unit === 'KGS' || unit === 'KILOGRAM' ? q / 1000 : q);
-    }, 0);
+    return deal.deal_items.reduce((sum, item) => sum + convertLineItemToMt(item), 0);
   }
-  const q = Number(deal.quantity ?? deal.quantity_mt ?? 0) || 0;
-  const unit = (deal.unit || 'MT').toUpperCase().trim();
-  return unit === 'KG' || unit === 'KGS' || unit === 'KILOGRAM' ? q / 1000 : q;
+  return convertLineItemToMt(deal);
 }
 
 // ─── 1. GET_INQUIRIES TOOL ──────────────────────────────────────────────────
@@ -636,12 +631,11 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
         if (parsed.customer?.name && !linkedDeal?.customer_name) {
           custName = parsed.customer.name;
         }
-        if (Array.isArray(parsed.line_items)) {
-          lineItems = parsed.line_items;
+        const rawAiItems = parsed.line_items || parsed.lineItems || parsed.items || [];
+        if (Array.isArray(rawAiItems) && rawAiItems.length > 0) {
+          lineItems = rawAiItems;
           lineItems.forEach((li) => {
-            const q = Number(li.quantity_mt || li.quantity || 0);
-            const u = (li.unit || 'MT').toUpperCase();
-            estTonnage += u.includes('KG') ? q / 1000 : q;
+            estTonnage += convertLineItemToMt(li);
           });
         }
         dimensions = parsed.dimensions || null;
@@ -649,12 +643,12 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
       } catch {}
     }
 
-    if (linkedDeal && (!lineItems || lineItems.length === 0)) {
+    if (linkedDeal && (!lineItems || lineItems.length === 0 || estTonnage === 0)) {
       if (Array.isArray(linkedDeal.deal_items) && linkedDeal.deal_items.length > 0) {
         lineItems = linkedDeal.deal_items.map((di) => ({
           product_name: di.sku_text,
           dimensions: di.dimensions,
-          quantity_mt: di.quantity,
+          quantity_mt: convertLineItemToMt(di),
           unit: di.unit || 'MT',
           rate: di.rate,
         }));
@@ -948,13 +942,15 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   let lostCount = 0;
   let pendingCount = 0;
   let ocrCount = 0;
+  let totalTonnage = 0;
   const custFreq = {};
 
   filtered.forEach((m) => {
-    if (m.deal_stage === 'won' || Boolean(m.po_number)) wonCount++;
+    if (m.deal_stage === 'won' || m.status === 'won') wonCount++;
     else if (m.deal_stage === 'lost') lostCount++;
     else pendingCount++;
     if (m.is_ocr_document) ocrCount++;
+    totalTonnage += Number(m.estimated_tonnage_mt || 0);
     custFreq[m.customer_name] = (custFreq[m.customer_name] || 0) + 1;
   });
 
@@ -967,6 +963,8 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     data: {
       summary: {
         total_inquiries: filtered.length,
+        total_inquired_tonnage_mt: Math.round(totalTonnage * 1000) / 1000,
+        total_tonnage_mt: Math.round(totalTonnage * 1000) / 1000,
         won_orders_count: wonCount,
         lost_deals_count: lostCount,
         pending_review_count: pendingCount,

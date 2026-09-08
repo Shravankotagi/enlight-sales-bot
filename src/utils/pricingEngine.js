@@ -75,13 +75,113 @@ function normalizeUnit(rawUnit) {
 }
 
 /**
+ * Converts any individual line item to Metric Tonnes (MT) using exact steel dimension formulas.
+ * Density: 7.85 g/cm3.
+ */
+function convertLineItemToMt(item) {
+  if (!item) return 0;
+  const qty = Number(item.quantity ?? item.quantity_mt ?? item.quantityTons ?? item.qty ?? 0);
+  const rawUnit = (item.unit || 'MT').trim();
+  const normUnit = normalizeUnit(rawUnit);
+
+  if (!qty || qty <= 0) return 0;
+  if (normUnit === 'MT') return qty;
+  if (normUnit === 'KG') return qty / 1000;
+
+  const combinedText = [
+    item.sku_text || item.product_name || item.description || item.name || '',
+    item.dimensions || item.specs || item.spec || item.specification || '',
+    item.description || '',
+  ].join(' ').toLowerCase();
+
+  // 1. TMT Rebars: (Dia^2 / 162) * Len * Qty / 1000
+  if (combinedText.includes('tmt') || combinedText.includes('rebar')) {
+    const diaMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm|dia|diameter)/);
+    if (diaMatch) {
+      const dia = parseFloat(diaMatch[1]);
+      const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
+      const len = lenMatch ? parseFloat(lenMatch[1]) : 12;
+      return (((dia * dia) / 162) * len * qty) / 1000;
+    }
+  }
+
+  // 2. Round Bars: (pi/4) * (Dia_cm^2) * Len_cm * 7.85 / 1000 * Qty / 1000
+  if (combinedText.includes('round bar') || combinedText.includes('bright bar')) {
+    const diaMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm|dia|diameter)/);
+    if (diaMatch) {
+      const dia = parseFloat(diaMatch[1]);
+      const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
+      const len = lenMatch ? parseFloat(lenMatch[1]) : 6;
+      const diaCm = dia / 10;
+      const lenCm = len * 100;
+      const wtKg = (Math.PI / 4) * (diaCm * diaCm) * lenCm * (7.85 / 1000) * qty;
+      return wtKg / 1000;
+    }
+  }
+
+  // 3. Angles: (A + B - t) * t * 0.00785 * Len * Qty / 1000
+  if (combinedText.includes('angle') || combinedText.includes('isa')) {
+    const angleMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*]\s*(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*]\s*(\d+(?:\.\d+)?)/);
+    if (angleMatch) {
+      const a = parseFloat(angleMatch[1]);
+      const b = parseFloat(angleMatch[2]);
+      const t = parseFloat(angleMatch[3]);
+      const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
+      const len = lenMatch ? parseFloat(lenMatch[1]) : 6;
+      return ((a + b - t) * t * 0.00785 * len * qty) / 1000;
+    }
+  }
+
+  // 4. Sheets / Plates / Coils: Length(m) * Width(m) * Thickness(mm) * 7.85 * Qty / 1000
+  let thickness = null;
+  const thkMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm\s*thk|mm\s*thickness|mm|\bthk\b)/);
+  if (thkMatch) thickness = parseFloat(thkMatch[1]);
+
+  let widthM = null;
+  let lengthM = null;
+
+  const dim3Match = combinedText.match(/(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)/);
+  if (dim3Match) {
+    const n1 = parseFloat(dim3Match[1]);
+    const n2 = parseFloat(dim3Match[2]);
+    const n3 = parseFloat(dim3Match[3]);
+    const sorted = [n1, n2, n3].sort((a, b) => a - b);
+    if (!thickness) thickness = sorted[0];
+    const w = sorted[1];
+    const l = sorted[2];
+    widthM = w > 20 ? w / 1000 : w;
+    lengthM = l > 20 ? l / 1000 : l;
+  } else {
+    const dim2Match = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*]\s*(\d+(?:\.\d+)?)\s*(?:mm)?/);
+    if (dim2Match) {
+      const d1 = parseFloat(dim2Match[1]);
+      const d2 = parseFloat(dim2Match[2]);
+      const w = Math.min(d1, d2);
+      const l = Math.max(d1, d2);
+      widthM = w > 20 ? w / 1000 : w;
+      lengthM = l > 20 ? l / 1000 : l;
+    }
+  }
+
+  if (thickness && widthM && lengthM) {
+    const wtKgPerPc = lengthM * widthM * thickness * 7.85;
+    return (wtKgPerPc * qty) / 1000;
+  }
+
+  if (thickness) {
+    // Default sheet size: 1.25m x 2.5m (1250 x 2500 mm)
+    const wtKgPerPc = 2.5 * 1.25 * thickness * 7.85;
+    return (wtKgPerPc * qty) / 1000;
+  }
+
+  return qty;
+}
+
+/**
  * Converts a quantity to its Metric Ton (MT) equivalent.
  */
 function convertToMt(quantity, rawUnit) {
-  const norm = normalizeUnit(rawUnit);
-  if (norm === 'KG') return quantity / 1000;
-  if (norm === 'MT') return quantity;
-  return quantity;
+  return convertLineItemToMt({ quantity, unit: rawUnit });
 }
 
 /**
@@ -278,6 +378,7 @@ module.exports = {
   DEFAULT_GST_RATE,
   normalizeUnit,
   convertToMt,
+  convertLineItemToMt,
   extractDimensions,
   isDimensionCompatible,
   calculateLineItem,
