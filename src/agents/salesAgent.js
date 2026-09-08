@@ -2328,9 +2328,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     const isRateOrPriceUpdate = isRateUpdateContext || hasRateUpdate;
     const isFieldUpdate = hasDeliveryUpdate || hasPaymentUpdate || hasHsnUpdate || hasUnitUpdate || !!data.delivery_date || !!data.contact_person;
 
-    const isExplicitNewInquiry = (data.action === 'inquiry' && hasAnyProductName) || /^(?:new\s+inquiry|inquiry\s+for|inquiry\s+from|need|requires?|create\s+inquiry|add\s+inquiry)\b/i.test(effectiveTextForLLM || text);
+    const isExplicitNewInquiryIntent = (data.action === 'inquiry' && hasAnyProductName) || /^(?:new\s+inquiry|inquiry\s+for|inquiry\s+from|need|requires?|create\s+inquiry|add\s+inquiry)\b/i.test(effectiveTextForLLM || text);
 
-    if (!targetExplicitDeal && customerName && !isExplicitNewInquiry && (isRateOrPriceUpdate || isFieldUpdate || data.action === 'deal_update' || !hasAnyProductName)) {
+    if (!targetExplicitDeal && customerName && !isExplicitNewInquiryIntent && (isRateOrPriceUpdate || isFieldUpdate || data.action === 'deal_update' || !hasAnyProductName)) {
       const openDeals = await getAllOpenDealsForCustomer(customerName, senderPhone);
       if (openDeals.length === 1) {
         targetExplicitDeal = openDeals[0];
@@ -2362,7 +2362,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     const isAddItemAction = /\b(?:add\s+(?:item|line\s*item)|add\s+\d+|new\s+item)\b/i.test(effectiveTextForLLM || text) || data.action === 'add_item';
     const isRemoveItemAction = /\b(?:remove\s+(?:item|line\s*item)|delete\s+(?:item|line\s*item)|remove\s+[A-Za-z]+|delete\s+item\s*\d+)\b/i.test(effectiveTextForLLM || text) || data.action === 'remove_item';
 
-    if (targetExplicitDeal && (explicitDealCode || data.deal_id || (!isExplicitNewInquiry && (!hasAnyProductName || data.action === 'deal_update' || isRateUpdateContext || hasRateUpdate || isRateOrPriceUpdate || isFieldUpdate || isAddItemAction || isRemoveItemAction)))) {
+    if (targetExplicitDeal && (explicitDealCode || data.deal_id || (!isExplicitNewInquiryIntent && (!hasAnyProductName || data.action === 'deal_update' || isRateUpdateContext || hasRateUpdate || isRateOrPriceUpdate || isFieldUpdate || isAddItemAction || isRemoveItemAction)))) {
       const dealId = targetExplicitDeal.id;
       const dealCode = getDealCode(targetExplicitDeal);
       const company = targetExplicitDeal.customer_name;
