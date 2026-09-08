@@ -562,12 +562,22 @@ async function findDeal(dealName, biginDealId, token) {
     if (!dealName) return null;
     const cleanSearchName = dealName.replace(/[\[\]#()]/g, '').trim();
 
-    // Search by Deal_Name prefix
+    // 1. Search by Deal_Name prefix
     const res = await axios.get(`${ZOHO_BIGIN_BASE}/Deals/search`, {
       headers: zohoHeaders(token),
       params: { criteria: `(Deal_Name:starts_with:${cleanSearchName.substring(0, 30)})`, fields: 'id,Deal_Name,Stage' },
     });
     if (res.data?.data?.[0]) return res.data.data[0];
+
+    // 2. Fallback: search by customer name prefix if dealName has a hyphen
+    const customerPrefix = cleanSearchName.split('-')[0].trim();
+    if (customerPrefix && customerPrefix.length >= 3 && customerPrefix !== cleanSearchName) {
+      const resCust = await axios.get(`${ZOHO_BIGIN_BASE}/Deals/search`, {
+        headers: zohoHeaders(token),
+        params: { criteria: `(Deal_Name:starts_with:${customerPrefix.substring(0, 30)})`, fields: 'id,Deal_Name,Stage' },
+      });
+      if (resCust.data?.data?.[0]) return resCust.data.data[0];
+    }
 
     return null;
   } catch (err) {
@@ -587,7 +597,7 @@ async function getDealsLayout(token) {
     const layouts = res.data?.layouts || [];
     const sales = layouts.find(l => /sale/i.test(l.name)) || layouts[0];
     if (sales && sales.id) {
-      let pipelineName = 'Sales Pipeline Standard';
+      let pipelineName = 'Sales Standard';
       for (const s of sales.sections || []) {
         for (const f of s.fields || []) {
           if (f.api_name === 'Pipeline' && f.pick_list_values?.length) {
@@ -601,16 +611,26 @@ async function getDealsLayout(token) {
   } catch (err) {
     console.error('[BiginSync] getDealsLayout error:', err.message);
   }
-  return { id: '1384628000000000173', name: 'Sales Pipeline', pipeline: 'Sales Pipeline Standard' };
+  return { id: '1384628000000000173', name: 'Sales Pipeline', pipeline: 'Sales Standard' };
 }
 
 const STAGE_MAP = {
-  won:         'Closed Won',
-  lost:        'Closed Lost',
-  negotiation: 'Negotiation/Review',
-  quoted:      'Proposal/Price Quote',
-  qualified:   'Qualification',
-  new_inquiry: 'Qualification',
+  won:                    'Closed Won',
+  'closed won':           'Closed Won',
+  lost:                   'Closed Lost',
+  'closed lost':          'Closed Lost',
+  negotiation:            'Negotiation/Review',
+  review:                 'Negotiation/Review',
+  'negotiation/review':   'Negotiation/Review',
+  on_hold:                'On Hold',
+  'on hold':              'On Hold',
+  hold:                   'On Hold',
+  quoted:                 'Proposal/Price Quote',
+  proposal:               'Proposal/Price Quote',
+  'proposal/price quote': 'Proposal/Price Quote',
+  qualified:              'Proposal/Price Quote',
+  new_inquiry:            'New Inquiry',
+  'new inquiry':          'New Inquiry',
 };
 
 async function upsertDeal({
@@ -644,7 +664,7 @@ async function upsertDeal({
   // Build payload - only include valid fields accepted by Bigin API
   const dealPayload = {
     Deal_Name:    dealName,
-    Stage:        STAGE_MAP[stage] || 'Qualification',
+    Stage:        STAGE_MAP[stage] || 'New Inquiry',
     Amount:       Number(amount) || 0,
     Closing_Date: new Date().toISOString().split('T')[0],
     Description:  summary || '',
@@ -673,7 +693,7 @@ async function upsertDeal({
         payload,
         { headers: zohoHeaders(token) }
       );
-      console.log(`[BiginSync] Deal updated: ${dealName} → ${STAGE_MAP[stage] || 'Qualification'} (${existing.id})`);
+      console.log(`[BiginSync] Deal updated: ${dealName} → ${STAGE_MAP[stage] || 'New Inquiry'} (${existing.id})`);
       finalId = existing.id;
     } catch (err) {
       console.error('[BiginSync] Deal update error:', err.response?.data || err.message);
@@ -1406,15 +1426,16 @@ async function pullBiginToDatabase() {
     const biginDeals = dealRes.data?.data || [];
 
     const REVERSE_STAGE_MAP = {
-      'Closed Won': 'won',
-      'Closed Lost': 'lost',
-      'Negotiation/Review': 'negotiation',
+      'Closed Won':           'won',
+      'Closed Lost':          'lost',
+      'Negotiation/Review':   'negotiation',
       'Proposal/Price Quote': 'quoted',
-      'New Inquiry': 'new_inquiry',
-      'Inquiry Received': 'new_inquiry',
-      'Waiting for Inquiry': 'new_inquiry',
-      'Qualification': 'qualified',
-      'Needs Analysis': 'qualified',
+      'On Hold':              'on_hold',
+      'New Inquiry':          'new_inquiry',
+      'Inquiry Received':     'new_inquiry',
+      'Waiting for Inquiry':  'new_inquiry',
+      'Qualification':        'new_inquiry',
+      'Needs Analysis':       'quoted',
     };
 
     for (const d of biginDeals) {

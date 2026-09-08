@@ -32,11 +32,11 @@ Input message can be English, Hindi, or Hinglish.
 
 Extract into ONLY a JSON object (no markdown, no prose, no backticks):
 {
-  "action": "inquiry|stage_update|purchase_order|deal_update", // Use "stage_update" whenever moving stage, updating status, or marking as won/lost/negotiation/quoted/qualified. Use "inquiry" for ALL new customer requirements, notes, RFQs, quotes. Use "purchase_order" ONLY if text explicitly contains "PO", "PO-...", "Purchase order", "Order confirmed", "Order placed", or "Won".
+  "action": "inquiry|stage_update|purchase_order|deal_update", // Use "stage_update" whenever moving stage, updating status, or marking as won/lost/negotiation/quoted/on_hold. Use "inquiry" for ALL new customer requirements, notes, RFQs, quotes. Use "purchase_order" ONLY if text explicitly contains "PO", "PO-...", "Purchase order", "Order confirmed", "Order placed", or "Won".
   "deal_id": "<inquiry ID if mentioned e.g. #INQ-C538B6, INQ-C538B6, #DEAL-C538B6, or C538B6, else null>",
   "customer_name": "<exact company/customer name requesting material or placing order, else null>",
   "contact_person": "<full name of customer contact person/owner/proprietor if mentioned e.g. Rajesh Mehta, else null>",
-  "target_stage": "new_inquiry|qualified|negotiation|quoted|won|lost", // Stage if explicitly requested to update e.g. "update to negotiation", "mark as negotiation", "mark as won", "deal lost", else null
+  "target_stage": "new_inquiry|quoted|negotiation|on_hold|won|lost", // Stage if explicitly requested to update e.g. "update to negotiation", "mark as negotiation", "mark as won", "deal lost", "put on hold", else null
   "line_items": [
     {
       "product_requirement": "<specific product name from 9 categories e.g. CR Coil, HR Coil, HRPO Coil, MS Round Bar, MS Square Pipe, MS Angle, MS Beam, MS Channel, MS Plate, Chequered Plate, TMT Bar>",
@@ -2049,29 +2049,37 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     const hasRateUpdate = !!(data.line_items?.some(i => i.rate_per_mt > 0) || (data.total_amount && data.total_amount > 0));
     const hasQtyUpdate = !!(rawItems.some(i => (i.quantity > 0 || i.quantity_mt > 0)));
 
-    // ── STAGE UPDATE HANDLER (e.g. "mark the deal as won", "deal is lost", "mark as negotiation") ───
+    // ── STAGE UPDATE HANDLER (e.g. "mark the deal as won", "deal is lost", "mark as negotiation", "put on hold") ───
     const isExplicitStageUpdate = data.action === 'stage_update' ||
-      (data.target_stage && ['negotiation', 'won', 'lost', 'quoted', 'qualified'].includes(data.target_stage)) ||
-      /\b(?:mark|move|update|set|change)\b.*?\b(negotiation|won|lost|quoted|qualified)\b/i.test(text) ||
-      /\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+)?(negotiation|won|lost|quoted|qualified)\b/i.test(text);
+      (data.target_stage && ['negotiation', 'won', 'lost', 'quoted', 'on_hold', 'hold', 'qualified'].includes(data.target_stage)) ||
+      /\b(?:mark|move|update|set|change|put)\b.*?\b(negotiation|won|lost|quoted|on\s+hold|hold|qualified)\b/i.test(text) ||
+      /\b(?:deal|inquiry)\s+(?:is\s+|moved\s+to\s+|marked\s+as\s+|put\s+on\s+)?(negotiation|won|lost|quoted|on\s+hold|hold|qualified)\b/i.test(text);
 
     if (isExplicitStageUpdate) {
       let targetStageName = data.target_stage;
       if (!targetStageName || targetStageName === 'new_inquiry') {
-        const stageMatch = text.match(/\b(negotiation|won|lost|quoted|quotated|qualified)\b/i);
+        const stageMatch = text.match(/\b(negotiation|won|lost|quoted|quotated|on\s+hold|hold|qualified)\b/i);
         if (stageMatch) {
-          const rawStage = stageMatch[1].toLowerCase();
-          targetStageName = (rawStage === 'quotated' || rawStage === 'quoted') ? 'quoted' : rawStage;
+          const rawStage = stageMatch[1].toLowerCase().replace(/\s+/g, '_');
+          targetStageName = (rawStage === 'quotated' || rawStage === 'quoted') ? 'quoted' : (rawStage === 'hold' ? 'on_hold' : rawStage);
         }
       }
 
       const stageMap = {
-        new_inquiry: 'new_inquiry',
-        won: 'won',
-        lost: 'lost',
-        negotiation: 'negotiation',
-        qualified: 'qualified',
-        quoted: 'quoted',
+        new_inquiry:            'new_inquiry',
+        'new inquiry':          'new_inquiry',
+        quoted:                 'quoted',
+        proposal:               'quoted',
+        'proposal/price quote': 'quoted',
+        negotiation:            'negotiation',
+        review:                 'negotiation',
+        'negotiation/review':   'negotiation',
+        on_hold:                'on_hold',
+        'on hold':              'on_hold',
+        hold:                   'on_hold',
+        won:                    'won',
+        lost:                   'lost',
+        qualified:              'quoted',
       };
       const dbStage = stageMap[targetStageName] || 'new_inquiry';
 
@@ -2093,19 +2101,14 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
       const currentStage = (dealToUpdate.stage || 'new_inquiry').toLowerCase().trim();
 
-      // Stage Gate 1: If deal is in New Inquiry stage, no status updates allowed
-      if (['new_inquiry', 'review', 'auto_created', 'pending', 'draft', 'needs_review'].includes(currentStage)) {
-        return `This deal is currently in New Inquiry stage. It must be moved to Qualified before it can be updated further. Please save the deal first.`;
-      }
-
-      // Stage Gate 2: If deal is in Qualified stage, must move to Negotiation or Quoted first before Won/Lost
-      if (currentStage === 'qualified' && (dbStage === 'won' || dbStage === 'lost')) {
-        return `This deal must go through Negotiation or Quoted stage before it can be marked as Won or Lost.`;
-      }
-
-      // Stage Gate 3: If deal is already closed
+      // Stage Gate 1: If deal is already closed
       if (currentStage === 'won' || currentStage === 'lost') {
         return `This deal is already marked as ${currentStage.toUpperCase()} and cannot be updated further.`;
+      }
+
+      // Stage Gate 2: If deal is in New Inquiry stage and trying to mark Won without PO/items
+      if (['new_inquiry', 'review', 'auto_created', 'pending', 'draft', 'needs_review'].includes(currentStage) && dbStage === 'won' && !data.po_number && data.action !== 'purchase_order') {
+        return `This deal is currently in New Inquiry stage. Please quote the deal or provide a Purchase Order (PO) to mark it as Won.`;
       }
 
       const dealCode = getDealCode(dealToUpdate);
@@ -2622,10 +2625,20 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     let targetStage = data.target_stage || 'new_inquiry';
     const stageMap = {
-      new_inquiry: 'new_inquiry',
-      won: 'won',
-      lost: 'lost',
-      negotiation: 'negotiation',
+      new_inquiry:            'new_inquiry',
+      'new inquiry':          'new_inquiry',
+      quoted:                 'quoted',
+      proposal:               'quoted',
+      'proposal/price quote': 'quoted',
+      negotiation:            'negotiation',
+      review:                 'negotiation',
+      'negotiation/review':   'negotiation',
+      on_hold:                'on_hold',
+      'on hold':              'on_hold',
+      hold:                   'on_hold',
+      won:                    'won',
+      lost:                   'lost',
+      qualified:              'quoted',
     };
     const dbStage = stageMap[targetStage] || 'new_inquiry';
 
