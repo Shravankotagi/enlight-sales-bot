@@ -2012,6 +2012,9 @@ function evaluateMandatoryFields({ customerName, lineItems, deliveryLocation, pa
 
 function extractDeterministicRateItems(text) {
   if (!text || typeof text !== 'string') return [];
+  const hasRateKeywords = /\b(rates?|prices?|pricing|bhav|daam|@|₹|inr|rs\.?|\/mt|\/kg)\b/i.test(text);
+  const isExplicitRateUpdate = /\b(upadte|updt|updte|update|set|new|change)\s+(?:the\s+)?(?:rates?|prices?)\b/i.test(text);
+
   const lines = text.split(/[\r\n]+/);
   const items = [];
 
@@ -2019,18 +2022,33 @@ function extractDeterministicRateItems(text) {
     const cleanLine = line.trim();
     if (
       !cleanLine ||
-      /^(?:upadte|updt|updte|update|rates?|prices?|for|customer|company|deal|inquiry|inq)\b/i.test(cleanLine) ||
+      /^(?:upadte|updt|updte|update|rates?|prices?|for|customer|company|deal|inquiry|inq|qty|quantity)\b/i.test(cleanLine) ||
       /#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/i.test(cleanLine) ||
       /deal\s+id/i.test(cleanLine)
     ) continue;
 
-    // Pattern: "MS Sheet 5MM THK E250 - 10", "CR sheet 1mm : 16", "Chequered Plate = 17", "HR Coil 3.15mm 12"
+    // Reject if line has quantity indicators like "qty - 45MT" or "quantity 45 MT"
+    if (/\b(?:qty|quantity|tonnage)\s*[-:=]?\s*\d+/i.test(cleanLine)) continue;
+
+    // Pattern: "MS Sheet 5MM THK E250 - 52000", "CR sheet 1mm : 58000", "HR Coil 3.15mm @ 54000"
     const lineMatch = cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s*(?:[-:=@—→]|rate\s+(?:is|to|of)?|price\s+(?:is|to|of)?)\s*₹?\s*([\d,.]+)\s*(?:\/?[a-zA-Z]+)?$/i) ||
                       cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s+([\d,.]+)\s*$/i);
     if (lineMatch) {
       const prodCandidate = lineMatch[1].trim().replace(/^[-•*]\s*/, '');
       const rateVal = parseFloat(lineMatch[2].replace(/,/g, ''));
-      if (prodCandidate && rateVal > 0 && !/^(?:company|customer|inquiry|delivery|payment|stage|status|notes?)/i.test(prodCandidate)) {
+      const suffix = (lineMatch[0].match(/[\d,.]+\s*([a-zA-Z]+)/) || [])[1] || '';
+
+      // Check if suffix is a quantity unit -> if so, it's a quantity, NOT a rate!
+      if (/^(?:mt|tons?|tonne|kg|pcs|nos|sheets?|plates?|coils?|bars?|lengths?|bundles?)$/i.test(suffix)) {
+        continue;
+      }
+
+      if (
+        prodCandidate &&
+        !/^(?:company|customer|inquiry|delivery|payment|stage|status|notes?|qty|quantity|tonnage|address|terms|credit)$/i.test(prodCandidate) &&
+        (getProductFamily(prodCandidate) || isValidCatalogProduct(prodCandidate)) &&
+        rateVal > 10
+      ) {
         const mmM = prodCandidate.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
         items.push({
           product_requirement: prodCandidate,
@@ -2046,16 +2064,30 @@ function extractDeterministicRateItems(text) {
     }
   }
 
-  // If no multi-line, try inline comma/dash separated items
-  if (items.length === 0) {
+  // If no multi-line, try inline comma/dash separated items ONLY if explicit rate context
+  if (items.length === 0 && (hasRateKeywords || isExplicitRateUpdate)) {
     const inlineSegments = text.split(/[,;]+/);
     for (const seg of inlineSegments) {
       const cleanSeg = seg.trim();
+      // Skip quantity segments
+      if (/\b(?:qty|quantity|tonnage)\s*[-:=]?\s*\d+/i.test(cleanSeg)) continue;
+      if (/\b\d+\s*(?:mt|tons?|tonne|kg|pcs|nos|sheets?|plates?|coils?|bars?)\b/i.test(cleanSeg)) continue;
+
       const segMatch = cleanSeg.match(/([A-Za-z0-9\s.()x/]+?)\s*(?:[-:=@—→]|rate\s+(?:is|to|of)?)\s*₹?\s*([\d,.]+)/i);
       if (segMatch) {
         const pCand = segMatch[1].trim().replace(/^(?:rates?|prices?|for|and|update)\s+/i, '');
         const rVal = parseFloat(segMatch[2].replace(/,/g, ''));
-        if (pCand && rVal > 0 && !/^(?:company|customer|inquiry|delivery|payment|stage|status)/i.test(pCand)) {
+        const suffix = (cleanSeg.match(/[\d,.]+\s*([a-zA-Z]+)/) || [])[1] || '';
+        if (/^(?:mt|tons?|tonne|kg|pcs|nos|sheets?|plates?|coils?|bars?|lengths?|bundles?)$/i.test(suffix)) {
+          continue;
+        }
+
+        if (
+          pCand &&
+          !/^(?:company|customer|inquiry|delivery|payment|stage|status|qty|quantity|tonnage|address|terms|credit)$/i.test(pCand) &&
+          (getProductFamily(pCand) || isValidCatalogProduct(pCand)) &&
+          rVal > 10
+        ) {
           const mmM = pCand.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
           items.push({
             product_requirement: pCand,
@@ -2519,6 +2551,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     }
 
     let customerName = data.customer_name;
+    if (customerName) {
+      customerName = customerName.replace(/^(?:customer|client|party|firm|m\/s|m\/s\.)\s*[:=-]?\s*/i, '').trim();
+    }
     if (isInvalidCustomerName(customerName)) {
       customerName = null;
     }
@@ -2547,21 +2582,23 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     }
 
     // Check line items & product name extraction
-    const deterministicRateItems = extractDeterministicRateItems(effectiveTextForLLM || text);
     let rawItems = [];
-    if (deterministicRateItems.length > 0) {
-      rawItems = deterministicRateItems;
-    } else if (Array.isArray(data.line_items) && data.line_items.length > 0) {
+    if (Array.isArray(data.line_items) && data.line_items.length > 0) {
       rawItems = data.line_items;
-    } else if (data.product_requirement || data.quantity_mt || data.quantity) {
-      rawItems = [{
-        product_requirement: data.product_requirement,
-        dimensions: data.dimensions || null,
-        quantity: data.quantity || data.quantity_mt || 0,
-        quantity_mt: data.quantity_mt || data.quantity || 0,
-        unit: data.unit || 'MT',
-        rate_per_mt: data.rate_per_mt || null,
-      }];
+    } else {
+      const deterministicRateItems = extractDeterministicRateItems(effectiveTextForLLM || text);
+      if (deterministicRateItems.length > 0) {
+        rawItems = deterministicRateItems;
+      } else if (data.product_requirement || data.quantity_mt || data.quantity) {
+        rawItems = [{
+          product_requirement: data.product_requirement,
+          dimensions: data.dimensions || null,
+          quantity: data.quantity || data.quantity_mt || 0,
+          quantity_mt: data.quantity_mt || data.quantity || 0,
+          unit: data.unit || 'MT',
+          rate_per_mt: data.rate_per_mt || null,
+        }];
+      }
     }
 
     const GENERIC_PRODUCT_REGEX = /^(?:steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined|address|delivery|delivery address|delivery location|location|destination|payment|payment terms|terms|credit|hsn|sac|unit|this inquiry|this inqiry|this inqiry is inq|inquiry id|deal id)$/i;
