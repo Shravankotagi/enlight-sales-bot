@@ -90,6 +90,22 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
   "confidence": <float 0.0 to 1.0>
 }
 
+CRITICAL CONTEXT WINDOW RULE:
+The conversation history is provided ONLY to resolve ambiguous references (e.g. "it", "that deal", "same customer", "update it").
+NEVER extract or infer customer_name, product_requirement, dimensions, quantity, delivery_location, payment_terms, or rate_per_mt from conversation history.
+These fields must ONLY come from the CURRENT message being processed.
+If a field is not explicitly stated in the current message — set it to null.
+History is for identity resolution only — NOT for data extraction.
+
+CRITICAL DIMENSION RULE:
+For multi-product messages, assign dimensions ONLY to the product they appear immediately adjacent to in the text.
+NEVER assign a dimension value to a product it was not mentioned with.
+Example: "20 MT CR Coil 1.2mm and 15 MT HR Coil 3.15mm"
+-> CR Coil dimensions: 1.2mm ONLY
+-> HR Coil dimensions: 3.15mm ONLY
+NEVER: CR Coil dimensions: 3.15mm
+If a product does not have dimensions specified in its own segment, set dimensions to null.
+
 CRITICAL RULES FOR THE 9 CORE STEEL PRODUCT CATEGORIES:
 1. CR COILS:
    - Handle Gauges (e.g. "20 Gauge" -> 0.90mm, "24 Gauge" -> 0.60mm, "16 Gauge" -> 1.60mm).
@@ -344,6 +360,165 @@ function cleanProductCandidate(candidate) {
   const words = cleaned.toLowerCase().split(/\s+/).filter(w => !NOISE_WORDS.has(w));
   if (words.length === 0) return null;
   return cleaned.replace(/^(?:bhai|please|update|change|set|the|for|of)\s+/i, '').trim();
+}
+
+function getProductTextSegment(fullText, pName, itemIndex = 0, allItems = []) {
+  if (!fullText || !pName) return fullText || '';
+  if (!allItems || allItems.length <= 1) return fullText;
+
+  const lowerText = fullText.toLowerCase();
+
+  function findItemPosition(item) {
+    const name = (item.pName || item.product_requirement || item.sku_text || '').toLowerCase().trim();
+    if (!name) return -1;
+    let pos = lowerText.indexOf(name);
+    if (pos !== -1) return pos;
+
+    const words = name.split(/\s+/).filter(w => w.length > 1 && !['coil', 'sheet', 'bar', 'pipe', 'steel', 'ms'].includes(w));
+    for (const w of words) {
+      pos = lowerText.indexOf(w);
+      if (pos !== -1) return pos;
+    }
+
+    const allWords = name.split(/\s+/).filter(w => w.length > 1);
+    for (const w of allWords) {
+      pos = lowerText.indexOf(w);
+      if (pos !== -1) return pos;
+    }
+    return -1;
+  }
+
+  const itemPositions = allItems.map((it, idx) => ({
+    index: idx,
+    pos: findItemPosition(it),
+  }));
+
+  const matchedPositions = itemPositions
+    .filter(ip => ip.pos !== -1)
+    .sort((a, b) => a.pos - b.pos);
+
+  if (matchedPositions.length === 0) return fullText;
+
+  const currentMatchIdx = matchedPositions.findIndex(mp => mp.index === itemIndex);
+  if (currentMatchIdx === -1) return fullText;
+
+  let startPos = matchedPositions[currentMatchIdx].pos;
+  const prefix = fullText.substring(Math.max(0, startPos - 30), startPos);
+  const qtyPrefixMatch = prefix.match(/(?:\d+(?:\.\d+)?\s*(?:mt|ton|tons|tonne|kg|pcs|sheet|sheets|plate|plates|coil|coils|bar|bars)\s*)$/i);
+  if (qtyPrefixMatch) {
+    startPos = startPos - qtyPrefixMatch[0].length;
+  }
+
+  let endPos = fullText.length;
+  if (currentMatchIdx + 1 < matchedPositions.length) {
+    let nextStart = matchedPositions[currentMatchIdx + 1].pos;
+    const nextPrefix = fullText.substring(Math.max(0, nextStart - 30), nextStart);
+    const nextQtyPrefix = nextPrefix.match(/(?:(?:and|with|,|;)\s*)?(?:\d+(?:\.\d+)?\s*(?:mt|ton|tons|tonne|kg|pcs|sheet|sheets|plate|plates|coil|coils|bar|bars)\s*)$/i);
+    if (nextQtyPrefix) {
+      endPos = nextStart - nextQtyPrefix[0].length;
+    } else {
+      endPos = nextStart;
+    }
+  }
+
+  return fullText.substring(startPos, endPos).trim();
+}
+
+function extractProductSegmentDimension(fullText, pName, itemIndex = 0, allItems = []) {
+  if (!fullText || typeof fullText !== 'string' || !pName) return null;
+
+  // 1. Check if pName itself already contains the dimension
+  const pNameMatch = pName.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i) ||
+                     pName.match(/\b(ismb\s*\d+|ismc\s*\d+|npb\s*[\dx]+|wpb\s*[\dx]+|uc\s*[\dx]+|ub\s*[\dx]+)\b/i);
+  if (pNameMatch) return pNameMatch[0];
+
+  // 2. Extract strictly from this product's text segment
+  const segment = getProductTextSegment(fullText, pName, itemIndex, allItems);
+  if (!segment) return null;
+
+  const ismbM = segment.match(/\b(ismb\s*\d+|ismc\s*\d+|npb\s*[\dx]+|wpb\s*[\dx]+|uc\s*[\dx]+|ub\s*[\dx]+)\b/i);
+  if (ismbM) return ismbM[0].toUpperCase();
+
+  const boxSizeM = segment.match(/(\d+\s*x\s*\d+(?:\s*x\s*[\d.]+)?\s*mm)/i);
+  if (boxSizeM) return boxSizeM[0];
+
+  const mmM = segment.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft)(?:\s*x\s*[\d.]+\s*(?:mm|ft|inch|mtr)?)?)/i);
+  if (mmM) return mmM[0];
+
+  const simpleMmM = segment.match(/(\d+(?:\.\d+)?\s*mm)/i);
+  if (simpleMmM) return simpleMmM[0];
+
+  return null;
+}
+
+function sanitizeLLMExtraction(extractedData, rawText) {
+  if (!extractedData || typeof extractedData !== 'object') return extractedData;
+  const clean = (rawText || '').toLowerCase();
+
+  // 1. Sanitize customer_name: Must have actual token presence in current message unless choice/code
+  if (extractedData.customer_name) {
+    const custClean = extractedData.customer_name.toLowerCase().trim();
+    const custWords = custClean.split(/[^a-z0-9]+/i).filter(w => w.length >= 3 && !['pvt', 'ltd', 'limited', 'steel', 'metals', 'the', 'and', 'for'].includes(w));
+    const isPresent = custWords.length > 0 ? custWords.some(w => clean.includes(w)) : clean.includes(custClean);
+    if (!isPresent) {
+      extractedData.customer_name = null;
+    }
+  }
+
+  // 2. Sanitize delivery_location
+  if (extractedData.delivery_location) {
+    const locClean = extractedData.delivery_location.toLowerCase().trim();
+    const locWords = locClean.split(/[^a-z0-9]+/i).filter(w => w.length >= 3 && !['plot', 'phase', 'near', 'opp', 'road', 'midc'].includes(w));
+    const isPresent = locWords.length > 0 ? locWords.some(w => clean.includes(w)) : clean.includes(locClean);
+    if (!isPresent) {
+      extractedData.delivery_location = null;
+    }
+  }
+
+  // 3. Sanitize payment_terms
+  if (extractedData.payment_terms) {
+    const ptClean = extractedData.payment_terms.toLowerCase().trim();
+    const hasPaymentKeyword = /\b(?:days?|credit|advance|pdc|against|pi|delivery|cash|net|rtgs|cheque|cod)\b/i.test(clean);
+    if (!hasPaymentKeyword && !clean.includes(ptClean)) {
+      extractedData.payment_terms = null;
+    }
+  }
+
+  // 4. Sanitize contact_person
+  if (extractedData.contact_person) {
+    const cpClean = extractedData.contact_person.toLowerCase().trim();
+    const cpWords = cpClean.split(/[^a-z0-9]+/i).filter(w => w.length >= 3);
+    const isPresent = cpWords.length > 0 ? cpWords.some(w => clean.includes(w)) : clean.includes(cpClean);
+    if (!isPresent) {
+      extractedData.contact_person = null;
+    }
+  }
+
+  // 5. Sanitize line_items:
+  if (Array.isArray(extractedData.line_items) && extractedData.line_items.length > 0) {
+    const hasAnySteelKeywords = /\b(coil|coils|sheet|sheets|plate|plates|bar|bars|pipe|pipes|tube|tubes|angle|angles|beam|beams|channel|channels|tmt|rebar|sariya|crca|hrpo|gp|gi|ms|hr|cr|steel|metal|iron|ismb|ismc|chequered)\b/i.test(clean);
+
+    extractedData.line_items = extractedData.line_items.map((item) => {
+      const pName = (item.product_requirement || item.pName || '').trim();
+      const pWords = pName.toLowerCase().split(/[^a-z0-9]+/i).filter(w => w.length >= 2);
+      const isProductMentioned = hasAnySteelKeywords && (pWords.length > 0 ? pWords.some(w => clean.includes(w)) : clean.includes(pName.toLowerCase()));
+
+      if (!isProductMentioned && !hasAnySteelKeywords) {
+        return {
+          ...item,
+          product_requirement: null,
+          pName: null,
+          quantity: 0,
+          quantity_mt: 0,
+          dimensions: null,
+        };
+      }
+
+      return item;
+    }).filter(i => i.product_requirement || i.rate_per_mt || i.quantity > 0);
+  }
+
+  return extractedData;
 }
 
 function extractDeliveryLocation(text) {
@@ -1620,6 +1795,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         const rawText = typeof response.content === 'string' ? response.content : JSON.stringify(response.content || '');
         const { safeParseJSON } = require('../utils/jsonUtils');
         data = safeParseJSON(rawText, null);
+        if (data) {
+          data = sanitizeLLMExtraction(data, effectiveTextForLLM || text);
+        }
       } catch (llmErr) {
         console.warn('[SalesAgent] LLM extraction notice, utilizing rule-based engine:', llmErr.message);
       }
@@ -1973,24 +2151,16 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       customerName = targetExplicitDeal.customer_name;
     }
 
-    // If still no customer name in message, check active conversation session or recent active deal
-    if (!customerName) {
+    // Check if this is an explicit new inquiry or new requirement
+    const isExplicitNewInquiryIntent =
+      data.action === 'inquiry' ||
+      /^(?:new\s+inquiry|inquiry\s+for|inquiry\s+from|need|requires?|create\s+inquiry|add\s+inquiry)\b/i.test(effectiveTextForLLM || text);
+
+    // If still no customer name in message, check active conversation session ONLY for non-new-inquiry updates
+    if (!customerName && !isExplicitNewInquiryIntent && !targetExplicitDeal) {
       const activeSessionCustomer = await getActiveSession(senderPhone);
       if (activeSessionCustomer && !isInvalidCustomerName(activeSessionCustomer)) {
         customerName = activeSessionCustomer;
-      } else {
-        const { data: recentDeals } = await supabase
-          .from('deals')
-          .select('*, deal_items(*)')
-          .eq('salesperson_phone', senderPhone)
-          .not('stage', 'in', '("won","lost")')
-          .order('created_at', { ascending: false })
-          .limit(1);
-
-        if (recentDeals && recentDeals.length > 0) {
-          targetExplicitDeal = recentDeals[0];
-          customerName = recentDeals[0].customer_name;
-        }
       }
     }
 
@@ -2039,7 +2209,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const unit = item.unit || 'MT';
       const rawRate = item.rate_per_mt !== undefined && item.rate_per_mt !== null && item.rate_per_mt !== '' ? Number(item.rate_per_mt) : (item.rate ? Number(item.rate) : null);
       const rate = rawRate && rawRate > 0 ? rawRate : null;
-      const rawDim = item.dimensions || (pName?.match(/(\d+(?:\.\d+)?)\s*mm/i) ? pName.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : (text.match(/(\d+(?:\.\d+)?)\s*mm/i) ? text.match(/(\d+(?:\.\d+)?)\s*mm/i)[1] + ' mm' : null));
+      const rawDim = item.dimensions || extractProductSegmentDimension(effectiveTextForLLM || text, pName, rawItems.indexOf(item), rawItems);
 
       if (pName) {
         if (qty > 0 && rate && rate > 0) {
@@ -2207,7 +2377,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       // Stage Gate 2: On Hold is ONLY allowed from Price Quote (quoted/qualified) stage
       if (dbStage === 'on_hold') {
         if (isNewInquiryStage) {
-          return `❌ Cannot put inquiry on hold.\n\nInquiry ${dealCode} for ${dealToUpdate.customer_name} is currently in NEW INQUIRY stage without quoted rates.\n\nPlease enter unit rates first to move it to PRICE QUOTE stage before putting it on hold.`;
+          return `❌ Cannot put inquiry on hold.\n\nInquiry ${dealCode} for ${dealToUpdate.customer_name} is currently in NEW INQUIRY stage please share the quotation or mark Inquiry as quoted.\n\nPlease enter unit rates first to move it to PRICE QUOTE stage before putting it on hold.`;
         }
         if (currentStage !== 'quoted' && currentStage !== 'qualified') {
           return `❌ Cannot put inquiry on hold.\n\nInquiry ${dealCode} for ${dealToUpdate.customer_name} is currently in ${currentStage.toUpperCase().replace('_', ' ')} stage. An inquiry must be in PRICE QUOTE stage before it can be placed on hold.`;
@@ -2356,9 +2526,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     const isRateOrPriceUpdate = isRateUpdateContext || hasRateUpdate;
     const isFieldUpdate = hasDeliveryUpdate || hasPaymentUpdate || hasHsnUpdate || hasUnitUpdate || !!data.delivery_date || !!data.contact_person;
 
-    const isExplicitNewInquiryIntent = (data.action === 'inquiry' && hasAnyProductName) || /^(?:new\s+inquiry|inquiry\s+for|inquiry\s+from|need|requires?|create\s+inquiry|add\s+inquiry)\b/i.test(effectiveTextForLLM || text);
+    const isNewInquiryWithProduct = (data.action === 'inquiry' && hasAnyProductName) || isExplicitNewInquiryIntent;
 
-    if (!targetExplicitDeal && customerName && !isExplicitNewInquiryIntent && (isRateOrPriceUpdate || isFieldUpdate || data.action === 'deal_update' || !hasAnyProductName)) {
+    if (!targetExplicitDeal && customerName && !isNewInquiryWithProduct && (isRateOrPriceUpdate || isFieldUpdate || data.action === 'deal_update' || !hasAnyProductName)) {
       const openDeals = await getAllOpenDealsForCustomer(customerName, senderPhone);
       if (openDeals.length === 1) {
         targetExplicitDeal = openDeals[0];
