@@ -507,35 +507,19 @@ async function processSingleComplaint(data, originalText, senderPhone) {
   let targetDealId = null;
   let targetPoNumber = data.po_number || null;
 
-  const candidateDealCode = (data.deal_id || '').match(/#?(?:DEAL|INQ)-([A-F0-9]{6})/i)?.[1]
-    || originalText.match(/#?(?:DEAL|INQ)-([A-F0-9]{6})/i)?.[1]
-    || null;
+  const candidateDealCode = (data.deal_id || '').match(/#?(?:DEAL|INQ)-([A-F0-9_-]{4,36})/i)?.[1]
+    || originalText.match(/#?(?:DEAL|INQ)-([A-F0-9_-]{4,36})/i)?.[1]
+    || (data.deal_id ? data.deal_id.replace(/^#?(?:DEAL|INQ)-/i, '').trim() : null);
 
   if (candidateDealCode) {
-    const shortCode = candidateDealCode.toLowerCase();
-    const { data: matchedDeals } = await supabase
-      .from('deals')
-      .select('id, po_number, customer_name')
-      .or(`id.eq.${shortCode},id.ilike.${shortCode}%`)
-      .limit(5);
-    if (matchedDeals && matchedDeals.length > 0) {
-      targetDealId = matchedDeals[0].id;
-      if (matchedDeals[0].po_number) targetPoNumber = matchedDeals[0].po_number;
+    const { findDealByCodeOrId } = require('./salesAgent');
+    const matchedDeal = await findDealByCodeOrId(candidateDealCode, senderPhone);
+    if (matchedDeal) {
+      targetDealId = matchedDeal.id;
+      if (matchedDeal.po_number) targetPoNumber = matchedDeal.po_number;
+      if (!finalCustomerName && matchedDeal.customer_name) finalCustomerName = matchedDeal.customer_name;
     } else {
       targetDealId = candidateDealCode;
-    }
-  } else if (data.deal_id) {
-    const cleanId = data.deal_id.replace(/^#?(?:DEAL|INQ)-/i, '').trim().toLowerCase();
-    const { data: matchedDeals } = await supabase
-      .from('deals')
-      .select('id, po_number, customer_name')
-      .or(`id.eq.${cleanId},id.ilike.${cleanId}%`)
-      .limit(5);
-    if (matchedDeals && matchedDeals.length > 0) {
-      targetDealId = matchedDeals[0].id;
-      if (matchedDeals[0].po_number) targetPoNumber = matchedDeals[0].po_number;
-    } else {
-      targetDealId = data.deal_id;
     }
   }
 
@@ -545,27 +529,23 @@ async function processSingleComplaint(data, originalText, senderPhone) {
       const poCandidate = poMatch[1].trim();
       const { data: matchedDeals } = await supabase
         .from('deals')
-        .select('id, po_number')
+        .select('id, po_number, customer_name')
         .ilike('po_number', `%${poCandidate}%`)
         .limit(1);
       if (matchedDeals && matchedDeals.length > 0) {
         targetPoNumber = matchedDeals[0].po_number;
         if (!targetDealId) targetDealId = matchedDeals[0].id;
+        if (!finalCustomerName && matchedDeals[0].customer_name) finalCustomerName = matchedDeals[0].customer_name;
       }
     }
   }
 
   // If targetDealId is present but targetPoNumber is still missing, lookup deal's po_number
   if (targetDealId && !targetPoNumber) {
-    const cleanId = targetDealId.replace(/^#?(?:DEAL|INQ)-/i, '').trim().toLowerCase();
-    const { data: matchedDeals } = await supabase
-      .from('deals')
-      .select('id, po_number')
-      .or(`id.eq.${cleanId},id.ilike.${cleanId}%`)
-      .limit(1);
-    if (matchedDeals && matchedDeals.length > 0) {
-      targetDealId = matchedDeals[0].id;
-      if (matchedDeals[0].po_number) targetPoNumber = matchedDeals[0].po_number;
+    const { findDealByCodeOrId } = require('./salesAgent');
+    const matchedDeal = await findDealByCodeOrId(targetDealId, senderPhone);
+    if (matchedDeal && matchedDeal.po_number) {
+      targetPoNumber = matchedDeal.po_number;
     }
   }
 
