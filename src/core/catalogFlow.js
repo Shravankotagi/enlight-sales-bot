@@ -292,14 +292,26 @@ function formatDateDDMMYYYY(d) {
 }
 
 function parseDDMMYYYYtoISO(dStr) {
-  if (!dStr) return new Date().toISOString();
+  const now = new Date();
+  if (!dStr) return now.toISOString();
+
+  const todayStr = formatDateDDMMYYYY(now);
+  if (typeof dStr === 'string' && dStr.trim() === todayStr) {
+    return now.toISOString();
+  }
+
   const m = String(dStr).match(/^(\d{2})-(\d{2})-(\d{4})$/);
   if (m) {
-    return new Date(`${m[3]}-${m[2]}-${m[1]}T10:00:00.000Z`).toISOString();
+    const day = parseInt(m[1], 10);
+    const month = parseInt(m[2], 10) - 1;
+    const year = parseInt(m[3], 10);
+    const targetDate = new Date(Date.UTC(year, month, day, now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds(), now.getUTCMilliseconds()));
+    return targetDate.toISOString();
   }
+
   const parsed = new Date(dStr);
   if (!isNaN(parsed.getTime())) return parsed.toISOString();
-  return new Date().toISOString();
+  return now.toISOString();
 }
 
 // ── LLM FIELD EXTRACTION ENGINE ──────────────────────────────────────────────
