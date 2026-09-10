@@ -299,7 +299,7 @@ function createTools(senderPhone, rawUserText = '') {
         location: z.string().optional().nullable().describe('Optional filter by visit city or destination (e.g. "Nashik", "Pune", "Mumbai").'),
         outcome_filter: z.string().optional().nullable().describe('Optional filter by visit outcome: "positive", "neutral", "negative", "all".'),
         date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
-        mode: z.string().optional().nullable().describe('Query mode: "list", "rep_leaderboard", "week_comparison", "duplicates", "missing_location", "missing_contact_person".'),
+        mode: z.string().optional().nullable().describe('Query mode: "list", "rep_leaderboard", "week_comparison", "duplicates", "missing_location", "missing_contact_person", "pending_followup".'),
         limit: z.number().optional().nullable().describe('Maximum number of visits to return (default: 20).'),
       }),
     }
@@ -362,13 +362,14 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'get_my_open_deals',
-      description: `Retrieves deals and confirmed orders (negotiations, quotations, won orders, or lost deals). Can filter by stage (e.g. stage_filter="won" for orders), customer name, date range, PO number, or delivery location. Always returns total order value, won deal total value, volume in MT, and #INQ-XXXXXX IDs.`,
+      description: `Retrieves deals and confirmed orders (negotiations, quotations, won orders, or lost deals). Can filter by stage (e.g. stage_filter="won" for orders), customer name, date range, PO number, or delivery location. Supports modes: "invalid_delivery_locations" (flag bad/incomplete addresses), "highest_tonnage", and total items/tonnage metrics.`,
       schema: z.object({
         stage_filter: z.string().optional().nullable().describe('Optional filter by deal stage: "all", "won" (orders), "quoted", "negotiation", "review", "lost".'),
         customer_name: z.string().optional().nullable().describe('Optional customer name filter.'),
         po_number: z.string().optional().nullable().describe('Optional PO number filter.'),
         delivery_location: z.string().optional().nullable().describe('Optional delivery destination city.'),
         date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
+        mode: z.string().optional().nullable().describe('Query mode: "list", "highest_tonnage", "invalid_delivery_locations".'),
         limit: z.number().optional().nullable().describe('Maximum number of deals to return (default: 20).'),
       }),
     }

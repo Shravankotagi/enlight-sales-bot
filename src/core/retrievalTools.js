@@ -1200,6 +1200,19 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     };
   }
 
+  // ── Mode: Pending Follow-up Visits ───────────────────────────────────────
+  if (mode === 'pending_followup' || mode === 'pending_follow_up' || args?.pending_followup || args?.pending_follow_up) {
+    const pending = materialized.filter((v) => v.requires_follow_up);
+    return {
+      data: {
+        total_pending_followup_visits: pending.length,
+        summary: `You have ${pending.length} visit${pending.length === 1 ? '' : 's'} with pending follow-up action.`,
+        visits: pending.slice(0, limit),
+      },
+      rowCount: pending.length,
+    };
+  }
+
   // ── Mode: Missing Location / Contact ──────────────────────────────────────
   if (missingLocation) {
     const missing = materialized.filter((v) => !v.location || v.location === 'N/A');
@@ -1693,22 +1706,92 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
 
   let filtered = [...materialized];
   if (custName) filtered = filtered.filter((d) => d.customer_name.toLowerCase().includes(custName));
-  if (poFilter) filtered = filtered.filter((d) => (d.po_number || '').toLowerCase().includes(poFilter));
+  if (poFilter) {
+    filtered = filtered.filter((d) => (d.po_number || '').toLowerCase().includes(poFilter));
+    // If not found in caller's immediate portfolio, search company-wide deals for this specific PO
+    if (filtered.length === 0) {
+      const { data: globalPoDeals } = await supabaseAdmin
+        .from('deals')
+        .select('id, inquiry_id, customer_name, customer_phone, total_amount, stage, status, po_number, delivery_location, salesperson_phone, employee_id, created_at, won_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
+        .ilike('po_number', `%${poFilter}%`)
+        .limit(5);
+
+      if (globalPoDeals && globalPoDeals.length > 0) {
+        filtered = globalPoDeals.map((d) => {
+          const shortId = `#INQ-${(d.id || d.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+          return {
+            inquiry_id: shortId,
+            deal_id: shortId,
+            full_id: d.id,
+            inquiry_uuid: d.inquiry_id || null,
+            customer_name: d.customer_name || 'Unnamed Customer',
+            customer_phone: d.customer_phone || '',
+            stage: d.stage || 'new_inquiry',
+            po_number: d.po_number || null,
+            total_amount_inr: Number(d.total_amount || 0),
+            tonnage_mt: getDealTonnage(d),
+            delivery_location: d.delivery_location || 'N/A',
+            created_at: d.created_at,
+            won_at: d.won_at,
+            items: d.deal_items || [],
+          };
+        });
+      }
+    }
+  }
   if (locFilter) filtered = filtered.filter((d) => (d.delivery_location || '').toLowerCase().includes(locFilter));
   if (stageFilter && stageFilter !== 'all') {
-    if (stageFilter === 'won' || stageFilter === 'orders') filtered = filtered.filter((d) => d.stage === 'won');
+    if (stageFilter === 'won' || stageFilter === 'orders') filtered = filtered.filter((d) => d.stage === 'won' || Boolean(d.po_number));
     else if (stageFilter === 'lost') filtered = filtered.filter((d) => d.stage === 'lost');
-    else if (stageFilter === 'open') filtered = filtered.filter((d) => d.stage !== 'won' && d.stage !== 'lost');
+    else if (stageFilter === 'open') filtered = filtered.filter((d) => d.stage !== 'won' && d.stage !== 'lost' && !d.po_number);
     else filtered = filtered.filter((d) => d.stage.toLowerCase() === stageFilter);
   }
 
-  let totalVal = 0, wonVal = 0, wonCount = 0, totalTonnage = 0;
+  const mode = (args?.mode || '').toLowerCase().trim();
+
+  // ── Mode: Invalid or Incomplete Delivery Locations ─────────────────────────
+  if (mode === 'invalid_delivery_locations' || mode === 'invalid_locations' || mode === 'bad_locations' || args?.invalid_delivery_location) {
+    const invalidDeals = filtered.filter((d) => {
+      const loc = (d.delivery_location || '').trim().toLowerCase();
+      return !loc || loc === 'n/a' || loc === 'unknown' || loc === 'null' || loc === '123' || loc === 'qwq' || loc === 'test' || loc.length < 3 || /^\d+$/.test(loc);
+    });
+    return {
+      data: {
+        total_invalid_delivery_orders: invalidDeals.length,
+        summary: `Found ${invalidDeals.length} order(s) with an invalid, incomplete, or placeholder delivery location (e.g. "123", "qwq", or unassigned).`,
+        orders: invalidDeals.slice(0, limit),
+        deals: invalidDeals.slice(0, limit),
+      },
+      rowCount: invalidDeals.length,
+    };
+  }
+
+  // ── Mode: Highest Tonnage Order ───────────────────────────────────────────
+  if (mode === 'highest_tonnage' || (stageFilter === 'won' && args?.sort_by === 'tonnage')) {
+    const sortedWon = filtered.filter((d) => d.stage === 'won' || Boolean(d.po_number)).sort((a, b) => b.tonnage_mt - a.tonnage_mt);
+    const top = sortedWon[0] || filtered[0] || null;
+    return {
+      data: {
+        highest_tonnage_order: top,
+        summary: top
+          ? `The order with the highest tonnage is for ${top.customer_name} (${top.po_number ? `PO: ${top.po_number}` : top.inquiry_id}) with ${top.tonnage_mt} MT.`
+          : 'No orders with recorded tonnage found.',
+        top_orders: sortedWon.slice(0, 5),
+      },
+      rowCount: sortedWon.length,
+    };
+  }
+
+  let totalVal = 0, wonVal = 0, wonCount = 0, totalTonnage = 0, totalItems = 0;
   const stageCounts = {};
 
   filtered.forEach((d) => {
-    const isWon = d.stage === 'won';
+    const isWon = d.stage === 'won' || Boolean(d.po_number);
     totalVal += d.total_amount_inr;
     totalTonnage += d.tonnage_mt;
+    if (d.items && Array.isArray(d.items)) {
+      totalItems += d.items.length;
+    }
     if (isWon) {
       wonVal += d.total_amount_inr;
       wonCount++;
@@ -1720,10 +1803,12 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
     data: {
       summary: {
         total_deals: filtered.length,
+        total_orders: wonCount,
         won_orders_count: wonCount,
         won_orders_total_value_inr: wonVal,
         pipeline_total_value_inr: totalVal,
         total_tonnage_mt: Math.round(totalTonnage * 1000) / 1000,
+        total_items_count: totalItems,
         by_stage: stageCounts,
       },
       deals: filtered.slice(0, limit),
