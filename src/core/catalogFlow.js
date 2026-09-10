@@ -45,7 +45,7 @@ Please provide the following details. Fields marked with * are mandatory:
 
 • *Company Name:* *
 • *Product Description / Quantity:* *
-• *Rate:* *
+• *Rate:* (optional)
 • *Preferred Make:* (optional)
 • *Payment Terms:* *
 • *Delivery Location:* *
@@ -700,12 +700,6 @@ function validateMandatoryFields(action, draft) {
       if (!draft.company_name) missing.push('Company Name');
       if (!draft.product_description && (!Array.isArray(draft.line_items) || draft.line_items.length === 0)) {
         missing.push('Product Description / Quantity');
-      }
-      // Rate is mandatory
-      const hasLineRates = Array.isArray(draft.line_items) && draft.line_items.length > 0 && draft.line_items.some(it => Number(it.rate) > 0);
-      const hasGlobalRate = Boolean(draft.rate && Number(String(draft.rate).replace(/[^\d.]/g, '')) > 0);
-      if (!hasLineRates && !hasGlobalRate) {
-        missing.push('Rate (₹ per unit / MT)');
       }
       if (!draft.payment_terms) missing.push('Payment Terms');
       if (!draft.delivery_location) missing.push('Delivery Location');
