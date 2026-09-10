@@ -21,6 +21,21 @@ const { processVisitMessage } = require('./agents/visitAgent');
 const { processRetentionMessage } = require('./agents/retentionAgent');
 const { calculateSubtotal } = require('./utils/pricingEngine');
 
+// In-memory deduplication set with 5-minute TTL to prevent double processing of any message (queries, deals, Meta retries)
+const processedMessageIds = new Map();
+function isDuplicateMessageId(messageId) {
+  if (!messageId) return false;
+  const now = Date.now();
+  for (const [id, time] of processedMessageIds.entries()) {
+    if (now - time > 5 * 60 * 1000) processedMessageIds.delete(id);
+  }
+  if (processedMessageIds.has(messageId)) {
+    return true;
+  }
+  processedMessageIds.set(messageId, now);
+  return false;
+}
+
 /**
  * KRA 6 - CRM Compliance Logger
  * Logs every business activity by a salesperson as a daily CRM touch.
@@ -115,13 +130,18 @@ router.post('/', async (req, res) => {
         const messageType = message.type;
 
         // ── DEDUPLICATION: skip if messageId already processed (Meta retry protection) ──
+        if (isDuplicateMessageId(messageId)) {
+          console.log(`[Webhook] In-memory duplicate detected for messageId ${messageId} - skipping.`);
+          return;
+        }
+
         const { data: existingMsg } = await supabase
           .from('inquiries')
           .select('id')
           .eq('whatsapp_message_id', messageId)
           .limit(1);
         if (existingMsg && existingMsg.length > 0) {
-          console.log(`[Webhook] MessageId ${messageId} already processed - skipping duplicate.`);
+          console.log(`[Webhook] MessageId ${messageId} already processed in DB - skipping duplicate.`);
           return;
         }
 
