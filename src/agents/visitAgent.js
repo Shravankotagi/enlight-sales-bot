@@ -1728,7 +1728,6 @@ async function processVisitMessage(text, senderPhone) {
 
     // 9. Check missing mandatory fields & route to catalog confirmation
     const { validateMandatoryFields, buildConfirmationSummary } = require('../core/catalogFlow');
-    const { saveActiveSession } = require('../supabase');
 
     const draft = {
       action: 'LOG_VISIT',
