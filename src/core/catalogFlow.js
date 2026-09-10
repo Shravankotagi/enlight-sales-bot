@@ -312,6 +312,8 @@ async function extractFieldsWithLLM(action, userInput, existingDraft = {}) {
   const dayBeforeYesterdayDate = new Date(now.getTime() - 48 * 3600 * 1000);
   const dayBeforeYesterdayStr = formatDateDDMMYYYY(dayBeforeYesterdayDate);
 
+  const cleanDraftForLLM = Object.fromEntries(Object.entries(existingDraft || {}).filter(([k]) => !k.startsWith('_')));
+
   const systemPrompt = `You are the Structured Data Extraction Agent for Enlight Metals CRM WhatsApp Bot.
 The user is providing details for the action: "${action}".
 
@@ -349,6 +351,17 @@ LOG_INQUIRY:
       "unit": "<MT | KG | PCS | Sheets | Nos, default MT>",
       "rate": <numeric rate per unit in INR without symbol e.g. 54000 or 20, else null>,
       "amount": <auto-calculated quantity * rate if rate mentioned, else null>
+    }
+  ],
+  "entries": [
+    {
+      "company_name": "<Company Name>",
+      "product_description": "<Product description>",
+      "rate": <rate or null>,
+      "preferred_make": "<make or null>",
+      "payment_terms": "<payment terms or null>",
+      "delivery_location": "<location or null>",
+      "line_items": []
     }
   ]
 }
@@ -402,6 +415,16 @@ LOG_ORDER:
       "rate": <numeric rate per unit in INR without symbol e.g. 58000>,
       "amount": <auto-calculated quantity * rate>
     }
+  ],
+  "entries": [
+    {
+      "company_name": "<Company Name>",
+      "po_number": "<PO Number>",
+      "po_date": "<PO Date>",
+      "delivery_location": "<Location>",
+      "payment_terms": "<Payment Terms>",
+      "line_items": []
+    }
   ]
 }
 
@@ -440,7 +463,19 @@ LOG_VISIT:
   "visit_date": "<Visit date in DD-MM-YYYY format e.g. 10-09-2026, else null>",
   "visit_outcome": "<Positive | Negative | Neutral | Follow-up Required, else null>",
   "followup_action": "<specific follow up action if mentioned, else null>",
-  "meeting_remarks": "<meeting remarks & requirements discussed, else null>"
+  "meeting_remarks": "<meeting remarks & requirements discussed, else null>",
+  "entries": [
+    {
+      "company_name": "<Company Name visited>",
+      "person_met": "<Person met, else null>",
+      "contact_phone": "<Phone, else null>",
+      "city_location": "<City / Location, else null>",
+      "visit_date": "<Visit date in DD-MM-YYYY format, else null>",
+      "visit_outcome": "<Positive | Negative | Neutral | Follow-up Required, else null>",
+      "followup_action": "<Follow-up action, else null>",
+      "meeting_remarks": "<Meeting remarks, else null>"
+    }
+  ]
 }
 
 UPDATE_VISIT:
@@ -468,7 +503,17 @@ LOG_COMPLAINT:
   "complaint_type": "<Quality Defect | Short Delivery | Wrong Material | Delayed Delivery | Billing Issue | Other>",
   "complaint_description": "<Detailed complaint description, else null>",
   "corrective_action": "<Corrective action taken if mentioned, else null>",
-  "initial_status": "<Pending | In Progress | Resolved>"
+  "initial_status": "<Pending | In Progress | Resolved>",
+  "entries": [
+    {
+      "company_name": "<Company Name>",
+      "linked_inquiry_or_po": "<Linked ID>",
+      "complaint_type": "<Type>",
+      "complaint_description": "<Description>",
+      "corrective_action": "<Action>",
+      "initial_status": "<Status>"
+    }
+  ]
 }
 
 UPDATE_COMPLAINT:
@@ -491,10 +536,14 @@ CRITICAL RULES:
 3. Normalize all dates to DD-MM-YYYY format (e.g. "today" -> current date, "yesterday" -> yesterday date, "10/9/26" -> "10-09-2026").
 4. If a field was NOT mentioned by the user, leave it as null or empty string. NEVER fabricate or guess.
 5. In LOG_INQUIRY and LOG_ORDER: if multiple products are listed, extract EACH individual item into the line_items array with its own product name, dimensions/spec, quantity, and unit.
+6. If an existing draft is provided, you are completing or updating fields for THAT ACTIVE DRAFT (${cleanDraftForLLM.company_name || 'the current draft'}). PRESERVE existing draft fields unless explicitly changed by the user message.
+7. MULTIPLE ENTITIES / COMPANIES (CRITICAL): If and only if the user message itself introduces multiple distinct companies/records (e.g. 'Visited two customers today: ABC Steel in Mumbai (positive) and Sharma Construction in Pune (neutral)' or 'Inquiry from ABC for 10 MT and XYZ for 20 MT'):
+Output an 'entries' array containing a separate object for EACH individual customer/visit/inquiry/complaint!
+If only a single company is mentioned or if filling missing fields for an existing draft, return the top-level fields (e.g. company_name, person_met, contact_phone, etc.) and do NOT output an entries array.
 `;
 
-  const userPrompt = `Existing Draft State:
-${JSON.stringify(existingDraft, null, 2)}
+  const userPrompt = `Existing Active Draft:
+${JSON.stringify(cleanDraftForLLM, null, 2)}
 
 User Message:
 "${userInput}"`;
@@ -522,11 +571,14 @@ User Message:
 
 // ── MERGE DRAFT HELPER ───────────────────────────────────────────────────────
 
-function mergeDraft(action, baseDraft, newExtracted, userInput = '') {
+function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   const merged = { ...baseDraft, action };
+  if (baseDraft._queue) merged._queue = baseDraft._queue;
+  if (baseDraft._totalCount) merged._totalCount = baseDraft._totalCount;
+  if (baseDraft._currentIndex) merged._currentIndex = baseDraft._currentIndex;
 
   for (const [key, val] of Object.entries(newExtracted)) {
-    if (key === 'action') continue;
+    if (key === 'action' || key === 'entries' || key.startsWith('_')) continue;
 
     if (val !== null && val !== undefined && val !== '') {
       if (key === 'updates' && typeof val === 'object' && !Array.isArray(val)) {
@@ -566,7 +618,6 @@ function mergeDraft(action, baseDraft, newExtracted, userInput = '') {
       } else if (key === 'line_item_updates' && Array.isArray(val)) {
         if (val.length > 0) {
           merged.line_item_updates = val;
-          // If individual line items are being updated, clear out generic updates.rate/product_description
           if (merged.updates) {
             delete merged.updates.rate;
             delete merged.updates.product_description;
@@ -592,7 +643,39 @@ function mergeDraft(action, baseDraft, newExtracted, userInput = '') {
     }
   }
 
+  // Fallback date injection if date field is empty and user mentioned relative date
+  if (!merged.visit_date && !merged.po_date) {
+    const targetDateKey = action.includes('ORDER') ? 'po_date' : 'visit_date';
+    if (/\b(?:day before yesterday|parso)\b/i.test(userInput)) {
+      merged[targetDateKey] = formatDateDDMMYYYY(new Date(Date.now() - 48 * 3600 * 1000));
+    } else if (/\b(?:yesterday|kal)\b/i.test(userInput)) {
+      merged[targetDateKey] = formatDateDDMMYYYY(new Date(Date.now() - 24 * 3600 * 1000));
+    } else if (/\b(?:today|now|just now|aaj)\b/i.test(userInput)) {
+      merged[targetDateKey] = formatDateDDMMYYYY(new Date());
+    }
+  }
+
   return merged;
+}
+
+function mergeDraft(action, baseDraft, newExtracted, userInput = '') {
+  // If LLM returned multiple entries (e.g. 2 visits / 2 companies in one message)
+  if (Array.isArray(newExtracted?.entries) && newExtracted.entries.length > 0) {
+    const firstEntry = newExtracted.entries[0];
+    const remainingEntries = newExtracted.entries.slice(1).map(entry => {
+      return mergeSingleDraft(action, {}, entry, userInput);
+    });
+
+    const merged = mergeSingleDraft(action, baseDraft, firstEntry, userInput);
+    if (remainingEntries.length > 0) {
+      merged._queue = (baseDraft._queue || []).concat(remainingEntries);
+      merged._totalCount = baseDraft._totalCount || (merged._queue.length + 1);
+      merged._currentIndex = baseDraft._currentIndex || 1;
+    }
+    return merged;
+  }
+
+  return mergeSingleDraft(action, baseDraft, newExtracted, userInput);
 }
 
 // ── VALIDATE MANDATORY FIELDS ────────────────────────────────────────────────
@@ -695,7 +778,8 @@ function validateMandatoryFields(action, draft) {
 // ── BUILD CONFIRMATION SUMMARY ───────────────────────────────────────────────
 
 function buildConfirmationSummary(action, draft) {
-  let summary = `✅ *Here's what I've captured:*\n\n`;
+  const indexTag = draft._totalCount && draft._totalCount > 1 ? ` (${draft._currentIndex || 1} of ${draft._totalCount}: ${draft.company_name || 'Item'})` : '';
+  let summary = `✅ *Here's what I've captured${indexTag}:*\n\n`;
 
   switch (action) {
     case 'LOG_INQUIRY':
@@ -1506,6 +1590,81 @@ ${updates.status ? `🚦 *New Status:* ${updates.status}\n` : ''}Updated details
   }
 }
 
+// ── OPERATIONAL ACTION & QUERY DETECTION HELPERS ─────────────────────────────
+
+function isOperationalQuery(text) {
+  if (!text || typeof text !== 'string') return false;
+  const lower = text.toLowerCase().trim();
+
+  // Common query patterns
+  if (/^(?:show|list|get|check|find|filter|tell me|what|which|how many|total|status of|view|search|is there|who has|compare|rankings|leaderboard)\b/i.test(lower)) {
+    // Exception: "show quotation", "create inquiry", "log visit", etc.
+    if (/^(?:create|log|add|record|raise|report|new|submit)\b/i.test(lower)) {
+      return false;
+    }
+    return true;
+  }
+
+  if (/\b(?:kya hai|batao|dikhao|dikhaye|kitne|kitna|kaun hai|kiska|list karo|check karo)\b/i.test(lower)) {
+    return true;
+  }
+
+  if (/\b(?:inquiry id|deal id|status|summary|leaderboard|pipeline|radar|360|knowledge base|sop|moq|pricing sheet)\b/i.test(lower)) {
+    return true;
+  }
+
+  return false;
+}
+
+function detectOperationalAction(text) {
+  if (!text || typeof text !== 'string') return null;
+  const lower = text.toLowerCase().trim();
+
+  // If message is a pure query / search, do not intercept
+  if (isOperationalQuery(lower)) return null;
+
+  // 1. Explicit Update patterns
+  if (/\b(?:update|change|modify)\b/i.test(lower)) {
+    if (/\b(?:inquiry|deal|inq-)\b/i.test(lower)) return 'UPDATE_INQUIRY';
+    if (/\b(?:order|po-)\b/i.test(lower)) return 'UPDATE_ORDER';
+    if (/\b(?:visit|vis-)\b/i.test(lower)) return 'UPDATE_VISIT';
+    if (/\b(?:complaint|cmp-)\b/i.test(lower)) return 'UPDATE_COMPLAINT';
+  }
+
+  // 2. Complaint patterns (prioritized because complaints often cite PO numbers or visit dates)
+  if (
+    /\b(?:complaint|defect|defective|damaged material|rust on|rusty|short delivery|wrong material|rejection|rejected material|material return|wapas kiya|issue aa gaya)\b/i.test(lower)
+  ) {
+    return 'LOG_COMPLAINT';
+  }
+
+  // 3. Visit / Meeting patterns
+  if (
+    /\b(?:visited|met\b|meeting with|meet with|site visit|field visit|client visit|market visit|office visit|factory visit|gaya tha|mila aaj|milne gaye|visit kiya|visit report)\b/i.test(lower)
+  ) {
+    return 'LOG_VISIT';
+  }
+
+  // 4. Order / PO patterns
+  if (
+    /\b(?:purchase order|po received|received po|order confirmed|po-\d+|po no|po number|order logged|order recorded|deal won)\b/i.test(lower) ||
+    /^\s*(?:po|purchase order)\b/i.test(lower)
+  ) {
+    return 'LOG_ORDER';
+  }
+
+  // 5. Inquiry / Requirements patterns
+  if (
+    /\b(?:inquiry|requirement|rfq|enquiry|rate manga|chahiye|need|needs|requires|require|interested in|quote for|rates? for)\b/i.test(lower)
+  ) {
+    if (/\b(?:coil|sheet|plate|structural|beam|channel|pipe|tube|tmt|steel|mt|ton|tons|kg|pieces|sheets|rate|advance|credit)\b/i.test(lower)) {
+      return 'LOG_INQUIRY';
+    }
+  }
+
+  return null;
+}
+
 // ── MAIN CATALOG FLOW HANDLER ────────────────────────────────────────────────
 
 /**
@@ -1532,12 +1691,22 @@ async function handleCatalogFlow(rawText, senderPhone) {
   const activeSession = await getFullActiveSession(senderPhone);
   const lastIntent = activeSession ? (activeSession.last_intent || '') : '';
 
+  // If currently in a dedicated webhook rejection/payment/unit flow, do not intercept
+  if (lastIntent.startsWith('pending_')) {
+    return { handled: false };
+  }
+
   // ── 3. HANDLE CONFIRMATION STATE (catalog_confirm|...) ──────────────────────
   if (lastIntent.startsWith('catalog_confirm|')) {
     const parts = lastIntent.split('|');
     const action = parts[1];
     const draftJsonStr = parts.slice(2).join('|');
     const draft = safeParseJSON(draftJsonStr, {});
+
+    if (isOperationalQuery(text)) {
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return { handled: false };
+    }
 
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
 
@@ -1553,8 +1722,35 @@ async function handleCatalogFlow(rawText, senderPhone) {
       cleanInput === 'ok' ||
       cleanInput === 'sure'
     ) {
-      await saveActiveSession(senderPhone, draft.company_name || 'Customer', 'general');
       const reply = await executeAction(action, draft, senderPhone);
+
+      // Check if there are queued entries (e.g. 2nd customer visit/inquiry)
+      if (draft._queue && Array.isArray(draft._queue) && draft._queue.length > 0) {
+        const nextEntry = draft._queue.shift();
+        nextEntry._queue = draft._queue;
+        nextEntry._totalCount = draft._totalCount || (draft._queue.length + 2);
+        nextEntry._currentIndex = (draft._currentIndex || 1) + 1;
+        const nextAction = nextEntry.action || action;
+        const missing = validateMandatoryFields(nextAction, nextEntry);
+
+        if (missing.length === 0) {
+          const summary = buildConfirmationSummary(nextAction, nextEntry);
+          await saveActiveSession(senderPhone, nextEntry.company_name || 'Customer', `catalog_confirm|${nextAction}|${JSON.stringify(nextEntry)}`);
+          return {
+            handled: true,
+            reply: `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's confirm the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\n${summary}`,
+          };
+        } else {
+          const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
+          await saveActiveSession(senderPhone, nextEntry.company_name || 'Customer', `catalog_flow|${nextAction}|${JSON.stringify(nextEntry)}`);
+          return {
+            handled: true,
+            reply: `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's complete the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\nPlease provide the remaining mandatory details:\n\n${missingList}`,
+          };
+        }
+      }
+
+      await saveActiveSession(senderPhone, draft.company_name || 'Customer', 'general');
       return { handled: true, reply };
     }
 
@@ -1610,6 +1806,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const draftJsonStr = parts.slice(2).join('|');
     const draft = safeParseJSON(draftJsonStr, {});
 
+    if (isOperationalQuery(text)) {
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return { handled: false };
+    }
+
     const updatedDraft = await extractFieldsWithLLM(action, text, draft);
     const missing = validateMandatoryFields(action, updatedDraft);
 
@@ -1620,10 +1821,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
     } else {
       const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
       const actionName = getActionFriendlyName(action);
+      const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
       return {
         handled: true,
-        reply: `Let's finish your ${actionName} first. Please provide the missing mandatory details:\n\n${missingList}`,
+        reply: `Let's finish your ${actionName}${indexTag} first. Please provide the missing mandatory details:\n\n${missingList}`,
       };
     }
   }
@@ -1634,6 +1836,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const action = parts[1];
     const draftJsonStr = parts.slice(2).join('|');
     const existingDraft = safeParseJSON(draftJsonStr, {});
+
+    if (isOperationalQuery(text)) {
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return { handled: false };
+    }
 
     // Check if user wants to abort / switch
     const newActionMatch = matchActionFromInput(text);
@@ -1673,10 +1880,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
       // Missing mandatory fields -> Ask only for missing fields
       const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
       const actionName = getActionFriendlyName(action);
+      const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
       return {
         handled: true,
-        reply: `Please provide the remaining mandatory details for this ${actionName}:\n\n${missingList}`,
+        reply: `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`,
       };
     }
   }
@@ -1699,7 +1907,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
   }
 
-  // ── 7. DIRECT 1-SHOT ACTION DETECTION FROM FULL TEXT ───────────────────────
+  // ── 7. NATURAL OPERATIONAL ACTION DETECTION (Visits, Inquiries, Orders, Complaints) ─────────
   const directActionMap = [
     { pattern: /^\s*(?:log|create|new|add)\s*(?:new\s*)?inquiry\b/i, action: 'LOG_INQUIRY' },
     { pattern: /^\s*(?:update|change|modify)\s*inquiry\b/i, action: 'UPDATE_INQUIRY' },
@@ -1711,22 +1919,39 @@ async function handleCatalogFlow(rawText, senderPhone) {
     { pattern: /^\s*(?:update|resolve|change|modify)\s*(?:customer\s*)?complaint\b/i, action: 'UPDATE_COMPLAINT' },
   ];
 
+  let detectedAction = null;
   for (const { pattern, action } of directActionMap) {
     if (pattern.test(text)) {
-      const extracted = await extractFieldsWithLLM(action, text, {});
-      const missing = validateMandatoryFields(action, extracted);
+      detectedAction = action;
+      break;
+    }
+  }
+
+  if (!detectedAction) {
+    detectedAction = detectOperationalAction(text);
+  }
+
+  if (detectedAction) {
+    const extracted = await extractFieldsWithLLM(detectedAction, text, {});
+    const hasCompany = Boolean(extracted.company_name || (Array.isArray(extracted.entries) && extracted.entries.some(e => e.company_name)));
+    const hasLineItems = Array.isArray(extracted.line_items) && extracted.line_items.length > 0;
+    const hasUpdates = extracted.updates && Object.keys(extracted.updates).length > 0;
+
+    if (hasCompany || hasLineItems || hasUpdates || extracted.product_description) {
+      const missing = validateMandatoryFields(detectedAction, extracted);
 
       if (missing.length === 0) {
-        const summary = buildConfirmationSummary(action, extracted);
-        await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(extracted)}`);
+        const summary = buildConfirmationSummary(detectedAction, extracted);
+        await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_confirm|${detectedAction}|${JSON.stringify(extracted)}`);
         return { handled: true, reply: summary };
       } else {
         const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
-        const actionName = getActionFriendlyName(action);
-        await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(extracted)}`);
+        const actionName = getActionFriendlyName(detectedAction);
+        const indexTag = extracted._totalCount > 1 ? ` (${extracted._currentIndex || 1} of ${extracted._totalCount}: ${extracted.company_name || 'Item'})` : '';
+        await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(extracted)}`);
         return {
           handled: true,
-          reply: `I've noted the initial details for your ${actionName}. Please provide the missing mandatory details:\n\n${missingList}`,
+          reply: `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`,
         };
       }
     }
@@ -1745,4 +1970,8 @@ module.exports = {
   buildConfirmationSummary,
   executeAction,
   handleCatalogFlow,
+  isOperationalQuery,
+  detectOperationalAction,
+  extractFieldsWithLLM,
+  mergeDraft,
 };
