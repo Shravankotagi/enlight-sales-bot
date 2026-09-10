@@ -215,13 +215,13 @@ function detectHsnCode(productName, dimensions) {
   }
 
   // HR Plate
-  if (/\bhr\s*plate\b|\bhot\s*rolled\s*plate\b|\bms\s*plate\b|\bplate\b/i.test(combined)) {
+  if (/\bhr\s*plate\b|\bhot\s*rolled\s*plate\b/i.test(combined)) {
     if (t !== null && t < 12.00) return '72083730';
     return '72085110';
   }
 
   // HR Sheet
-  if (/\bhr\s*sheet\b|\bhot\s*rolled\s*sheet\b|\bms\s*sheet\b/i.test(combined)) {
+  if (/\bhr\s*sheet\b|\bhot\s*rolled\s*sheet\b/i.test(combined)) {
     if (t !== null) {
       if (t < 3.00) return '72083930';
       if (t < 4.75) return '72083830';
@@ -366,7 +366,7 @@ function normalizeProductToCatalog(productName, dimensions = null) {
   }
 
   // HR Plate (14mm+)
-  if (/\bhr\s*plate\b|\bhot\s*rolled\s*plate\b|\bms\s*plate\b|\bplate\b/i.test(combined)) {
+  if (/\bhr\s*plate\b|\bhot\s*rolled\s*plate\b/i.test(combined)) {
     if (t !== null && t < 12.00) {
       return { isValid: true, catalogName: 'HR Sheet', category: 'Flat Steel', hsnCode: '72083730' };
     }
@@ -374,7 +374,7 @@ function normalizeProductToCatalog(productName, dimensions = null) {
   }
 
   // HR Sheet
-  if (/\bhr\s*sheet\b|\bhot\s*rolled\s*sheet\b|\bms\s*sheet\b/i.test(combined)) {
+  if (/\bhr\s*sheet\b|\bhot\s*rolled\s*sheet\b/i.test(combined)) {
     let code = '72083830';
     if (t !== null && t < 3.00) code = '72083930';
     else if (t !== null && t < 4.75) code = '72083830';
@@ -396,7 +396,7 @@ function normalizeProductToCatalog(productName, dimensions = null) {
     return { isValid: true, catalogName: 'Stainless Steel', category: 'Specialty Steel', hsnCode: '72193390' };
   }
 
-  // Generic / Unrecognized
+  // Generic / Unrecognized (e.g. MS Sheet, MS Plate, etc.)
   return { isValid: false, catalogName: null, category: null, hsnCode: null };
 }
 
@@ -405,13 +405,22 @@ function isValidCatalogProduct(productName) {
 }
 
 function getUnknownProductClarificationMessage(invalidProductName) {
-  return `⚠️ *Unrecognized Product: "${invalidProductName}"*\n\n` +
-    `Please verify the product name. We supply standard steel products across these categories:\n\n` +
-    `📋 *Flat Steel:* HR Coil, HR Sheet, HR Plate, HRPO Coil, HRPO Sheet, CR Coil, CR Sheet, GP Coil, GP Sheet, Galvalume Coil/Sheet, Chequered Coil/Sheet\n` +
-    `🏗️ *Structural Steel:* MS Round Bar, MS Flat Bar, MS Square Bar, TMT Bar, MS Angle, MS Channel, MS Beam\n` +
-    `🔘 *Pipes & Tubes:* MS Round Pipe, MS Square Pipe, MS Rectangular Tube\n` +
-    `⚡ *Value Added:* Slotted Angle, Solar Mounting Structure, Cable Tray (Perforated/Ladder), GI Earthing Strip\n\n` +
-    `Please reply with the matching product name.`;
+  const pLower = String(invalidProductName || '').toLowerCase();
+
+  if (pLower.includes('ms sheet') || (pLower.includes('sheet') && !pLower.includes('hr') && !pLower.includes('cr') && !pLower.includes('gp') && !pLower.includes('galvalume') && !pLower.includes('chequered') && !pLower.includes('hrpo'))) {
+    return `Product "${invalidProductName}" is not present in our products list.\n\nPlease confirm which sheet product from our catalog you would like to log:\n- HR Sheet (1.60 mm – <12.00 mm)\n- CR Sheet (0.30 mm – <3.00 mm)\n- HRPO Sheet (1.60 mm – 12.00 mm)\n- GP Sheet (0.30 mm – 3.00 mm)\n- Galvalume Sheet (0.30 mm – 3.00 mm)\n- Chequered Sheet (1.60 mm – 12.00 mm)\n\nPlease reply with the matching product name (e.g. "HR Sheet" or "CR Sheet").`;
+  }
+
+  if (pLower.includes('ms plate') || (pLower.includes('plate') && !pLower.includes('hr') && !pLower.includes('chequered'))) {
+    return `Product "${invalidProductName}" is not present in our products list.\n\nPlease confirm which product from our catalog you would like to log:\n- HR Plate (14.00 mm and above)\n- HR Sheet (4.75 mm – <12.00 mm)\n- Chequered Sheet (1.60 mm – 12.00 mm)\n\nPlease reply with the matching product name.`;
+  }
+
+  return `Product "${invalidProductName}" is not present in our products list.\n\nPlease verify the product name against our standard product catalog:\n\n` +
+    `- Flat Steel: HR Coil, HR Sheet, HR Plate, HRPO Coil, HRPO Sheet, CR Coil, CR Sheet, GP Coil, GP Sheet, Galvalume Coil, Galvalume Sheet, Chequered Coil, Chequered Sheet\n` +
+    `- Structural Steel: MS Round Bar, MS Flat Bar, MS Square Bar, TMT Bar, MS Angle, MS Channel, MS Beam\n` +
+    `- Pipes & Tubes: MS Round Pipe, MS Square Pipe, MS Rectangular Tube\n` +
+    `- Value Added Products: Slotted Angle, Solar Mounting Structure, Cable Tray (Perforated/Ladder), GI Earthing Strip\n\n` +
+    `Please reply with the confirmed product name from the list.`;
 }
 
 module.exports = {

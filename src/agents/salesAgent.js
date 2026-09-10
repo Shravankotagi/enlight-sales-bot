@@ -2210,6 +2210,69 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       return await handleSendQuotationMessage(text, senderPhone);
     }
 
+    // Check if there is an active pending product clarification session
+    if (activeSess?.last_intent?.startsWith('pending_product_clarification|')) {
+      const parts = activeSess.last_intent.split('|');
+      const sessionCustomer = parts[1];
+      const payloadStr = parts.slice(2).join('|');
+      const { safeParseJSON } = require('../utils/jsonUtils');
+      const pendingPayload = safeParseJSON(payloadStr, null);
+
+      if (pendingPayload) {
+        const rawClean = text.trim();
+        const sheetOptions = ['HR Sheet', 'CR Sheet', 'HRPO Sheet', 'GP Sheet', 'Galvalume Sheet', 'Chequered Sheet'];
+        const plateOptions = ['HR Plate', 'HR Sheet', 'Chequered Sheet'];
+
+        let resolvedCatalogName = null;
+        const numMatch = rawClean.match(/^([1-6])\b/);
+        if (numMatch) {
+          const idx = parseInt(numMatch[1], 10) - 1;
+          const isPlate = String(pendingPayload.invalid_product || '').toLowerCase().includes('plate');
+          const optList = isPlate ? plateOptions : sheetOptions;
+          if (optList[idx]) {
+            resolvedCatalogName = optList[idx];
+          }
+        }
+
+        if (!resolvedCatalogName) {
+          const norm = normalizeProductToCatalog(rawClean);
+          if (norm.isValid) {
+            resolvedCatalogName = norm.catalogName;
+          }
+        }
+
+        if (resolvedCatalogName) {
+          const oldProdName = pendingPayload.invalid_product;
+          if (pendingPayload.data && Array.isArray(pendingPayload.data.line_items)) {
+            for (const itm of pendingPayload.data.line_items) {
+              const itmName = itm.product_requirement || itm.pName || '';
+              if (itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase())) {
+                itm.product_requirement = resolvedCatalogName;
+                itm.pName = resolvedCatalogName;
+              }
+            }
+          }
+          if (Array.isArray(pendingPayload.processedItems)) {
+            for (const itm of pendingPayload.processedItems) {
+              const itmName = itm.pName || itm.product_requirement || '';
+              if (itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase())) {
+                itm.pName = resolvedCatalogName;
+                itm.product_requirement = resolvedCatalogName;
+              }
+            }
+          }
+
+          await saveActiveSession(senderPhone, sessionCustomer || 'Unknown', 'general');
+
+          return await processSalesMessage(
+            pendingPayload.raw_text,
+            senderPhone,
+            pendingPayload.data
+          );
+        }
+      }
+    }
+
     let effectiveTextForLLM = text;
     let data = (typeof overrideData === 'object' && overrideData !== null) ? overrideData : null;
     const cleanText = (text || '').replace(/[*_~`]/g, '').trim();
@@ -2829,6 +2892,33 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       /\b(?:deal|inquiry).*?\b(is\s+on\s+hold|is\s+lost|is\s+won|is\s+negotiation|is\s+quoted|moved\s+to|marked\s+as|put\s+on\s+hold|on\s+hold)\b/i.test(text) ||
       /\b(?:is\s+on\s+hold|put\s+on\s+hold|on\s+hold|hold)\b/i.test(text);
 
+    // ── CATALOG PRODUCT VALIDATION INTERCEPTOR ────────────────────────────────
+    // If user provided items that do not match our official catalog (e.g. "MS Sheet", "MS Plate"),
+    // ask for confirmation/clarification immediately and DO NOT save to database!
+    if (!isExplicitStageUpdate && processedItems.length > 0) {
+      const ambiguousOrInvalidItem = processedItems.find(item => {
+        const norm = normalizeProductToCatalog(item.pName, item.dimensions);
+        return !norm.isValid;
+      });
+
+      if (ambiguousOrInvalidItem) {
+        const clarificationCustomer = customerName || 'Unknown';
+        const pendingPayload = {
+          raw_text: text,
+          customer_name: clarificationCustomer,
+          data: data,
+          processedItems: processedItems,
+          invalid_product: ambiguousOrInvalidItem.pName,
+        };
+        await saveActiveSession(
+          senderPhone,
+          clarificationCustomer,
+          `pending_product_clarification|${clarificationCustomer}|${JSON.stringify(pendingPayload)}`
+        );
+        return getUnknownProductClarificationMessage(ambiguousOrInvalidItem.pName);
+      }
+    }
+
     if (isExplicitStageUpdate) {
       let targetStageName = data.target_stage;
       if (!targetStageName || targetStageName === 'new_inquiry') {
@@ -3040,7 +3130,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     // Disambiguation check for any deal update/rate update/field update without an explicit Deal ID
     const isRateOrPriceUpdate = isRateUpdateContext || hasRateUpdate;
     const isFieldUpdate = hasDeliveryUpdate || hasPaymentUpdate || hasHsnUpdate || hasUnitUpdate || !!data.delivery_date || !!data.contact_person;
-    const isExplicitNewInquiryIntent = /^\s*(?:log\s+new\s+inquiry|new\s+inquiry|new\s+deal|create\s+deal|create\s+inquiry|add\s+deal|add\s+inquiry)\b/i.test(effectiveTextForLLM || text);
+    const isExplicitNewInquiryIntent = /^\s*(?:log\s+(?:new\s+)?inquiry|new\s+inquiry|inquiry\s+for|requirement\s+for|new\s+deal|create\s+deal|create\s+inquiry|add\s+deal|add\s+inquiry|order\s+for)\b/i.test(effectiveTextForLLM || text);
     const isNewInquiryWithProduct = (data.action === 'inquiry' && hasAnyProductName) || isExplicitNewInquiryIntent;
 
     if (!targetExplicitDeal && customerName && !isNewInquiryWithProduct && (isRateOrPriceUpdate || isFieldUpdate || data.action === 'deal_update' || !hasAnyProductName)) {
@@ -3498,29 +3588,30 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     const dealIdMatch = text.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,6})\b/i) || text.match(/#([A-F0-9]{6})\b/i);
     const numChoiceMatch = text.trim().match(/^([1-9])$/);
-
     const isExplicitNewInquiry =
       !dealIdMatch &&
       !numChoiceMatch &&
       !data.po_number &&
       dbStage !== 'won' &&
       data.action !== 'purchase_order' &&
-      /^\s*(?:log\s+new\s+inquiry|new\s+inquiry|new\s+deal|create\s+deal|create\s+inquiry|add\s+deal|add\s+inquiry)\b/i.test(text);
+      /^\s*(?:log\s+(?:new\s+)?inquiry|new\s+inquiry|inquiry\s+for|requirement\s+for|new\s+deal|create\s+deal|create\s+inquiry|add\s+deal|add\s+inquiry|order\s+for)\b/i.test(text);
 
     if (dealIdMatch && openDeals.length > 0) {
       const targetCode = dealIdMatch[1].toUpperCase().replace(/^(?:DEAL|INQ)-?/, '');
       existingDeal = openDeals.find(d => (d.id || '').toUpperCase().includes(targetCode) || (d.inquiry_id || '').toUpperCase().includes(targetCode) || (d.deal_number && d.deal_number.toUpperCase().includes(targetCode)));
     } else if (!isExplicitNewInquiry && openDeals.length > 0) {
-      const candidateProductNames = processedItems.map(pi => pi.pName).filter(Boolean);
-      if (candidateProductNames.length > 0) {
-        const matchingDeal = openDeals.find(d => isDealProductMatch(d, candidateProductNames));
-        existingDeal = matchingDeal || null;
-      } else if (openDeals.length === 1) {
-        existingDeal = openDeals[0];
+      if (data.action !== 'inquiry' && !isExplicitNewInquiryIntent) {
+        const candidateProductNames = processedItems.map(pi => pi.pName).filter(Boolean);
+        if (candidateProductNames.length > 0) {
+          const matchingDeal = openDeals.find(d => isDealProductMatch(d, candidateProductNames));
+          existingDeal = matchingDeal || null;
+        } else if (openDeals.length === 1) {
+          existingDeal = openDeals[0];
+        }
       }
     }
 
-    if (existingDeal && !isExplicitNewInquiry) {
+    if (existingDeal && !isExplicitNewInquiry && data.action !== 'inquiry' && !isExplicitNewInquiryIntent) {
       dealId = existingDeal.id;
     }
 

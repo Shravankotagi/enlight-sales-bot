@@ -418,6 +418,70 @@ router.post('/', async (req, res) => {
             await saveActiveSession(senderPhone, 'Unknown', 'general');
           }
 
+          if (activeSession?.last_intent?.startsWith('pending_product_clarification|')) {
+            const parts = activeSession.last_intent.split('|');
+            const sessionCustomer = parts[1];
+            const payloadStr = parts.slice(2).join('|');
+            const { safeParseJSON } = require('./utils/jsonUtils');
+            const pendingPayload = safeParseJSON(payloadStr, null);
+
+            const cleanInput = raw_text.trim();
+            const sheetOptions = ['HR Sheet', 'CR Sheet', 'HRPO Sheet', 'GP Sheet', 'Galvalume Sheet', 'Chequered Sheet'];
+            const plateOptions = ['HR Plate', 'HR Sheet', 'Chequered Sheet'];
+
+            let resolvedCatalogName = null;
+            const numMatch = cleanInput.match(/^([1-6])\b/);
+            if (numMatch) {
+              const idx = parseInt(numMatch[1], 10) - 1;
+              const isPlate = String(pendingPayload?.invalid_product || '').toLowerCase().includes('plate');
+              const optList = isPlate ? plateOptions : sheetOptions;
+              if (optList[idx]) {
+                resolvedCatalogName = optList[idx];
+              }
+            }
+
+            if (!resolvedCatalogName) {
+              const { normalizeProductToCatalog } = require('./utils/hsnDetector');
+              const norm = normalizeProductToCatalog(cleanInput);
+              if (norm.isValid) {
+                resolvedCatalogName = norm.catalogName;
+              }
+            }
+
+            if (resolvedCatalogName && pendingPayload) {
+              const oldProdName = pendingPayload.invalid_product;
+              if (pendingPayload.data && Array.isArray(pendingPayload.data.line_items)) {
+                for (const itm of pendingPayload.data.line_items) {
+                  const itmName = itm.product_requirement || itm.pName || '';
+                  if (itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase())) {
+                    itm.product_requirement = resolvedCatalogName;
+                    itm.pName = resolvedCatalogName;
+                  }
+                }
+              }
+              if (Array.isArray(pendingPayload.processedItems)) {
+                for (const itm of pendingPayload.processedItems) {
+                  const itmName = itm.pName || itm.product_requirement || '';
+                  if (itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase())) {
+                    itm.pName = resolvedCatalogName;
+                    itm.product_requirement = resolvedCatalogName;
+                  }
+                }
+              }
+
+              await saveActiveSession(senderPhone, sessionCustomer || 'Unknown', 'general');
+
+              const { processSalesMessage } = require('./agents/salesAgent');
+              const reply = await processSalesMessage(
+                pendingPayload.raw_text,
+                senderPhone,
+                pendingPayload.data
+              );
+              await sendTextMessage(senderPhone, reply);
+              return;
+            }
+          }
+
           if (activeSession?.last_intent?.startsWith('pending_product_for_deal|')) {
             const parts = activeSession.last_intent.split('|');
             const customerName = parts[1];
