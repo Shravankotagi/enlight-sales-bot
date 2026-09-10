@@ -305,8 +305,23 @@ function parseDDMMYYYYtoISO(dStr) {
 // ── LLM FIELD EXTRACTION ENGINE ──────────────────────────────────────────────
 
 async function extractFieldsWithLLM(action, userInput, existingDraft = {}) {
+  const now = new Date();
+  const todayStr = formatDateDDMMYYYY(now);
+  const yesterdayDate = new Date(now.getTime() - 24 * 3600 * 1000);
+  const yesterdayStr = formatDateDDMMYYYY(yesterdayDate);
+  const dayBeforeYesterdayDate = new Date(now.getTime() - 48 * 3600 * 1000);
+  const dayBeforeYesterdayStr = formatDateDDMMYYYY(dayBeforeYesterdayDate);
+
   const systemPrompt = `You are the Structured Data Extraction Agent for Enlight Metals CRM WhatsApp Bot.
 The user is providing details for the action: "${action}".
+
+REAL-TIME REFERENCE DATES (CRITICAL - ALWAYS USE THESE):
+- Today: ${todayStr} (DD-MM-YYYY)
+- Yesterday: ${yesterdayStr} (DD-MM-YYYY)
+- Day Before Yesterday / Parso: ${dayBeforeYesterdayStr} (DD-MM-YYYY)
+- Current Year: ${now.getFullYear()}
+- All relative dates like "today", "yesterday", "day before yesterday", "kal", "parso", "now" MUST be calculated relative to Today (${todayStr}) and Yesterday (${yesterdayStr}).
+- NEVER output past years like 2024 or 2025 unless the user explicitly typed that specific year.
 
 Extract the fields according to the following strict schema rules.
 Return ONLY a valid JSON object (no markdown, no backticks, no explanation).
@@ -496,7 +511,7 @@ User Message:
 
     const parsed = safeParseJSON(raw, null);
     if (parsed) {
-      return mergeDraft(action, existingDraft, parsed);
+      return mergeDraft(action, existingDraft, parsed, userInput);
     }
   } catch (err) {
     console.error('[CatalogFlow] LLM extraction error:', err.message);
@@ -507,7 +522,7 @@ User Message:
 
 // ── MERGE DRAFT HELPER ───────────────────────────────────────────────────────
 
-function mergeDraft(action, baseDraft, newExtracted) {
+function mergeDraft(action, baseDraft, newExtracted, userInput = '') {
   const merged = { ...baseDraft, action };
 
   for (const [key, val] of Object.entries(newExtracted)) {
@@ -559,7 +574,17 @@ function mergeDraft(action, baseDraft, newExtracted) {
         }
       } else {
         if (key.includes('date') && typeof val === 'string') {
-          merged[key] = normalizeDateToDDMMYYYY(val);
+          if (/\b(?:day before yesterday|parso)\b/i.test(userInput)) {
+            const dby = new Date(Date.now() - 48 * 3600 * 1000);
+            merged[key] = formatDateDDMMYYYY(dby);
+          } else if (/\b(?:yesterday|kal)\b/i.test(userInput)) {
+            const y = new Date(Date.now() - 24 * 3600 * 1000);
+            merged[key] = formatDateDDMMYYYY(y);
+          } else if (/\b(?:today|now|just now|aaj)\b/i.test(userInput)) {
+            merged[key] = formatDateDDMMYYYY(new Date());
+          } else {
+            merged[key] = normalizeDateToDDMMYYYY(val);
+          }
         } else {
           merged[key] = val;
         }
