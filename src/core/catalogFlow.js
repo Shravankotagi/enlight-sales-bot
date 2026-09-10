@@ -5,10 +5,11 @@
  * 1. Greeting Detection & 9-Option Menu
  * 2. 1-9 & Keyword Action Routing
  * 3. Structured Data Collection for Inquiries, Orders, Field Visits, Complaints
- * 4. AI-Powered Free-Form Field Extraction & Date Normalization
+ * 4. AI-Powered Free-Form Field Extraction, Multi-Product Parsing & Date Normalization
  * 5. Multi-Turn Clarification & Missing Field Prompts
  * 6. Interactive Confirmation Summary (Yes / Edit / Cancel) State Machine
  * 7. Clean Database Execution into Supabase (Inquiries, Deals, Customer Visits, Complaints)
+ *    - Strict Schema Compatibility with Enlight Sales OS Frontend (Company Name & Line Items)
  */
 
 const { invokeWithFallback } = require('./modelRouter');
@@ -315,11 +316,24 @@ LOG_INQUIRY:
 {
   "action": "LOG_INQUIRY",
   "company_name": "<Customer / Company Name, else null>",
-  "product_description": "<Product name, metal grade, dimensions e.g. HR Coil 8mm, else null>",
-  "preferred_make": "<JSW, SAIL, Tata, etc. if mentioned, else null>",
+  "product_description": "<Summary of all products/SKUs, else null>",
+  "preferred_make": "<JSW, SAIL, Tata, any, etc. if mentioned, else null>",
   "payment_terms": "<e.g. 30 Days Credit, 100% Advance, else null>",
-  "delivery_location": "<e.g. Chakan Pune, Taloja, else null>",
-  "additional_notes": "<any extra notes if mentioned, else null>"
+  "delivery_location": "<e.g. Chakan Pune, Taloja, Aurangabad, else null>",
+  "additional_notes": "<any extra notes if mentioned, else null>",
+  "line_items": [
+    {
+      "sku_text": "<Core metal product name and gauge/thickness e.g. 'CR Sheet 1.00MM', 'HR Coil 3.15MM', 'Chequered Sheet 4.5MM'>",
+      "description": "<Full product text e.g. 'CR Sheet 1.00MM (1000 x 2000 mm)'>",
+      "dimensions": "<Dimensions / specifications e.g. '1000 x 2000 mm', '1250 mm width', '1250 x 2500 mm'>",
+      "spec": "<Dimensions / specifications>",
+      "hsn_sac": "<HSN code if known, else null>",
+      "quantity": <numeric quantity e.g. 15>,
+      "unit": "<MT | KG | PCS | Sheets | Nos, default MT>",
+      "rate": <numeric rate if mentioned, else 0>,
+      "amount": <numeric amount if mentioned, else 0>
+    }
+  ]
 }
 
 UPDATE_INQUIRY:
@@ -346,8 +360,10 @@ LOG_ORDER:
   "payment_terms": "<Payment Terms, else null>",
   "line_items": [
     {
-      "description": "<Product name e.g. MS Plate 10mm, HR Coil>",
-      "spec": "<Dimensions / Spec e.g. 8X6000X1500, else null>",
+      "sku_text": "<Core metal product name e.g. 'MS Plate 10mm', 'HR Coil'>",
+      "description": "<Product name e.g. 'MS Plate 10mm', 'HR Coil'>",
+      "spec": "<Dimensions / Spec e.g. '8X6000X1500', else null>",
+      "dimensions": "<Dimensions / Spec, else null>",
       "hsn_sac": "<HSN code if mentioned, else null>",
       "quantity": <numeric quantity e.g. 10>,
       "unit": "<MT | KG | PCS | Sheets | Nos, default MT>",
@@ -442,6 +458,7 @@ CRITICAL RULES:
 2. For numeric amounts/rates, strip ₹ and currency symbols.
 3. Normalize all dates to DD-MM-YYYY format (e.g. "today" -> current date, "yesterday" -> yesterday date, "10/9/26" -> "10-09-2026").
 4. If a field was NOT mentioned by the user, leave it as null or empty string. NEVER fabricate or guess.
+5. In LOG_INQUIRY and LOG_ORDER: if multiple products are listed, extract EACH individual item into the line_items array with its own product name, dimensions/spec, quantity, and unit.
 `;
 
   const userPrompt = `Existing Draft State:
@@ -492,18 +509,27 @@ function mergeDraft(action, baseDraft, newExtracted) {
           merged.line_items = val.map((item) => {
             const qty = Number(item.quantity) || 0;
             const rate = Number(item.rate) || 0;
-            const amt = item.amount ? Number(item.amount) : qty * rate;
-            const hsn = item.hsn_sac || detectHsnCode(item.description || '');
+            const amt = item.amount ? Number(item.amount) : (qty && rate ? qty * rate : 0);
+            const skuText = item.sku_text || item.description || '';
+            const itemDim = item.dimensions || item.spec || '';
+            const hsn = item.hsn_code || item.hsn_sac || detectHsnCode(skuText, itemDim) || detectHsnCode(item.description || '') || '72083840';
             return {
-              description: item.description || '',
-              spec: item.spec || '',
-              hsn_sac: hsn || '',
+              sku_text: skuText,
+              description: item.description || skuText,
+              dimensions: itemDim,
+              spec: itemDim,
+              hsn_sac: hsn,
+              hsn_code: hsn,
               quantity: qty || '',
               unit: item.unit || 'MT',
               rate: rate || '',
               amount: amt || '',
             };
           });
+
+          if (!merged.product_description || merged.product_description.length < 5) {
+            merged.product_description = merged.line_items.map(it => `${it.sku_text || it.description}${it.quantity ? ` - ${it.quantity} ${it.unit || 'MT'}` : ''}`).join(', ');
+          }
         }
       } else if (key === 'line_item_updates' && Array.isArray(val)) {
         if (val.length > 0) {
@@ -530,7 +556,9 @@ function validateMandatoryFields(action, draft) {
   switch (action) {
     case 'LOG_INQUIRY':
       if (!draft.company_name) missing.push('Company Name');
-      if (!draft.product_description) missing.push('Product Description / SKU');
+      if (!draft.product_description && (!Array.isArray(draft.line_items) || draft.line_items.length === 0)) {
+        missing.push('Product Description / SKU');
+      }
       if (!draft.payment_terms) missing.push('Payment Terms');
       if (!draft.delivery_location) missing.push('Delivery Location');
       break;
@@ -552,7 +580,7 @@ function validateMandatoryFields(action, draft) {
         missing.push('Line Items (Product Name, Quantity, Rate)');
       } else {
         const first = draft.line_items[0];
-        if (!first.description) missing.push('Product Name for line item');
+        if (!first.description && !first.sku_text) missing.push('Product Name for line item');
         if (!first.quantity) missing.push('Quantity for line item');
         if (!first.rate) missing.push('Rate (₹ per unit) for line item');
       }
@@ -618,7 +646,16 @@ function buildConfirmationSummary(action, draft) {
   switch (action) {
     case 'LOG_INQUIRY':
       summary += `• *Customer / Company:* ${draft.company_name}\n`;
-      summary += `• *Product Description / SKU:* ${draft.product_description}\n`;
+      if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
+        summary += `• *Products:*\n`;
+        draft.line_items.forEach((it, i) => {
+          const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
+          const qtyStr = it.quantity ? ` — ${it.quantity} ${it.unit || 'MT'}` : '';
+          summary += `  ${i + 1}. *${it.sku_text || it.description}*${specStr}${qtyStr}\n`;
+        });
+      } else {
+        summary += `• *Product Description / SKU:* ${draft.product_description}\n`;
+      }
       if (draft.preferred_make) summary += `• *Preferred Make:* ${draft.preferred_make}\n`;
       summary += `• *Payment Terms:* ${draft.payment_terms}\n`;
       summary += `• *Delivery Location:* ${draft.delivery_location}\n`;
@@ -649,9 +686,9 @@ function buildConfirmationSummary(action, draft) {
         const rate = Number(it.rate) || 0;
         const amount = Number(it.amount) || qty * rate;
         totalAmount += amount;
-        const specStr = it.spec ? ` (${it.spec})` : '';
-        const hsnStr = it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '';
-        summary += `${i + 1}. *${it.description}*${specStr}${hsnStr}\n`;
+        const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
+        const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
+        summary += `${i + 1}. *${it.sku_text || it.description}*${specStr}${hsnStr}\n`;
         summary += `   • Quantity: ${qty} ${it.unit || 'MT'}\n`;
         summary += `   • Rate: ₹${rate.toLocaleString('en-IN')} / ${it.unit || 'MT'}\n`;
         summary += `   • Amount: ₹${amount.toLocaleString('en-IN')}\n`;
@@ -739,16 +776,82 @@ async function executeAction(action, draft, senderPhone) {
         const hexCode = Math.random().toString(16).substring(2, 8).toUpperCase();
         const inquiryCode = `INQ-${hexCode}`;
 
+        const structuredLineItems = (Array.isArray(draft.line_items) && draft.line_items.length > 0)
+          ? draft.line_items.map((it) => {
+              const sText = it.sku_text || it.description || '';
+              const sDim = it.dimensions || it.spec || '';
+              const hCode = it.hsn_code || it.hsn_sac || detectHsnCode(sText, sDim) || detectHsnCode(it.description || '') || '72083840';
+              return {
+                sku_text: sText,
+                description: it.description || sText,
+                dimensions: sDim,
+                spec: sDim,
+                hsn_code: hCode,
+                hsn_sac: hCode,
+                quantity: Number(it.quantity) || 0,
+                unit: it.unit || 'MT',
+                rate: Number(it.rate) || 0,
+                amount: Number(it.amount) || Math.round((Number(it.quantity) || 0) * (Number(it.rate) || 0)),
+              };
+            })
+          : [
+              {
+                sku_text: draft.product_description || 'Hot Rolled',
+                description: draft.product_description || 'Hot Rolled',
+                dimensions: '',
+                spec: '',
+                hsn_code: detectHsnCode(draft.product_description || '') || '72083840',
+                hsn_sac: detectHsnCode(draft.product_description || '') || '72083840',
+                quantity: 0,
+                unit: 'MT',
+                rate: 0,
+                amount: 0,
+              }
+            ];
+
+        const structuredAiJson = {
+          customer: {
+            name: companyName,
+            phone: null,
+            address: draft.delivery_location || null,
+            match_status: 'matched',
+          },
+          customer_name: companyName,
+          companyName: companyName,
+          delivery_location: draft.delivery_location || null,
+          delivery_address: draft.delivery_location || null,
+          payment_terms: draft.payment_terms || null,
+          preferred_make: draft.preferred_make || null,
+          additional_notes: draft.additional_notes || null,
+          product_requirement: draft.product_description || (structuredLineItems[0] ? structuredLineItems[0].sku_text : null),
+          productType: structuredLineItems[0] ? structuredLineItems[0].sku_text : null,
+          line_items: structuredLineItems,
+          lineItems: structuredLineItems,
+          inquiry_type: 'inquiry',
+          overall_confidence: 0.95,
+        };
+
+        let humanRawText = `Customer: ${companyName}\n`;
+        if (structuredLineItems.length > 0 && structuredLineItems[0].quantity > 0) {
+          humanRawText += `Products:\n` + structuredLineItems.map((it, i) => `${i + 1}. ${it.description || it.sku_text} - ${it.quantity} ${it.unit}`).join('\n') + `\n`;
+        } else if (draft.product_description) {
+          humanRawText += `Product: ${draft.product_description}\n`;
+        }
+        if (draft.preferred_make) humanRawText += `Preferred Make: ${draft.preferred_make}\n`;
+        if (draft.payment_terms) humanRawText += `Payment Terms: ${draft.payment_terms}\n`;
+        if (draft.delivery_location) humanRawText += `Delivery Location: ${draft.delivery_location}\n`;
+        if (draft.additional_notes) humanRawText += `Notes: ${draft.additional_notes}\n`;
+
         // 1. Insert into inquiries
         const { data: inqRow, error: inqErr } = await supabase
           .from('inquiries')
           .insert({
             source_channel: 'WhatsApp',
-            raw_text: JSON.stringify(draft),
+            raw_text: humanRawText.trim(),
             sender_phone: senderPhone,
             salesperson_phone: senderPhone,
             status: 'auto_created',
-            ai_extraction_json: draft,
+            ai_extraction_json: structuredAiJson,
             overall_confidence: 0.95,
             inquiry_type: 'inquiry',
             created_at: new Date().toISOString(),
@@ -765,6 +868,7 @@ async function executeAction(action, draft, senderPhone) {
             inquiry_id: inqRow ? inqRow.id : null,
             stage: 'new_inquiry',
             customer_name: companyName,
+            customer_address: draft.delivery_location || null,
             delivery_location: draft.delivery_location || null,
             payment_terms: draft.payment_terms || null,
             inquiry_type: 'inquiry',
@@ -777,14 +881,21 @@ async function executeAction(action, draft, senderPhone) {
 
         if (dealErr) console.error('[CatalogFlow] Deal insert error:', dealErr);
 
-        // 3. Insert line item
-        if (dealRow && draft.product_description) {
-          await supabase.from('deal_items').insert({
+        // 3. Insert line items into deal_items
+        if (dealRow && structuredLineItems.length > 0) {
+          const itemsPayload = structuredLineItems.map(it => ({
             deal_id: dealRow.id,
-            sku_text: draft.product_description,
+            sku_text: it.sku_text || it.description,
+            dimensions: it.dimensions || it.spec || null,
+            grade: it.grade || null,
+            quantity: Number(it.quantity) || null,
+            unit: it.unit || 'MT',
+            rate: Number(it.rate) || null,
+            amount: Number(it.amount) || null,
             confidence: 0.95,
             created_at: new Date().toISOString(),
-          });
+          }));
+          await supabase.from('deal_items').insert(itemsPayload);
         }
 
         // 4. Log KRA 6 (CRM Compliance)
@@ -799,11 +910,15 @@ async function executeAction(action, draft, senderPhone) {
           created_at: new Date().toISOString(),
         });
 
+        const productSummaryStr = structuredLineItems.length > 0
+          ? structuredLineItems.map(it => `${it.sku_text || it.description}${it.quantity ? ` - ${it.quantity} ${it.unit || 'MT'}` : ''}`).join(', ')
+          : (draft.product_description || 'Steel Material');
+
         return `🎉 *Inquiry Successfully Created!*
 
 📋 *Inquiry ID:* #${inquiryCode}
 🏢 *Customer:* ${companyName}
-📦 *Product:* ${draft.product_description}
+📦 *Product:* ${productSummaryStr}
 📍 *Delivery Location:* ${draft.delivery_location}
 💳 *Payment Terms:* ${draft.payment_terms}${draft.preferred_make ? `\n🏷️ *Preferred Make:* ${draft.preferred_make}` : ''}
 
@@ -849,23 +964,70 @@ Updated details saved to Sales Pipeline & Inquiries! 📈`;
         await ensureCustomerRecord(companyName, senderPhone);
 
         let totalAmount = 0;
-        (draft.line_items || []).forEach(it => {
-          const qty = Number(it.quantity) || 0;
-          const rate = Number(it.rate) || 0;
-          const amt = Number(it.amount) || qty * rate;
-          totalAmount += amt;
-        });
+        const structuredLineItems = (Array.isArray(draft.line_items) && draft.line_items.length > 0)
+          ? draft.line_items.map((it) => {
+              const sText = it.sku_text || it.description || '';
+              const sDim = it.dimensions || it.spec || '';
+              const qty = Number(it.quantity) || 0;
+              const rate = Number(it.rate) || 0;
+              const amt = Number(it.amount) || qty * rate;
+              totalAmount += amt;
+              const hCode = it.hsn_code || it.hsn_sac || detectHsnCode(sText, sDim) || detectHsnCode(it.description || '') || '72083840';
+              return {
+                sku_text: sText,
+                description: it.description || sText,
+                dimensions: sDim,
+                spec: sDim,
+                hsn_code: hCode,
+                hsn_sac: hCode,
+                quantity: qty,
+                unit: it.unit || 'MT',
+                rate: rate,
+                amount: amt,
+              };
+            })
+          : [];
+
+        const structuredAiJson = {
+          customer: {
+            name: companyName,
+            phone: null,
+            address: draft.delivery_location || null,
+            match_status: 'matched',
+          },
+          customer_name: companyName,
+          companyName: companyName,
+          po_number: draft.po_number,
+          po_date: draft.po_date,
+          delivery_location: draft.delivery_location || null,
+          delivery_address: draft.delivery_location || null,
+          payment_terms: draft.payment_terms || null,
+          product_requirement: structuredLineItems[0] ? structuredLineItems[0].sku_text : null,
+          productType: structuredLineItems[0] ? structuredLineItems[0].sku_text : null,
+          line_items: structuredLineItems,
+          lineItems: structuredLineItems,
+          total_amount: totalAmount,
+          inquiry_type: 'purchase_order',
+          overall_confidence: 0.98,
+        };
+
+        let humanRawText = `Customer: ${companyName}\nPO Number: ${draft.po_number}\nPO Date: ${draft.po_date}\n`;
+        if (structuredLineItems.length > 0) {
+          humanRawText += `Line Items:\n` + structuredLineItems.map((it, i) => `${i + 1}. ${it.description || it.sku_text} ${it.dimensions ? `(${it.dimensions})` : ''} - ${it.quantity} ${it.unit} @ ₹${it.rate}/${it.unit}`).join('\n') + `\n`;
+        }
+        if (draft.payment_terms) humanRawText += `Payment Terms: ${draft.payment_terms}\n`;
+        if (draft.delivery_location) humanRawText += `Delivery Location: ${draft.delivery_location}\n`;
 
         // 1. Insert into inquiries
         const { data: inqRow } = await supabase
           .from('inquiries')
           .insert({
             source_channel: 'WhatsApp',
-            raw_text: JSON.stringify(draft),
+            raw_text: humanRawText.trim(),
             sender_phone: senderPhone,
             salesperson_phone: senderPhone,
             status: 'auto_created',
-            ai_extraction_json: draft,
+            ai_extraction_json: structuredAiJson,
             overall_confidence: 0.98,
             inquiry_type: 'purchase_order',
             created_at: new Date().toISOString(),
@@ -883,6 +1045,7 @@ Updated details saved to Sales Pipeline & Inquiries! 📈`;
             po_number: draft.po_number,
             po_date: draft.po_date,
             customer_name: companyName,
+            customer_address: draft.delivery_location || null,
             delivery_location: draft.delivery_location,
             payment_terms: draft.payment_terms,
             total_amount: totalAmount,
@@ -897,11 +1060,12 @@ Updated details saved to Sales Pipeline & Inquiries! 📈`;
         if (dealErr) console.error('[CatalogFlow] Order deal insert error:', dealErr);
 
         // 3. Insert line items
-        if (dealRow && Array.isArray(draft.line_items)) {
-          const itemsPayload = draft.line_items.map(it => ({
+        if (dealRow && structuredLineItems.length > 0) {
+          const itemsPayload = structuredLineItems.map(it => ({
             deal_id: dealRow.id,
-            sku_text: it.description,
-            dimensions: it.spec || null,
+            sku_text: it.sku_text || it.description,
+            dimensions: it.dimensions || it.spec || null,
+            grade: it.grade || null,
             quantity: Number(it.quantity) || 0,
             unit: it.unit || 'MT',
             rate: Number(it.rate) || 0,
