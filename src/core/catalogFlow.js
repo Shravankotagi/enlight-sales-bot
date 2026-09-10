@@ -41,47 +41,47 @@ Reply with a number (1–9) or type what you'd like to do.`;
 const MODULE_PROMPTS = {
   LOG_INQUIRY: `📋 *Log New Inquiry*
 
-Please provide the following details. Fields marked with * are mandatory.
+Please provide the following details. Fields marked with * are mandatory:
 
-* *Company Name:*
-* *Product Description / SKU:*
-*Rate:* (optional)
-*Preferred Make:* (optional)
-* *Payment Terms:*
-* *Delivery Location:*
-*Additional Notes:* (optional)
+• *Company Name:* *
+• *Product Description / Quantity:* *
+• *Rate:* *
+• *Preferred Make:* (optional)
+• *Payment Terms:* *
+• *Delivery Location:* *
+• *Additional Notes:* (optional)
 
 You can reply in any format — just include the field names or values in order.`,
 
   UPDATE_INQUIRY: `✏️ *Update Inquiry*
 
-* *Inquiry ID:* (e.g. INQ-2026-0042)
+• *Inquiry ID:* * (e.g. INQ-2026-0042)
 
 Which fields do you want to update? Mention the field name and new value.
 
 *Updatable Fields:*
-- Product Description / SKU
-- Rate
-- Preferred Make
-- Payment Terms
-- Delivery Location
-- Additional Notes
-- Status (Open / Quoted / Won / Lost / On Hold)
+• Product Description / Quantity
+• Rate
+• Preferred Make
+• Payment Terms
+• Delivery Location
+• Additional Notes
+• Status (Open / Quoted / Won / Lost / On Hold)
 
 Example:
 "INQ-2026-0042, update rate to 54000, payment terms to 45 days credit, status to Quoted"`,
 
   LOG_ORDER: `🛒 *Record New Order*
 
-Please provide the following details. Fields marked with * are mandatory.
+Please provide the following details. Fields marked with * are mandatory:
 
-* *Company Name:*
-* *PO Number:* (e.g. PO-2026-0042)
-* *PO Date:* (e.g. 10-09-2026)
-* *Delivery Location:*
-* *Payment Terms:*
+• *Company Name:* *
+• *PO Number:* * (e.g. PO-2026-0042)
+• *PO Date:* * (e.g. 10-09-2026)
+• *Delivery Location:* *
+• *Payment Terms:* *
 
-* *Line Items:* (repeat for each product)
+• *Line Items:* * (repeat for each product)
   - Product Name / Description
   - Spec
   - HSN/SAC Code
@@ -90,84 +90,83 @@ Please provide the following details. Fields marked with * are mandatory.
 
   UPDATE_ORDER: `✏️ *Update Order*
 
-* *PO Number:* (e.g. PO-2026-0042)
+• *PO Number:* * (e.g. PO-2026-0042)
 
 What would you like to update?
 
 *Updatable Header Fields:*
-- PO Date
-- Delivery Location
-- Payment Terms
-- Status (Pending / Processing / Dispatched / Delivered / Cancelled)
+• PO Date
+• Delivery Location
+• Payment Terms
+• Status (Pending / Processing / Dispatched / Delivered / Cancelled)
 
 *Updatable Line Item Fields:*
-- To update a line item, mention the item number or product name and the new values
-- You can also add a new line item or remove an existing one
+• To update a line item, mention the item number or product name and the new values
+• You can also add a new line item or remove an existing one
 
 Example:
 "PO-2026-0042, update delivery location to Pune MIDC, change item 1 rate to 58000, add new item: MS Plate 10mm, HSN 720837, 5 MT, ₹55000"`,
 
   LOG_VISIT: `📍 *Log Customer Field Visit*
 
-Please provide the following. Fields marked with * are mandatory.
+Please provide the following details. Fields marked with * are mandatory:
 
-* *Customer / Company Name:*
-* *Person Met:*
-* *Contact Phone:*
-* *City / Location:*
-* *Visit Date:*
-* *Visit Outcome:* (Positive / Negative / Neutral / Follow-up Required)
-*Follow-up Action:* (optional)
-* *Meeting Remarks & Requirements:*`,
+• *Customer / Company Name:* *
+• *Person Met:* *
+• *Contact Phone:* *
+• *City / Location:* *
+• *Visit Date:* *
+• *Visit Outcome:* * (Positive / Negative / Neutral / Follow-up Required)
+• *Follow-up Action:* (optional)
+• *Meeting Remarks & Requirements:* *`,
 
   UPDATE_VISIT: `✏️ *Update Field Visit*
 
 To identify the visit, provide ONE of the following:
-* *Visit ID:* (e.g. VIS-2026-0015)
+• *Visit ID:* * (e.g. VIS-2026-0015)
 OR
-* *Company Name + Visit Date:* (e.g. ABC Steels, 10-09-2026)
+• *Company Name + Visit Date:* * (e.g. ABC Steels, 10-09-2026)
 
 What would you like to update?
 
 *Updatable Fields:*
-- Person Met
-- Contact Phone
-- City / Location
-- Visit Outcome (Positive / Negative / Neutral / Follow-up Required)
-- Follow-up Action
-- Meeting Remarks & Requirements
-- Status (Completed / Follow-up Pending / Cancelled)
+• Person Met
+• Contact Phone
+• City / Location
+• Visit Outcome (Positive / Negative / Neutral / Follow-up Required)
+• Follow-up Action
+• Meeting Remarks & Requirements
+• Status (Completed / Follow-up Pending / Cancelled)
 
 Example:
 "ABC Steels visit on 10-09-2026, update outcome to Positive, follow-up action to Send quotation by Friday"`,
 
   LOG_COMPLAINT: `⚠️ *Log Customer Complaint*
 
-Please provide the following. Fields marked with * are mandatory.
+Please provide the following details. Fields marked with * are mandatory:
 
-* *Company / Customer Name:*
-* *Linked Inquiry ID / PO Number & Product:*
-* *Complaint Type:*
-  (Quality Defect / Short Delivery / Wrong Material / Delayed Delivery / Billing Issue / Other)
-* *Complaint Description:*
-*Corrective Action Taken:* (optional)
-* *Initial Status:* (Pending / In Progress / Resolved)`,
+• *Company / Customer Name:* *
+• *Linked Inquiry ID / PO Number & Product:* *
+• *Complaint Type:* * (Quality Defect / Short Delivery / Wrong Material / Delayed Delivery / Billing Issue / Other)
+• *Complaint Description:* *
+• *Corrective Action Taken:* (optional)
+• *Initial Status:* * (Pending / In Progress / Resolved)`,
 
   UPDATE_COMPLAINT: `✏️ *Update Complaint*
 
 To identify the complaint, provide ONE of the following:
-* *Complaint ID:* (e.g. CMP-2026-0008)
+• *Complaint ID:* * (e.g. CMP-2026-0008)
 OR
-* *Linked PO Number / Inquiry ID:*
+• *Linked PO Number / Inquiry ID:* * (e.g. PO-2026-0042)
 
 What would you like to update?
 
 *Updatable Fields:*
-- Complaint Type
-- Complaint Description
-- Corrective Action Taken
-- Status (Pending / In Progress / Resolved / Closed)
-- Resolution Notes
+• Complaint Type
+• Complaint Description
+• Corrective Action Taken
+• Resolution Notes
+• Status (Pending / In Progress / Resolved / Closed)
 
 Example:
 "CMP-2026-0008, update status to Resolved, corrective action: replacement dispatched on 09-09-2026"`
@@ -318,23 +317,23 @@ LOG_INQUIRY:
 {
   "action": "LOG_INQUIRY",
   "company_name": "<Customer / Company Name, else null>",
-  "product_description": "<Summary of all products/SKUs, else null>",
-  "rate": <numeric target rate/price per unit if mentioned, else 0>,
+  "product_description": "<Summary of all products/quantities, else null>",
+  "rate": <numeric target rate/price per unit if mentioned, else null>,
   "preferred_make": "<JSW, SAIL, Tata, any, etc. if mentioned, else null>",
   "payment_terms": "<e.g. 30 Days Credit, 100% Advance, else null>",
   "delivery_location": "<e.g. Chakan Pune, Taloja, Aurangabad, else null>",
   "additional_notes": "<any extra notes if mentioned, else null>",
   "line_items": [
     {
-      "sku_text": "<Core metal product name and gauge/thickness e.g. 'CR Sheet 1.00MM', 'HR Coil 3.15MM', 'Chequered Sheet 4.5MM'>",
-      "description": "<Full product text e.g. 'CR Sheet 1.00MM (1000 x 2000 mm)'>",
-      "dimensions": "<Dimensions / specifications e.g. '1000 x 2000 mm', '1250 mm width', '1250 x 2500 mm'>",
+      "sku_text": "<Core metal product name and gauge/thickness e.g. 'MS Sheet 5MM', 'CR Sheet 1.00MM', 'HR Coil 3.15MM'>",
+      "description": "<Full product text e.g. 'MS Sheet 5MM THK (1250 x 2500)'>",
+      "dimensions": "<Dimensions / specifications e.g. '1250 x 2500', '1000 x 2000 mm'>",
       "spec": "<Dimensions / specifications>",
       "hsn_sac": "<HSN code if known, else null>",
       "quantity": <numeric quantity e.g. 15>,
       "unit": "<MT | KG | PCS | Sheets | Nos, default MT>",
-      "rate": <numeric rate per unit in INR without symbol e.g. 54000 if mentioned, else 0>,
-      "amount": <auto-calculated quantity * rate if rate mentioned, else 0>
+      "rate": <numeric rate per unit in INR without symbol e.g. 54000 or 20, else null>,
+      "amount": <auto-calculated quantity * rate if rate mentioned, else null>
     }
   ]
 }
@@ -342,17 +341,31 @@ LOG_INQUIRY:
 UPDATE_INQUIRY:
 {
   "action": "UPDATE_INQUIRY",
-  "inquiry_id": "<Inquiry ID e.g. INQ-2026-0042, INQ-B76516, #INQ-0042, else null>",
+  "inquiry_id": "<Inquiry ID e.g. INQ-2026-0042, INQ-1BB6F1, INQ-B76516, #INQ-0042, else null>",
   "updates": {
-    "product_description": "<if user requested update, else null>",
-    "rate": <numeric rate if updated e.g. 54000, else null>,
+    "product_description": "<if user requested general product text update, else null>",
+    "rate": <numeric rate ONLY if a single overall rate was specified without mentioning product names, else null>,
     "preferred_make": "<if user requested update, else null>",
     "payment_terms": "<if user requested update, else null>",
     "delivery_location": "<if user requested update, else null>",
     "additional_notes": "<if user requested update, else null>",
     "status": "<Open | Quoted | Won | Lost | On Hold if mentioned, else null>"
-  }
+  },
+  "line_item_updates": [
+    {
+      "sku_text": "<Product SKU or Name e.g. 'MS Sheet 5MM', 'MS Sheet 6MM'>",
+      "description": "<Product description>",
+      "rate": <numeric rate if specified for this product e.g. 20, 30, 54000, else null>,
+      "quantity": <numeric quantity if specified for this product e.g. 15, 20, else null>,
+      "unit": "<MT | KG | PCS | Sheets, default MT>"
+    }
+  ]
 }
+
+IMPORTANT RULES FOR INQUIRIES:
+- If a user provides multiple products with individual rates (e.g. 'rate \n MS Sheet 5MM - 20 \n MS Sheet 6MM - 30'), put each product with its specific rate into 'line_item_updates' array! Do NOT put 20 as updates.rate, and do NOT put 'MS Sheet 5MM, MS Sheet 6MM' into updates.product_description.
+- If a user provides multiple products with quantities (e.g. 'MS Sheet 5MM - 15 MT, MS Sheet 6MM - 20 MT'), parse each into line_items/line_item_updates with its respective quantity and unit.
+- If a single rate is provided along with multiple products, apply that rate to all line items.
 
 LOG_ORDER:
 {
@@ -538,6 +551,11 @@ function mergeDraft(action, baseDraft, newExtracted) {
       } else if (key === 'line_item_updates' && Array.isArray(val)) {
         if (val.length > 0) {
           merged.line_item_updates = val;
+          // If individual line items are being updated, clear out generic updates.rate/product_description
+          if (merged.updates) {
+            delete merged.updates.rate;
+            delete merged.updates.product_description;
+          }
         }
       } else {
         if (key.includes('date') && typeof val === 'string') {
@@ -561,7 +579,13 @@ function validateMandatoryFields(action, draft) {
     case 'LOG_INQUIRY':
       if (!draft.company_name) missing.push('Company Name');
       if (!draft.product_description && (!Array.isArray(draft.line_items) || draft.line_items.length === 0)) {
-        missing.push('Product Description / SKU');
+        missing.push('Product Description / Quantity');
+      }
+      // Rate is mandatory
+      const hasLineRates = Array.isArray(draft.line_items) && draft.line_items.length > 0 && draft.line_items.some(it => Number(it.rate) > 0);
+      const hasGlobalRate = Boolean(draft.rate && Number(String(draft.rate).replace(/[^\d.]/g, '')) > 0);
+      if (!hasLineRates && !hasGlobalRate) {
+        missing.push('Rate (₹ per unit / MT)');
       }
       if (!draft.payment_terms) missing.push('Payment Terms');
       if (!draft.delivery_location) missing.push('Delivery Location');
@@ -571,7 +595,8 @@ function validateMandatoryFields(action, draft) {
       if (!draft.inquiry_id) missing.push('Inquiry ID (e.g. INQ-2026-0042)');
       const inqUpdates = draft.updates || {};
       const hasInqUpdate = Object.values(inqUpdates).some(v => v !== null && v !== undefined && v !== '');
-      if (!hasInqUpdate) missing.push('At least one field to update');
+      const hasInqLineUpdates = Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0;
+      if (!hasInqUpdate && !hasInqLineUpdates) missing.push('At least one field to update');
       break;
 
     case 'LOG_ORDER':
@@ -660,7 +685,7 @@ function buildConfirmationSummary(action, draft) {
           summary += `  ${i + 1}. *${it.sku_text || it.description}*${specStr}${qtyStr}${rateStr}${amtStr}\n`;
         });
       } else {
-        summary += `• *Product Description / SKU:* ${draft.product_description}\n`;
+        summary += `• *Product Description / Quantity:* ${draft.product_description}\n`;
         if (draft.rate) summary += `• *Rate:* ₹${Number(String(draft.rate).replace(/[^\d.]/g, '')).toLocaleString('en-IN')} / MT\n`;
       }
       if (draft.preferred_make) summary += `• *Preferred Make:* ${draft.preferred_make}\n`;
@@ -671,13 +696,26 @@ function buildConfirmationSummary(action, draft) {
 
     case 'UPDATE_INQUIRY':
       summary += `• *Inquiry ID:* ${draft.inquiry_id}\n`;
-      summary += `*Updating Fields:*\n`;
-      for (const [k, v] of Object.entries(draft.updates || {})) {
-        if (v) {
-          const label = k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-          const valStr = k.toLowerCase().includes('rate') ? `₹${Number(String(v).replace(/[^\d.]/g, '')).toLocaleString('en-IN')} / MT` : v;
-          summary += `• Updating *${label}* → ${valStr}\n`;
+      const hasHeaderUpdates = draft.updates && Object.values(draft.updates).some(v => v !== null && v !== undefined && v !== '');
+      if (hasHeaderUpdates) {
+        summary += `*Updating Fields:*\n`;
+        for (const [k, v] of Object.entries(draft.updates || {})) {
+          if (v) {
+            const label = k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+            const valStr = k.toLowerCase().includes('rate') ? `₹${Number(String(v).replace(/[^\d.]/g, '')).toLocaleString('en-IN')} / MT` : v;
+            summary += `• Updating *${label}* → ${valStr}\n`;
+          }
         }
+      }
+      if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0) {
+        summary += `*Updating Products / Rates:*\n`;
+        draft.line_item_updates.forEach((it, i) => {
+          const name = it.sku_text || it.description || `Item ${i + 1}`;
+          const parts = [];
+          if (it.quantity) parts.push(`Qty: ${it.quantity} ${it.unit || 'MT'}`);
+          if (it.rate) parts.push(`Rate: ₹${Number(String(it.rate).replace(/[^\d.]/g, '')).toLocaleString('en-IN')}/${it.unit || 'MT'}`);
+          summary += `  ${i + 1}. *${name}* → ${parts.join(' | ')}\n`;
+        });
       }
       break;
 
@@ -980,43 +1018,95 @@ Logged to Sales Pipeline & Inquiries! ✅`;
           else dealUpdates.stage = updates.status;
         }
 
-        // Handle rate update
-        if (updates.rate) {
-          const newRate = Number(String(updates.rate).replace(/[^\d.]/g, '')) || 0;
-          if (newRate > 0 && deal) {
-            const { data: dItems } = await supabase.from('deal_items').select('*').eq('deal_id', deal.id);
-            if (dItems && dItems.length > 0) {
-              let totalAmount = 0;
+        if (deal) {
+          const { data: dItems } = await supabase.from('deal_items').select('*').eq('deal_id', deal.id);
+          let totalAmount = 0;
+          let itemsUpdated = false;
+
+          // 1. Specific line item updates (e.g. MS Sheet 5MM - 20, MS Sheet 6MM - 30)
+          if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0 && dItems && dItems.length > 0) {
+            for (let i = 0; i < dItems.length; i++) {
+              const currentItem = dItems[i];
+              const curSku = (currentItem.sku_text || currentItem.description || '').toLowerCase();
+
+              // Find matching update in line_item_updates
+              const matchedUpd = draft.line_item_updates.find((upd, uIdx) => {
+                const updSku = (upd.sku_text || upd.description || '').toLowerCase();
+                if (!updSku) return uIdx === i;
+                const cleanCur = curSku.replace(/[^a-z0-9]/g, '');
+                const cleanUpd = updSku.replace(/[^a-z0-9]/g, '');
+                return cleanCur.includes(cleanUpd) || cleanUpd.includes(cleanCur) || uIdx === i;
+              });
+
+              let itRate = Number(currentItem.rate) || 0;
+              let itQty = Number(currentItem.quantity) || 0;
+
+              if (matchedUpd) {
+                if (matchedUpd.rate !== null && matchedUpd.rate !== undefined && matchedUpd.rate !== '') {
+                  itRate = Number(String(matchedUpd.rate).replace(/[^\d.]/g, '')) || itRate;
+                }
+                if (matchedUpd.quantity !== null && matchedUpd.quantity !== undefined && matchedUpd.quantity !== '') {
+                  itQty = Number(String(matchedUpd.quantity).replace(/[^\d.]/g, '')) || itQty;
+                }
+              } else if (updates.rate) {
+                const globalRate = Number(String(updates.rate).replace(/[^\d.]/g, '')) || 0;
+                if (globalRate > 0) itRate = globalRate;
+              }
+
+              const itAmt = itQty > 0 && itRate > 0 ? itQty * itRate : 0;
+              totalAmount += itAmt;
+
+              await supabase.from('deal_items').update({
+                rate: itRate,
+                quantity: itQty,
+                amount: itAmt,
+              }).eq('id', currentItem.id);
+              itemsUpdated = true;
+            }
+          } else if (updates.rate && dItems && dItems.length > 0) {
+            // 2. Global rate update across all items
+            const newRate = Number(String(updates.rate).replace(/[^\d.]/g, '')) || 0;
+            if (newRate > 0) {
               for (const it of dItems) {
                 const itQty = Number(it.quantity) || 0;
                 const itAmt = itQty > 0 ? itQty * newRate : 0;
                 totalAmount += itAmt;
                 await supabase.from('deal_items').update({ rate: newRate, amount: itAmt }).eq('id', it.id);
               }
-              if (totalAmount > 0) {
-                dealUpdates.total_amount = totalAmount;
-              }
+              itemsUpdated = true;
             }
+          }
 
-            if (deal.inquiry_id) {
-              const { data: inqRow } = await supabase.from('inquiries').select('ai_extraction_json').eq('id', deal.inquiry_id).single();
-              if (inqRow?.ai_extraction_json) {
-                const aiJson = inqRow.ai_extraction_json;
-                if (Array.isArray(aiJson.line_items)) {
-                  aiJson.line_items = aiJson.line_items.map(it => {
-                    const itQty = Number(it.quantity) || 0;
-                    return {
-                      ...it,
-                      rate: newRate,
-                      amount: itQty > 0 ? itQty * newRate : (it.amount || 0),
-                    };
-                  });
-                  aiJson.lineItems = aiJson.line_items;
-                }
-                aiJson.rate = newRate;
-                aiJson.unitPrice = newRate;
-                await supabase.from('inquiries').update({ ai_extraction_json: aiJson }).eq('id', deal.inquiry_id);
+          if (itemsUpdated && totalAmount > 0) {
+            dealUpdates.total_amount = totalAmount;
+          }
+
+          // Synchronize inquiries.ai_extraction_json
+          if (deal.inquiry_id && itemsUpdated) {
+            const { data: inqRow } = await supabase.from('inquiries').select('ai_extraction_json').eq('id', deal.inquiry_id).single();
+            if (inqRow?.ai_extraction_json) {
+              const aiJson = inqRow.ai_extraction_json;
+              const { data: refreshedItems } = await supabase.from('deal_items').select('*').eq('deal_id', deal.id);
+              if (refreshedItems && refreshedItems.length > 0) {
+                aiJson.line_items = refreshedItems.map(it => ({
+                  sku_text: it.sku_text,
+                  description: it.sku_text,
+                  dimensions: it.dimensions,
+                  spec: it.dimensions,
+                  hsn_code: it.hsn_code || detectHsnCode(it.sku_text, it.dimensions) || '72083840',
+                  hsn_sac: it.hsn_code || detectHsnCode(it.sku_text, it.dimensions) || '72083840',
+                  quantity: Number(it.quantity) || 0,
+                  unit: it.unit || 'MT',
+                  rate: Number(it.rate) || 0,
+                  amount: Number(it.amount) || (Number(it.quantity) * Number(it.rate)),
+                }));
+                aiJson.lineItems = aiJson.line_items;
+                aiJson.rate = refreshedItems[0]?.rate ?? aiJson.rate;
+                aiJson.unitPrice = refreshedItems[0]?.rate ?? aiJson.unitPrice;
+                aiJson.total_amount = totalAmount;
+                aiJson.totalAmount = totalAmount;
               }
+              await supabase.from('inquiries').update({ ai_extraction_json: aiJson }).eq('id', deal.inquiry_id);
             }
           }
         }
