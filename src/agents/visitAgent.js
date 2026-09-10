@@ -849,7 +849,7 @@ async function handleVisitCorrection(text, senderPhone) {
     let query = supabase
       .from('customer_visits')
       .select(
-        'id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, salesperson_phone',
+        'id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, salesperson_phone, outcome',
       )
       .order('visited_at', { ascending: false })
       .limit(15);
@@ -920,13 +920,18 @@ async function handleVisitCorrection(text, senderPhone) {
 
     // 3. If old_value mentioned, filter by old_value
     if (!targetVisit && oldValue) {
+      const oldLower = oldValue.toLowerCase().trim();
       const matchedByOld = candidateVisits.filter((v) => {
         const pMet = (v.person_met || '').toLowerCase();
         const rem = (v.remarks || '').toLowerCase();
-        const oldLower = oldValue.toLowerCase();
+        const vOut = (v.outcome || '').toLowerCase();
+        const outTagMatch = rem.match(/\[Outcome:\s*([^\]]+)\]/i);
+        const outTag = outTagMatch ? outTagMatch[1].toLowerCase().trim() : '';
         return (
           pMet.includes(oldLower) ||
           rem.includes(oldLower) ||
+          vOut === oldLower ||
+          outTag === oldLower ||
           rem.includes(`[outcome: ${oldLower}]`)
         );
       });
@@ -962,11 +967,17 @@ async function handleVisitCorrection(text, senderPhone) {
           'Dec',
         ];
         const dateStr = `${day} ${monthNames[vDate.getMonth()]} ${vDate.getFullYear()}`;
+        const outTagMatch = (v.remarks || '').match(/\[Outcome:\s*([^\]]+)\]/i);
+        const recordedOutcome =
+          v.outcome || (outTagMatch ? outTagMatch[1] : null) || 'Not recorded';
+        const formattedOutcome =
+          recordedOutcome.charAt(0).toUpperCase() + recordedOutcome.slice(1);
         return {
           index: idx + 1,
           id: v.id,
           customer_name: v.customer_name,
           date: dateStr,
+          outcome: formattedOutcome,
           person_met: v.person_met || 'Not recorded',
           remarks: v.remarks ? v.remarks.slice(0, 60) : 'No remarks',
         };
@@ -975,7 +986,7 @@ async function handleVisitCorrection(text, senderPhone) {
       const choicesText = candidateSummaries
         .map(
           (c) =>
-            `${c.index}. ${c.customer_name} (${c.date}) - Person Met: ${c.person_met}`,
+            `${c.index}. ${c.customer_name} (${c.date}) - Outcome: ${c.outcome} - Contact: ${c.person_met}`,
         )
         .join('\n');
 
@@ -1046,6 +1057,7 @@ async function applyVisitFieldUpdate(
     const normOut =
       newValue.charAt(0).toUpperCase() + newValue.slice(1).toLowerCase();
     newValue = normOut;
+    updatePayload.outcome = normOut.toLowerCase();
     // Update outcome tag in remarks
     let updatedRemarks = targetVisit.remarks || '';
     if (/\[Outcome:\s*[^\]]+\]/i.test(updatedRemarks)) {

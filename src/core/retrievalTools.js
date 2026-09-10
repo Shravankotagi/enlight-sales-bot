@@ -344,7 +344,7 @@ function parseDateFilter(dateFilter) {
 function parseVisitRemarks(remarks) {
   if (!remarks) {
     return {
-      outcome: 'neutral',
+      outcome: null,
       follow_up_action: null,
       requires_follow_up: false,
       material_requirement: null,
@@ -354,7 +354,7 @@ function parseVisitRemarks(remarks) {
     };
   }
 
-  let outcome = 'neutral';
+  let outcome = null;
   const outcomeMatch = remarks.match(/\[Outcome:\s*([^\]]+)\]/i);
   if (outcomeMatch) {
     const rawOut = outcomeMatch[1].toLowerCase().trim();
@@ -364,13 +364,16 @@ function parseVisitRemarks(remarks) {
   }
 
   let followUpAction = null;
-  const followUpMatch = remarks.match(/\[Follow-up:\s*([^\]]+)\]/i);
+  const followUpMatch = remarks.match(/\[Follow-?Up:\s*([^\]]+)\]/i);
   if (followUpMatch) {
-    followUpAction = followUpMatch[1].trim();
+    const fu = followUpMatch[1].trim();
+    if (fu && !fu.toLowerCase().startsWith('no remarks') && fu.toLowerCase() !== 'none') {
+      followUpAction = fu;
+    }
   }
 
   let materialRequirement = null;
-  const matMatch = remarks.match(/\[Material Requirements:\s*([^\]]+)\]/i) || remarks.match(/\[Requirements:\s*([^\]]+)\]/i);
+  const matMatch = remarks.match(/\[(?:Material )?Requirements?:\s*([^\]]+)\]/i);
   if (matMatch) {
     materialRequirement = matMatch[1].trim();
   }
@@ -389,9 +392,8 @@ function parseVisitRemarks(remarks) {
 
   const cleanRemarks = remarks
     .replace(/\[Outcome:\s*[^\]]+\]/gi, '')
-    .replace(/\[Follow-up:\s*[^\]]+\]/gi, '')
-    .replace(/\[Material Requirements:\s*[^\]]+\]/gi, '')
-    .replace(/\[Requirements:\s*[^\]]+\]/gi, '')
+    .replace(/\[Follow-?Up:\s*[^\]]+\]/gi, '')
+    .replace(/\[(?:Material )?Requirements?:\s*[^\]]+\]/gi, '')
     .replace(/\[Location:\s*[^\]]+\]/gi, '')
     .replace(/\[Interests:\s*[^\]]+\]/gi, '')
     .trim();
@@ -1059,9 +1061,10 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   const materialized = (rows || []).map((r) => {
     const rawRemarks = r.remarks || r.discussion_remarks || '';
     const parsed = parseVisitRemarks(rawRemarks);
-    const out = r.outcome && ['positive', 'neutral', 'negative'].includes(String(r.outcome).toLowerCase().trim())
-      ? String(r.outcome).toLowerCase().trim()
-      : parsed.outcome;
+    const rawOut = r.outcome || parsed.outcome;
+    const out = rawOut && ['positive', 'neutral', 'negative'].includes(String(rawOut).toLowerCase().trim())
+      ? String(rawOut).toLowerCase().trim()
+      : null;
     const p = (r.salesperson_phone || '').replace(/\D/g, '').slice(-10);
     const repName = empMap.get(p) || empMap.get(r.employee_id) || r.salesperson_name || 'Salesperson';
     const loc = r.location || r.customer_address || parsed.location || 'N/A';
@@ -1095,7 +1098,9 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
         repStats[rep] = { rep_name: rep, total_visits: 0, positive: 0, neutral: 0, negative: 0, follow_ups_logged: 0, accounts_visited: new Set() };
       }
       repStats[rep].total_visits += 1;
-      repStats[rep][v.outcome] += 1;
+      if (v.outcome === 'positive') repStats[rep].positive += 1;
+      else if (v.outcome === 'neutral') repStats[rep].neutral += 1;
+      else if (v.outcome === 'negative') repStats[rep].negative += 1;
       if (v.requires_follow_up) repStats[rep].follow_ups_logged += 1;
       repStats[rep].accounts_visited.add(v.customer_name);
     });
@@ -1203,8 +1208,8 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   let pos = 0, neu = 0, neg = 0, fu = 0;
   filtered.forEach((v) => {
     if (v.outcome === 'positive') pos++;
+    else if (v.outcome === 'neutral') neu++;
     else if (v.outcome === 'negative') neg++;
-    else neu++;
     if (v.requires_follow_up) fu++;
   });
 
@@ -1215,7 +1220,12 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
         positive_outcomes: pos,
         neutral_outcomes: neu,
         negative_outcomes: neg,
+        unspecified_outcomes: filtered.length - (pos + neu + neg),
         follow_ups_logged: fu,
+        multiple_visits_for_customer: Boolean(custFilter && filtered.length > 1),
+        customer_visits_breakdown: custFilter && filtered.length > 1
+          ? filtered.map((v, i) => `${i + 1}. Date: ${v.visit_date}, Outcome: ${v.outcome || 'Not recorded'}, Person: ${v.person_met}`).join(' | ')
+          : undefined,
       },
       visits: filtered.slice(0, limit),
     },
