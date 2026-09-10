@@ -227,6 +227,39 @@ const PRODUCT_FAMILIES = {
   gi_earthing_strip: ['gi earthing strip', 'earthing strip', 'galvanized strip', 'earthing patti', 'earthing'],
 };
 
+const KNOWN_CATALOG_PRODUCTS = [
+  { name: 'HRPO Sheet', regex: /\b(hrpo\s*sheet|pickled\s*(?:&|and)\s*oiled\s*sheet)\b/i },
+  { name: 'HRPO Coil', regex: /\b(hrpo\s*coil|hrpo|pickled\s*(?:&|and)\s*oiled)\b/i },
+  { name: 'HR Plate', regex: /\b(hr\s*plate|hot\s*rolled\s*plate)\b/i },
+  { name: 'HR Sheet', regex: /\b(hr\s*sheet|hot\s*rolled\s*sheet)\b/i },
+  { name: 'HR Coil', regex: /\b(hr\s*coil|hot\s*rolled\s*coil)\b/i },
+  { name: 'CR Sheet', regex: /\b(cr\s*sheet|cold\s*rolled\s*sheet|crca\s*sheet)\b/i },
+  { name: 'CR Coil', regex: /\b(cr\s*coil|cold\s*rolled\s*coil|crca)\b/i },
+  { name: 'GP Sheet', regex: /\b(gp\s*sheet|gi\s*sheet|galvanized\s*plain\s*sheet|gi\s*patra|gp\s*patra)\b/i },
+  { name: 'GP Coil', regex: /\b(gp\s*coil|gi\s*coil|galvanized\s*plain\s*coil)\b/i },
+  { name: 'Galvalume Sheet', regex: /\b(galvalume\s*sheet|gl\s*sheet)\b/i },
+  { name: 'Galvalume Coil', regex: /\b(galvalume\s*coil|gl\s*coil)\b/i },
+  { name: 'Chequered Coil', regex: /\b(chequered\s*coil|checkered\s*coil)\b/i },
+  { name: 'Chequered Sheet', regex: /\b(chequered|checkered)\s*(?:plate|sheet|coil)?\b/i },
+  { name: 'MS Plate', regex: /\b(ms\s*plate|plates|bq\s*plate|boiler\s*plate|hardox)\b/i },
+  { name: 'MS Sheet', regex: /\b(ms\s*sheet)\b/i },
+  { name: 'MS Round Bar', regex: /\b(round\s*bar|bright\s*bar|en8|en19|round\s*rod)\b/i },
+  { name: 'MS Flat Bar', regex: /\b(flat\s*bar|ms\s*flat|patti|flats)\b/i },
+  { name: 'MS Square Bar', regex: /\b(square\s*bar|sq\s*bar|square\s*rod)\b/i },
+  { name: 'MS Square Pipe', regex: /\b(square\s*pipe|box\s*pipe|shs|square\s*tube|box\s*section)\b/i },
+  { name: 'MS Rectangular Tube', regex: /\b(rectangular\s*pipe|rhs|rectangular\s*tube)\b/i },
+  { name: 'MS Round Pipe', regex: /\b(round\s*pipe|erw\s*pipe|seamless\s*pipe|ms\s*pipe|pipe|tube)\b/i },
+  { name: 'MS Angle', regex: /\b(angle|angles|equal\s*angle|unequal\s*angle|l-angle|isa)\b/i },
+  { name: 'MS Beam', regex: /\b(beam|beams|ismb|joist|i-beam|h-beam|girder|npb|wpb)\b/i },
+  { name: 'MS Channel', regex: /\b(channel|channels|ismc|c-channel)\b/i },
+  { name: 'TMT Bar', regex: /\b(tmt\s*bar|tmt|sariya|rebar|fe\s*500|fe\s*550)\b/i },
+  { name: 'Slotted Angle', regex: /\b(slotted\s*angle|slotted\s*rack)\b/i },
+  { name: 'Solar Mounting Structure', regex: /\b(solar\s*mounting|solar\s*structure|solar|z\s*purlin|hat\s*section)\b/i },
+  { name: 'Cable Tray – Perforated', regex: /\b(perforated\s*cable\s*tray|cable\s*tray)\b/i },
+  { name: 'Cable Tray – Ladder', regex: /\b(ladder\s*cable\s*tray)\b/i },
+  { name: 'GI Earthing Strip', regex: /\b(earthing\s*strip|earthing\s*patti|gi\s*earthing)\b/i },
+];
+
 function getProductFamily(name) {
   if (!name || typeof name !== 'string') return null;
   const lower = name.toLowerCase();
@@ -555,64 +588,17 @@ function extractRuleBasedLineItems(textRaw) {
   if (!textRaw || typeof textRaw !== 'string') return [];
   const items = [];
 
-  // 1. Check deterministic rate items first
-  const rateItems = extractDeterministicRateItems(textRaw);
-  if (rateItems.length > 0) {
-    return rateItems;
+  const isExplicitRateUpdate = /\b(upadte|updt|updte|update|set|new|give|change)\s+(?:the\s+)?(?:rates?|prices?|pricing)|(?:rates?|prices?)\s+for|rates?:/i.test(textRaw);
+
+  // 1. If explicit rate update, check deterministic rate items first
+  if (isExplicitRateUpdate) {
+    const rateItems = extractDeterministicRateItems(textRaw);
+    if (rateItems.length > 0) {
+      return rateItems;
+    }
   }
 
-  // 2. Check multi-item TMT list
-  const tmtMultiRegex = /(\d+(?:\.\d+)?\s*mm)\s*(?:[-:]|–)?\s*(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|bundles|pcs)?/gi;
-  let tmtM;
-  const tmtItems = [];
-  while ((tmtM = tmtMultiRegex.exec(textRaw)) !== null) {
-    tmtItems.push({
-      product_requirement: 'TMT Bar',
-      pName: 'TMT Bar',
-      dimensions: tmtM[1].replace(/\s+/g, ''),
-      quantity_mt: parseFloat(tmtM[2]),
-      quantity: parseFloat(tmtM[2]),
-      unit: tmtM[3] ? tmtM[3].toUpperCase() : 'MT',
-      rate_per_mt: null,
-    });
-  }
-  if (tmtItems.length > 1) {
-    return tmtItems;
-  }
-
-  // 3. Multi-product Catalog regex
-  const KNOWN_CATALOG_PRODUCTS = [
-    { name: 'HRPO Sheet', regex: /\b(hrpo\s*sheet|pickled\s*(?:&|and)\s*oiled\s*sheet)\b/i },
-    { name: 'HRPO Coil', regex: /\b(hrpo\s*coil|hrpo|pickled\s*(?:&|and)\s*oiled)\b/i },
-    { name: 'HR Plate', regex: /\b(hr\s*plate|hot\s*rolled\s*plate)\b/i },
-    { name: 'HR Sheet', regex: /\b(hr\s*sheet|hot\s*rolled\s*sheet)\b/i },
-    { name: 'HR Coil', regex: /\b(hr\s*coil|hot\s*rolled\s*coil)\b/i },
-    { name: 'CR Sheet', regex: /\b(cr\s*sheet|cold\s*rolled\s*sheet|crca\s*sheet)\b/i },
-    { name: 'CR Coil', regex: /\b(cr\s*coil|cold\s*rolled\s*coil|crca)\b/i },
-    { name: 'GP Sheet', regex: /\b(gp\s*sheet|gi\s*sheet|galvanized\s*plain\s*sheet|gi\s*patra|gp\s*patra)\b/i },
-    { name: 'GP Coil', regex: /\b(gp\s*coil|gi\s*coil|galvanized\s*plain\s*coil)\b/i },
-    { name: 'Galvalume Sheet', regex: /\b(galvalume\s*sheet|gl\s*sheet)\b/i },
-    { name: 'Galvalume Coil', regex: /\b(galvalume\s*coil|gl\s*coil)\b/i },
-    { name: 'Chequered Coil', regex: /\b(chequered\s*coil|checkered\s*coil)\b/i },
-    { name: 'Chequered Sheet', regex: /\b(chequered|checkered)\s*(?:plate|sheet|coil)?\b/i },
-    { name: 'MS Round Bar', regex: /\b(round\s*bar|bright\s*bar|en8|en19|round\s*rod)\b/i },
-    { name: 'MS Flat Bar', regex: /\b(flat\s*bar|ms\s*flat|patti|flats)\b/i },
-    { name: 'MS Square Bar', regex: /\b(square\s*bar|sq\s*bar|square\s*rod)\b/i },
-    { name: 'MS Square Pipe', regex: /\b(square\s*pipe|box\s*pipe|shs|square\s*tube|box\s*section)\b/i },
-    { name: 'MS Rectangular Tube', regex: /\b(rectangular\s*pipe|rhs|rectangular\s*tube)\b/i },
-    { name: 'MS Round Pipe', regex: /\b(round\s*pipe|erw\s*pipe|seamless\s*pipe|ms\s*pipe|pipe|tube)\b/i },
-    { name: 'MS Angle', regex: /\b(angle|angles|equal\s*angle|unequal\s*angle|l-angle|isa)\b/i },
-    { name: 'MS Beam', regex: /\b(beam|beams|ismb|joist|i-beam|h-beam|girder|npb|wpb)\b/i },
-    { name: 'MS Channel', regex: /\b(channel|channels|ismc|c-channel)\b/i },
-    { name: 'TMT Bar', regex: /\b(tmt\s*bar|tmt|sariya|rebar|fe\s*500|fe\s*550)\b/i },
-    { name: 'Slotted Angle', regex: /\b(slotted\s*angle|slotted\s*rack)\b/i },
-    { name: 'Solar Mounting Structure', regex: /\b(solar\s*mounting|solar\s*structure|solar|z\s*purlin|hat\s*section)\b/i },
-    { name: 'Cable Tray – Perforated', regex: /\b(perforated\s*cable\s*tray|cable\s*tray)\b/i },
-    { name: 'Cable Tray – Ladder', regex: /\b(ladder\s*cable\s*tray)\b/i },
-    { name: 'GI Earthing Strip', regex: /\b(earthing\s*strip|earthing\s*patti|gi\s*earthing)\b/i },
-  ];
-
-  // 3a. Check line-by-line list: "1. MS Sheet 5MM THK (1250 x 2500 mm) - Qty: 150 Nos"
+  // 2. Check line-by-line list: "1. MS Sheet 5MM THK (1250 x 2500 mm) - Qty: 150 Nos" or "1. HR Sheet 2.5mm - 20 MT"
   const lines = textRaw.split(/[\r\n]+/);
   const lineItemsList = [];
   for (const line of lines) {
@@ -620,7 +606,7 @@ function extractRuleBasedLineItems(textRaw) {
     if (!cleanL || /^(?:log|create|inquiry|deal|customer|company|payment|delivery|terms|waluj|midc)\b/i.test(cleanL)) continue;
     const lineM = cleanL.match(/^(?:(?:\d+[-.)]|[-*•])\s*)?([A-Za-z0-9\s.()x/–-]+?)\s*(?:[-:–=]\s*(?:qty\s*:?\s*)?|\s+qty\s*:?\s*|\s+quantity\s*:?\s*)(\d+(?:\.\d+)?)\s*([a-zA-Z]+)?$/i);
     if (lineM) {
-      const rawProductAndDim = lineM[1].trim();
+      const rawProductAndDim = lineM[1].trim().replace(/^(?:\d+[-.)]|[-*•])\s*/, '');
       const lineQty = parseFloat(lineM[2]);
       const lineUnit = lineM[3] ? lineM[3].toUpperCase() : 'MT';
       
@@ -673,13 +659,32 @@ function extractRuleBasedLineItems(textRaw) {
     return lineItemsList;
   }
 
-  // 3b. Quantity + Unit + Product inline pattern
+  // 3. Check multi-item TMT list e.g. "8mm - 5 MT, 10mm - 10 MT" (when line-by-line didn't match specific catalog names)
+  const tmtMultiRegex = /(\d+(?:\.\d+)?\s*mm)\s*(?:[-:]|–)?\s*(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|bundles|pcs)?/gi;
+  let tmtM;
+  const tmtItems = [];
+  while ((tmtM = tmtMultiRegex.exec(textRaw)) !== null) {
+    tmtItems.push({
+      product_requirement: 'TMT Bar',
+      pName: 'TMT Bar',
+      dimensions: tmtM[1].replace(/\s+/g, ''),
+      quantity_mt: parseFloat(tmtM[2]),
+      quantity: parseFloat(tmtM[2]),
+      unit: tmtM[3] ? tmtM[3].toUpperCase() : 'MT',
+      rate_per_mt: null,
+    });
+  }
+  if (tmtItems.length > 1) {
+    return tmtItems;
+  }
+
+  // 4. Quantity + Unit + Product inline pattern
   const multiProdRegex = /(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|kgs|pcs|piece|pieces|nos|sheet|sheets|plate|plates|coil|coils|bar|bars|lengths|bundles)\s+([A-Za-z0-9\s.()x/]+?)(?=(?:and\s+\d|,\s*(?:\d|[a-zA-Z]+\s+delivery|delivery|payment|contact|terms|credit)|(?:\.|\?|!)(?:\s+|$)|$|[\r\n]|\s+for\s+delivery|\s+delivery|\s+payment|\s+contact|\s+before|\s+by\s+\d|\s+rate|\s+price|\s+po|\s+attn|\s+terms|\s+credit|\s+advance))/gi;
   let mProd;
   while ((mProd = multiProdRegex.exec(textRaw)) !== null) {
     const mQty = parseFloat(mProd[1]);
     const mUnitRaw = mProd[2].toUpperCase();
-    const rawP = mProd[3].trim().replace(/\s+(?:thk|thick|thickness|approx|approx\.)\b/i, '');
+    const rawP = mProd[3].trim().replace(/\s+(?:thk|thick|thickness|approx|approx\.)\b/i, '').replace(/^(?:\d+[-.)]|[-*•])\s*/, '');
     if (!rawP || /^\d+$/.test(rawP) || /^[0-9.:\s-]+$/.test(rawP) || rawP.length < 2) continue;
 
     let matchedPName = null;
@@ -720,7 +725,17 @@ function extractRuleBasedLineItems(textRaw) {
     });
   }
 
-  return items;
+  if (items.length > 0) {
+    return items;
+  }
+
+  // 5. Fallback to rate items
+  const fallbackRateItems = extractDeterministicRateItems(textRaw);
+  if (fallbackRateItems.length > 0) {
+    return fallbackRateItems;
+  }
+
+  return [];
 }
 
 function mergeIncompleteLineItems(data, rawText) {
@@ -2223,7 +2238,7 @@ function extractDeterministicRateItems(text) {
     const lineMatch = cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s*(?:[-:=@—→]|rate\s+(?:is|to|of)?|price\s+(?:is|to|of)?)\s*₹?\s*([\d,.]+)\s*(?:\/?[a-zA-Z]+)?$/i) ||
                       cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s+([\d,.]+)\s*$/i);
     if (lineMatch) {
-      const prodCandidate = lineMatch[1].trim().replace(/^[-•*]\s*/, '');
+      const rawCandidate = lineMatch[1].trim().replace(/^(?:\d+[-.)]|[-*•])\s*/, '').trim();
       const rateVal = parseFloat(lineMatch[2].replace(/,/g, ''));
       const suffix = (lineMatch[0].match(/[\d,.]+\s*([a-zA-Z]+)/) || [])[1] || '';
 
@@ -2233,15 +2248,22 @@ function extractDeterministicRateItems(text) {
       }
 
       if (
-        prodCandidate &&
-        !/^(?:company|customer|inquiry|delivery|payment|stage|status|notes?|qty|quantity|tonnage|address|terms|credit)$/i.test(prodCandidate) &&
-        (getProductFamily(prodCandidate) || isValidCatalogProduct(prodCandidate)) &&
+        rawCandidate &&
+        !/^(?:company|customer|inquiry|delivery|payment|stage|status|notes?|qty|quantity|tonnage|address|terms|credit)$/i.test(rawCandidate) &&
+        (getProductFamily(rawCandidate) || isValidCatalogProduct(rawCandidate)) &&
         rateVal > 10
       ) {
-        const mmM = prodCandidate.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
+        let pNameOnly = rawCandidate;
+        for (const kp of KNOWN_CATALOG_PRODUCTS) {
+          if (kp.regex.test(rawCandidate)) {
+            pNameOnly = kp.name;
+            break;
+          }
+        }
+        const mmM = rawCandidate.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
         items.push({
-          product_requirement: prodCandidate,
-          pName: prodCandidate,
+          product_requirement: pNameOnly,
+          pName: pNameOnly,
           dimensions: mmM ? mmM[0] : null,
           quantity: 0,
           quantity_mt: 0,
@@ -2525,170 +2547,18 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         }
 
         // Check multi-item rate update list / inline updates / field updates
+        const ruleLineItems = extractRuleBasedLineItems(textRaw);
         const multiItemsParsed = [];
+        if (ruleLineItems.length > 0) {
+          multiItemsParsed.push(...ruleLineItems);
+        }
+
         const isRateUpdateContext =
           /\b(upadte|updt|updte|update|set|new|give|change)\s+(?:the\s+)?(?:rates?|prices?|pricing)|(?:rates?|prices?)\s+for|rates?:/i.test(textRaw) ||
           /\b(?:rates?|prices?)\b/i.test(textRaw);
 
         if (isRateUpdateContext || /\b(?:rate|price|qty|quantity|unit)\b/i.test(textRaw)) {
           ruleAction = 'deal_update';
-
-          // 1. Process line by line
-          const lines = textRaw.split(/[\r\n]+/);
-          for (const line of lines) {
-            const cleanLine = line.trim();
-            if (
-              !cleanLine ||
-              /^(?:upadte|updt|updte|update|rates|prices|for|customer|company|deal|inquiry)\b/i.test(cleanLine) ||
-              /#?(?:DEAL|INQ)-[A-F0-9]{4,8}\b/i.test(cleanLine) ||
-              /deal\s+id/i.test(cleanLine)
-            ) continue;
-
-            // Pattern A: "MS Sheet 5mm - 15", "CR sheet 1mm : 16", "Chequered Plate = 17", "HR Coil 3.15mm 12"
-            const lineMatch = cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s*(?:[-:=@—→]|rate\s+(?:is|to|of)?|price\s+(?:is|to|of)?)\s*₹?\s*([\d,.]+)\s*(?:\/?[a-zA-Z]+)?$/i) ||
-                              cleanLine.match(/^([A-Za-z0-9\s.,()x/]+?)\s+([\d,.]+)\s*$/i);
-            if (lineMatch) {
-              const prodCandidate = lineMatch[1].trim().replace(/^[-•*]\s*/, '');
-              const rateVal = parseFloat(lineMatch[2].replace(/,/g, ''));
-              if (prodCandidate && rateVal > 0 && !/^(?:company|customer|inquiry|delivery|payment|stage|status)/i.test(prodCandidate)) {
-                const mmM = prodCandidate.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
-                multiItemsParsed.push({
-                  product_requirement: prodCandidate,
-                  dimensions: mmM ? mmM[0] : null,
-                  quantity: 0,
-                  quantity_mt: 0,
-                  unit: 'MT',
-                  rate_per_mt: rateVal,
-                });
-              }
-            }
-          }
-
-          // 2. If no multiline matches, try inline comma/dash separated items: "MS Sheet 5mm=15, 6mm=18, HR Coil=12"
-          if (multiItemsParsed.length === 0) {
-            const inlineSegments = textRaw.split(/[,;]+/);
-            for (const seg of inlineSegments) {
-              const cleanSeg = seg.trim();
-              const segMatch = cleanSeg.match(/([A-Za-z0-9\s.()x/]+?)\s*(?:[-:=@—→]|rate\s+(?:is|to|of)?)\s*₹?\s*([\d,.]+)/i);
-              if (segMatch) {
-                const pCand = segMatch[1].trim().replace(/^(?:rates?|prices?|for|and|update)\s+/i, '');
-                const rVal = parseFloat(segMatch[2].replace(/,/g, ''));
-                if (pCand && rVal > 0) {
-                  const mmM = pCand.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
-                  multiItemsParsed.push({
-                    product_requirement: pCand,
-                    dimensions: mmM ? mmM[0] : null,
-                    quantity: 0,
-                    quantity_mt: 0,
-                    unit: 'MT',
-                    rate_per_mt: rVal,
-                  });
-                }
-              }
-            }
-          }
-
-          // 3. Check for specific single item rate update: "set rate of HR coil 3.15mm to 12"
-          if (multiItemsParsed.length === 0) {
-            const singleRateMatch = textRaw.match(/(?:rate|price)\s+of\s+([A-Za-z0-9\s.()x/]+?)\s+to\s+₹?\s*([\d,.]+)/i) ||
-                                   textRaw.match(/([A-Za-z0-9\s.()x/]+?)\s+rate\s+(?:is\s+|to\s+)?₹?\s*([\d,.]+)/i);
-            if (singleRateMatch) {
-              const pCand = singleRateMatch[1].trim();
-              const rVal = parseFloat(singleRateMatch[2].replace(/,/g, ''));
-              if (pCand && rVal > 0) {
-                const mmM = pCand.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft|x\s*[\d.]+)+)/i);
-                multiItemsParsed.push({
-                  product_requirement: pCand,
-                  dimensions: mmM ? mmM[0] : null,
-                  quantity: 0,
-                  quantity_mt: 0,
-                  unit: 'MT',
-                  rate_per_mt: rVal,
-                });
-              }
-            }
-          }
-        }
-
-        // Check multi-item list e.g. "15 MT HR Coil 3.15mm thk and 10 MT CR Sheet 1.2mm" or "8mm - 5 MT, 10mm - 10 MT"
-        const KNOWN_CATALOG_PRODUCTS = [
-          { name: 'HRPO Sheet', regex: /\b(hrpo\s*sheet|pickled\s*(?:&|and)\s*oiled\s*sheet)\b/i },
-          { name: 'HRPO Coil', regex: /\b(hrpo\s*coil|hrpo|pickled\s*(?:&|and)\s*oiled)\b/i },
-          { name: 'HR Plate', regex: /\b(hr\s*plate|hot\s*rolled\s*plate)\b/i },
-          { name: 'HR Sheet', regex: /\b(hr\s*sheet|hot\s*rolled\s*sheet)\b/i },
-          { name: 'HR Coil', regex: /\b(hr\s*coil|hot\s*rolled\s*coil)\b/i },
-          { name: 'CR Sheet', regex: /\b(cr\s*sheet|cold\s*rolled\s*sheet|crca\s*sheet)\b/i },
-          { name: 'CR Coil', regex: /\b(cr\s*coil|cold\s*rolled\s*coil|crca)\b/i },
-          { name: 'GP Sheet', regex: /\b(gp\s*sheet|gi\s*sheet|galvanized\s*plain\s*sheet|gi\s*patra|gp\s*patra)\b/i },
-          { name: 'GP Coil', regex: /\b(gp\s*coil|gi\s*coil|galvanized\s*plain\s*coil)\b/i },
-          { name: 'Galvalume Sheet', regex: /\b(galvalume\s*sheet|gl\s*sheet)\b/i },
-          { name: 'Galvalume Coil', regex: /\b(galvalume\s*coil|gl\s*coil)\b/i },
-          { name: 'Chequered Coil', regex: /\b(chequered\s*coil|checkered\s*coil)\b/i },
-          { name: 'Chequered Sheet', regex: /\b(chequered|checkered)\s*(?:plate|sheet|coil)?\b/i },
-          { name: 'MS Round Bar', regex: /\b(round\s*bar|bright\s*bar|en8|en19|round\s*rod)\b/i },
-          { name: 'MS Flat Bar', regex: /\b(flat\s*bar|ms\s*flat|patti|flats)\b/i },
-          { name: 'MS Square Bar', regex: /\b(square\s*bar|sq\s*bar|square\s*rod)\b/i },
-          { name: 'MS Square Pipe', regex: /\b(square\s*pipe|box\s*pipe|shs|square\s*tube|box\s*section)\b/i },
-          { name: 'MS Rectangular Tube', regex: /\b(rectangular\s*pipe|rhs|rectangular\s*tube)\b/i },
-          { name: 'MS Round Pipe', regex: /\b(round\s*pipe|erw\s*pipe|seamless\s*pipe|ms\s*pipe|pipe|tube)\b/i },
-          { name: 'MS Angle', regex: /\b(angle|angles|equal\s*angle|unequal\s*angle|l-angle|isa)\b/i },
-          { name: 'MS Beam', regex: /\b(beam|beams|ismb|joist|i-beam|h-beam|girder|npb|wpb)\b/i },
-          { name: 'MS Channel', regex: /\b(channel|channels|ismc|c-channel)\b/i },
-          { name: 'TMT Bar', regex: /\b(tmt\s*bar|tmt|sariya|rebar|fe\s*500|fe\s*550)\b/i },
-          { name: 'Slotted Angle', regex: /\b(slotted\s*angle|slotted\s*rack)\b/i },
-          { name: 'Solar Mounting Structure', regex: /\b(solar\s*mounting|solar\s*structure|solar|z\s*purlin|hat\s*section)\b/i },
-          { name: 'Cable Tray – Perforated', regex: /\b(perforated\s*cable\s*tray|cable\s*tray)\b/i },
-          { name: 'Cable Tray – Ladder', regex: /\b(ladder\s*cable\s*tray)\b/i },
-          { name: 'GI Earthing Strip', regex: /\b(earthing\s*strip|earthing\s*patti|gi\s*earthing)\b/i },
-        ];
-
-        // Check multi-item Quantity + Unit + Product pattern
-        const multiProdRegex = /(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|kgs|pcs|piece|pieces|nos|sheet|sheets|plate|plates|coil|coils|bar|bars|lengths|bundles)\s+([A-Za-z0-9\s.()x/]+?)(?=(?:and\s+\d|,\s*(?:\d|[a-zA-Z]+\s+delivery|delivery|payment|contact|terms|credit)|(?:\.|\?|!)(?:\s+|$)|$|\s+for\s+delivery|\s+delivery|\s+payment|\s+contact|\s+before|\s+by\s+\d|\s+rate|\s+price|\s+po|\s+attn|\s+terms|\s+credit|\s+advance))/gi;
-        let mProd;
-        while ((mProd = multiProdRegex.exec(textRaw)) !== null) {
-          const mQty = parseFloat(mProd[1]);
-          const mUnitRaw = mProd[2].toUpperCase();
-          const rawP = mProd[3].trim().replace(/\s+(?:thk|thick|thickness|approx|approx\.)\b/i, '');
-
-          let matchedPName = null;
-          for (const kp of KNOWN_CATALOG_PRODUCTS) {
-            if (kp.regex.test(rawP)) {
-              matchedPName = kp.name;
-              break;
-            }
-          }
-          if (!matchedPName) matchedPName = rawP;
-
-          const ismbM = rawP.match(/\b(ismb\s*\d+|ismc\s*\d+|npb\s*[\dx]+|wpb\s*[\dx]+|uc\s*[\dx]+|ub\s*[\dx]+)\b/i);
-          const boxSizeM = rawP.match(/(\d+\s*x\s*\d+(?:\s*x\s*[\d.]+)?\s*mm)/i);
-          const mmM = rawP.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft)(?:\s*x\s*[\d.]+\s*(?:mm|ft|inch|mtr)?)?)/i);
-          const simpleMmM = rawP.match(/(\d+(?:\.\d+)?\s*mm)/i);
-          const mDim = ismbM ? ismbM[0].toUpperCase() : (boxSizeM ? boxSizeM[0] : (mmM ? mmM[0] : (simpleMmM ? simpleMmM[0] : null)));
-
-          multiItemsParsed.push({
-            product_requirement: matchedPName,
-            dimensions: mDim,
-            quantity: mQty,
-            quantity_mt: mUnitRaw.startsWith('K') ? mQty / 1000 : mQty,
-            unit: mUnitRaw.startsWith('TON') ? 'MT' : mUnitRaw,
-            rate_per_mt: null,
-          });
-        }
-
-        // Check multi-item TMT list e.g. "8mm - 5 MT, 10mm - 10 MT, 12mm - 15 MT"
-        if (multiItemsParsed.length === 0) {
-          const tmtMultiRegex = /(\d+(?:\.\d+)?\s*mm)\s*(?:[-:]|–)?\s*(\d+(?:\.\d+)?)\s*(mt|ton|tons|tonne|kg|bundles|pcs)?/gi;
-          let tmtM;
-          while ((tmtM = tmtMultiRegex.exec(textRaw)) !== null) {
-            multiItemsParsed.push({
-              product_requirement: 'TMT Bar',
-              dimensions: tmtM[1].replace(/\s+/g, ''),
-              quantity_mt: parseFloat(tmtM[2]),
-              quantity: parseFloat(tmtM[2]),
-              unit: tmtM[3] ? tmtM[3].toUpperCase() : 'MT',
-              rate_per_mt: null,
-            });
-          }
         }
 
         let qty = 0;
@@ -2722,6 +2592,36 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
           const mVal = structMat[1].trim();
           pReq = specDim && !mVal.toLowerCase().includes(specDim.toLowerCase()) ? `${mVal} ${specDim}` : mVal;
         } else {
+          const KNOWN_CATALOG_PRODUCTS = [
+            { name: 'HRPO Sheet', regex: /\b(hrpo\s*sheet|pickled\s*(?:&|and)\s*oiled\s*sheet)\b/i },
+            { name: 'HRPO Coil', regex: /\b(hrpo\s*coil|hrpo|pickled\s*(?:&|and)\s*oiled)\b/i },
+            { name: 'HR Plate', regex: /\b(hr\s*plate|hot\s*rolled\s*plate)\b/i },
+            { name: 'HR Sheet', regex: /\b(hr\s*sheet|hot\s*rolled\s*sheet)\b/i },
+            { name: 'HR Coil', regex: /\b(hr\s*coil|hot\s*rolled\s*coil)\b/i },
+            { name: 'CR Sheet', regex: /\b(cr\s*sheet|cold\s*rolled\s*sheet|crca\s*sheet)\b/i },
+            { name: 'CR Coil', regex: /\b(cr\s*coil|cold\s*rolled\s*coil|crca)\b/i },
+            { name: 'GP Sheet', regex: /\b(gp\s*sheet|gi\s*sheet|galvanized\s*plain\s*sheet|gi\s*patra|gp\s*patra)\b/i },
+            { name: 'GP Coil', regex: /\b(gp\s*coil|gi\s*coil|galvanized\s*plain\s*coil)\b/i },
+            { name: 'Galvalume Sheet', regex: /\b(galvalume\s*sheet|gl\s*sheet)\b/i },
+            { name: 'Galvalume Coil', regex: /\b(galvalume\s*coil|gl\s*coil)\b/i },
+            { name: 'Chequered Coil', regex: /\b(chequered\s*coil|checkered\s*coil)\b/i },
+            { name: 'Chequered Sheet', regex: /\b(chequered|checkered)\s*(?:plate|sheet|coil)?\b/i },
+            { name: 'MS Round Bar', regex: /\b(round\s*bar|bright\s*bar|en8|en19|round\s*rod)\b/i },
+            { name: 'MS Flat Bar', regex: /\b(flat\s*bar|ms\s*flat|patti|flats)\b/i },
+            { name: 'MS Square Bar', regex: /\b(square\s*bar|sq\s*bar|square\s*rod)\b/i },
+            { name: 'MS Square Pipe', regex: /\b(square\s*pipe|box\s*pipe|shs|square\s*tube|box\s*section)\b/i },
+            { name: 'MS Rectangular Tube', regex: /\b(rectangular\s*pipe|rhs|rectangular\s*tube)\b/i },
+            { name: 'MS Round Pipe', regex: /\b(round\s*pipe|erw\s*pipe|seamless\s*pipe|ms\s*pipe|pipe|tube)\b/i },
+            { name: 'MS Angle', regex: /\b(angle|angles|equal\s*angle|unequal\s*angle|l-angle|isa)\b/i },
+            { name: 'MS Beam', regex: /\b(beam|beams|ismb|joist|i-beam|h-beam|girder|npb|wpb)\b/i },
+            { name: 'MS Channel', regex: /\b(channel|channels|ismc|c-channel)\b/i },
+            { name: 'TMT Bar', regex: /\b(tmt\s*bar|tmt|sariya|rebar|fe\s*500|fe\s*550)\b/i },
+            { name: 'Slotted Angle', regex: /\b(slotted\s*angle|slotted\s*rack)\b/i },
+            { name: 'Solar Mounting Structure', regex: /\b(solar\s*mounting|solar\s*structure|solar|z\s*purlin|hat\s*section)\b/i },
+            { name: 'Cable Tray – Perforated', regex: /\b(perforated\s*cable\s*tray|cable\s*tray)\b/i },
+            { name: 'Cable Tray – Ladder', regex: /\b(ladder\s*cable\s*tray)\b/i },
+            { name: 'GI Earthing Strip', regex: /\b(earthing\s*strip|earthing\s*patti|gi\s*earthing)\b/i },
+          ];
           for (const kp of KNOWN_CATALOG_PRODUCTS) {
             if (kp.regex.test(textClean)) {
               pReq = kp.name;
@@ -2891,6 +2791,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       if (pName && (
         GENERIC_PRODUCT_REGEX.test(pName) ||
         hasCompanyIndicatorOnly ||
+        /^\d+$/.test(pName) ||
+        /^[0-9.:\s-]+$/.test(pName) ||
+        pName.length < 2 ||
+        /^(?:qty|quantity|unit|rate|price|amount|nos|pcs|mt|kg|sheets?|plates?|coils?|bars?)$/i.test(pName) ||
         /\b(?:this\s+inqiry|this\s+inquiry|inquiry\s+id|deal\s+id|inq\s+id|inq-)\b/i.test(pName) ||
         KNOWN_STEEL_CITIES.some(c => c.toLowerCase() === pName.toLowerCase())
       )) {
