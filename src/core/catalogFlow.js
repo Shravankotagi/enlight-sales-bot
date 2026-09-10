@@ -1645,31 +1645,32 @@ function detectOperationalAction(text) {
 
   // 2. Complaint patterns (prioritized because complaints often cite PO numbers or visit dates)
   if (
-    /\b(?:complaint|defect|defective|damaged material|rust on|rusty|short delivery|wrong material|rejection|rejected material|material return|wapas kiya|issue aa gaya)\b/i.test(lower)
+    /\b(?:complaint|defect|defective|damaged\s+material|rust\s+on|rusty|short\s+delivery|wrong\s+material|rejection|rejected\s+material|material\s+return|wapas\s+kiya|issue\s+aa\s+gaya|quality\s+issue|bad\s+material|damaged\s+coils|damaged\s+sheets)\b/i.test(lower)
   ) {
     return 'LOG_COMPLAINT';
   }
 
-  // 3. Visit / Meeting patterns
+  // 3. Visit / Meeting patterns (comprehensive coverage of any visit phrasing)
   if (
-    /\b(?:visited|met\b|meeting with|meet with|site visit|field visit|client visit|market visit|office visit|factory visit|gaya tha|mila aaj|milne gaye|visit kiya|visit report)\b/i.test(lower)
+    /\b(?:visit(?:ed|ing|s)?|met\b|meet(?:ing)?(?:\s+(?:with|at|in|up|to))?|had\s+a\s+visit|had\s+a\s+meeting|site\s+visit|field\s+visit|client\s+visit|market\s+visit|office\s+visit|factory\s+visit|went\s+to(?:\s+meet)?|gaya\s+tha|mila\s+aaj|milne\s+gaye|visit\s+kiya|visit\s+report)\b/i.test(lower) ||
+    /\b(?:visit\s+outcome|person\s+met|discussion\s+notes|meeting\s+remarks|neutral\s+response|positive\s+response|negative\s+response)\b/i.test(lower)
   ) {
     return 'LOG_VISIT';
   }
 
   // 4. Order / PO patterns
   if (
-    /\b(?:purchase order|po received|received po|order confirmed|po-\d+|po no|po number|order logged|order recorded|deal won)\b/i.test(lower) ||
-    /^\s*(?:po|purchase order)\b/i.test(lower)
+    /\b(?:purchase\s+order|po\s+received|received\s+po|order\s+confirmed|po-\d+|po\s*no|po\s*number|order\s+logged|order\s+recorded|deal\s+won|new\s+order|booked\s+order|order\s+for)\b/i.test(lower) ||
+    /^\s*(?:po|purchase\s+order)\b/i.test(lower)
   ) {
     return 'LOG_ORDER';
   }
 
   // 5. Inquiry / Requirements patterns
   if (
-    /\b(?:inquiry|requirement|rfq|enquiry|rate manga|chahiye|need|needs|requires|require|interested in|quote for|rates? for)\b/i.test(lower)
+    /\b(?:inquiry|inquiries|requirement|requirements|rfq|enquiry|enquiries|rate\s+manga|chahiye|need|needs|requires|require|interested\s+in|quote\s+for|rates?\s+for|price\s+for|quotation\s+for)\b/i.test(lower)
   ) {
-    if (/\b(?:coil|sheet|plate|structural|beam|channel|pipe|tube|tmt|steel|mt|ton|tons|kg|pieces|sheets|rate|advance|credit)\b/i.test(lower)) {
+    if (/\b(?:coil|sheet|plate|structural|beam|channel|pipe|tube|tmt|steel|metal|iron|mt|ton|tons|kg|pieces|sheets|rate|advance|credit|mm|thk)\b/i.test(lower)) {
       return 'LOG_INQUIRY';
     }
   }

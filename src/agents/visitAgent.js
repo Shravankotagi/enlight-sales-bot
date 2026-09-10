@@ -1726,8 +1726,32 @@ async function processVisitMessage(text, senderPhone) {
     // 8. Sanitize extracted fields against raw user text
     const sanitizedState = sanitizeExtractedVisitData(currentVisitState, text);
 
-    // 9. Save completed visit directly!
-    return await saveCompletedVisit(sanitizedState, senderPhone);
+    // 9. Check missing mandatory fields & route to catalog confirmation
+    const { validateMandatoryFields, buildConfirmationSummary } = require('../core/catalogFlow');
+    const { saveActiveSession } = require('../supabase');
+
+    const draft = {
+      action: 'LOG_VISIT',
+      company_name: sanitizedState.customer_name,
+      person_met: sanitizedState.person_met,
+      contact_phone: sanitizedState.contact_no,
+      city_location: sanitizedState.city,
+      visit_date: sanitizedState.visit_date_display,
+      visit_outcome: sanitizedState.visit_outcome ? sanitizedState.visit_outcome.charAt(0).toUpperCase() + sanitizedState.visit_outcome.slice(1) : null,
+      meeting_remarks: sanitizedState.remarks,
+      followup_action: sanitizedState.follow_up_action,
+    };
+
+    const missing = validateMandatoryFields('LOG_VISIT', draft);
+    if (missing.length > 0) {
+      const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
+      await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_VISIT|${JSON.stringify(draft)}`);
+      return `Please provide the remaining mandatory details for this visit report:\n\n${missingList}`;
+    }
+
+    const summary = buildConfirmationSummary('LOG_VISIT', draft);
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|LOG_VISIT|${JSON.stringify(draft)}`);
+    return summary;
   } catch (error) {
     console.error('Visit Agent Error:', error.message);
     return `Could not process site visit update: ${error.message}`;
