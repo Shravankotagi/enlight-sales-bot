@@ -146,11 +146,13 @@ Example:
 Please provide the following details. Fields marked with * are mandatory:
 
 • *Company / Customer Name:* *
-• *Linked Inquiry ID / PO Number & Product:* *
-• *Complaint Type:* * (Quality Defect / Physical Damage / Quantity Shortage / Delivery Delay / Billing Mismatch / Specification Mismatch / Other)
-• *Complaint Description:* *
+• *Complaint Description & Affected Material:* * (e.g. 12 MT MS angle with bending damage)
+• *Complaint Type:* (optional: Quality Defect / Physical Damage / Quantity Shortage / Delivery Delay / Billing Mismatch / Specification Mismatch / Other)
+• *Linked PO Number or Inquiry ID:* (optional, auto-linked if customer has active orders)
 • *Corrective Action Taken:* (optional)
-• *Initial Status:* * (Pending / In Progress / Resolved)`,
+
+Example:
+"Shree Balaji Pre-Engineered Buildings received 12 MT MS angle with bending damage and edge cuts during truck unloading"`,
 
   UPDATE_COMPLAINT: `✏️ *Update Complaint*
 
@@ -517,15 +519,17 @@ LOG_COMPLAINT:
 {
   "action": "LOG_COMPLAINT",
   "company_name": "<Company / Customer Name, else null>",
-  "linked_inquiry_or_po": "<Linked Inquiry ID e.g. #INQ-8971B1 or PO Number e.g. PO-2026-TI-101 and Product, else null>",
-  "complaint_type": "<Quality Defect | Physical Damage | Quantity Shortage | Delivery Delay | Billing Mismatch | Specification Mismatch | Other>",
+  "affected_product": "<specific product/material affected e.g. '12 MT MS angle', 'CR Sheet 1.20mm coils' - else null>",
+  "linked_inquiry_or_po": "<Linked Inquiry ID e.g. #INQ-8971B1 or PO Number e.g. PO-2026-TI-101 if mentioned, else null>",
+  "complaint_type": "<Quality Defect | Physical Damage | Quantity Shortage | Delivery Delay | Billing Mismatch | Specification Mismatch | Other, if mentioned or inferred from issue, else null>",
   "complaint_description": "<Detailed complaint description, else null>",
   "corrective_action": "<Corrective action taken if mentioned, else null>",
-  "initial_status": "<Pending | In Progress | Resolved>",
+  "initial_status": "<Pending | In Progress | Resolved, defaults to Pending>",
   "entries": [
     {
       "company_name": "<Company Name>",
-      "linked_inquiry_or_po": "<Linked ID>",
+      "affected_product": "<Product, else null>",
+      "linked_inquiry_or_po": "<Linked ID, else null>",
       "complaint_type": "<Type>",
       "complaint_description": "<Description>",
       "corrective_action": "<Action>",
@@ -766,10 +770,9 @@ function validateMandatoryFields(action, draft) {
 
     case 'LOG_COMPLAINT':
       if (!draft.company_name) missing.push('Company / Customer Name');
-      if (!draft.linked_inquiry_or_po) missing.push('Linked Inquiry ID / PO Number & Product');
-      if (!draft.complaint_type) missing.push('Complaint Type');
-      if (!draft.complaint_description) missing.push('Complaint Description');
-      if (!draft.initial_status) missing.push('Initial Status (Pending / In Progress / Resolved)');
+      if (!draft.complaint_description && !draft.affected_product) {
+        missing.push('Complaint Description & Affected Material');
+      }
       break;
 
     case 'UPDATE_COMPLAINT': {
@@ -907,11 +910,16 @@ function buildConfirmationSummary(action, draft) {
 
     case 'LOG_COMPLAINT':
       summary += `• *Customer / Company:* ${draft.company_name}\n`;
-      summary += `• *Linked Inquiry / PO:* ${draft.linked_inquiry_or_po}\n`;
-      summary += `• *Complaint Type:* ${draft.complaint_type}\n`;
-      summary += `• *Description:* ${draft.complaint_description}\n`;
+      if (draft.affected_product || draft.product_name) {
+        summary += `• *Product / Material:* ${draft.affected_product || draft.product_name}\n`;
+      }
+      if (draft.linked_inquiry_or_po) {
+        summary += `• *Linked Order / Ref:* ${draft.linked_inquiry_or_po}\n`;
+      }
+      summary += `• *Complaint Type:* ${draft.complaint_type || 'Physical Damage'}\n`;
+      summary += `• *Description:* ${draft.complaint_description || draft.affected_product}\n`;
       if (draft.corrective_action) summary += `• *Corrective Action:* ${draft.corrective_action}\n`;
-      summary += `• *Initial Status:* ${draft.initial_status}\n`;
+      summary += `• *Initial Status:* ${draft.initial_status || 'Pending'}\n`;
       break;
 
     case 'UPDATE_COMPLAINT': {
@@ -948,6 +956,31 @@ function normalizeComplaintType(typeStr) {
   if (t.includes('quality') || t.includes('rust') || t.includes('defect') || t.includes('reject')) return 'Quality Defect';
   if (t.includes('other')) return 'Other';
   return typeStr.trim().replace(/\b\w/g, l => l.toUpperCase());
+}
+
+function extractProductFromText(text) {
+  if (!text || typeof text !== 'string') return null;
+  const str = text.trim();
+
+  // Pattern 1: e.g. "12 MT MS angle", "15 MT CR Sheet 1.20mm", "10 MT HR Coil", "60 MT MS plates"
+  const m1 = str.match(/(?:(\d+(?:\.\d+)?\s*(?:MT|tons?|kg|pcs?|nos?|bundle|bundles))\s+)?\b(MS\s+Plates?|MS\s+Sheets?|HR\s+Coils?|HR\s+Sheets?|CR\s+Coils?|CR\s+Sheets?|TMT\s+Bars?|GI\s+Sheets?|GI\s+Coils?|GP\s+Sheets?|GP\s+Coils?|Chequered\s+Plates?|MS\s+Pipes?|Seamless\s+Pipes?|ERW\s+Pipes?|MS\s+Angles?|MS\s+Channels?|MS\s+Beams?|MS\s+Flats?|MS\s+Rounds?|Square\s+Bars?|Beams?|Channels?|Angles?|Flats?|Rounds?|Alloy\s+Steel|Stainless\s+Steel|IS\s+2062(?:\s+E250)?)\b(?:\s+([0-9.]+\s*mm(?:(?:\s*x\s*[0-9.]+\s*mm)+)?))?(?:\s+(\d+(?:\.\d+)?\s*(?:MT|tons?|kg|pcs?|nos?)))?/i);
+  if (m1) {
+    const qty = (m1[1] || m1[4] || '').trim();
+    const prod = m1[2].trim();
+    const dims = (m1[3] || '').trim();
+    let res = prod;
+    if (dims) res += ` ${dims}`;
+    if (qty) res += ` (${qty})`;
+    return res;
+  }
+
+  // Pattern 2: e.g. "MS Plate", "HR Coil", "CR Sheet", "MS Angle", "Chequered Plate"
+  const m2 = str.match(/\b(MS\s+Plate|MS\s+Plates|MS\s+Sheet|MS\s+Sheets|HR\s+Coil|HR\s+Coils|HR\s+Sheet|HR\s+Sheets|CR\s+Coil|CR\s+Coils|CR\s+Sheet|CR\s+Sheets|TMT\s+Bar|TMT\s+Bars|GI\s+Sheet|GI\s+Sheets|GI\s+Coil|GI\s+Coils|Chequered\s+Plate|Chequered\s+Plates|MS\s+Pipe|MS\s+Pipes|MS\s+Angle|MS\s+Angles|MS\s+Channel|MS\s+Channels|MS\s+Beam|MS\s+Beams)\b/i);
+  if (m2) {
+    return m2[1];
+  }
+
+  return null;
 }
 
 async function findAndMatchComplaint(draft) {
@@ -1608,6 +1641,77 @@ Visit details updated in Customer Visits Card! ✅`;
         const slaDueAt = new Date(Date.now() + 48 * 3600 * 1000).toISOString();
         const normalizedType = normalizeComplaintType(draft.complaint_type || 'quality');
 
+        // Extract affected product
+        let product = (draft.affected_product || draft.product_name || '').trim();
+        if (!product && draft.complaint_description) {
+          product = extractProductFromText(draft.complaint_description) || '';
+        }
+
+        // Try to match or look up genuine deal/PO for this customer
+        let targetPoNumber = draft.linked_inquiry_or_po || draft.po_number || null;
+        let targetDealId = null;
+
+        // If user gave a PO or INQ ref, look it up in deals table
+        if (targetPoNumber) {
+          const rawRef = targetPoNumber.replace(/^#?(?:INQ|DEAL|PO)-?/i, '').trim();
+          try {
+            const { data: matchedDeals } = await supabase
+              .from('deals')
+              .select('id, po_number, customer_name, deal_items(sku_text, dimensions, quantity, unit)')
+              .or(`po_number.ilike.%${rawRef}%,inquiry_id.ilike.%${rawRef}%,id.ilike.%${rawRef}%`)
+              .limit(1);
+
+            if (matchedDeals && matchedDeals.length > 0) {
+              targetDealId = matchedDeals[0].id;
+              targetPoNumber = matchedDeals[0].po_number || targetPoNumber;
+              if (!product && matchedDeals[0].deal_items && matchedDeals[0].deal_items.length > 0) {
+                product = matchedDeals[0].deal_items.map(it => `${it.sku_text || ''} ${it.dimensions || ''} ${it.quantity ? `(${it.quantity} ${it.unit || 'MT'})` : ''}`.trim()).filter(Boolean).join(', ');
+              }
+            }
+          } catch (e) {
+            console.warn('[CatalogFlow] Deal lookup error by ref:', e?.message);
+          }
+        }
+
+        // If no PO/deal matched or provided, auto-link to customer's won deal/order
+        if (!targetDealId && companyName && companyName !== 'Customer') {
+          try {
+            const { data: custDeals } = await supabase
+              .from('deals')
+              .select('id, po_number, stage, deal_items(sku_text, dimensions, quantity, unit)')
+              .ilike('customer_name', `%${companyName}%`)
+              .order('created_at', { ascending: false })
+              .limit(5);
+
+            if (custDeals && custDeals.length > 0) {
+              let matchedDeal = null;
+              if (product) {
+                const pLower = product.toLowerCase();
+                matchedDeal = custDeals.find(d =>
+                  (d.deal_items || []).some(it =>
+                    pLower.includes((it.sku_text || '').toLowerCase()) ||
+                    (it.sku_text && (it.sku_text.toLowerCase().includes(pLower) || pLower.includes(it.sku_text.toLowerCase()))) ||
+                    (it.dimensions && pLower.includes(it.dimensions.toLowerCase()))
+                  )
+                );
+              }
+              if (!matchedDeal) {
+                matchedDeal = custDeals.find(d => d.stage === 'won' && d.po_number) || custDeals[0];
+              }
+
+              if (matchedDeal) {
+                targetDealId = matchedDeal.id;
+                targetPoNumber = matchedDeal.po_number || null;
+                if (!product && matchedDeal.deal_items && matchedDeal.deal_items.length > 0) {
+                  product = matchedDeal.deal_items.map(it => `${it.sku_text || ''} ${it.dimensions || ''} ${it.quantity ? `(${it.quantity} ${it.unit || 'MT'})` : ''}`.trim()).filter(Boolean).join(', ');
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('[CatalogFlow] Deal lookup error by customer:', e?.message);
+          }
+        }
+
         // 1. Insert into complaints
         const { error: cmpErr } = await supabase.from('complaints').insert({
           customer_name: companyName,
@@ -1615,8 +1719,10 @@ Visit details updated in Customer Visits Card! ✅`;
           description: draft.complaint_description,
           reported_by: senderPhone,
           status: (draft.initial_status || 'Pending').toLowerCase(),
-          po_number: draft.linked_inquiry_or_po,
-          deal_id: draft.linked_inquiry_or_po,
+          po_number: targetPoNumber,
+          deal_id: targetDealId,
+          product_name: product || null,
+          affected_product: product || null,
           corrective_action: draft.corrective_action || null,
           reported_at: nowIso,
           created_at: nowIso,
@@ -1637,13 +1743,19 @@ Visit details updated in Customer Visits Card! ✅`;
           created_at: nowIso,
         });
 
+        let linkedDisplay = '';
+        if (targetPoNumber) {
+          linkedDisplay = `\n🔗 *Linked Order:* PO: *${targetPoNumber}*`;
+        } else if (targetDealId) {
+          linkedDisplay = `\n🔗 *Linked Ref:* Inquiry *#INQ-${targetDealId.substring(0, 6).toUpperCase()}*`;
+        }
+
         return `⚠️ *Customer Complaint Logged Successfully!*
 
-🏢 *Customer:* ${companyName}
-🔗 *Linked Ref:* ${draft.linked_inquiry_or_po}
+🏢 *Customer:* ${companyName}${linkedDisplay}${product ? `\n📦 *Product Affected:* ${product}` : ''}
 📋 *Complaint Type:* ${normalizedType}
 📝 *Description:* ${draft.complaint_description}
-🚦 *Status:* ${draft.initial_status}${draft.corrective_action ? `\n🛠️ *Corrective Action:* ${draft.corrective_action}` : ''}
+🚦 *Status:* ${draft.initial_status || 'Pending'}${draft.corrective_action ? `\n🛠️ *Corrective Action:* ${draft.corrective_action}` : ''}
 
 Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
       }
