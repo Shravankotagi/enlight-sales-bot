@@ -1,14 +1,22 @@
 const { createClient } = require('@supabase/supabase-js');
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY;
+const supabaseServiceRoleKey =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_KEY;
 
 if (!supabaseUrl || !supabaseServiceRoleKey) {
-  console.warn("WARNING: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing in environment variables.");
+  console.warn(
+    'WARNING: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing in environment variables.',
+  );
 }
 
 // Initialize Supabase client
-const supabase = createClient(supabaseUrl || 'https://placeholder.supabase.co', supabaseServiceRoleKey || 'placeholder');
+const supabase = createClient(
+  supabaseUrl || 'https://placeholder.supabase.co',
+  supabaseServiceRoleKey || 'placeholder',
+);
 
 /**
  * Safely parses any value (string, number, formatting) into a numeric float or null.
@@ -104,13 +112,21 @@ async function getAccessibleSalespersonPhonesForBot(senderPhone) {
     const normPhone = normalizePhone(senderPhone);
     const assigned = (allActive || []).filter((emp) => {
       const empRole = (emp.role || '').toLowerCase();
-      if (empRole.includes('admin') || empRole.includes('manager')) return false;
+      if (empRole.includes('admin') || empRole.includes('manager'))
+        return false;
       if (emp.manager_id && emp.manager_id === employee.id) return true;
-      if (emp.manager_phone && normalizePhone(emp.manager_phone) === normPhone) return true;
+      if (emp.manager_phone && normalizePhone(emp.manager_phone) === normPhone)
+        return true;
       return false;
     });
 
-    const teamPhones = Array.from(new Set([employee.phone || senderPhone, ...assigned.map((a) => a.phone)].filter(Boolean)));
+    const teamPhones = Array.from(
+      new Set(
+        [employee.phone || senderPhone, ...assigned.map((a) => a.phone)].filter(
+          Boolean,
+        ),
+      ),
+    );
     return {
       role: 'sales_manager',
       phones: teamPhones,
@@ -139,22 +155,25 @@ async function getAccessibleSalespersonPhonesForBot(senderPhone) {
 async function saveInquiry(data) {
   try {
     const payload = {
-      source_channel: data.source_channel || "whatsapp",
+      source_channel: data.source_channel || 'whatsapp',
       raw_text: data.raw_text,
       media_urls: data.media_urls || [],
       voice_url: data.voice_url || null,
       sender_phone: data.sender_phone || data.salesperson_phone,
       sender_name: data.sender_name || null,
       whatsapp_message_id: data.message_id || null,
-      status: data.status || "processed",
+      status: data.status || 'processed',
       created_at: new Date().toISOString(),
       salesperson_phone: data.salesperson_phone || data.sender_phone || null,
       employee_id: data.employee_id || null,
       inquiry_type: data.inquiry_type || null,
       ai_extraction_json: data.ai_extraction_json || null,
-      overall_confidence: data.overall_confidence != null
-        ? Number(data.overall_confidence)
-        : (data.confidence != null ? Number(data.confidence) : 0.92),
+      overall_confidence:
+        data.overall_confidence != null
+          ? Number(data.overall_confidence)
+          : data.confidence != null
+            ? Number(data.confidence)
+            : 0.92,
     };
 
     const { data: savedRow, error } = await supabase
@@ -170,7 +189,7 @@ async function saveInquiry(data) {
     console.log('Successfully saved inquiry to Supabase:', savedRow.id);
     return savedRow;
   } catch (error) {
-    console.error("Error in saveInquiry:", error.message || error);
+    console.error('Error in saveInquiry:', error.message || error);
     return null;
   }
 }
@@ -190,7 +209,7 @@ async function getInquiries() {
 
     return inquiries;
   } catch (error) {
-    console.error("Error in getInquiries:", error.message || error);
+    console.error('Error in getInquiries:', error.message || error);
     throw error;
   }
 }
@@ -199,7 +218,11 @@ async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
   try {
     const poDate = extraction.po_date || null;
     let poNumber = extraction.po_number || null;
-    if (!poNumber && (extraction.inquiry_type === 'purchase_order' || extraction.stage === 'won')) {
+    if (
+      !poNumber &&
+      (extraction.inquiry_type === 'purchase_order' ||
+        extraction.stage === 'won')
+    ) {
       const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
       const randomNum = Math.floor(1000 + Math.random() * 9000);
       poNumber = `PO-${todayStr}-${randomNum}`;
@@ -209,7 +232,6 @@ async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
     const { data: deal, error: dealError } = await supabase
       .from('deals')
       .insert({
-        ...(inquiryId ? { id: inquiryId } : {}),
         inquiry_id: inquiryId,
         stage: 'new_inquiry',
         po_number: poNumber,
@@ -224,7 +246,10 @@ async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
         total_amount: sanitizeNumber(extraction.total_amount),
         inquiry_type: extraction.inquiry_type || 'unknown',
         overall_confidence: extraction.overall_confidence || 0,
-        status: extraction.overall_confidence >= 0.85 ? 'auto_created' : 'needs_review',
+        status:
+          extraction.overall_confidence >= 0.85
+            ? 'auto_created'
+            : 'needs_review',
         created_at: new Date().toISOString(),
         salesperson_phone: senderPhone || null,
         employee_id: employeeId || null,
@@ -239,9 +264,12 @@ async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
 
     // Save line items
     if (extraction.line_items && extraction.line_items.length > 0) {
-      console.log('DEBUG line_items:', JSON.stringify(extraction.line_items, null, 2));
+      console.log(
+        'DEBUG line_items:',
+        JSON.stringify(extraction.line_items, null, 2),
+      );
       console.log('DEBUG deal_id:', deal.id);
-      const lineItems = extraction.line_items.map(item => ({
+      const lineItems = extraction.line_items.map((item) => ({
         deal_id: deal.id,
         sku_text: item.sku_text || null,
         grade: item.grade || null,
@@ -251,7 +279,7 @@ async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
         rate: sanitizeNumber(item.rate),
         amount: sanitizeNumber(item.amount),
         confidence: item.confidence || 0,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
       }));
 
       const { error: itemsError } = await supabase
@@ -274,7 +302,11 @@ async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
 async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
   if (!customerName || !senderPhone) return null;
   const cleanName = customerName.trim();
-  if (!cleanName || cleanName.toLowerCase() === 'unknown' || cleanName.toLowerCase() === 'null') {
+  if (
+    !cleanName ||
+    cleanName.toLowerCase() === 'unknown' ||
+    cleanName.toLowerCase() === 'null'
+  ) {
     return null;
   }
 
@@ -311,12 +343,27 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
     if (existing && existing.length > 0) {
       const rec = existing[0];
       const updatePayload = {};
-      if (extraData.customer_phone && extraData.customer_phone !== rec.customer_phone) updatePayload.customer_phone = extraData.customer_phone;
-      if (extraData.customer_gst && extraData.customer_gst !== rec.customer_gst) updatePayload.customer_gst = extraData.customer_gst;
-      if (extraData.city && extraData.city !== rec.customer_address) updatePayload.customer_address = extraData.city;
-      if (extraData.contact_person && extraData.contact_person !== rec.contact_person) updatePayload.contact_person = extraData.contact_person;
-      if (extraData.avg_order_frequency_days) updatePayload.avg_order_frequency_days = Number(extraData.avg_order_frequency_days);
-      if (extraData.assigned_salesperson_phone && scope.isAdmin) updatePayload.assigned_salesperson_phone = extraData.assigned_salesperson_phone;
+      if (
+        extraData.customer_phone &&
+        extraData.customer_phone !== rec.customer_phone
+      )
+        updatePayload.customer_phone = extraData.customer_phone;
+      if (extraData.customer_gst && extraData.customer_gst !== rec.customer_gst)
+        updatePayload.customer_gst = extraData.customer_gst;
+      if (extraData.city && extraData.city !== rec.customer_address)
+        updatePayload.customer_address = extraData.city;
+      if (
+        extraData.contact_person &&
+        extraData.contact_person !== rec.contact_person
+      )
+        updatePayload.contact_person = extraData.contact_person;
+      if (extraData.avg_order_frequency_days)
+        updatePayload.avg_order_frequency_days = Number(
+          extraData.avg_order_frequency_days,
+        );
+      if (extraData.assigned_salesperson_phone && scope.isAdmin)
+        updatePayload.assigned_salesperson_phone =
+          extraData.assigned_salesperson_phone;
 
       if (Object.keys(updatePayload).length > 0) {
         updatePayload.updated_at = new Date().toISOString();
@@ -324,7 +371,8 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
           .from('recurring_customers')
           .update(updatePayload)
           .eq('id', rec.id);
-        if (updErr) console.error('[ensureCustomerRecord] update error:', updErr.message);
+        if (updErr)
+          console.error('[ensureCustomerRecord] update error:', updErr.message);
       }
       return rec;
     }
@@ -332,13 +380,15 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
     // 2. Insert new record only if genuine new customer and valid name
     const insertPayload = {
       customer_name: cleanName,
-      assigned_salesperson_phone: extraData.assigned_salesperson_phone || senderPhone,
+      assigned_salesperson_phone:
+        extraData.assigned_salesperson_phone || senderPhone,
       customer_phone: extraData.customer_phone || null,
       customer_gst: extraData.customer_gst || null,
       customer_address: extraData.city || null,
       contact_person: extraData.contact_person || null,
       is_active: true,
-      avg_order_frequency_days: Number(extraData.avg_order_frequency_days) || 30,
+      avg_order_frequency_days:
+        Number(extraData.avg_order_frequency_days) || 30,
     };
 
     const { data: newCustomer } = await supabase
@@ -360,9 +410,15 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
 
       if (scope.phones !== null) {
         if (scope.phones.length === 1) {
-          fallbackQuery = fallbackQuery.eq('assigned_salesperson_phone', scope.phones[0]);
+          fallbackQuery = fallbackQuery.eq(
+            'assigned_salesperson_phone',
+            scope.phones[0],
+          );
         } else if (scope.phones.length > 1) {
-          fallbackQuery = fallbackQuery.in('assigned_salesperson_phone', scope.phones);
+          fallbackQuery = fallbackQuery.in(
+            'assigned_salesperson_phone',
+            scope.phones,
+          );
         } else {
           return null;
         }
@@ -399,6 +455,116 @@ async function checkAndLogNewCustomer(deal, senderPhone) {
   }
 }
 
+const DISTINCTIVE_INDUSTRY_WORDS = [
+  'steel',
+  'steels',
+  'metal',
+  'metals',
+  'fabricator',
+  'fabricators',
+  'fabrication',
+  'tube',
+  'tubes',
+  'pipe',
+  'pipes',
+  'motor',
+  'motors',
+  'infra',
+  'infrastructure',
+  'engineering',
+  'engineers',
+  'automotive',
+  'automotives',
+  'auto',
+  'sheet',
+  'sheets',
+  'coil',
+  'coils',
+  'strip',
+  'strips',
+  'wire',
+  'wires',
+  'casting',
+  'castings',
+  'forging',
+  'forgings',
+  'alloy',
+  'alloys',
+  'power',
+  'energy',
+  'chemical',
+  'chemicals',
+  'tool',
+  'tools',
+  'solutions',
+  'logistics',
+  'trader',
+  'traders',
+  'trading',
+  'industry',
+  'industries',
+  'enterprise',
+  'enterprises',
+  'work',
+  'works',
+  'hardware',
+  'buildcon',
+  'constructions',
+  'construction',
+];
+
+const CORPORATE_LEGAL_SUFFIXES = [
+  'pvt',
+  'ltd',
+  'private',
+  'limited',
+  'llp',
+  'inc',
+  'corp',
+  'corporation',
+  'co',
+  'and',
+  '&',
+];
+
+function normalizeCoreCompanyName(name) {
+  if (!name || typeof name !== 'string') return '';
+  return name
+    .toLowerCase()
+    .replace(/[.:,\-_/()&]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !CORPORATE_LEGAL_SUFFIXES.includes(w))
+    .join(' ')
+    .trim();
+}
+
+function hasConflictingIndustryNoun(name1, name2) {
+  if (!name1 || !name2) return false;
+  const words1 = name1
+    .toLowerCase()
+    .replace(/[.:,\-_/()&]/g, ' ')
+    .split(/\s+/);
+  const words2 = name2
+    .toLowerCase()
+    .replace(/[.:,\-_/()&]/g, ' ')
+    .split(/\s+/);
+
+  const ind1 = words1.filter((w) => DISTINCTIVE_INDUSTRY_WORDS.includes(w));
+  const ind2 = words2.filter((w) => DISTINCTIVE_INDUSTRY_WORDS.includes(w));
+
+  if (ind1.length > 0 && ind2.length > 0) {
+    const hasOverlap = ind1.some(
+      (w1) =>
+        ind2.includes(w1) ||
+        ind2.some((w2) => w1.startsWith(w2) || w2.startsWith(w1)),
+    );
+    if (!hasOverlap) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Uses Google Gemini to fuzzy match a customer name from a list of customer names.
  * Useful for handling salesperson typos, Hinglish, or shorthand customer names.
@@ -408,32 +574,55 @@ async function checkAndLogNewCustomer(deal, senderPhone) {
  */
 async function fuzzyMatchCustomer(text, customerList) {
   if (!customerList || customerList.length === 0) return null;
-  
+
   try {
     const { invokeWithFallback } = require('./core/modelRouter');
     const { HumanMessage } = require('@langchain/core/messages');
 
     const prompt = `
-Given a user message and a list of customer names, identify which customer from the list the message is referring to.
-The user might have spelling mistakes, typos, or written in Hinglish/mix languages (e.g. "Mehta steel" matches "Mehta Steel Limited", "Delta structural" matches "Delta Structural Steel").
+You are a Strict Entity Resolution Engine for B2B industrial company names.
+Given a user-provided company name and a list of registered customer names, determine if ANY registered customer is EXACTLY the same business entity.
 
-List of customer names:
+Target Company Name: "${text}"
+
+Registered Customer Candidates:
 ${customerList.map((c, i) => `${i + 1}. "${c}"`).join('\n')}
 
-Message: "${text}"
+STRICT MATCHING & ANTI-ALIASING RULES:
+1. MATCH ONLY IF:
+   - The candidate is the EXACT same company with minor spelling typo or phonetic variation (e.g. "Vardhaman" vs "Vardhman", "Rishabh" vs "Rishab").
+   - The candidate is the SAME company with or without standard corporate legal suffixes (e.g. "Pvt Ltd", "Private Limited", "LLP", "Corp", "Enterprises", "Co."). For example: "ABC Steel" MATCHES "ABC Steel Pvt Ltd".
+2. STRICTLY REJECT (RETURN ONLY "0") IF:
+   - The core business noun or industry descriptor is different! For example:
+     * "ABC Steel" DOES NOT MATCH "ABC Fabricators" -> Return 0.
+     * "Tata Motors" DOES NOT MATCH "Tata Steel" -> Return 0.
+     * "Apex Steel" DOES NOT MATCH "Apex Industries" -> Return 0.
+     * "Jindal Pipes" DOES NOT MATCH "Jindal Fabricators" -> Return 0.
+     * "Supreme Infrastructure" DOES NOT MATCH "Supreme Steel" -> Return 0.
+   - The user name is a new prospect/company whose distinct name is not in the list.
+   - In case of ANY ambiguity, doubt, or multiple different companies sharing a prefix word, return "0".
 
-Rules:
-- If there is a high-confidence match from the list, return ONLY the index of the matched customer (1-based index).
-- If there is absolutely no match or the message is about a different customer, return ONLY "0".
-- Return ONLY the number (e.g. "1" or "0"), do not include any other text, markdown, or explanation.
+If there is a definite, high-confidence match according to these rules, return ONLY the 1-based index (e.g. "1").
+If there is NO exact entity match, return ONLY "0".
 `;
 
     const response = await invokeWithFallback([new HumanMessage(prompt)]);
-    const textRes = (typeof response.content === 'string' ? response.content : JSON.stringify(response.content)).trim();
-    const matchIndex = parseInt(textRes);
-    
-    if (!isNaN(matchIndex) && matchIndex > 0 && matchIndex <= customerList.length) {
-      return customerList[matchIndex - 1];
+    const textRes = (
+      typeof response.content === 'string'
+        ? response.content
+        : JSON.stringify(response.content)
+    ).trim();
+    const matchIndex = parseInt(textRes, 10);
+
+    if (
+      !isNaN(matchIndex) &&
+      matchIndex > 0 &&
+      matchIndex <= customerList.length
+    ) {
+      const candidate = customerList[matchIndex - 1];
+      if (!hasConflictingIndustryNoun(text, candidate)) {
+        return candidate;
+      }
     }
   } catch (err) {
     console.error('fuzzyMatchCustomer error:', err.message);
@@ -450,11 +639,16 @@ Rules:
 async function verifyAndGetCustomerName(customerName, senderPhone) {
   if (!customerName || !senderPhone) return null;
   const clean = customerName.trim();
-  if (!clean || clean.toLowerCase() === 'unknown' || clean.toLowerCase() === 'null') return null;
+  if (
+    !clean ||
+    clean.toLowerCase() === 'unknown' ||
+    clean.toLowerCase() === 'null'
+  )
+    return null;
 
   try {
     const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
-    
+
     // 1. Fast exact match at SQL level
     let exactQuery = supabase
       .from('recurring_customers')
@@ -465,7 +659,10 @@ async function verifyAndGetCustomerName(customerName, senderPhone) {
 
     if (scope.phones !== null) {
       if (scope.phones.length === 1) {
-        exactQuery = exactQuery.eq('assigned_salesperson_phone', scope.phones[0]);
+        exactQuery = exactQuery.eq(
+          'assigned_salesperson_phone',
+          scope.phones[0],
+        );
       } else if (scope.phones.length > 1) {
         exactQuery = exactQuery.in('assigned_salesperson_phone', scope.phones);
       } else {
@@ -508,12 +705,19 @@ async function verifyAndGetCustomerName(customerName, senderPhone) {
     }
 
     // 3. Word token candidate retrieval for typos or word order differences (max 20 candidates)
+    // IMPORTANT: stopWords must ONLY strip legal corporate suffixes, NEVER core business words like steel, fabricators, tubes
     if (!candidateRows || candidateRows.length === 0) {
-      const stopWords = ['pvt', 'ltd', 'steel', 'company', 'corp', 'enterprises', 'private', 'limited', 'industries', 'works'];
-      const words = clean.split(/\s+/).filter(w => w.length > 2 && !stopWords.includes(w.toLowerCase()));
+      const words = clean
+        .split(/\s+/)
+        .filter(
+          (w) =>
+            w.length > 2 && !CORPORATE_LEGAL_SUFFIXES.includes(w.toLowerCase()),
+        );
 
       if (words.length > 0) {
-        const orTokens = words.map(w => `customer_name.ilike.%${w}%`).join(',');
+        const orTokens = words
+          .map((w) => `customer_name.ilike.%${w}%`)
+          .join(',');
         let wordQuery = supabase
           .from('recurring_customers')
           .select('customer_name')
@@ -523,9 +727,15 @@ async function verifyAndGetCustomerName(customerName, senderPhone) {
 
         if (scope.phones !== null) {
           if (scope.phones.length === 1) {
-            wordQuery = wordQuery.eq('assigned_salesperson_phone', scope.phones[0]);
+            wordQuery = wordQuery.eq(
+              'assigned_salesperson_phone',
+              scope.phones[0],
+            );
           } else if (scope.phones.length > 1) {
-            wordQuery = wordQuery.in('assigned_salesperson_phone', scope.phones);
+            wordQuery = wordQuery.in(
+              'assigned_salesperson_phone',
+              scope.phones,
+            );
           }
         }
 
@@ -546,16 +756,37 @@ async function verifyAndGetCustomerName(customerName, senderPhone) {
 
     if (!candidateRows || candidateRows.length === 0) return null;
 
-    const customerList = Array.from(new Set(candidateRows.map(c => c.customer_name)));
+    const customerList = Array.from(
+      new Set(candidateRows.map((c) => c.customer_name)),
+    );
 
     // Exact match in candidates
-    const exactMatch = customerList.find(c => c.toLowerCase().trim() === clean.toLowerCase());
+    const exactMatch = customerList.find(
+      (c) => c.toLowerCase().trim() === clean.toLowerCase(),
+    );
     if (exactMatch) return exactMatch;
 
-    // Fuzzy match with Gemini only across targeted candidates (max 20)
-    const fuzzyMatch = await fuzzyMatchCustomer(clean, customerList);
-    if (fuzzyMatch) return fuzzyMatch;
+    // Suffix-normalized core match (e.g. "ABC Steel" vs "ABC Steel Pvt Ltd")
+    const cleanNormalized = normalizeCoreCompanyName(clean);
+    const suffixNormalizedMatch = customerList.find(
+      (c) => normalizeCoreCompanyName(c) === cleanNormalized,
+    );
+    if (suffixNormalizedMatch) return suffixNormalizedMatch;
 
+    // Filter out candidates that have conflicting industry/business descriptors before fuzzy matching
+    const nonConflictingCandidates = customerList.filter(
+      (c) => !hasConflictingIndustryNoun(clean, c),
+    );
+    if (nonConflictingCandidates.length === 0) return null;
+
+    // Fuzzy match with Gemini only across non-conflicting candidates (max 20)
+    const fuzzyMatch = await fuzzyMatchCustomer(
+      clean,
+      nonConflictingCandidates,
+    );
+    if (fuzzyMatch && !hasConflictingIndustryNoun(clean, fuzzyMatch)) {
+      return fuzzyMatch;
+    }
   } catch (err) {
     console.error('verifyAndGetCustomerName error:', err.message);
   }
@@ -566,7 +797,11 @@ async function verifyAndGetCustomerName(customerName, senderPhone) {
  * Updates an existing customer's profile and configuration in place (order frequency, contact, rep).
  * Supports full Admin, Sales Manager, and Salesperson role-scoping at scale.
  */
-async function updateCustomerProfileRecord(senderPhone, customerName, updates = {}) {
+async function updateCustomerProfileRecord(
+  senderPhone,
+  customerName,
+  updates = {},
+) {
   if (!customerName || !senderPhone) {
     return { success: false, message: 'Customer name is required for update.' };
   }
@@ -592,7 +827,10 @@ async function updateCustomerProfileRecord(senderPhone, customerName, updates = 
       } else if (scope.phones.length > 1) {
         query = query.in('assigned_salesperson_phone', scope.phones);
       } else {
-        return { success: false, message: 'No salespersons assigned to your team.' };
+        return {
+          success: false,
+          message: 'No salespersons assigned to your team.',
+        };
       }
     }
 
@@ -611,10 +849,25 @@ async function updateCustomerProfileRecord(senderPhone, customerName, updates = 
 
     // If still empty, try word tokens
     if (!customers || customers.length === 0) {
-      const stopWords = ['pvt', 'ltd', 'steel', 'company', 'corp', 'enterprises', 'private', 'limited', 'industries', 'works'];
-      const words = cleanName.split(/\s+/).filter(w => w.length > 2 && !stopWords.includes(w.toLowerCase()));
+      const stopWords = [
+        'pvt',
+        'ltd',
+        'steel',
+        'company',
+        'corp',
+        'enterprises',
+        'private',
+        'limited',
+        'industries',
+        'works',
+      ];
+      const words = cleanName
+        .split(/\s+/)
+        .filter((w) => w.length > 2 && !stopWords.includes(w.toLowerCase()));
       if (words.length > 0) {
-        const orTokens = words.map(w => `customer_name.ilike.%${w}%`).join(',');
+        const orTokens = words
+          .map((w) => `customer_name.ilike.%${w}%`)
+          .join(',');
         let wordQuery = supabase
           .from('recurring_customers')
           .select('*')
@@ -624,9 +877,15 @@ async function updateCustomerProfileRecord(senderPhone, customerName, updates = 
 
         if (scope.phones !== null) {
           if (scope.phones.length === 1) {
-            wordQuery = wordQuery.eq('assigned_salesperson_phone', scope.phones[0]);
+            wordQuery = wordQuery.eq(
+              'assigned_salesperson_phone',
+              scope.phones[0],
+            );
           } else if (scope.phones.length > 1) {
-            wordQuery = wordQuery.in('assigned_salesperson_phone', scope.phones);
+            wordQuery = wordQuery.in(
+              'assigned_salesperson_phone',
+              scope.phones,
+            );
           }
         }
 
@@ -646,46 +905,69 @@ async function updateCustomerProfileRecord(senderPhone, customerName, updates = 
     }
 
     if (!customers || customers.length === 0) {
-      return { success: false, message: `No registered customer found matching "${cleanName}".` };
+      return {
+        success: false,
+        message: `No registered customer found matching "${cleanName}".`,
+      };
     }
 
     // 2. Exact or fuzzy match across targeted candidates
-    let matched = customers.find(c => c.customer_name.toLowerCase().trim() === cleanName.toLowerCase());
+    let matched = customers.find(
+      (c) => c.customer_name.toLowerCase().trim() === cleanName.toLowerCase(),
+    );
     if (!matched) {
-      matched = customers.find(c => c.customer_name.toLowerCase().includes(cleanName.toLowerCase()) || cleanName.toLowerCase().includes(c.customer_name.toLowerCase()));
+      matched = customers.find(
+        (c) =>
+          c.customer_name.toLowerCase().includes(cleanName.toLowerCase()) ||
+          cleanName.toLowerCase().includes(c.customer_name.toLowerCase()),
+      );
     }
     if (!matched) {
-      const matchedName = await fuzzyMatchCustomer(cleanName, customers.map(c => c.customer_name));
+      const matchedName = await fuzzyMatchCustomer(
+        cleanName,
+        customers.map((c) => c.customer_name),
+      );
       if (matchedName) {
-        matched = customers.find(c => c.customer_name === matchedName);
+        matched = customers.find((c) => c.customer_name === matchedName);
       }
     }
 
     if (!matched) {
-      return { success: false, message: `Could not find any customer matching "${cleanName}".` };
+      return {
+        success: false,
+        message: `Could not find any customer matching "${cleanName}".`,
+      };
     }
 
     // 3. Build update payload
     const updatePayload = { updated_at: new Date().toISOString() };
     if (updates.order_frequency_days != null) {
       const freq = parseInt(updates.order_frequency_days, 10);
-      if (!isNaN(freq) && freq > 0) updatePayload.avg_order_frequency_days = freq;
+      if (!isNaN(freq) && freq > 0)
+        updatePayload.avg_order_frequency_days = freq;
     }
-    if (updates.contact_person) updatePayload.contact_person = updates.contact_person;
+    if (updates.contact_person)
+      updatePayload.contact_person = updates.contact_person;
     if (updates.phone) updatePayload.customer_phone = updates.phone;
     if (updates.gst) updatePayload.customer_gst = updates.gst;
-    if (updates.address_or_city) updatePayload.customer_address = updates.address_or_city;
-    if (updates.is_active != null) updatePayload.is_active = Boolean(updates.is_active);
+    if (updates.address_or_city)
+      updatePayload.customer_address = updates.address_or_city;
+    if (updates.is_active != null)
+      updatePayload.is_active = Boolean(updates.is_active);
 
     // If Admin/Manager reassigning to another salesperson
     let targetRepEmployee = null;
     if (updates.assigned_salesperson && (scope.isAdmin || scope.isManager)) {
-      const { data: allEmps } = await supabase.from('employees').select('*').eq('is_active', true);
+      const { data: allEmps } = await supabase
+        .from('employees')
+        .select('*')
+        .eq('is_active', true);
       const targetLower = updates.assigned_salesperson.toLowerCase().trim();
-      const foundEmp = (allEmps || []).find(e =>
-        e.name?.toLowerCase().includes(targetLower) ||
-        targetLower.includes(e.name?.toLowerCase()) ||
-        e.phone === updates.assigned_salesperson
+      const foundEmp = (allEmps || []).find(
+        (e) =>
+          e.name?.toLowerCase().includes(targetLower) ||
+          targetLower.includes(e.name?.toLowerCase()) ||
+          e.phone === updates.assigned_salesperson,
       );
       if (foundEmp) {
         targetRepEmployee = foundEmp;
@@ -706,9 +988,11 @@ async function updateCustomerProfileRecord(senderPhone, customerName, updates = 
     // Sync updated location / phone / contact person to the customer's latest visit record
     try {
       const visitUpdates = {};
-      if (updates.address_or_city) visitUpdates.customer_address = updates.address_or_city;
+      if (updates.address_or_city)
+        visitUpdates.customer_address = updates.address_or_city;
       if (updates.phone) visitUpdates.contact_no = updates.phone;
-      if (updates.contact_person) visitUpdates.person_met = updates.contact_person;
+      if (updates.contact_person)
+        visitUpdates.person_met = updates.contact_person;
 
       if (Object.keys(visitUpdates).length > 0) {
         const { data: latestVisit } = await supabase
@@ -726,7 +1010,10 @@ async function updateCustomerProfileRecord(senderPhone, customerName, updates = 
         }
       }
     } catch (vErr) {
-      console.warn('Syncing profile update to customer_visits notice:', vErr.message);
+      console.warn(
+        'Syncing profile update to customer_visits notice:',
+        vErr.message,
+      );
     }
 
     // Get current assigned rep name for display
@@ -744,18 +1031,32 @@ async function updateCustomerProfileRecord(senderPhone, customerName, updates = 
       success: true,
       customer: updatedRecord,
       assignedRepName,
-      message: `✅ *Customer Profile Updated!*\n\n` +
+      message:
+        `✅ *Customer Profile Updated!*\n\n` +
         `🏢 Company: *${updatedRecord.customer_name}*\n` +
-        (updates.order_frequency_days ? `📅 Order Frequency: *Every ${updatedRecord.avg_order_frequency_days} days*\n` : '') +
-        (updatedRecord.contact_person ? `👤 Contact: *${updatedRecord.contact_person}*\n` : '') +
-        (updatedRecord.customer_phone ? `📱 Phone: *${updatedRecord.customer_phone}*\n` : '') +
-        (updatedRecord.customer_address ? `📍 Location: *${updatedRecord.customer_address}*\n` : '') +
-        (assignedRepName ? `💼 Assigned Salesperson: *${assignedRepName}*\n` : '') +
+        (updates.order_frequency_days
+          ? `📅 Order Frequency: *Every ${updatedRecord.avg_order_frequency_days} days*\n`
+          : '') +
+        (updatedRecord.contact_person
+          ? `👤 Contact: *${updatedRecord.contact_person}*\n`
+          : '') +
+        (updatedRecord.customer_phone
+          ? `📱 Phone: *${updatedRecord.customer_phone}*\n`
+          : '') +
+        (updatedRecord.customer_address
+          ? `📍 Location: *${updatedRecord.customer_address}*\n`
+          : '') +
+        (assignedRepName
+          ? `💼 Assigned Salesperson: *${assignedRepName}*\n`
+          : '') +
         `\n_Updated live on Enlight Sales OS Dashboard!_ ✅`,
     };
   } catch (err) {
     console.error('updateCustomerProfileRecord error:', err.message);
-    return { success: false, message: `❌ Could not update customer: ${err.message}` };
+    return {
+      success: false,
+      message: `❌ Could not update customer: ${err.message}`,
+    };
   }
 }
 
@@ -765,7 +1066,9 @@ async function updateCustomerProfileRecord(senderPhone, customerName, updates = 
  */
 async function getCustomerMissingInfoPrompt(customerName, senderPhone) {
   try {
-    const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null };
+    const scope = senderPhone
+      ? await getAccessibleSalespersonPhonesForBot(senderPhone)
+      : { phones: null };
     let query = supabase
       .from('recurring_customers')
       .select('customer_phone, customer_gst, customer_address, contact_person')
@@ -809,12 +1112,18 @@ async function getCustomerMissingInfoPrompt(customerName, senderPhone) {
 /**
  * Saves or updates the active customer context session for a salesperson.
  */
-async function saveActiveSession(salespersonPhone, customerName, intent = 'general') {
+async function saveActiveSession(
+  salespersonPhone,
+  customerName,
+  intent = 'general',
+) {
   if (!salespersonPhone || !customerName) return;
   try {
     const clean = String(salespersonPhone).replace(/\D/g, '');
     const p10 = clean.slice(-10);
-    const variants = p10 ? Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean])) : [clean];
+    const variants = p10
+      ? Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean]))
+      : [clean];
 
     const { data: existing } = await supabase
       .from('conversation_sessions')
@@ -830,18 +1139,16 @@ async function saveActiveSession(salespersonPhone, customerName, intent = 'gener
         .update({
           active_customer_name: customerName,
           last_intent: intent,
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         })
         .eq('salesperson_phone', existing[0].salesperson_phone);
     } else {
-      await supabase
-        .from('conversation_sessions')
-        .insert({
-          salesperson_phone: primaryPhone,
-          active_customer_name: customerName,
-          last_intent: intent,
-          updated_at: new Date().toISOString()
-        });
+      await supabase.from('conversation_sessions').insert({
+        salesperson_phone: primaryPhone,
+        active_customer_name: customerName,
+        last_intent: intent,
+        updated_at: new Date().toISOString(),
+      });
     }
   } catch (err) {
     console.error('saveActiveSession catch:', err.message);
@@ -850,7 +1157,15 @@ async function saveActiveSession(salespersonPhone, customerName, intent = 'gener
 
 function getStartOfTodayISO() {
   const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const startOfToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+    0,
+    0,
+    0,
+    0,
+  );
   return startOfToday.toISOString();
 }
 
@@ -862,7 +1177,9 @@ async function getActiveSession(salespersonPhone) {
   try {
     const clean = String(salespersonPhone).replace(/\D/g, '');
     const p10 = clean.slice(-10);
-    const variants = p10 ? Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean])) : [clean];
+    const variants = p10
+      ? Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean]))
+      : [clean];
     const startOfToday = getStartOfTodayISO();
     const { data, error } = await supabase
       .from('conversation_sessions')
@@ -893,7 +1210,9 @@ async function getFullActiveSession(salespersonPhone) {
   try {
     const clean = String(salespersonPhone).replace(/\D/g, '');
     const p10 = clean.slice(-10);
-    const variants = p10 ? Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean])) : [clean];
+    const variants = p10
+      ? Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean]))
+      : [clean];
     const startOfToday = getStartOfTodayISO();
     const { data, error } = await supabase
       .from('conversation_sessions')
@@ -917,11 +1236,11 @@ async function getFullActiveSession(salespersonPhone) {
 }
 
 // Export default and named exports
-module.exports = { 
-  supabase, 
-  saveInquiry, 
-  getInquiries, 
-  saveDeal, 
+module.exports = {
+  supabase,
+  saveInquiry,
+  getInquiries,
+  saveDeal,
   getEmployeeByPhone,
   normalizePhone,
   getAccessibleSalespersonPhonesForBot,
@@ -933,5 +1252,5 @@ module.exports = {
   saveActiveSession,
   getActiveSession,
   getFullActiveSession,
-  updateCustomerProfileRecord
+  updateCustomerProfileRecord,
 };
