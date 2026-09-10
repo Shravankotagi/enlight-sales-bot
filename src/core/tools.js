@@ -292,14 +292,14 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'get_visits',
-      description: `Retrieves customer site and field visit logs, visit outcomes (positive, neutral, negative), location filtering (e.g. "Mumbai", "Pune", "Nashik"), salesperson visit leaderboard, week-over-week visit comparison, duplicate visits, and visits missing location or contact person.`,
+      description: `Retrieves customer site and field visit logs, visit outcomes (positive, neutral, negative), location filtering (e.g. "Mumbai", "Pune", "Nashik"), salesperson visit leaderboard, week-over-week visit comparison, duplicate visits, visits missing location or contact person, and prospective customers who have visits logged but no orders yet (mode: "visits_no_orders").`,
       schema: z.object({
         customer_name_search: z.string().optional().nullable().describe('Optional search term for customer name.'),
         salesperson_name: z.string().optional().nullable().describe('Optional filter by salesperson name (e.g. "Max", "Rishabh Makwana").'),
         location: z.string().optional().nullable().describe('Optional filter by visit city or destination (e.g. "Nashik", "Pune", "Mumbai").'),
         outcome_filter: z.string().optional().nullable().describe('Optional filter by visit outcome: "positive", "neutral", "negative", "all".'),
         date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
-        mode: z.string().optional().nullable().describe('Query mode: "list", "rep_leaderboard", "week_comparison", "duplicates", "missing_location", "missing_contact_person", "pending_followup".'),
+        mode: z.string().optional().nullable().describe('Query mode: "list", "rep_leaderboard", "week_comparison", "duplicates", "missing_location", "missing_contact_person", "pending_followup", "visits_no_orders".'),
         limit: z.number().optional().nullable().describe('Maximum number of visits to return (default: 20).'),
       }),
     }
@@ -317,13 +317,15 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'get_complaints',
-      description: `Retrieves customer quality and delivery complaints, 48-hour SLA performance, open vs resolved tracking, sales rep complaints leaderboard / comparison, product category breakdown (Coil vs Plate vs Structural Steel), and negative visit correlation patterns.`,
+      description: `Retrieves customer quality and delivery complaints, 48-hour SLA performance, open vs resolved tracking, specific PO number lookups (e.g. po_number="1212"), complaint type filtering (e.g. complaint_type="Quality Defect" or "Billing"), complaints grouped by type (mode: "type_breakdown"), pending/reopened status filtering, sales rep complaints leaderboard, product category breakdown, and customers with both open complaints and recent orders (mode: "open_complaints_with_orders").`,
       schema: z.object({
         customer_name: z.string().optional().nullable().describe('Optional filter by customer or company name.'),
         salesperson_name: z.string().optional().nullable().describe('Optional filter by salesperson name.'),
-        status_filter: z.string().optional().nullable().describe('Optional filter: "open", "resolved", "all".'),
+        po_number: z.string().optional().nullable().describe('Optional filter by Purchase Order (PO) number (e.g. "1212", "PO-2026-TI-101").'),
+        complaint_type: z.string().optional().nullable().describe('Optional filter by complaint type: "Quality Defect", "quality", "physical damage", "billing", "delivery", "commercial".'),
+        status_filter: z.string().optional().nullable().describe('Optional status filter: "open", "pending", "resolved", "reopened", "closed", "all".'),
         date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
-        mode: z.string().optional().nullable().describe('Query mode: "list", "rep_complaints", "product_category_breakdown", "visit_correlation".'),
+        mode: z.string().optional().nullable().describe('Query mode: "list", "type_breakdown", "open_complaints_with_orders", "rep_complaints", "product_category_breakdown", "visit_correlation".'),
         limit: z.number().optional().nullable().describe('Maximum number of complaints to return (default: 20).'),
       }),
     }
@@ -341,10 +343,11 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'get_customer_360',
-      description: `Retrieves comprehensive Customer 360 overview for a specific customer (profile, pipeline deals, payments, site visits, complaints, segment, health status), OR customer count, directory, and segmentation breakdown (New, Key Account, Growth) when customer_name is omitted.`,
+      description: `Retrieves comprehensive Customer 360 overview for a specific customer (profile, pipeline deals, payments, site visits, complaints, segment, health status), OR customer count, directory, segmentation breakdown (New, Key Account, Growth), and active accounts with 0 orders (mode: "zero_orders_active").`,
       schema: z.object({
-        customer_name: z.string().optional().nullable().describe('Optional name of customer or company (e.g. "Supreme Steel"). Omit to retrieve directory and segmentation stats.'),
+        customer_name: z.string().optional().nullable().describe('Optional name of customer or company (e.g. "Supreme Steel", "ABC Steel"). Omit to retrieve directory and segmentation stats.'),
         segment_filter: z.string().optional().nullable().describe('Optional segment filter: "all", "key_account", "growth", "new".'),
+        mode: z.string().optional().nullable().describe('Query mode: "directory", "segmentation", "zero_orders_active".'),
         limit: z.number().optional().nullable().describe('Maximum number of customer records (default: 50).'),
       }),
     }

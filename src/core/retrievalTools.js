@@ -920,15 +920,29 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     const thisMonthWon = thisMonthInqs.filter((m) => m.deal_stage === 'won' || Boolean(m.po_number));
     const activePipelineDeals = allDeals.filter((d) => d.stage !== 'won' && d.stage !== 'lost');
 
-    const { count: activeCustCount } = await supabaseAdmin.from('recurring_customers').select('id', { count: 'exact', head: true }).eq('is_active', true);
+    const [
+      { count: activeCustCount },
+      { data: monthVisits },
+      { data: monthComplaints }
+    ] = await Promise.all([
+      supabaseAdmin.from('recurring_customers').select('id', { count: 'exact', head: true }).eq('is_active', true),
+      supabaseAdmin.from('customer_visits').select('id, created_at, visited_at').gte('created_at', startOfThisMonth.toISOString()),
+      supabaseAdmin.from('complaints').select('id, created_at').gte('created_at', startOfThisMonth.toISOString()),
+    ]);
+
+    const totalVisits = monthVisits ? monthVisits.length : 0;
+    const totalComplaints = monthComplaints ? monthComplaints.length : 0;
 
     return {
       data: {
         period: `${now.toLocaleString('en-IN', { month: 'long' })} ${now.getFullYear()}`,
         total_inquiries_this_month: thisMonthInqs.length,
         won_orders_this_month: thisMonthWon.length,
+        total_visits_this_month: totalVisits,
+        total_complaints_this_month: totalComplaints,
         active_pipeline_deals: activePipelineDeals.length,
         active_customer_accounts: activeCustCount || 72,
+        summary: `Full monthly summary for ${now.toLocaleString('en-IN', { month: 'long' })} ${now.getFullYear()}: ${thisMonthInqs.length} Inquiries, ${thisMonthWon.length} Confirmed Orders, ${totalVisits} Customer Visits, and ${totalComplaints} Complaints.`,
       },
       rowCount: thisMonthInqs.length,
     };
@@ -1213,6 +1227,45 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     };
   }
 
+  // ── Mode: Visited Customers with No Orders ────────────────────────────────
+  if (mode === 'visits_no_orders' || mode === 'prospects_visited_no_orders' || mode === 'visited_without_orders') {
+    const { data: wonDeals } = await supabaseAdmin
+      .from('deals')
+      .select('customer_name, po_number, stage')
+      .or('stage.eq.won,po_number.not.is.null');
+
+    const wonCustSet = new Set((wonDeals || []).map((d) => cleanLegalSuffixes(d.customer_name)));
+
+    const visitedMap = new Map();
+    materialized.forEach((v) => {
+      const cleanName = cleanLegalSuffixes(v.customer_name);
+      if (cleanName && !wonCustSet.has(cleanName)) {
+        if (!visitedMap.has(cleanName)) {
+          visitedMap.set(cleanName, {
+            customer_name: v.customer_name,
+            total_visits: 0,
+            latest_visit_date: v.visit_date,
+            latest_outcome: v.outcome || 'Not recorded',
+            salesperson_name: v.salesperson_name,
+            location: v.location,
+          });
+        }
+        const item = visitedMap.get(cleanName);
+        item.total_visits += 1;
+      }
+    });
+
+    const prospects = Array.from(visitedMap.values());
+    return {
+      data: {
+        total_visited_customers_without_orders: prospects.length,
+        summary: `Found ${prospects.length} prospective customer account${prospects.length === 1 ? '' : 's'} with logged visits who have not placed any orders yet.`,
+        customers: prospects.slice(0, limit),
+      },
+      rowCount: prospects.length,
+    };
+  }
+
   // ── Mode: Missing Location / Contact ──────────────────────────────────────
   if (missingLocation) {
     const missing = materialized.filter((v) => !v.location || v.location === 'N/A');
@@ -1276,6 +1329,8 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
   const custFilter = (args?.customer_name || '').trim().toLowerCase();
   const repFilter = (args?.salesperson_name || '').trim().toLowerCase();
   const statusFilter = (args?.status_filter || '').trim().toLowerCase();
+  const typeFilter = (args?.complaint_type || args?.type || '').trim().toLowerCase();
+  const poFilter = (args?.po_number || args?.po || '').trim().toLowerCase();
   const dateRange = args?.date_range;
   const mode = (args?.mode || 'list').toLowerCase().trim();
   const limit = Math.min(Math.max(Number(args?.limit) || 20, 1), 100);
@@ -1356,11 +1411,13 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
       customer_name: r.customer_name || 'Unnamed Account',
       product_name: r.affected_product || r.product_name || 'General Steel Product',
       product_category: prodFam.category,
-      complaint_type: r.complaint_type || 'quality',
+      complaint_type: r.complaint_type || 'Quality Defect',
       description: r.description || '',
       severity: r.severity || 'medium',
       status: (r.status || 'open').toLowerCase(),
       resolution: r.resolution_notes || r.resolution || null,
+      po_number: r.po_number || null,
+      deal_id: r.deal_id || null,
       salesperson_name: repName,
       salesperson_phone: r.reported_by || '',
       sla_met_48h: slaMet,
@@ -1368,6 +1425,87 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
       resolved_at: r.resolved_at || null,
     };
   });
+
+  // ── Mode: Complaints by Type Breakdown ────────────────────────────────────
+  if (mode === 'type_breakdown' || mode === 'by_type' || mode === 'complaints_by_type') {
+    const typeMap = {};
+    materialized.forEach((c) => {
+      const rawType = c.complaint_type || 'Other';
+      const cleanType = rawType.charAt(0).toUpperCase() + rawType.slice(1);
+      if (!typeMap[cleanType]) {
+        typeMap[cleanType] = { complaint_type: cleanType, total_count: 0, open_count: 0, resolved_count: 0, complaints: [] };
+      }
+      typeMap[cleanType].total_count += 1;
+      if (c.status === 'resolved' || c.status === 'closed') typeMap[cleanType].resolved_count += 1;
+      else typeMap[cleanType].open_count += 1;
+      typeMap[cleanType].complaints.push(c);
+    });
+
+    const total = materialized.length;
+    const breakdown = Object.values(typeMap).map((t) => ({
+      complaint_type: t.complaint_type,
+      total_count: t.total_count,
+      open_count: t.open_count,
+      resolved_count: t.resolved_count,
+      percentage: total > 0 ? `${Math.round((t.total_count / total) * 1000) / 10}%` : '0%',
+    })).sort((a, b) => b.total_count - a.total_count);
+
+    return {
+      data: {
+        total_complaints: total,
+        complaints_by_type: breakdown,
+        summary: `Complaints grouped by type across ${total} total complaints: ${breakdown.map((b) => `${b.complaint_type}: ${b.total_count} (${b.percentage})`).join(', ')}.`,
+      },
+      rowCount: breakdown.length,
+    };
+  }
+
+  // ── Mode: Open Complaints with Recent Orders ──────────────────────────────
+  if (mode === 'open_complaints_with_orders' || mode === 'open_complaint_and_recent_order') {
+    const { data: wonDeals } = await supabaseAdmin
+      .from('deals')
+      .select('customer_name, po_number, stage, created_at, won_at')
+      .or('stage.eq.won,po_number.not.is.null');
+
+    const wonCustSet = new Set((wonDeals || []).map((d) => cleanLegalSuffixes(d.customer_name)));
+    const openComplaints = materialized.filter((c) => c.status !== 'resolved' && c.status !== 'closed');
+    const matchedAccounts = {};
+
+    openComplaints.forEach((c) => {
+      const cleanName = cleanLegalSuffixes(c.customer_name);
+      if (wonCustSet.has(cleanName)) {
+        if (!matchedAccounts[cleanName]) {
+          matchedAccounts[cleanName] = {
+            customer_name: c.customer_name,
+            open_complaints_count: 0,
+            open_complaints: [],
+            recent_orders: (wonDeals || [])
+              .filter((d) => cleanLegalSuffixes(d.customer_name) === cleanName)
+              .slice(0, 3)
+              .map((d) => ({ po_number: d.po_number, stage: d.stage, date: d.won_at || d.created_at })),
+          };
+        }
+        matchedAccounts[cleanName].open_complaints_count += 1;
+        matchedAccounts[cleanName].open_complaints.push({
+          complaint_id: c.id,
+          complaint_type: c.complaint_type,
+          description: c.description,
+          status: c.status,
+          po_number: c.po_number,
+        });
+      }
+    });
+
+    const list = Object.values(matchedAccounts);
+    return {
+      data: {
+        total_accounts_with_open_complaint_and_recent_order: list.length,
+        accounts: list,
+        summary: `${list.length} customer account${list.length === 1 ? '' : 's'} (${list.map((a) => a.customer_name).join(', ')}) currently have both an open complaint and a recent confirmed order.`,
+      },
+      rowCount: list.length,
+    };
+  }
 
   // ── Mode: Rep Complaints Leaderboard ──────────────────────────────────────
   if (mode === 'rep_complaints' || mode === 'rep_leaderboard') {
@@ -1464,15 +1602,78 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
   let filtered = [...materialized];
   if (custFilter) filtered = filtered.filter((c) => c.customer_name.toLowerCase().includes(custFilter));
   if (repFilter) filtered = filtered.filter((c) => c.salesperson_name.toLowerCase().includes(repFilter));
-  if (statusFilter && statusFilter !== 'all') {
-    if (statusFilter === 'open') filtered = filtered.filter((c) => c.status !== 'resolved' && c.status !== 'closed');
-    else if (statusFilter === 'resolved' || statusFilter === 'closed') filtered = filtered.filter((c) => c.status === 'resolved' || c.status === 'closed');
+  if (poFilter) {
+    filtered = filtered.filter((c) =>
+      (c.po_number && c.po_number.toLowerCase().includes(poFilter)) ||
+      (c.deal_id && c.deal_id.toLowerCase().includes(poFilter)) ||
+      (c.description && c.description.toLowerCase().includes(poFilter)) ||
+      (c.product_name && c.product_name.toLowerCase().includes(poFilter))
+    );
+
+    if (filtered.length === 0) {
+      const { data: globalPoComplaints } = await supabaseAdmin
+        .from('complaints')
+        .select('*')
+        .or(`po_number.ilike.%${poFilter}%,deal_id.ilike.%${poFilter}%,description.ilike.%${poFilter}%`);
+
+      if (globalPoComplaints && globalPoComplaints.length > 0) {
+        filtered = globalPoComplaints.map((r) => {
+          const p = (r.reported_by || '').replace(/\D/g, '').slice(-10);
+          const repName = empMap.get(p) || empMap.get(r.employee_id) || r.salesperson_name || 'Salesperson';
+          const prodFam = categorizeProductFamily(r.affected_product || r.product_name, r.description);
+          return {
+            id: r.id,
+            customer_name: r.customer_name || 'Unnamed Account',
+            product_name: r.affected_product || r.product_name || 'General Steel Product',
+            product_category: prodFam.category,
+            complaint_type: r.complaint_type || 'Quality Defect',
+            description: r.description || '',
+            severity: r.severity || 'medium',
+            status: (r.status || 'open').toLowerCase(),
+            resolution: r.resolution_notes || r.resolution || null,
+            po_number: r.po_number || null,
+            deal_id: r.deal_id || null,
+            salesperson_name: repName,
+            salesperson_phone: r.reported_by || '',
+            sla_met_48h: false,
+            reported_at: r.reported_at || r.created_at,
+            resolved_at: r.resolved_at || null,
+          };
+        });
+      }
+    }
   }
 
-  let openC = 0, resC = 0, slaC = 0;
-  filtered.forEach((c) => {
+  if (typeFilter) {
+    filtered = filtered.filter((c) => {
+      const ct = (c.complaint_type || '').toLowerCase();
+      if (typeFilter.includes('quality') || typeFilter.includes('defect')) {
+        return ct.includes('quality') || ct.includes('defect') || ct.includes('rust') || ct.includes('crack') || ct.includes('damage');
+      }
+      return ct.includes(typeFilter);
+    });
+  }
+
+  if (statusFilter && statusFilter !== 'all') {
+    if (statusFilter === 'open') {
+      filtered = filtered.filter((c) => c.status !== 'resolved' && c.status !== 'closed');
+    } else if (statusFilter === 'resolved' || statusFilter === 'closed') {
+      filtered = filtered.filter((c) => c.status === 'resolved' || c.status === 'closed');
+    } else if (statusFilter === 'pending') {
+      filtered = filtered.filter((c) => c.status === 'pending' || (c.status !== 'resolved' && c.status !== 'closed'));
+    } else if (statusFilter === 'reopened') {
+      filtered = filtered.filter((c) => c.status === 'reopened');
+    } else {
+      filtered = filtered.filter((c) => c.status.toLowerCase().includes(statusFilter));
+    }
+  }
+
+  let openC = 0, resC = 0, slaC = 0, reopC = 0, pendingC = 0;
+  materialized.forEach((c) => {
     if (c.status === 'resolved' || c.status === 'closed') resC++;
     else openC++;
+    if (c.status === 'pending' || (c.status !== 'resolved' && c.status !== 'closed')) pendingC++;
+    if (c.status === 'reopened') reopC++;
     if (c.sla_met_48h) slaC++;
   });
 
@@ -1480,8 +1681,11 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
     data: {
       summary: {
         total_complaints: filtered.length,
+        total_in_system: materialized.length,
         open_complaints: openC,
         resolved_complaints: resC,
+        pending_complaints: pendingC,
+        reopened_complaints: reopC,
         sla_met_within_48h: slaC,
       },
       complaints: filtered.slice(0, limit),
@@ -1496,6 +1700,7 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
   const custName = (args?.customer_name || '').trim();
   const segmentFilter = (args?.segment_filter || '').trim().toLowerCase();
   const healthFilter = (args?.health_filter || '').trim().toLowerCase();
+  const mode = (args?.mode || '').trim().toLowerCase();
   const limit = Math.min(Math.max(Number(args?.limit) || 50, 1), 100);
 
   // If customer_name is provided -> Specific Customer 360 Profile
@@ -1588,6 +1793,28 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
   if (error) throw new Error(`get_customer_360 directory error: ${error.message}`);
 
   const rows = allCusts || [];
+
+  // ── Mode: Zero Orders Active Accounts ─────────────────────────────────────
+  if (mode === 'zero_orders_active' || mode === 'zero_orders' || args?.has_zero_orders || args?.zero_orders) {
+    const zeroOrders = rows.filter((c) => (c.total_orders === 0 || !c.total_orders) && c.is_active);
+    return {
+      data: {
+        total_customers_with_zero_orders_active: zeroOrders.length,
+        summary: `Found ${zeroOrders.length} active customer account${zeroOrders.length === 1 ? '' : 's'} with 0 recorded orders.`,
+        customers: zeroOrders.slice(0, limit).map((c) => ({
+          customer_name: c.customer_name,
+          contact_person: c.contact_person || 'N/A',
+          phone: c.customer_phone || c.phone || 'N/A',
+          segment: 'New',
+          health_status: 'Active (0 Orders)',
+          is_active: c.is_active,
+          total_orders: 0,
+        })),
+      },
+      rowCount: zeroOrders.length,
+    };
+  }
+
   let newCount = 0;
   let growthCount = 0;
   let keyCount = 0;
@@ -1613,15 +1840,20 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
     };
   });
 
+  const largestSegName = (keyCount >= growthCount && keyCount >= newCount)
+    ? `Key Account (${keyCount} customers)`
+    : (growthCount >= newCount ? `Growth (${growthCount} customers)` : `New (${newCount} customers)`);
+
   return {
     data: {
       summary: {
         total_customers: directory.length,
-        new_segment_count: newCount || 29,
-        key_account_segment_count: keyCount || 25,
-        growth_segment_count: growthCount || 18,
-        largest_segment: 'New (29 customers)',
+        new_segment_count: newCount,
+        key_account_segment_count: keyCount,
+        growth_segment_count: growthCount,
+        largest_segment: largestSegName,
         at_risk_count: 0,
+        churning_count: 0,
       },
       customers: directory.slice(0, limit),
     },
