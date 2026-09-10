@@ -287,16 +287,29 @@ async function verifyCustomerAccountAccess(customerName, callerContext, supabase
 function parseDateFilter(dateFilter) {
   if (!dateFilter) return {};
   const lower = String(dateFilter).toLowerCase().trim().replace(/[-_]+/g, ' ');
-  if (lower === 'all' || lower === 'all time' || lower === 'all_time' || lower === 'overall' || lower === 'lifetime' || lower === 'total' || lower === 'everything') return {};
+  if (
+    lower === 'all' ||
+    lower === 'all time' ||
+    lower === 'all_time' ||
+    lower === 'overall' ||
+    lower === 'lifetime' ||
+    lower === 'total' ||
+    lower === 'everything' ||
+    lower === 'hamesha' ||
+    lower === 'kul' ||
+    lower === 'sab' ||
+    lower === 'poora' ||
+    lower === 'ab tak'
+  ) return {};
 
   const now = new Date();
 
-  if (lower === 'today') {
+  if (lower === 'today' || lower === 'aaj' || lower === 'aj') {
     const startOfToday = new Date(now);
     startOfToday.setHours(0, 0, 0, 0);
     return { from: startOfToday };
   }
-  if (lower === 'yesterday') {
+  if (lower === 'yesterday' || lower === 'kal' || lower === 'beeta kal') {
     const startOfYesterday = new Date(now);
     startOfYesterday.setDate(startOfYesterday.getDate() - 1);
     startOfYesterday.setHours(0, 0, 0, 0);
@@ -306,8 +319,8 @@ function parseDateFilter(dateFilter) {
     return { from: startOfYesterday, to: endOfYesterday };
   }
 
-  // Relative days regex: e.g. "last 7 days", "past 7 days", "7 days", "last 30 days", "30 days", "last 14 days"
-  const daysMatch = lower.match(/^(?:last|past)?\s*(\d+)\s*days?$/);
+  // Relative days regex: e.g. "last 7 days", "past 7 days", "7 days", "7 din", "pichle 7 din", "last 30 days", "30 days", "30 din", "last 14 days"
+  const daysMatch = lower.match(/^(?:last|past|pichle)?\s*(\d+)\s*(?:days?|din)$/);
   if (daysMatch) {
     const numDays = parseInt(daysMatch[1], 10);
     const start = new Date(now);
@@ -320,12 +333,19 @@ function parseDateFilter(dateFilter) {
   if (
     lower === 'this week' ||
     lower === 'week' ||
+    lower === 'is hafte' ||
+    lower === 'yeh hafte' ||
+    lower === 'iss hafte' ||
+    lower === 'current week' ||
     lower === 'last 7 days' ||
     lower === 'past 7 days' ||
     lower === '7 days' ||
+    lower === '7 din' ||
+    lower === 'pichle 7 din' ||
     lower === 'last week' ||
     lower === 'past week' ||
-    lower === 'previous week'
+    lower === 'previous week' ||
+    lower === 'pichle hafte'
   ) {
     const startOfWeek = new Date(now);
     startOfWeek.setDate(startOfWeek.getDate() - 7);
@@ -337,15 +357,27 @@ function parseDateFilter(dateFilter) {
   if (
     lower === 'this month' ||
     lower === 'month' ||
+    lower === 'is mahine' ||
+    lower === 'yeh mahine' ||
+    lower === 'iss mahine' ||
+    lower === 'current month' ||
+    lower === 'mtd' ||
     lower === 'last 30 days' ||
     lower === 'past 30 days' ||
     lower === '30 days' ||
-    lower === 'current month'
+    lower === '30 din' ||
+    lower === 'pichle 30 din'
   ) {
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     return { from: startOfMonth };
   }
-  if (lower === 'last month' || lower === 'previous month' || lower === 'past month') {
+  if (
+    lower === 'last month' ||
+    lower === 'previous month' ||
+    lower === 'past month' ||
+    lower === 'pichle mahine' ||
+    lower === 'pichla mahina'
+  ) {
     const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0);
     endOfLastMonth.setHours(23, 59, 59, 999);
@@ -746,7 +778,13 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   }
 
   // ── Mode: Highest Tonnage ─────────────────────────────────────────────────
-  if (mode === 'highest_tonnage' || sortBy.includes('tonnage')) {
+  if (
+    mode === 'highest_tonnage' ||
+    mode === 'max_tonnage' ||
+    mode === 'top_tonnage' ||
+    mode === 'highest_qty' ||
+    sortBy.includes('tonnage')
+  ) {
     const sorted = [...materialized].sort((a, b) => b.estimated_tonnage_mt - a.estimated_tonnage_mt);
     const top = sorted[0];
     return {
@@ -762,7 +800,13 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   }
 
   // ── Mode: Channel Breakdown ───────────────────────────────────────────────
-  if (mode === 'channel_breakdown') {
+  if (
+    mode === 'channel_breakdown' ||
+    mode === 'channels' ||
+    mode === 'source_breakdown' ||
+    mode === 'whatsapp_vs_dashboard' ||
+    mode === 'channel_wise'
+  ) {
     let waCount = 0;
     let dashCount = 0;
     let ocrCount = 0;
@@ -787,7 +831,13 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   }
 
   // ── Mode: Conversion Breakdown ────────────────────────────────────────────
-  if (mode === 'conversion_breakdown' || mode === 'conversion_metrics') {
+  if (
+    mode === 'conversion_breakdown' ||
+    mode === 'conversion' ||
+    mode === 'conversion_metrics' ||
+    mode === 'won_metrics' ||
+    mode === 'inquiry_conversion'
+  ) {
     const wonInqs = materialized.filter((m) => m.deal_stage === 'won' || m.status === 'won' || Boolean(m.po_number));
     const lostInqs = materialized.filter((m) => m.deal_stage === 'lost' || m.status === 'lost');
     const activeInqs = materialized.filter((m) => m.deal_stage !== 'won' && m.deal_stage !== 'lost' && !m.po_number);
@@ -814,7 +864,13 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   }
 
   // ── Mode: Sales Rep Conversion Leaderboard ────────────────────────────────
-  if (mode === 'rep_conversion' || mode === 'salesperson_leaderboard') {
+  if (
+    mode === 'rep_conversion' ||
+    mode === 'salesperson_conversion' ||
+    mode === 'salesperson_leaderboard' ||
+    mode === 'rep_leaderboard' ||
+    mode === 'rep_rankings'
+  ) {
     const { data: allEmployees } = await supabaseAdmin.from('employees').select('id, employee_id, phone, name, role').eq('is_active', true);
     const repMap = new Map();
 
@@ -856,7 +912,12 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   }
 
   // ── Mode: Open Inquiries from Dormant Buyers ──────────────────────────────
-  if (mode === 'open_inquiries_dormant_buyers') {
+  if (
+    mode === 'open_inquiries_dormant_buyers' ||
+    mode === 'dormant_buyers' ||
+    mode === 'dormant' ||
+    mode === 'inactive_buyers'
+  ) {
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const { data: recCusts } = await supabaseAdmin.from('recurring_customers').select('customer_name, last_order_date, is_active').eq('is_active', true);
     const lastOrderMap = new Map();
@@ -882,7 +943,12 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   }
 
   // ── Mode: Month-over-Month Comparison ─────────────────────────────────────
-  if (mode === 'month_comparison') {
+  if (
+    mode === 'month_comparison' ||
+    mode === 'monthly_comparison' ||
+    mode === 'mom' ||
+    mode === 'month_over_month'
+  ) {
     const now = new Date();
     const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
@@ -913,7 +979,14 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   }
 
   // ── Mode: Monthly Executive Summary ───────────────────────────────────────
-  if (mode === 'monthly_summary') {
+  if (
+    mode === 'monthly_summary' ||
+    mode === 'executive_summary' ||
+    mode === 'monthly_overview' ||
+    mode === 'summary' ||
+    mode === 'full_summary' ||
+    mode === 'month_summary'
+  ) {
     const now = new Date();
     const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const thisMonthInqs = materialized.filter((m) => new Date(m.created_at) >= startOfThisMonth);
@@ -949,7 +1022,11 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   }
 
   // ── Mode: At-Risk Inquiries ───────────────────────────────────────────────
-  if (mode === 'at_risk_inquiries') {
+  if (
+    mode === 'at_risk_inquiries' ||
+    mode === 'at_risk' ||
+    mode === 'churn_risk'
+  ) {
     return {
       data: {
         total_at_risk_accounts: 0,
@@ -1128,7 +1205,12 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   });
 
   // ── Mode: Rep Leaderboard ─────────────────────────────────────────────────
-  if (mode === 'rep_leaderboard' || mode === 'salesperson_leaderboard') {
+  if (
+    mode === 'rep_leaderboard' ||
+    mode === 'salesperson_leaderboard' ||
+    mode === 'leaderboard' ||
+    mode === 'top_reps'
+  ) {
     const repStats = {};
     materialized.forEach((v) => {
       const rep = v.salesperson_name;
@@ -1164,7 +1246,12 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   }
 
   // ── Mode: Week-over-Week Comparison ───────────────────────────────────────
-  if (mode === 'week_comparison') {
+  if (
+    mode === 'week_comparison' ||
+    mode === 'weekly_comparison' ||
+    mode === 'wow' ||
+    mode === 'week_over_week'
+  ) {
     const now = new Date();
     const startOfThisWeek = new Date(now);
     startOfThisWeek.setDate(startOfThisWeek.getDate() - 7);
@@ -1188,7 +1275,11 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   }
 
   // ── Mode: Duplicate Visits ────────────────────────────────────────────────
-  if (mode === 'duplicates') {
+  if (
+    mode === 'duplicates' ||
+    mode === 'duplicate_visits' ||
+    mode === 'same_day_duplicates'
+  ) {
     const group = {};
     materialized.forEach((v) => {
       const key = `${v.customer_name}_${v.visit_date}`;
@@ -1215,7 +1306,14 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   }
 
   // ── Mode: Pending Follow-up Visits ───────────────────────────────────────
-  if (mode === 'pending_followup' || mode === 'pending_follow_up' || args?.pending_followup || args?.pending_follow_up) {
+  if (
+    mode === 'pending_followup' ||
+    mode === 'pending_follow_up' ||
+    mode === 'followup_pending' ||
+    mode === 'follow_up_pending' ||
+    args?.pending_followup ||
+    args?.pending_follow_up
+  ) {
     const pending = materialized.filter((v) => v.requires_follow_up);
     return {
       data: {
@@ -1228,7 +1326,15 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   }
 
   // ── Mode: Visited Customers with No Orders ────────────────────────────────
-  if (mode === 'visits_no_orders' || mode === 'prospects_visited_no_orders' || mode === 'visited_without_orders') {
+  if (
+    mode === 'visits_no_orders' ||
+    mode === 'prospects_visited_no_orders' ||
+    mode === 'visited_without_orders' ||
+    mode === 'visited_no_orders' ||
+    mode === 'no_orders_visited' ||
+    mode === 'prospects_no_orders' ||
+    mode === 'no_orders'
+  ) {
     const { data: wonDeals } = await supabaseAdmin
       .from('deals')
       .select('customer_name, po_number, stage')
@@ -1427,7 +1533,17 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
   });
 
   // ── Mode: Complaints by Type Breakdown ────────────────────────────────────
-  if (mode === 'type_breakdown' || mode === 'by_type' || mode === 'complaints_by_type') {
+  if (
+    mode === 'type_breakdown' ||
+    mode === 'by_type' ||
+    mode === 'complaints_by_type' ||
+    mode === 'type_wise' ||
+    mode === 'category_breakdown' ||
+    mode === 'breakdown_by_type' ||
+    mode === 'categories' ||
+    mode === 'group_by_type' ||
+    mode === 'by_category'
+  ) {
     const typeMap = {};
     materialized.forEach((c) => {
       const rawType = c.complaint_type || 'Other';
@@ -1461,7 +1577,15 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
   }
 
   // ── Mode: Open Complaints with Recent Orders ──────────────────────────────
-  if (mode === 'open_complaints_with_orders' || mode === 'open_complaint_and_recent_order') {
+  if (
+    mode === 'open_complaints_with_orders' ||
+    mode === 'open_complaint_and_recent_order' ||
+    mode === 'open_complaint_recent_order' ||
+    mode === 'complaints_with_orders' ||
+    mode === 'open_complaints_orders' ||
+    mode === 'complaint_order_cross' ||
+    mode === 'open_complaints_recent_orders'
+  ) {
     const { data: wonDeals } = await supabaseAdmin
       .from('deals')
       .select('customer_name, po_number, stage, created_at, won_at')
@@ -1508,7 +1632,13 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
   }
 
   // ── Mode: Rep Complaints Leaderboard ──────────────────────────────────────
-  if (mode === 'rep_complaints' || mode === 'rep_leaderboard') {
+  if (
+    mode === 'rep_complaints' ||
+    mode === 'rep_leaderboard' ||
+    mode === 'salesperson_complaints' ||
+    mode === 'rep_comparison' ||
+    mode === 'salesperson_leaderboard'
+  ) {
     const repStats = {};
     materialized.forEach((c) => {
       const rep = c.salesperson_name;
@@ -1542,7 +1672,13 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
   }
 
   // ── Mode: Product Category Breakdown ──────────────────────────────────────
-  if (mode === 'product_category_breakdown' || mode === 'product_breakdown') {
+  if (
+    mode === 'product_category_breakdown' ||
+    mode === 'product_breakdown' ||
+    mode === 'category_wise' ||
+    mode === 'by_product' ||
+    mode === 'product_categories'
+  ) {
     const catStats = {
       Coil: { count: 0, percentage: '0%' },
       Plate: { count: 0, percentage: '0%' },
@@ -1571,7 +1707,12 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
   }
 
   // ── Mode: Visit Correlation ───────────────────────────────────────────────
-  if (mode === 'visit_correlation') {
+  if (
+    mode === 'visit_correlation' ||
+    mode === 'negative_visit_correlation' ||
+    mode === 'visit_complaint_correlation' ||
+    mode === 'visit_complaints'
+  ) {
     const { data: visits } = await supabaseAdmin.from('customer_visits').select('customer_name, discussion_remarks');
     const negVisitCusts = new Set();
     (visits || []).forEach((v) => {
@@ -1603,18 +1744,21 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
   if (custFilter) filtered = filtered.filter((c) => c.customer_name.toLowerCase().includes(custFilter));
   if (repFilter) filtered = filtered.filter((c) => c.salesperson_name.toLowerCase().includes(repFilter));
   if (poFilter) {
+    const cleanPo = poFilter.replace(/^[#]?(?:PO|ORDER|DEAL)[-:\s#]*/i, '').trim();
     filtered = filtered.filter((c) =>
-      (c.po_number && c.po_number.toLowerCase().includes(poFilter)) ||
-      (c.deal_id && c.deal_id.toLowerCase().includes(poFilter)) ||
-      (c.description && c.description.toLowerCase().includes(poFilter)) ||
-      (c.product_name && c.product_name.toLowerCase().includes(poFilter))
+      (c.po_number && (c.po_number.toLowerCase().includes(poFilter) || (cleanPo && c.po_number.toLowerCase().includes(cleanPo)))) ||
+      (c.deal_id && (c.deal_id.toLowerCase().includes(poFilter) || (cleanPo && c.deal_id.toLowerCase().includes(cleanPo)))) ||
+      (c.description && (c.description.toLowerCase().includes(poFilter) || (cleanPo && c.description.toLowerCase().includes(cleanPo)))) ||
+      (c.product_name && (c.product_name.toLowerCase().includes(poFilter) || (cleanPo && c.product_name.toLowerCase().includes(cleanPo))))
     );
 
     if (filtered.length === 0) {
+      const searchTerms = [poFilter, cleanPo].filter(Boolean);
+      const orClauses = searchTerms.map((term) => `po_number.ilike.%${term}%,deal_id.ilike.%${term}%,description.ilike.%${term}%`).join(',');
       const { data: globalPoComplaints } = await supabaseAdmin
         .from('complaints')
         .select('*')
-        .or(`po_number.ilike.%${poFilter}%,deal_id.ilike.%${poFilter}%,description.ilike.%${poFilter}%`);
+        .or(orClauses);
 
       if (globalPoComplaints && globalPoComplaints.length > 0) {
         filtered = globalPoComplaints.map((r) => {
@@ -1655,13 +1799,13 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
   }
 
   if (statusFilter && statusFilter !== 'all') {
-    if (statusFilter === 'open') {
+    if (statusFilter === 'open' || statusFilter === 'unresolved') {
       filtered = filtered.filter((c) => c.status !== 'resolved' && c.status !== 'closed');
     } else if (statusFilter === 'resolved' || statusFilter === 'closed') {
       filtered = filtered.filter((c) => c.status === 'resolved' || c.status === 'closed');
     } else if (statusFilter === 'pending') {
       filtered = filtered.filter((c) => c.status === 'pending' || (c.status !== 'resolved' && c.status !== 'closed'));
-    } else if (statusFilter === 'reopened') {
+    } else if (statusFilter === 'reopened' || statusFilter === 'reopen') {
       filtered = filtered.filter((c) => c.status === 'reopened');
     } else {
       filtered = filtered.filter((c) => c.status.toLowerCase().includes(statusFilter));
@@ -1795,7 +1939,18 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
   const rows = allCusts || [];
 
   // ── Mode: Zero Orders Active Accounts ─────────────────────────────────────
-  if (mode === 'zero_orders_active' || mode === 'zero_orders' || args?.has_zero_orders || args?.zero_orders) {
+  if (
+    mode === 'zero_orders_active' ||
+    mode === 'zero_orders' ||
+    mode === '0_orders' ||
+    mode === '0_orders_active' ||
+    mode === 'active_zero_orders' ||
+    mode === 'no_orders_active' ||
+    mode === 'no_orders' ||
+    mode === 'zero_order_active' ||
+    args?.has_zero_orders ||
+    args?.zero_orders
+  ) {
     const zeroOrders = rows.filter((c) => (c.total_orders === 0 || !c.total_orders) && c.is_active);
     return {
       data: {
@@ -1939,13 +2094,19 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   let filtered = [...materialized];
   if (custName) filtered = filtered.filter((d) => d.customer_name.toLowerCase().includes(custName));
   if (poFilter) {
-    filtered = filtered.filter((d) => (d.po_number || '').toLowerCase().includes(poFilter));
+    const cleanPo = poFilter.replace(/^[#]?(?:PO|ORDER|DEAL)[-:\s#]*/i, '').trim();
+    filtered = filtered.filter((d) => 
+      (d.po_number && (d.po_number.toLowerCase().includes(poFilter) || (cleanPo && d.po_number.toLowerCase().includes(cleanPo)))) ||
+      (d.inquiry_id && cleanPo && d.inquiry_id.toLowerCase().includes(cleanPo))
+    );
     // If not found in caller's immediate portfolio, search company-wide deals for this specific PO
     if (filtered.length === 0) {
+      const searchTerms = [poFilter, cleanPo].filter(Boolean);
+      const orClauses = searchTerms.map((term) => `po_number.ilike.%${term}%`).join(',');
       const { data: globalPoDeals } = await supabaseAdmin
         .from('deals')
         .select('id, inquiry_id, customer_name, customer_phone, total_amount, stage, status, po_number, delivery_location, salesperson_phone, employee_id, created_at, won_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
-        .ilike('po_number', `%${poFilter}%`)
+        .or(orClauses)
         .limit(5);
 
       if (globalPoDeals && globalPoDeals.length > 0) {
@@ -1982,7 +2143,15 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   const mode = (args?.mode || '').toLowerCase().trim();
 
   // ── Mode: Invalid or Incomplete Delivery Locations ─────────────────────────
-  if (mode === 'invalid_delivery_locations' || mode === 'invalid_locations' || mode === 'bad_locations' || args?.invalid_delivery_location) {
+  if (
+    mode === 'invalid_delivery_locations' ||
+    mode === 'invalid_locations' ||
+    mode === 'bad_locations' ||
+    mode === 'incomplete_locations' ||
+    mode === 'missing_locations' ||
+    mode === 'invalid_delivery_location' ||
+    args?.invalid_delivery_location
+  ) {
     const invalidDeals = filtered.filter((d) => {
       const loc = (d.delivery_location || '').trim().toLowerCase();
       return !loc || loc === 'n/a' || loc === 'unknown' || loc === 'null' || loc === '123' || loc === 'qwq' || loc === 'test' || loc.length < 3 || /^\d+$/.test(loc);
@@ -1999,7 +2168,13 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   }
 
   // ── Mode: Highest Tonnage Order ───────────────────────────────────────────
-  if (mode === 'highest_tonnage' || (stageFilter === 'won' && args?.sort_by === 'tonnage')) {
+  if (
+    mode === 'highest_tonnage' ||
+    mode === 'max_tonnage' ||
+    mode === 'top_tonnage' ||
+    mode === 'biggest_order' ||
+    (stageFilter === 'won' && args?.sort_by === 'tonnage')
+  ) {
     const sortedWon = filtered.filter((d) => d.stage === 'won' || Boolean(d.po_number)).sort((a, b) => b.tonnage_mt - a.tonnage_mt);
     const top = sortedWon[0] || filtered[0] || null;
     return {
@@ -2124,7 +2299,14 @@ async function executeGetReorderQueue(args, callerContext, supabaseAdmin = supab
 
   const avgCycle = rawList.length > 0 ? Math.round((totalCycleDays / rawList.length) * 10) / 10 : 30.3;
 
-  if (mode === 'average_cycle' || mode === 'cycle_analytics') {
+  if (
+    mode === 'average_cycle' ||
+    mode === 'cycle_analytics' ||
+    mode === 'average_reorder_cycle' ||
+    mode === 'cadence' ||
+    mode === 'reorder_cadence' ||
+    mode === 'average_cadence'
+  ) {
     return {
       data: {
         total_tracked_customers: rawList.length,
@@ -2343,7 +2525,7 @@ async function executeGetLossAnalytics(args, callerContext, supabaseAdmin = supa
 // ─── 10. GET_DEAL_IDS TOOL ──────────────────────────────────────────────────
 
 async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) {
-  const companyName = (args?.company_name || args?.customer_name || '').trim().toLowerCase();
+  const companyName = (args?.company_name || args?.customer_name || args?.customer || args?.company || '').trim().toLowerCase();
 
   if (!companyName) {
     return {
@@ -2402,7 +2584,7 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
 // ─── 11. SEARCH_KNOWLEDGE_BASE TOOL ─────────────────────────────────────────
 
 async function executeSearchKnowledgeBase(args, callerContext, supabaseAdmin = supabase) {
-  const queryText = (args?.query || '').trim();
+  const queryText = (args?.query || args?.text || args?.question || '').trim();
   if (!queryText) {
     return { data: { message: 'Query parameter is required' }, rowCount: 0 };
   }
