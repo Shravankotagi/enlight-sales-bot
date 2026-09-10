@@ -183,6 +183,17 @@ router.post('/', async (req, res) => {
         let isMediaMessage = messageType === 'image' || messageType === 'document';
         const { getFullActiveSession, saveActiveSession } = require('./supabase');
 
+        // ── GUIDED CATALOG & CONVERSATIONAL FORM FLOW (Greetings, 1-9 Routing, Confirmations) ──
+        if (messageType === 'text' && raw_text) {
+          const { handleCatalogFlow } = require('./core/catalogFlow');
+          const catalogResult = await handleCatalogFlow(raw_text, senderPhone);
+          if (catalogResult && catalogResult.handled && catalogResult.reply) {
+            await sendTextMessage(senderPhone, catalogResult.reply);
+            return;
+          }
+        }
+        // ── END CATALOG FLOW ─────────────────────────────────────────────────────────────────
+
         // --- CHECK ACTIVE REJECTION FLOWS (multi-turn logic) ---
         const activeSession = await getFullActiveSession(senderPhone);
         
