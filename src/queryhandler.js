@@ -1869,13 +1869,15 @@ function classifyFollowUp(visit) {
 
   // Determine deliverable vs scheduled_call
   const isDeliverable =
-    /\b(send|share|provide|prepare|mail|email|courier|dispatch|submit|give)\s+(?:the\s+)?(?:ms\s+plate\s+|hr\s+coil\s+|cr\s+coil\s+|steel\s+)?(samples?|quotation|quote|pricing|rates?|catalog|catalogue|specs?|specification|certificate|test\s+cert|proforma|pi)\b/i.test(
+    /\b(send|share|provide|prepare|mail|email|courier|dispatch|submit|give)\b.*?\b(samples?|quotations?|quotes?|pricing|rate\s*cards?|rate\s*sheets?|rates?|catalogs?|catalogues?|specs?|specifications?|certificates?|test\s*certs?|proforma|pi)\b/i.test(
       lowerAction,
     ) ||
-    /\b(samples?|quotation|quote|specs?|catalog|test\s+cert)\s+(?:to\s+be\s+sent|needed|required|to\s+send)\b/i.test(
+    /\b(samples?|quotations?|quotes?|pricing|rate\s*cards?|rate\s*sheets?|rates?|catalogs?|catalogues?|specs?|specifications?|certificates?|test\s*certs?|proforma|pi)\b.*?\b(to\s+(?:be\s+)?(?:sent|share|send|provide|mail|email)|needed|required|pending|to\s+send)\b/i.test(
       lowerAction,
     ) ||
-    /\b(send\s+samples?|send\s+quote|send\s+quotation)\b/i.test(lowerAction);
+    /\b(send|share|provide|prepare)\s+(?:samples?|quotes?|quotations?|rates?)\b/i.test(
+      lowerAction,
+    );
 
   return {
     action: cleanAction,
@@ -3843,6 +3845,8 @@ module.exports = {
   isQuery,
   handleQuery,
   getVisitSummary,
+  getVisitsPendingFollowup,
+  getVisitCountComparison,
   getInactiveCustomers,
   getReorderQueue,
   getFilteredOrders,
