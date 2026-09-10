@@ -209,6 +209,7 @@ async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
     const { data: deal, error: dealError } = await supabase
       .from('deals')
       .insert({
+        ...(inquiryId ? { id: inquiryId } : {}),
         inquiry_id: inquiryId,
         stage: 'new_inquiry',
         po_number: poNumber,

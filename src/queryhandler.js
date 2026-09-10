@@ -805,7 +805,8 @@ Return ONLY the company name or "NONE":`;
     }
 
     const dealCards = deals.map((d, i) => {
-      const cleanNum = d.deal_number ? d.deal_number.replace(/^#?(?:DEAL|INQ)-?/i, '') : (d.id ? d.id.substring(0, 6).toUpperCase() : 'UNKNOWN');
+      const rawInq = d.inquiry_id || d.id || 'UNKNOWN';
+      const cleanNum = rawInq.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').substring(0, 6).toUpperCase();
       const dealCode = `#INQ-${cleanNum}`;
       const stageStr = (d.stage || 'new_inquiry').toUpperCase();
       const items = d.deal_items || [];
@@ -832,7 +833,8 @@ Return ONLY the company name or "NONE":`;
     });
 
     const displayCustName = deals[0].customer_name || customerName;
-    const sampleInqCode = deals[0].deal_number ? `#INQ-${deals[0].deal_number.replace(/^#?(?:DEAL|INQ)-?/i, '')}` : (deals[0].id ? `#INQ-${deals[0].id.substring(0, 6).toUpperCase()}` : '#INQ-XXXXXX');
+    const firstRawInq = deals[0].inquiry_id || deals[0].id || 'XXXXXX';
+    const sampleInqCode = `#INQ-${firstRawInq.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').substring(0, 6).toUpperCase()}`;
 
     return `📋 *Active Inquiries & Deals - ${displayCustName}* (${deals.length} found)\n\n` +
            dealCards.join('\n\n') +
@@ -3042,9 +3044,8 @@ async function getInquiryOrDealByCode(scopeOrPhone, text, explicitCode = null) {
     }
 
     const custName = matchedDeal?.customer_name || matchedInq?.sender_name || 'Customer';
-    const displayId = matchedDeal
-      ? (matchedDeal.deal_number || `#INQ-${(matchedDeal.id || '').substring(0, 6).toUpperCase()}`)
-      : `#INQ-${(matchedInq.id || '').substring(0, 6).toUpperCase()}`;
+    const rawMatchId = matchedDeal ? (matchedDeal.inquiry_id || matchedDeal.id || '') : (matchedInq?.id || '');
+    const displayId = `#INQ-${rawMatchId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').substring(0, 6).toUpperCase()}`;
 
     const stageStr = (matchedDeal?.stage || matchedInq?.status || 'NEW INQUIRY').toUpperCase();
     const dateStr = (matchedDeal?.created_at || matchedInq?.created_at)

@@ -493,9 +493,10 @@ function createTools(senderPhone, rawUserText = '') {
   );
 
   const queryMyDataTool = tool(
-    async ({ text }) => {
+    async ({ text, query }) => {
       try {
-        return await getQueryHandler().handleQuery(text, senderPhone);
+        const effectiveText = text || query || rawUserText;
+        return await getQueryHandler().handleQuery(effectiveText, senderPhone);
       } catch (err) {
         return `Error fetching data: ${err.message}`;
       }
@@ -504,7 +505,8 @@ function createTools(senderPhone, rawUserText = '') {
       name: 'query_my_data',
       description: `Use this tool when the salesperson is ASKING for information about deals, customers, visits, complaints, payments, KRA metrics, or general data.`,
       schema: z.object({
-        text: z.string().describe('The query question from the salesperson'),
+        text: z.string().optional().nullable().describe('The query question from the salesperson'),
+        query: z.string().optional().nullable().describe('Alias for query text'),
       }),
     }
   );

@@ -656,9 +656,7 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
       }
     }
 
-    const shortId = linkedDeal?.id
-      ? `#INQ-${linkedDeal.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`
-      : `#INQ-${row.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    const shortId = `#INQ-${row.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     const rawSrc = (row.source_channel || '').toLowerCase();
     const isDoc = rawSrc.includes('image') || rawSrc.includes('po') || rawSrc.includes('ocr') || (row.media_urls && row.media_urls.length > 0);
     const channelDisplay = isDoc ? 'ocr_document' : (rawSrc.includes('whatsapp') ? 'whatsapp_text' : (rawSrc.includes('dashboard') ? 'web_dashboard' : 'whatsapp_text'));
@@ -666,7 +664,6 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     return {
       inquiry_id: shortId,
       full_id: row.id,
-      deal_id: linkedDeal?.id || null,
       customer_name: custName,
       customer_phone: row.sender_phone || linkedDeal?.customer_phone || '',
       inquiry_type: row.inquiry_type || 'standard',
@@ -691,7 +688,8 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     const matched = materialized.find((m) => {
       const s = m.inquiry_id.replace(/^[#]INQ-/i, '').toLowerCase();
       const f = m.full_id.replace(/-/g, '').toLowerCase();
-      const did = m.deal_id ? m.deal_id.replace(/-/g, '').toLowerCase() : '';
+      const lDeal = inqDealMap.get(m.full_id);
+      const did = lDeal?.id ? lDeal.id.replace(/-/g, '').toLowerCase() : '';
       return (
         s === cleanInquiryId ||
         f.startsWith(cleanInquiryId) ||
@@ -1640,8 +1638,9 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   if (error) throw new Error(`get_my_open_deals error: ${error.message}`);
 
   const materialized = (rows || []).map((d) => {
-    const shortId = `#INQ-${d.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    const shortId = `#INQ-${(d.inquiry_id || d.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     return {
+      inquiry_id: shortId,
       deal_id: shortId,
       full_id: d.id,
       inquiry_uuid: d.inquiry_id || null,
@@ -1809,7 +1808,7 @@ async function executeGetReorderQueue(args, callerContext, supabaseAdmin = supab
 async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supabase) {
   let query = supabaseAdmin
     .from('deals')
-    .select('id, customer_name, customer_phone, total_amount, stage, status, po_number, salesperson_phone, employee_id, created_at');
+    .select('id, inquiry_id, customer_name, customer_phone, total_amount, stage, status, po_number, salesperson_phone, employee_id, created_at');
 
   if (isManagerRole(callerContext.role)) {
     const { employeeIds, phoneSuffixes } = await getSubordinateSalespersons(callerContext, supabaseAdmin);
@@ -1837,17 +1836,21 @@ async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supab
     stageStats[st].total_value += val;
   });
 
-  const formattedDeals = rows.slice(0, 15).map((d) => ({
-    deal_id: `#INQ-${(d.id || '').replace(/-/g, '').slice(0, 6).toUpperCase()}`,
-    full_id: d.id,
-    customer_name: d.customer_name,
-    customer_phone: d.customer_phone,
-    total_amount: Number(d.total_amount || 0),
-    stage: d.stage,
-    status: d.status,
-    po_number: d.po_number,
-    created_at: d.created_at,
-  }));
+  const formattedDeals = rows.slice(0, 15).map((d) => {
+    const rawId = d.inquiry_id || d.id || '';
+    const shortId = `#INQ-${rawId.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    return {
+      inquiry_id: shortId,
+      full_id: rawId,
+      customer_name: d.customer_name,
+      customer_phone: d.customer_phone,
+      total_amount: Number(d.total_amount || 0),
+      stage: d.stage,
+      status: d.status,
+      po_number: d.po_number,
+      created_at: d.created_at,
+    };
+  });
 
   return {
     data: {
@@ -1962,14 +1965,18 @@ async function executeGetLossAnalytics(args, callerContext, supabaseAdmin = supa
     .map(([reason, count]) => ({ reason, count }))
     .sort((a, b) => b.count - a.count);
 
-  const formattedDeals = rows.slice(0, 10).map((d) => ({
-    deal_id: `#INQ-${(d.id || '').replace(/-/g, '').slice(0, 6).toUpperCase()}`,
-    full_id: d.id,
-    customer_name: d.customer_name,
-    lost_reason: d.lost_reason || 'Unspecified',
-    total_amount_inr: Number(d.total_amount || 0),
-    created_at: d.created_at,
-  }));
+  const formattedDeals = rows.slice(0, 10).map((d) => {
+    const rawId = d.inquiry_id || d.id || '';
+    const shortId = `#INQ-${rawId.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    return {
+      inquiry_id: shortId,
+      full_id: rawId,
+      customer_name: d.customer_name,
+      lost_reason: d.lost_reason || 'Unspecified',
+      total_amount_inr: Number(d.total_amount || 0),
+      created_at: d.created_at,
+    };
+  });
 
   return {
     data: {
@@ -2017,10 +2024,11 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
   if (error) throw new Error(`get_deal_ids error: ${error.message}`);
 
   const rows = (deals || []).map((d) => {
-    const formattedCode = `#INQ-${d.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    const rawId = d.inquiry_id || d.id || '';
+    const formattedCode = `#INQ-${rawId.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     return {
       inquiry_id: formattedCode,
-      full_id: d.id,
+      full_id: rawId,
       customer_name: d.customer_name,
       stage: d.stage || 'new_inquiry',
       po_number: d.po_number || null,

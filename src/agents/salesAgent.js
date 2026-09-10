@@ -3740,6 +3740,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const { data: newDeal, error: dealInsertErr } = await supabase
         .from('deals')
         .insert({
+          ...(inqId ? { id: inqId } : {}),
           inquiry_id:        inqId || null,
           customer_name:     finalCustomerName,
           salesperson_phone: senderPhone,
