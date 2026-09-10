@@ -1879,11 +1879,34 @@ function detectOperationalAction(text) {
   if (isOperationalQuery(lower)) return null;
 
   // 1. Explicit Update patterns
-  if (/\b(?:update|change|modify)\b/i.test(lower)) {
-    if (/\b(?:inquiry|deal|inq-)\b/i.test(lower)) return 'UPDATE_INQUIRY';
-    if (/\b(?:order|po-)\b/i.test(lower)) return 'UPDATE_ORDER';
-    if (/\b(?:visit|vis-)\b/i.test(lower)) return 'UPDATE_VISIT';
-    if (/\b(?:complaint|complaints)\b/i.test(lower)) return 'UPDATE_COMPLAINT';
+  if (/\b(?:update|change|modify|set|mark|resolve|close|reopen)\b/i.test(lower)) {
+    // 1a. Complaints (Check FIRST: user messages updating a complaint often cite #INQ-xxx or PO-xxx)
+    if (
+      /\b(?:complaint|complaints|defect|defective|rejection|damage|damaged|rust)\b/i.test(lower) ||
+      /\b(?:mark\s+as\s+resolved|mark\s+resolved|resolve\s+complaint|close\s+complaint|reopen\s+complaint)\b/i.test(lower)
+    ) {
+      return 'UPDATE_COMPLAINT';
+    }
+
+    // 1b. Visits (Check SECOND: visits might mention inquiries discussed)
+    if (/\b(?:visit|vis-|site\s+visit|field\s+visit|meeting|person\s+met)\b/i.test(lower)) {
+      return 'UPDATE_VISIT';
+    }
+
+    // 1c. Orders
+    if (/\b(?:order|orders|purchase\s+order|po\s*no|po\s*number|delivery\s*date|po\s*date)\b/i.test(lower)) {
+      return 'UPDATE_ORDER';
+    }
+
+    // 1d. Inquiries
+    if (/\b(?:inquiry|inquiries|deal|quote|quotation|rfq)\b/i.test(lower)) {
+      return 'UPDATE_INQUIRY';
+    }
+
+    // 1e. ID-only updates without explicit entity keyword
+    if (/\b(?:inq-)\b/i.test(lower)) return 'UPDATE_INQUIRY';
+    if (/\b(?:po-)\b/i.test(lower)) return 'UPDATE_ORDER';
+    if (/\b(?:vis-)\b/i.test(lower)) return 'UPDATE_VISIT';
   }
 
   // 2. Complaint patterns (prioritized because complaints often cite PO numbers or visit dates)
@@ -2165,14 +2188,23 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
   // ── 7. NATURAL OPERATIONAL ACTION DETECTION (Visits, Inquiries, Orders, Complaints) ─────────
   const directActionMap = [
-    { pattern: /^\s*(?:log|create|new|add)\s*(?:new\s*)?inquiry\b/i, action: 'LOG_INQUIRY' },
-    { pattern: /^\s*(?:update|change|modify)\s*inquiry\b/i, action: 'UPDATE_INQUIRY' },
-    { pattern: /^\s*(?:record|log|create|add)\s*(?:new\s*)?order\b/i, action: 'LOG_ORDER' },
-    { pattern: /^\s*(?:update|change|modify)\s*order\b/i, action: 'UPDATE_ORDER' },
-    { pattern: /^\s*(?:log|record|add)\s*(?:customer\s*)?(?:field\s*)?visit\b/i, action: 'LOG_VISIT' },
-    { pattern: /^\s*(?:update|change|modify)\s*(?:field\s*)?visit\b/i, action: 'UPDATE_VISIT' },
-    { pattern: /^\s*(?:log|record|raise|report)\s*(?:customer\s*)?complaint\b/i, action: 'LOG_COMPLAINT' },
-    { pattern: /^\s*(?:update|resolve|change|modify)\s*(?:customer\s*)?complaint\b/i, action: 'UPDATE_COMPLAINT' },
+    // Complaints
+    { pattern: /\b(?:log|record|raise|report|create|add)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?complaint\b/i, action: 'LOG_COMPLAINT' },
+    { pattern: /\b(?:update|resolve|change|modify|close|reopen|set|mark)\s+(?:the\s+|a\s+)?(?:customer\s+)?complaint\b/i, action: 'UPDATE_COMPLAINT' },
+    { pattern: /\b(?:change|update|modify|set)\s+(?:the\s+)?complaint\s+(?:type|status|description|action|notes)\b/i, action: 'UPDATE_COMPLAINT' },
+    { pattern: /\b(?:mark|set)\s+(?:the\s+)?complaint\s+(?:as\s+)?(?:resolved|closed|pending|in progress|reopened)\b/i, action: 'UPDATE_COMPLAINT' },
+
+    // Visits
+    { pattern: /\b(?:log|record|add|create)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'LOG_VISIT' },
+    { pattern: /\b(?:update|change|modify|set)\s+(?:the\s+|a\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'UPDATE_VISIT' },
+
+    // Orders
+    { pattern: /\b(?:record|log|create|add)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:purchase\s+)?order\b/i, action: 'LOG_ORDER' },
+    { pattern: /\b(?:update|change|modify)\s+(?:the\s+|a\s+)?(?:purchase\s+)?order\b/i, action: 'UPDATE_ORDER' },
+
+    // Inquiries
+    { pattern: /\b(?:log|create|new|add)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?inquiry\b/i, action: 'LOG_INQUIRY' },
+    { pattern: /\b(?:update|change|modify)\s+(?:the\s+|a\s+)?inquiry\b/i, action: 'UPDATE_INQUIRY' },
   ];
 
   let detectedAction = null;
