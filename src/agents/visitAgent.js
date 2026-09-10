@@ -542,7 +542,6 @@ async function saveCompletedVisit(visitState, senderPhone) {
     customer_address: city,
     person_met: person_met,
     contact_no: contact_no,
-    outcome: finalOutcome,
     remarks: fullRemarks,
     visited_at: visit_date_iso || new Date().toISOString(),
   });
