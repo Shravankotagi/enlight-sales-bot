@@ -119,6 +119,7 @@ Return ONLY the JSON object.
  * Format a Date object into standard display and storage metadata
  */
 function formatResolvedDate(d) {
+  const now = new Date();
   const months = [
     'Jan',
     'Feb',
@@ -136,9 +137,19 @@ function formatResolvedDate(d) {
   const day = d.getDate();
   const monthStr = months[d.getMonth()];
   const year = d.getFullYear();
+
+  const isToday =
+    d.getDate() === now.getDate() &&
+    d.getMonth() === now.getMonth() &&
+    d.getFullYear() === now.getFullYear();
+
+  const dateToUse = isToday
+    ? now
+    : new Date(year, d.getMonth(), day, now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+
   return {
-    dateObj: d,
-    isoString: d.toISOString(),
+    dateObj: dateToUse,
+    isoString: dateToUse.toISOString(),
     formattedDisplay: `${day} ${monthStr} ${year}`,
     month: d.getMonth() + 1,
     year: year,
