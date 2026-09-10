@@ -485,11 +485,42 @@ async function saveCompletedVisit(visitState, senderPhone) {
   }
   const finalCustomerName = officialCustomerName || customer_name;
 
+  // Infer outcome from remarks if visit_outcome is not explicitly provided
+  let finalOutcome = visit_outcome ? visit_outcome.toLowerCase() : null;
+  if (!finalOutcome && remarks) {
+    const lowerRem = remarks.toLowerCase();
+    if (
+      /\b(?:negative|bad|rejected|rejection|unsuccessful|declined|not\s+(?:at\s+all\s+)?inter(?:e)?sted|uninterested|no\s+interest|not\s+buying|not\s+interested|no\s+(?:immediate\s+)?need|no\s+requirement|refused|unfavorable|dissatisfied|cancelled|lost)\b/i.test(
+        lowerRem,
+      ) ||
+      /\b(?:nahi\s+chahiye|interest\s+nahi|mana\s+kar\s+diya|reject\s+hua)\b/i.test(
+        lowerRem,
+      )
+    ) {
+      finalOutcome = 'negative';
+    } else if (
+      /\b(?:positive|went\s+well|good|great|successful|favorable|interested|keen|promising|order\s+confirmed|deal\s+done)\b/i.test(
+        lowerRem,
+      ) &&
+      !/\b(?:not\s+|no\s+|nahi\s+)(?:positive|good|great|interested|keen|promising)\b/i.test(
+        lowerRem,
+      )
+    ) {
+      finalOutcome = 'positive';
+    } else if (
+      /\b(?:neutral|routine|okay|ok|normal|general\s+visit|courtesy\s+visit|check-?in|introductory|introduction)\b/i.test(
+        lowerRem,
+      )
+    ) {
+      finalOutcome = 'neutral';
+    }
+  }
+
   // Format metaTags in remarks
   const metaTags = [];
-  if (visit_outcome)
+  if (finalOutcome)
     metaTags.push(
-      `[Outcome: ${visit_outcome.charAt(0).toUpperCase() + visit_outcome.slice(1)}]`,
+      `[Outcome: ${finalOutcome.charAt(0).toUpperCase() + finalOutcome.slice(1)}]`,
     );
   if (city) metaTags.push(`[Location: ${city}]`);
   if (material_requirement)
@@ -511,6 +542,7 @@ async function saveCompletedVisit(visitState, senderPhone) {
     customer_address: city,
     person_met: person_met,
     contact_no: contact_no,
+    outcome: finalOutcome,
     remarks: fullRemarks,
     visited_at: visit_date_iso || new Date().toISOString(),
   });
@@ -539,7 +571,7 @@ async function saveCompletedVisit(visitState, senderPhone) {
     city ? `Location: ${city}` : null,
     isNew ? 'NEW PROSPECT' : null,
     person_met ? `Met: ${person_met}` : null,
-    visit_outcome ? `Outcome: ${visit_outcome}` : null,
+    finalOutcome ? `Outcome: ${finalOutcome}` : null,
     product_interests ? `Interests: ${product_interests}` : null,
     material_requirement ? `Requirement: ${material_requirement}` : null,
     follow_up_action ? `Follow-up: ${follow_up_action}` : null,
@@ -615,7 +647,7 @@ async function saveCompletedVisit(visitState, senderPhone) {
 
   // Schedule follow-up task if positive outcome and interest
   const interestProducts = product_interests || material_requirement;
-  if (visit_outcome === 'positive' && interestProducts) {
+  if (finalOutcome === 'positive' && interestProducts) {
     try {
       const { extractFollowupDays } = require('../kra3');
       const promisedDays = extractFollowupDays(
@@ -664,7 +696,7 @@ async function saveCompletedVisit(visitState, senderPhone) {
     customerName: finalCustomerName,
     personMet: person_met,
     remarks,
-    visitOutcome: visit_outcome,
+    visitOutcome: finalOutcome,
     materialRequirement: material_requirement,
     followUpAction: follow_up_action,
     productInterests: product_interests,
@@ -684,8 +716,8 @@ async function saveCompletedVisit(visitState, senderPhone) {
   if (city) reply += `- Location: ${city}\n`;
   if (person_met) reply += `- Person Met: ${person_met}\n`;
   if (contact_no) reply += `- Contact Phone: ${contact_no}\n`;
-  if (visit_outcome)
-    reply += `- Outcome: ${visit_outcome.charAt(0).toUpperCase() + visit_outcome.slice(1)}\n`;
+  if (finalOutcome)
+    reply += `- Outcome: ${finalOutcome.charAt(0).toUpperCase() + finalOutcome.slice(1)}\n`;
   if (remarks) reply += `- Discussion Notes: ${remarks}\n`;
   if (product_interests) reply += `- Product Interests: ${product_interests}\n`;
   if (material_requirement) reply += `- Requirement: ${material_requirement}\n`;
@@ -749,13 +781,29 @@ async function handlePendingVisitContinuation(text, senderPhone, storedState) {
   }
 
   if (!extracted.visit_outcome) {
-    if (/\b(positive|good|great|successful|favorable)\b/i.test(text)) {
-      extracted.visit_outcome = 'positive';
-    } else if (
-      /\b(negative|bad|rejected|unsuccessful|not interested)\b/i.test(text)
+    if (
+      /\b(?:negative|bad|rejected|rejection|unsuccessful|declined|not\s+(?:at\s+all\s+)?inter(?:e)?sted|uninterested|no\s+interest|not\s+buying|not\s+interested|no\s+(?:immediate\s+)?need|no\s+requirement|refused|unfavorable|dissatisfied|cancelled|lost)\b/i.test(
+        text,
+      ) ||
+      /\b(?:nahi\s+chahiye|interest\s+nahi|mana\s+kar\s+diya|reject\s+hua)\b/i.test(
+        text,
+      )
     ) {
       extracted.visit_outcome = 'negative';
-    } else if (/\b(neutral|routine|normal|okay|check[- ]in)\b/i.test(text)) {
+    } else if (
+      /\b(?:positive|went\s+well|good|great|successful|favorable|interested|keen|promising|order\s+confirmed|deal\s+done)\b/i.test(
+        text,
+      ) &&
+      !/\b(?:not\s+|no\s+|nahi\s+)(?:positive|good|great|interested|keen|promising)\b/i.test(
+        text,
+      )
+    ) {
+      extracted.visit_outcome = 'positive';
+    } else if (
+      /\b(?:neutral|routine|okay|ok|normal|general\s+visit|courtesy\s+visit|check-?in|introductory|introduction)\b/i.test(
+        text,
+      )
+    ) {
       extracted.visit_outcome = 'neutral';
     }
   }
@@ -1278,16 +1326,19 @@ function sanitizeExtractedVisitData(data, rawText) {
     if (!['positive', 'neutral', 'negative'].includes(norm)) {
       res.visit_outcome = null;
     } else {
-      const hasPositiveIndicator =
-        /\b(?:positive|good|great|successful|well|went well|deal|closed|interested|interest|favorable|ordered)\b/i.test(
-          text,
-        );
       const hasNegativeIndicator =
-        /\b(?:negative|bad|rejected|unsuccessful|not interested|declined|cancelled|lost)\b/i.test(
+        /\b(?:negative|bad|rejected|rejection|unsuccessful|declined|not\s+(?:at\s+all\s+)?inter(?:e)?sted|uninterested|no\s+interest|not\s+buying|not\s+interested|no\s+(?:immediate\s+)?need|no\s+requirement|refused|unfavorable|dissatisfied|cancelled|lost)\b/i.test(
+          text,
+        ) ||
+        /\b(?:nahi\s+chahiye|interest\s+nahi|mana\s+kar\s+diya|reject\s+hua)\b/i.test(
           text,
         );
+      const hasPositiveIndicator =
+        /\b(?:positive|good|great|successful|well|went well|deal|closed|interested|interest|favorable|ordered|order)\b/i.test(
+          text,
+        ) && !hasNegativeIndicator;
       const hasNeutralIndicator =
-        /\b(?:neutral|routine|check\s*in|okay|normal|average|no immediate)\b/i.test(
+        /\b(?:neutral|routine|check\s*in|okay|ok|normal|average|no immediate)\b/i.test(
           text,
         );
 
@@ -1386,17 +1437,27 @@ function extractVisitDeterministic(text) {
   // Outcome
   let visitOutcome = null;
   if (
-    /\b(?:positive|went well|good|great|successful|favorable)\b/i.test(lower)
-  ) {
-    visitOutcome = 'positive';
-  } else if (
-    /\b(?:negative|bad|rejected|unsuccessful|not interested|declined)\b/i.test(
+    /\b(?:negative|bad|rejected|rejection|unsuccessful|declined|not\s+(?:at\s+all\s+)?inter(?:e)?sted|uninterested|no\s+interest|not\s+buying|not\s+interested|no\s+(?:immediate\s+)?need|no\s+requirement|refused|unfavorable|dissatisfied|cancelled|lost)\b/i.test(
+      lower,
+    ) ||
+    /\b(?:nahi\s+chahiye|interest\s+nahi|mana\s+kar\s+diya|reject\s+hua)\b/i.test(
       lower,
     )
   ) {
     visitOutcome = 'negative';
   } else if (
-    /\b(?:neutral|routine|okay|normal|no immediate requirement)\b/i.test(lower)
+    /\b(?:positive|went\s+well|good|great|successful|favorable|interested|keen|promising|order\s+confirmed|deal\s+done)\b/i.test(
+      lower,
+    ) &&
+    !/\b(?:not\s+|no\s+|nahi\s+)(?:positive|good|great|interested|keen|promising)\b/i.test(
+      lower,
+    )
+  ) {
+    visitOutcome = 'positive';
+  } else if (
+    /\b(?:neutral|routine|okay|ok|normal|general\s+visit|courtesy\s+visit|check-?in|introductory|introduction)\b/i.test(
+      lower,
+    )
   ) {
     visitOutcome = 'neutral';
   }
