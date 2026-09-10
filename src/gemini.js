@@ -267,60 +267,91 @@ async function extractFromImageOrDoc(buffer, mimeType) {
     const apiKey =
       process.env.GEMINI_PAID_API_KEY ||
       process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    const apiKeys = [
+      process.env.GEMINI_PAID_API_KEY,
+      process.env.GEMINI_API_KEY,
+      process.env.GEMINI_API_KEY_1,
+      process.env.GEMINI_API_KEY_2,
+    ].filter(Boolean);
+
+    if (apiKeys.length === 0) {
       throw new Error('GEMINI API key missing');
     }
 
     const cleanBase64 = buffer.toString('base64');
     const cleanMime = mimeType || 'application/pdf';
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key=${apiKey}`;
-    // Using gemini-3.7-flash - highest accuracy multimodal model for PO vs Inquiry differentiation
+    const candidateModels = [
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+    ];
 
-    const response = await axios.post(
-      url,
-      {
-        system_instruction: {
-          parts: [
+    let lastError = null;
+
+    for (const apiKey of apiKeys) {
+      for (const model of candidateModels) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+          const response = await axios.post(
+            url,
             {
-              text: `You are a document classifier for Enlight Metals (Indian B2B metal distributor).
+              system_instruction: {
+                parts: [
+                  {
+                    text: `You are a document classifier for Enlight Metals (Indian B2B metal distributor).
 CRITICAL: Before you do ANYTHING else, scan the document for a field labeled "PO No", "P.O. No", "PO Number", "Purchase Order No", or "Purchase Order Number".
 - If that label EXISTS with a value → inquiry_type MUST be "purchase_order" and po_number MUST be set to that value.
 - If that label does NOT exist → inquiry_type MUST be "inquiry" and po_number MUST be null.
 "Ref No", "Inquiry Ref", "Quotation Ref" are NOT PO numbers. Never confuse them with a PO Number.
 Return ONLY a valid JSON object. No markdown, no prose, no backticks.`,
-            },
-          ],
-        },
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: EXTRACTION_PROMPT },
-              {
-                inline_data: {
-                  mime_type: cleanMime,
-                  data: cleanBase64,
-                },
+                  },
+                ],
               },
-            ],
-          },
-        ],
-        generationConfig: {
-          temperature: 0.05,
-          response_mime_type: 'application/json',
-        },
-      },
-      { timeout: 35000 },
-    );
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    { text: EXTRACTION_PROMPT },
+                    {
+                      inline_data: {
+                        mime_type: cleanMime,
+                        data: cleanBase64,
+                      },
+                    },
+                  ],
+                },
+              ],
+              generationConfig: {
+                temperature: 0.05,
+                response_mime_type: 'application/json',
+              },
+            },
+            { timeout: 35000 },
+          );
 
-    const rawText =
-      response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    const parsed = safeParseJSON(rawText, null);
-    if (!parsed) throw new Error('Could not parse JSON from Gemini vision response');
-    const postProcessed = postProcessExtraction(parsed);
-    console.log('Gemini document/image extraction successful:', JSON.stringify(postProcessed, null, 2));
-    return postProcessed;
+          const rawText =
+            response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          const parsed = safeParseJSON(rawText, null);
+          if (parsed) {
+            const postProcessed = postProcessExtraction(parsed);
+            console.log(
+              'Gemini document/image extraction successful:',
+              JSON.stringify(postProcessed, null, 2),
+            );
+            return postProcessed;
+          }
+        } catch (err) {
+          lastError = err;
+          console.warn(
+            `Gemini vision extraction with model ${model} failed: ${err.message}`,
+          );
+        }
+      }
+    }
+
+    throw lastError || new Error('Could not parse JSON from Gemini vision response');
   } catch (error) {
     console.error('Gemini vision extraction error:', error.message);
     return {

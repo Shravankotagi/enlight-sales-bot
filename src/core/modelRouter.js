@@ -1,22 +1,25 @@
 /**
- * modelRouter.js - Google Gemini 3.7 Flash Model Router
+ * modelRouter.js - Google Gemini Model Router
  *
  * UNIFIED HIGH-ACCURACY MODEL CONFIGURATION:
- * - Model: gemini-3.7-flash
- * - Key: process.env.GEMINI_PAID_API_KEY || process.env.GEMINI_API_KEY
- * - All tasks (Vision/OCR, Multi-page PO Documents, Agent Decisions, Intent Classification, Query Routing, Extractions)
+ * - Model: gemini-2.5-flash
+ * - Key: process.env.GEMINI_PAID_API_KEY || process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_2
  */
 
 const { ChatGoogleGenerativeAI } = require('@langchain/google-genai');
 
 const GEMINI_API_KEY =
   process.env.GEMINI_PAID_API_KEY ||
-  process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY ||
+  process.env.GEMINI_API_KEY_1 ||
+  process.env.GEMINI_API_KEY_2;
 
-const PRIMARY_MODEL = 'gemini-3.7-flash';
+const PRIMARY_MODEL = 'gemini-2.5-flash';
+const FALLBACK_MODEL = 'gemini-2.0-flash';
+const LITE_FALLBACK_MODEL = 'gemini-1.5-flash';
 
 /**
- * High-accuracy Gemini 3.7 Flash model for Image Processing, OCR, PDFs, & Complex Reasoning.
+ * High-accuracy Gemini model for Image Processing, OCR, PDFs, & Complex Reasoning.
  */
 function getPaidHighAccuracyModel(tools = null) {
   const model = new ChatGoogleGenerativeAI({
@@ -30,7 +33,7 @@ function getPaidHighAccuracyModel(tools = null) {
 }
 
 /**
- * Standard Gemini 3.7 Flash model for Intent routing, greetings, query classification, and line item extractions.
+ * Standard Gemini model for Intent routing, greetings, query classification, and line item extractions.
  */
 function getLightweightModel(tools = null) {
   const model = new ChatGoogleGenerativeAI({
@@ -47,10 +50,8 @@ function getModel(tools = null) {
   return getPaidHighAccuracyModel(tools);
 }
 
-const FALLBACK_MODEL = 'gemini-2.5-flash';
-
 /**
- * Invoke Gemini with automatic model fallback (gemini-3.7-flash -> gemini-2.5-flash).
+ * Invoke Gemini with automatic model fallback (gemini-2.5-flash -> gemini-2.0-flash -> gemini-1.5-flash).
  */
 async function invokeWithFallback(messages, tools = null, isPaidTask = false) {
   try {
@@ -68,9 +69,9 @@ async function invokeWithFallback(messages, tools = null, isPaidTask = false) {
       const boundFallback = tools ? fallbackModel.bindTools(tools) : fallbackModel;
       return await boundFallback.invoke(messages);
     } catch (fallbackErr) {
-      console.warn(`[ModelRouter] Fallback model (${FALLBACK_MODEL}) error: ${fallbackErr.message}. Retrying with gemini-2.5-flash-lite...`);
+      console.warn(`[ModelRouter] Fallback model (${FALLBACK_MODEL}) error: ${fallbackErr.message}. Retrying with ${LITE_FALLBACK_MODEL}...`);
       const liteModel = new ChatGoogleGenerativeAI({
-        model: 'gemini-2.5-flash-lite',
+        model: LITE_FALLBACK_MODEL,
         apiKey: GEMINI_API_KEY,
         temperature: 0.1,
         maxRetries: 2,
