@@ -245,20 +245,20 @@ function normalizeDateToDDMMYYYY(dateStr) {
 
   // Handle relative words
   const now = new Date();
-  if (/^today$/i.test(clean)) {
+  if (/^(?:today|now|nonw|just now|aaj|current)$/i.test(clean)) {
     return formatDateDDMMYYYY(now);
   }
   if (/^yesterday$/i.test(clean)) {
     const y = new Date(now.getTime() - 24 * 3600 * 1000);
     return formatDateDDMMYYYY(y);
   }
-  if (/^day before yesterday$/i.test(clean) || /^parso$/i.test(clean)) {
+  if (/^(?:day before yesterday|parso)$/i.test(clean)) {
     const dby = new Date(now.getTime() - 48 * 3600 * 1000);
     return formatDateDDMMYYYY(dby);
   }
 
-  // Handle DD-MM-YYYY or DD/MM/YYYY
-  const dmyMatch = clean.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  // Handle DD-MM-YYYY or DD/MM/YYYY embedded in text
+  const dmyMatch = clean.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
   if (dmyMatch) {
     const day = String(dmyMatch[1]).padStart(2, '0');
     const month = String(dmyMatch[2]).padStart(2, '0');
@@ -266,8 +266,8 @@ function normalizeDateToDDMMYYYY(dateStr) {
     return `${day}-${month}-${year}`;
   }
 
-  // Handle YYYY-MM-DD
-  const ymdMatch = clean.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+  // Handle YYYY-MM-DD embedded in text
+  const ymdMatch = clean.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
   if (ymdMatch) {
     const year = ymdMatch[1];
     const month = String(ymdMatch[2]).padStart(2, '0');
