@@ -287,7 +287,7 @@ async function verifyCustomerAccountAccess(customerName, callerContext, supabase
 function parseDateFilter(dateFilter) {
   if (!dateFilter || dateFilter === 'all') return {};
   const now = new Date();
-  const lower = String(dateFilter).toLowerCase().trim();
+  const lower = String(dateFilter).toLowerCase().trim().replace(/[-_]+/g, ' ');
 
   if (lower === 'today') {
     const startOfToday = new Date(now);
@@ -303,31 +303,53 @@ function parseDateFilter(dateFilter) {
     endOfYesterday.setHours(23, 59, 59, 999);
     return { from: startOfYesterday, to: endOfYesterday };
   }
-  if (lower === 'this_week' || lower === 'week') {
+
+  // Relative days regex: e.g. "last 7 days", "past 7 days", "7 days", "last 30 days", "30 days", "last 14 days"
+  const daysMatch = lower.match(/^(?:last|past)?\s*(\d+)\s*days?$/);
+  if (daysMatch) {
+    const numDays = parseInt(daysMatch[1], 10);
+    const start = new Date(now);
+    start.setDate(start.getDate() - numDays);
+    start.setHours(0, 0, 0, 0);
+    return { from: start };
+  }
+
+  // Week variations (rolling 7 days for recent activity)
+  if (
+    lower === 'this week' ||
+    lower === 'week' ||
+    lower === 'last 7 days' ||
+    lower === 'past 7 days' ||
+    lower === '7 days' ||
+    lower === 'last week' ||
+    lower === 'past week' ||
+    lower === 'previous week'
+  ) {
     const startOfWeek = new Date(now);
     startOfWeek.setDate(startOfWeek.getDate() - 7);
     startOfWeek.setHours(0, 0, 0, 0);
     return { from: startOfWeek };
   }
-  if (lower === 'last_week') {
-    const endOfLastWeek = new Date(now);
-    endOfLastWeek.setDate(endOfLastWeek.getDate() - 7);
-    endOfLastWeek.setHours(23, 59, 59, 999);
-    const startOfLastWeek = new Date(now);
-    startOfLastWeek.setDate(startOfLastWeek.getDate() - 14);
-    startOfLastWeek.setHours(0, 0, 0, 0);
-    return { from: startOfLastWeek, to: endOfLastWeek };
-  }
-  if (lower === 'this_month' || lower === 'month') {
+
+  // Month variations (rolling 30 days or start of month)
+  if (
+    lower === 'this month' ||
+    lower === 'month' ||
+    lower === 'last 30 days' ||
+    lower === 'past 30 days' ||
+    lower === '30 days' ||
+    lower === 'current month'
+  ) {
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     return { from: startOfMonth };
   }
-  if (lower === 'last_month' || lower === 'previous_month') {
+  if (lower === 'last month' || lower === 'previous month' || lower === 'past month') {
     const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0);
     endOfLastMonth.setHours(23, 59, 59, 999);
     return { from: startOfLastMonth, to: endOfLastMonth };
   }
+
   const parsed = new Date(dateFilter);
   if (!isNaN(parsed.getTime())) {
     const start = new Date(parsed);

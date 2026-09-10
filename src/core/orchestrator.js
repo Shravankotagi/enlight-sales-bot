@@ -131,6 +131,9 @@ Logged to Sales Pipeline & Inquiries!
 - **MONTHLY EXECUTIVE SUMMARY**: When the user asks "summary of total inquiries, orders, and customers this month", call get_inquiries with mode: "monthly_summary". Detail total inquiries (28), won orders (9), active pipeline deals (25), and active customer accounts (72).
 - **INQUIRIES FROM AT-RISK CUSTOMERS**: When the user asks "Show me inquiries from customers who are currently marked At Risk", call get_inquiries with mode: "at_risk_inquiries". State clearly that 0 customers are at risk (all 72 active accounts are in good standing), so there are 0 inquiries from at-risk accounts.
 - **VISITS INTELLIGENCE**:
+  - Recent Visits / Last 7 Days / Weekly Filter: When the user asks "list total visits in last 7 days", "visits in past 7 days", "visits this week", "recent visits", OR asks follow-up details (e.g. "show me in detail", "show details", "give me the list", "which visits", "list visits"), call get_visits with date_range: "last_7_days". Always preserve the active date range on follow-up questions.
+  - Today / Yesterday Visits: "visits today" -> call get_visits with date_range: "today"; "visits yesterday" -> call get_visits with date_range: "yesterday".
+  - Monthly Visits: "visits this month", "visits in last 30 days" -> call get_visits with date_range: "last_30_days".
   - Rep Visit Filter: "List all visits handled by [Rep Name]" -> call get_visits with salesperson_name: "[Rep Name]".
   - Location Visit Filter: "Show me all visits in [City]" (e.g. "Nashik", "Mumbai", "Pune", "Bhiwandi") -> call get_visits with location: "[City]".
   - Rep Visit Leaderboard: "Which salesperson has logged the most visits?" -> call get_visits with mode: "rep_leaderboard" (Rishabh Makwana #1 with 19 visits, Max #2 with 13, Akruti #3 with 7, Dhananjay Goel #4 with 2).
