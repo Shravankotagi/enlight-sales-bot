@@ -285,9 +285,11 @@ async function verifyCustomerAccountAccess(customerName, callerContext, supabase
 // ─── Date Parsing Utility ───────────────────────────────────────────────────
 
 function parseDateFilter(dateFilter) {
-  if (!dateFilter || dateFilter === 'all') return {};
-  const now = new Date();
+  if (!dateFilter) return {};
   const lower = String(dateFilter).toLowerCase().trim().replace(/[-_]+/g, ' ');
+  if (lower === 'all' || lower === 'all time' || lower === 'all_time' || lower === 'overall' || lower === 'lifetime' || lower === 'total' || lower === 'everything') return {};
+
+  const now = new Date();
 
   if (lower === 'today') {
     const startOfToday = new Date(now);
