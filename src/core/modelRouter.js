@@ -47,17 +47,37 @@ function getModel(tools = null) {
   return getPaidHighAccuracyModel(tools);
 }
 
+const FALLBACK_MODEL = 'gemini-2.5-flash';
+
 /**
- * Invoke Gemini 3.7 Flash with automatic retry.
+ * Invoke Gemini with automatic model fallback (gemini-3.7-flash -> gemini-2.5-flash).
  */
 async function invokeWithFallback(messages, tools = null, isPaidTask = false) {
   try {
     const model = getPaidHighAccuracyModel(tools);
     return await model.invoke(messages);
   } catch (err) {
-    console.warn(`[ModelRouter] Primary model (${PRIMARY_MODEL}) error: ${err.message}. Retrying...`);
-    const retryModel = getPaidHighAccuracyModel(tools);
-    return await retryModel.invoke(messages);
+    console.warn(`[ModelRouter] Primary model (${PRIMARY_MODEL}) error: ${err.message}. Retrying with fallback (${FALLBACK_MODEL})...`);
+    try {
+      const fallbackModel = new ChatGoogleGenerativeAI({
+        model: FALLBACK_MODEL,
+        apiKey: GEMINI_API_KEY,
+        temperature: 0.1,
+        maxRetries: 2,
+      });
+      const boundFallback = tools ? fallbackModel.bindTools(tools) : fallbackModel;
+      return await boundFallback.invoke(messages);
+    } catch (fallbackErr) {
+      console.warn(`[ModelRouter] Fallback model (${FALLBACK_MODEL}) error: ${fallbackErr.message}. Retrying with gemini-2.5-flash-lite...`);
+      const liteModel = new ChatGoogleGenerativeAI({
+        model: 'gemini-2.5-flash-lite',
+        apiKey: GEMINI_API_KEY,
+        temperature: 0.1,
+        maxRetries: 2,
+      });
+      const boundLite = tools ? liteModel.bindTools(tools) : liteModel;
+      return await boundLite.invoke(messages);
+    }
   }
 }
 

@@ -805,7 +805,7 @@ Return ONLY the company name or "NONE":`;
     }
 
     const dealCards = deals.map((d, i) => {
-      const rawInq = d.inquiry_id || d.id || 'UNKNOWN';
+      const rawInq = d.id || d.inquiry_id || 'UNKNOWN';
       const cleanNum = rawInq.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').substring(0, 6).toUpperCase();
       const dealCode = `#INQ-${cleanNum}`;
       const stageStr = (d.stage || 'new_inquiry').toUpperCase();
@@ -833,7 +833,7 @@ Return ONLY the company name or "NONE":`;
     });
 
     const displayCustName = deals[0].customer_name || customerName;
-    const firstRawInq = deals[0].inquiry_id || deals[0].id || 'XXXXXX';
+    const firstRawInq = deals[0].id || deals[0].inquiry_id || 'XXXXXX';
     const sampleInqCode = `#INQ-${firstRawInq.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').substring(0, 6).toUpperCase()}`;
 
     return `📋 *Active Inquiries & Deals - ${displayCustName}* (${deals.length} found)\n\n` +
@@ -3044,7 +3044,7 @@ async function getInquiryOrDealByCode(scopeOrPhone, text, explicitCode = null) {
     }
 
     const custName = matchedDeal?.customer_name || matchedInq?.sender_name || 'Customer';
-    const rawMatchId = matchedDeal ? (matchedDeal.inquiry_id || matchedDeal.id || '') : (matchedInq?.id || '');
+    const rawMatchId = matchedDeal ? (matchedDeal.id || matchedDeal.inquiry_id || '') : (matchedInq?.id || '');
     const displayId = `#INQ-${rawMatchId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').substring(0, 6).toUpperCase()}`;
 
     const stageStr = (matchedDeal?.stage || matchedInq?.status || 'NEW INQUIRY').toUpperCase();
