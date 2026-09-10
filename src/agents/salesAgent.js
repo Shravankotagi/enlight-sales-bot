@@ -640,9 +640,23 @@ function extractRuleBasedLineItems(textRaw) {
         }
       }
       if (linePName && lineQty > 0 && !/^\d+$/.test(linePName) && !/^[0-9.:\s-]+$/.test(linePName) && linePName.length >= 2) {
-        const mmM = rawProductAndDim.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft)(?:\s*x\s*[\d.]+\s*(?:mm|ft|inch|mtr)?)?)/i);
-        const simpleMmM = rawProductAndDim.match(/(\d+(?:\.\d+)?\s*mm)/i);
-        const mDim = mmM ? mmM[0] : (simpleMmM ? simpleMmM[0] : null);
+        const ismbM = rawProductAndDim.match(/\b(ismb\s*\d+|ismc\s*\d+|npb\s*[\dx]+|wpb\s*[\dx]+|uc\s*[\dx]+|ub\s*[\dx]+)\b/i);
+        let mDim = ismbM ? ismbM[0].toUpperCase() : null;
+        if (!mDim) {
+          const parenM = rawProductAndDim.match(/(\([^)]+\))/);
+          const withoutParen = rawProductAndDim.replace(/\([^)]+\)/g, '').trim();
+          const thkM = withoutParen.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft)(?:\s*thk|\s*thick|\s*thickness)?)/i) || withoutParen.match(/(\d+(?:\.\d+)?\s*mm)/i);
+          if (thkM && parenM) {
+            mDim = `${thkM[1].trim()} ${parenM[1]}`.trim();
+          } else if (parenM && !thkM) {
+            mDim = parenM[1];
+          } else {
+            const boxSizeM = rawProductAndDim.match(/(\d+\s*x\s*\d+(?:\s*x\s*[\d.]+)?\s*mm)/i);
+            const mmM = rawProductAndDim.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft)(?:\s*x\s*[\d.]+\s*(?:mm|ft|inch|mtr)?)?)/i);
+            const simpleMmM = rawProductAndDim.match(/(\d+(?:\.\d+)?\s*mm)/i);
+            mDim = boxSizeM ? boxSizeM[0] : (mmM ? mmM[0] : (simpleMmM ? simpleMmM[0] : null));
+          }
+        }
         lineItemsList.push({
           product_requirement: linePName,
           pName: linePName,
@@ -678,10 +692,22 @@ function extractRuleBasedLineItems(textRaw) {
     if (!matchedPName) matchedPName = rawP;
 
     const ismbM = rawP.match(/\b(ismb\s*\d+|ismc\s*\d+|npb\s*[\dx]+|wpb\s*[\dx]+|uc\s*[\dx]+|ub\s*[\dx]+)\b/i);
-    const boxSizeM = rawP.match(/(\d+\s*x\s*\d+(?:\s*x\s*[\d.]+)?\s*mm)/i);
-    const mmM = rawP.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft)(?:\s*x\s*[\d.]+\s*(?:mm|ft|inch|mtr)?)?)/i);
-    const simpleMmM = rawP.match(/(\d+(?:\.\d+)?\s*mm)/i);
-    const mDim = ismbM ? ismbM[0].toUpperCase() : (boxSizeM ? boxSizeM[0] : (mmM ? mmM[0] : (simpleMmM ? simpleMmM[0] : null)));
+    let mDim = ismbM ? ismbM[0].toUpperCase() : null;
+    if (!mDim) {
+      const parenM = rawP.match(/(\([^)]+\))/);
+      const withoutParen = rawP.replace(/\([^)]+\)/g, '').trim();
+      const thkM = withoutParen.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft)(?:\s*thk|\s*thick|\s*thickness)?)/i) || withoutParen.match(/(\d+(?:\.\d+)?\s*mm)/i);
+      if (thkM && parenM) {
+        mDim = `${thkM[1].trim()} ${parenM[1]}`.trim();
+      } else if (parenM && !thkM) {
+        mDim = parenM[1];
+      } else {
+        const boxSizeM = rawP.match(/(\d+\s*x\s*\d+(?:\s*x\s*[\d.]+)?\s*mm)/i);
+        const mmM = rawP.match(/(\d+(?:\.\d+)?\s*(?:mm|g|gauge|dia|ø|inch|ft)(?:\s*x\s*[\d.]+\s*(?:mm|ft|inch|mtr)?)?)/i);
+        const simpleMmM = rawP.match(/(\d+(?:\.\d+)?\s*mm)/i);
+        mDim = boxSizeM ? boxSizeM[0] : (mmM ? mmM[0] : (simpleMmM ? simpleMmM[0] : null));
+      }
+    }
 
     items.push({
       product_requirement: matchedPName,
@@ -2297,71 +2323,81 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
     // Check if there is an active pending product clarification session
     if (activeSess?.last_intent?.startsWith('pending_product_clarification|')) {
-      const parts = activeSess.last_intent.split('|');
-      const sessionCustomer = parts[1];
-      const payloadStr = parts.slice(2).join('|');
-      const { safeParseJSON } = require('../utils/jsonUtils');
-      const pendingPayload = safeParseJSON(payloadStr, null);
+      const rawClean = (text || '').trim();
+      const isNewInquiryOrLongMsg =
+        rawClean.length > 60 ||
+        rawClean.includes('\n') ||
+        /^\s*(?:log|create|new|add|inquiry|deal|order|rfq|quote|requirement)\b/i.test(rawClean);
 
-      if (pendingPayload) {
-        const rawClean = text.trim();
-        const sheetOptions = ['HR Sheet', 'CR Sheet', 'HRPO Sheet', 'GP Sheet', 'Galvalume Sheet', 'Chequered Sheet'];
-        const plateOptions = ['HR Plate', 'HR Sheet', 'Chequered Sheet'];
+      if (isNewInquiryOrLongMsg) {
+        // Clear stale pending clarification session so the new inquiry is processed cleanly
+        await saveActiveSession(senderPhone, 'Unknown', 'general');
+      } else {
+        const parts = activeSess.last_intent.split('|');
+        const sessionCustomer = parts[1];
+        const payloadStr = parts.slice(2).join('|');
+        const { safeParseJSON } = require('../utils/jsonUtils');
+        const pendingPayload = safeParseJSON(payloadStr, null);
 
-        let resolvedCatalogName = null;
-        const numMatch = rawClean.match(/^([1-6])\b/);
-        if (numMatch) {
-          const idx = parseInt(numMatch[1], 10) - 1;
-          const isPlate = String(pendingPayload.invalid_product || '').toLowerCase().includes('plate');
-          const optList = isPlate ? plateOptions : sheetOptions;
-          if (optList[idx]) {
-            resolvedCatalogName = optList[idx];
-          }
-        }
+        if (pendingPayload) {
+          const sheetOptions = ['HR Sheet', 'CR Sheet', 'HRPO Sheet', 'GP Sheet', 'Galvalume Sheet', 'Chequered Sheet'];
+          const plateOptions = ['HR Plate', 'HR Sheet', 'Chequered Sheet'];
 
-        if (!resolvedCatalogName) {
-          const norm = normalizeProductToCatalog(rawClean);
-          if (norm.isValid) {
-            resolvedCatalogName = norm.catalogName;
-          }
-        }
-
-        if (resolvedCatalogName) {
-          const oldProdName = pendingPayload.invalid_product;
-          if (pendingPayload.data && Array.isArray(pendingPayload.data.line_items)) {
-            pendingPayload.data.line_items = pendingPayload.data.line_items.filter(itm => {
-              const itmName = (itm.product_requirement || itm.pName || '').trim();
-              return itmName && !/^\d+$/.test(itmName) && !/^[0-9.:\s-]+$/.test(itmName) && itmName.length >= 2;
-            });
-            for (const itm of pendingPayload.data.line_items) {
-              const itmName = itm.product_requirement || itm.pName || '';
-              if (itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase())) {
-                itm.product_requirement = resolvedCatalogName;
-                itm.pName = resolvedCatalogName;
-              }
-            }
-          }
-          if (Array.isArray(pendingPayload.processedItems)) {
-            pendingPayload.processedItems = pendingPayload.processedItems.filter(itm => {
-              const itmName = (itm.pName || itm.product_requirement || '').trim();
-              return itmName && !/^\d+$/.test(itmName) && !/^[0-9.:\s-]+$/.test(itmName) && itmName.length >= 2;
-            });
-            for (const itm of pendingPayload.processedItems) {
-              const itmName = itm.pName || itm.product_requirement || '';
-              if (itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase())) {
-                itm.pName = resolvedCatalogName;
-                itm.product_requirement = resolvedCatalogName;
-              }
+          let resolvedCatalogName = null;
+          const numMatch = rawClean.match(/^(?:option\s*|#\s*)?([1-6])\b/i);
+          if (numMatch) {
+            const idx = parseInt(numMatch[1], 10) - 1;
+            const isPlate = String(pendingPayload.invalid_product || '').toLowerCase().includes('plate');
+            const optList = isPlate ? plateOptions : sheetOptions;
+            if (optList[idx]) {
+              resolvedCatalogName = optList[idx];
             }
           }
 
-          await saveActiveSession(senderPhone, sessionCustomer || 'Unknown', 'general');
+          if (!resolvedCatalogName) {
+            const norm = normalizeProductToCatalog(rawClean);
+            if (norm.isValid) {
+              resolvedCatalogName = norm.catalogName;
+            }
+          }
 
-          return await processSalesMessage(
-            pendingPayload.raw_text,
-            senderPhone,
-            pendingPayload.data
-          );
+          if (resolvedCatalogName) {
+            const oldProdName = pendingPayload.invalid_product;
+            if (pendingPayload.data && Array.isArray(pendingPayload.data.line_items)) {
+              pendingPayload.data.line_items = pendingPayload.data.line_items.filter(itm => {
+                const itmName = (itm.product_requirement || itm.pName || '').trim();
+                return itmName && !/^\d+$/.test(itmName) && !/^[0-9.:\s-]+$/.test(itmName) && itmName.length >= 2;
+              });
+              for (const itm of pendingPayload.data.line_items) {
+                const itmName = itm.product_requirement || itm.pName || '';
+                if (itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase())) {
+                  itm.product_requirement = resolvedCatalogName;
+                  itm.pName = resolvedCatalogName;
+                }
+              }
+            }
+            if (Array.isArray(pendingPayload.processedItems)) {
+              pendingPayload.processedItems = pendingPayload.processedItems.filter(itm => {
+                const itmName = (itm.pName || itm.product_requirement || '').trim();
+                return itmName && !/^\d+$/.test(itmName) && !/^[0-9.:\s-]+$/.test(itmName) && itmName.length >= 2;
+              });
+              for (const itm of pendingPayload.processedItems) {
+                const itmName = itm.pName || itm.product_requirement || '';
+                if (itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase())) {
+                  itm.pName = resolvedCatalogName;
+                  itm.product_requirement = resolvedCatalogName;
+                }
+              }
+            }
+
+            await saveActiveSession(senderPhone, sessionCustomer || 'Unknown', 'general');
+
+            return await processSalesMessage(
+              pendingPayload.raw_text,
+              senderPhone,
+              pendingPayload.data
+            );
+          }
         }
       }
     }
