@@ -147,7 +147,7 @@ Please provide the following details. Fields marked with * are mandatory:
 
 • *Company / Customer Name:* *
 • *Linked Inquiry ID / PO Number & Product:* *
-• *Complaint Type:* * (Quality Defect / Short Delivery / Wrong Material / Delayed Delivery / Billing Issue / Other)
+• *Complaint Type:* * (Quality Defect / Physical Damage / Quantity Shortage / Delivery Delay / Billing Mismatch / Specification Mismatch / Other)
 • *Complaint Description:* *
 • *Corrective Action Taken:* (optional)
 • *Initial Status:* * (Pending / In Progress / Resolved)`,
@@ -155,21 +155,20 @@ Please provide the following details. Fields marked with * are mandatory:
   UPDATE_COMPLAINT: `✏️ *Update Complaint*
 
 To identify the complaint, provide ONE of the following:
-• *Complaint ID:* * (e.g. CMP-2026-0008)
-OR
-• *Linked PO Number / Inquiry ID:* * (e.g. PO-2026-0042)
+• *Linked PO Number or Inquiry ID:* * (e.g. PO-2026-TI-101 or #INQ-8971B1)
+• *Customer Name:* (e.g. Tech Industries)
 
 What would you like to update?
 
 *Updatable Fields:*
-• Complaint Type
+• Complaint Type (Quality Defect / Physical Damage / Quantity Shortage / Delivery Delay / Billing Mismatch / Specification Mismatch / Other)
 • Complaint Description
 • Corrective Action Taken
 • Resolution Notes
 • Status (Pending / In Progress / Resolved / Closed)
 
 Example:
-"CMP-2026-0008, update status to Resolved, corrective action: replacement dispatched on 09-09-2026"`
+"Update complaint for Tech Industries to Specification Mismatch"`
 };
 
 // ── ACTION NAME FORMATTER FOR PROMPTS ─────────────────────────────────────────
@@ -204,33 +203,40 @@ function isGreeting(text) {
 
 function matchActionFromInput(text) {
   if (!text || typeof text !== 'string') return null;
-  const clean = text.trim().toLowerCase().replace(/[️⃣*]/g, '');
+  const clean = text.trim().toLowerCase().replace(/[️⃣*]/g, '').trim();
 
-  if (clean === '1' || clean === '1.' || clean.includes('log inquiry') || clean.includes('log new inquiry') || clean === 'new inquiry' || clean === 'start_log_inquiry') {
+  // If text is a full sentence with arguments/details, let natural action detection & LLM extraction handle it
+  if (clean.length > 35 || /\b(?:for|to|on|of|with|at|rate|qty|status|inq-|po-|midc|midc\s+pune|midc\s+bhosari|mt|tons|plate|sheet|coil)\b/i.test(clean)) {
+    if (!/^(?:1|2|3|4|5|6|7|8|9)\.?$/i.test(clean) && !/^(?:log|update|record|start_log_|start_update_)\s*(?:new\s*)?(?:inquiry|order|visit|complaint|field visit|customer visit|customer complaint)$/i.test(clean)) {
+      return null;
+    }
+  }
+
+  if (clean === '1' || clean === '1.' || clean === 'log inquiry' || clean === 'log new inquiry' || clean === 'new inquiry' || clean === 'start_log_inquiry') {
     return 'LOG_INQUIRY';
   }
-  if (clean === '2' || clean === '2.' || clean.includes('update inquiry') || clean === 'start_update_inquiry') {
+  if (clean === '2' || clean === '2.' || clean === 'update inquiry' || clean === 'start_update_inquiry') {
     return 'UPDATE_INQUIRY';
   }
-  if (clean === '3' || clean === '3.' || clean.includes('log order') || clean.includes('log new order') || clean.includes('record order') || clean.includes('record new order') || clean === 'new order' || clean === 'start_log_order') {
+  if (clean === '3' || clean === '3.' || clean === 'log order' || clean === 'log new order' || clean === 'record order' || clean === 'record new order' || clean === 'new order' || clean === 'start_log_order') {
     return 'LOG_ORDER';
   }
-  if (clean === '4' || clean === '4.' || clean.includes('update order') || clean === 'start_update_order') {
+  if (clean === '4' || clean === '4.' || clean === 'update order' || clean === 'start_update_order') {
     return 'UPDATE_ORDER';
   }
-  if (clean === '5' || clean === '5.' || clean.includes('log visit') || clean.includes('log customer field visit') || clean.includes('log customer visit') || clean.includes('log field visit') || clean === 'new visit' || clean === 'start_log_visit') {
+  if (clean === '5' || clean === '5.' || clean === 'log visit' || clean === 'log customer field visit' || clean === 'log customer visit' || clean === 'log field visit' || clean === 'new visit' || clean === 'start_log_visit') {
     return 'LOG_VISIT';
   }
-  if (clean === '6' || clean === '6.' || clean.includes('update visit') || clean.includes('update field visit') || clean === 'start_update_visit') {
+  if (clean === '6' || clean === '6.' || clean === 'update visit' || clean === 'update field visit' || clean === 'start_update_visit') {
     return 'UPDATE_VISIT';
   }
-  if (clean === '7' || clean === '7.' || clean.includes('log complaint') || clean.includes('log customer complaint') || clean === 'new complaint' || clean === 'start_log_complaint') {
+  if (clean === '7' || clean === '7.' || clean === 'log complaint' || clean === 'log customer complaint' || clean === 'new complaint' || clean === 'start_log_complaint') {
     return 'LOG_COMPLAINT';
   }
-  if (clean === '8' || clean === '8.' || clean.includes('update complaint') || clean.includes('update customer complaint') || clean === 'start_update_complaint') {
+  if (clean === '8' || clean === '8.' || clean === 'update complaint' || clean === 'update customer complaint' || clean === 'start_update_complaint') {
     return 'UPDATE_COMPLAINT';
   }
-  if (clean === '9' || clean === '9.' || clean === 'other' || clean.includes('general query') || clean === 'other query' || clean === 'general_query') {
+  if (clean === '9' || clean === '9.' || clean === 'other' || clean === 'general query' || clean === 'other query' || clean === 'general_query') {
     return 'GENERAL_QUERY';
   }
 
@@ -511,8 +517,8 @@ LOG_COMPLAINT:
 {
   "action": "LOG_COMPLAINT",
   "company_name": "<Company / Customer Name, else null>",
-  "linked_inquiry_or_po": "<Linked Inquiry ID or PO Number and Product, else null>",
-  "complaint_type": "<Quality Defect | Short Delivery | Wrong Material | Delayed Delivery | Billing Issue | Other>",
+  "linked_inquiry_or_po": "<Linked Inquiry ID e.g. #INQ-8971B1 or PO Number e.g. PO-2026-TI-101 and Product, else null>",
+  "complaint_type": "<Quality Defect | Physical Damage | Quantity Shortage | Delivery Delay | Billing Mismatch | Specification Mismatch | Other>",
   "complaint_description": "<Detailed complaint description, else null>",
   "corrective_action": "<Corrective action taken if mentioned, else null>",
   "initial_status": "<Pending | In Progress | Resolved>",
@@ -531,10 +537,10 @@ LOG_COMPLAINT:
 UPDATE_COMPLAINT:
 {
   "action": "UPDATE_COMPLAINT",
-  "complaint_id": "<Complaint ID e.g. CMP-2026-0008, else null>",
-  "linked_inquiry_or_po": "<Linked PO Number / Inquiry ID if mentioned, else null>",
+  "company_name": "<Customer / Company Name if mentioned, else null>",
+  "linked_inquiry_or_po": "<Linked PO Number or Inquiry ID e.g. #INQ-8971B1, PO-2026-TI-101 if mentioned, else null>",
   "updates": {
-    "complaint_type": "<if updated, else null>",
+    "complaint_type": "<Quality Defect | Physical Damage | Quantity Shortage | Delivery Delay | Billing Mismatch | Specification Mismatch | Other if updated, else null>",
     "complaint_description": "<if updated, else null>",
     "corrective_action": "<if updated, else null>",
     "status": "<Pending | In Progress | Resolved | Closed if updated, else null>",
@@ -766,16 +772,16 @@ function validateMandatoryFields(action, draft) {
       if (!draft.initial_status) missing.push('Initial Status (Pending / In Progress / Resolved)');
       break;
 
-    case 'UPDATE_COMPLAINT':
-      const hasCmpId = Boolean(draft.complaint_id);
-      const hasLinkedRef = Boolean(draft.linked_inquiry_or_po);
-      if (!hasCmpId && !hasLinkedRef) {
-        missing.push('Complaint ID (e.g. CMP-2026-0008) OR Linked PO Number / Inquiry ID');
+    case 'UPDATE_COMPLAINT': {
+      const hasCmpRef = Boolean(draft.linked_inquiry_or_po || draft.company_name || draft.complaint_id);
+      if (!hasCmpRef) {
+        missing.push('Customer Name OR Linked PO Number / Inquiry ID');
       }
       const cmpUpdates = draft.updates || {};
       const hasCmpUpdate = Object.values(cmpUpdates).some(v => v !== null && v !== undefined && v !== '');
-      if (!hasCmpUpdate) missing.push('At least one field to update');
+      if (!hasCmpUpdate) missing.push('At least one field to update (e.g. Complaint Type, Status, Description, Resolution Notes)');
       break;
+    }
   }
 
   return missing;
@@ -908,9 +914,12 @@ function buildConfirmationSummary(action, draft) {
       summary += `• *Initial Status:* ${draft.initial_status}\n`;
       break;
 
-    case 'UPDATE_COMPLAINT':
-      const targetCmp = draft.complaint_id || draft.linked_inquiry_or_po;
+    case 'UPDATE_COMPLAINT': {
+      const targetCmp = draft.linked_inquiry_or_po || draft.company_name || draft.complaint_id || 'Active Complaint';
       summary += `• *Target Complaint:* ${targetCmp}\n`;
+      if (draft.company_name && draft.linked_inquiry_or_po && draft.company_name !== draft.linked_inquiry_or_po) {
+        summary += `• *Customer:* ${draft.company_name}\n`;
+      }
       summary += `*Updating Fields:*\n`;
       for (const [k, v] of Object.entries(draft.updates || {})) {
         if (v) {
@@ -919,10 +928,104 @@ function buildConfirmationSummary(action, draft) {
         }
       }
       break;
+    }
   }
 
   summary += `\n*Reply:*\n✔️ *Yes* — to save\n✏️ *Edit* — to change something\n❌ *Cancel* — to discard`;
   return summary;
+}
+
+// ── COMPLAINT RESOLUTION HELPERS ─────────────────────────────────────────────
+
+function normalizeComplaintType(typeStr) {
+  if (!typeStr || typeof typeStr !== 'string') return 'Quality Defect';
+  const t = typeStr.trim().toLowerCase();
+  if (t.includes('spec') || t.includes('mismatch')) return 'Specification Mismatch';
+  if (t.includes('damage') || t.includes('physical') || t.includes('broken') || t.includes('crack') || t.includes('bend')) return 'Physical Damage';
+  if (t.includes('short') || t.includes('qty') || t.includes('quantity') || t.includes('kam')) return 'Quantity Shortage';
+  if (t.includes('delay') || t.includes('late') || t.includes('delivery')) return 'Delivery Delay';
+  if (t.includes('bill') || t.includes('invoice') || t.includes('price') || t.includes('rate') || t.includes('amount')) return 'Billing Mismatch';
+  if (t.includes('quality') || t.includes('rust') || t.includes('defect') || t.includes('reject')) return 'Quality Defect';
+  if (t.includes('other')) return 'Other';
+  return typeStr.trim().replace(/\b\w/g, l => l.toUpperCase());
+}
+
+async function findAndMatchComplaint(draft) {
+  const targetRef = (draft.linked_inquiry_or_po || draft.target_ref || draft.complaint_id || '').trim();
+  const companyName = (draft.company_name || '').trim();
+
+  const { data: allComplaints } = await supabase
+    .from('complaints')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(100);
+
+  if (!allComplaints || allComplaints.length === 0) return null;
+
+  // 1. Direct match by targetRef (PO Number, Inquiry ID / Deal ID, or Complaint UUID)
+  if (targetRef) {
+    const cleanRef = targetRef.replace(/^#?(?:INQ|DEAL|PO)-?/i, '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+
+    // Direct check on complaints table
+    const directMatch = allComplaints.find(c => {
+      const cId = (c.id || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+      const po = (c.po_number || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+      const dealId = (c.deal_id || '').replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+      const cust = (c.customer_name || '').toLowerCase();
+
+      return (
+        (cleanRef.length >= 4 && cId.startsWith(cleanRef)) ||
+        (cleanRef.length >= 2 && po.includes(cleanRef)) ||
+        (cleanRef.length >= 2 && dealId.includes(cleanRef)) ||
+        (cleanRef.length >= 3 && cust.includes(cleanRef))
+      );
+    });
+
+    if (directMatch) return directMatch;
+
+    // Lookup deals table if cleanRef matches a deal ID or PO
+    try {
+      const { data: deals } = await supabase
+        .from('deals')
+        .select('id, po_number, customer_name')
+        .limit(100);
+
+      const matchedDeal = deals?.find(d => {
+        const dId = (d.id || '').replace(/-/g, '').toLowerCase();
+        const dPo = (d.po_number || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+        return (cleanRef.length >= 3 && dId.startsWith(cleanRef)) || (cleanRef.length >= 3 && dPo.includes(cleanRef));
+      });
+
+      if (matchedDeal) {
+        const dealMatch = allComplaints.find(c =>
+          (c.deal_id && (c.deal_id === matchedDeal.id || c.deal_id.toLowerCase().includes(matchedDeal.id.toLowerCase()))) ||
+          (c.po_number && matchedDeal.po_number && c.po_number.toLowerCase().includes(matchedDeal.po_number.toLowerCase())) ||
+          (c.customer_name && matchedDeal.customer_name && c.customer_name.toLowerCase().includes(matchedDeal.customer_name.toLowerCase()))
+        );
+        if (dealMatch) return dealMatch;
+      }
+    } catch (e) {
+      console.warn('[CatalogFlow] Error in deal lookup for complaint:', e.message);
+    }
+  }
+
+  // 2. Match by companyName
+  if (companyName) {
+    const cleanCust = companyName.toLowerCase();
+    const custMatches = allComplaints.filter(c =>
+      (c.customer_name || '').toLowerCase().includes(cleanCust) ||
+      cleanCust.includes((c.customer_name || '').toLowerCase())
+    );
+
+    if (custMatches.length > 0) {
+      const openMatch = custMatches.find(c =>
+        ['open', 'pending', 'reported', 'in progress', 'reopened'].includes((c.status || '').toLowerCase())
+      );
+      return openMatch || custMatches[0];
+    }
+  }
+
+  return null;
 }
 
 // ── EXECUTE ACTION HANDLERS ──────────────────────────────────────────────────
@@ -1503,11 +1606,12 @@ Visit details updated in Customer Visits Card! ✅`;
 
         const nowIso = new Date().toISOString();
         const slaDueAt = new Date(Date.now() + 48 * 3600 * 1000).toISOString();
+        const normalizedType = normalizeComplaintType(draft.complaint_type || 'quality');
 
         // 1. Insert into complaints
         const { error: cmpErr } = await supabase.from('complaints').insert({
           customer_name: companyName,
-          complaint_type: draft.complaint_type || 'quality',
+          complaint_type: normalizedType,
           description: draft.complaint_description,
           reported_by: senderPhone,
           status: (draft.initial_status || 'Pending').toLowerCase(),
@@ -1527,7 +1631,7 @@ Visit details updated in Customer Visits Card! ✅`;
           kra_number: 7,
           kra_type: 'quality_complaint',
           customer_name: companyName,
-          description: `Complaint Logged: ${companyName} - ${draft.complaint_type}: ${draft.complaint_description}`,
+          description: `Complaint Logged: ${companyName} - ${normalizedType}: ${draft.complaint_description}`,
           month: new Date().getMonth() + 1,
           year: new Date().getFullYear(),
           created_at: nowIso,
@@ -1537,7 +1641,7 @@ Visit details updated in Customer Visits Card! ✅`;
 
 🏢 *Customer:* ${companyName}
 🔗 *Linked Ref:* ${draft.linked_inquiry_or_po}
-📋 *Complaint Type:* ${draft.complaint_type}
+📋 *Complaint Type:* ${normalizedType}
 📝 *Description:* ${draft.complaint_description}
 🚦 *Status:* ${draft.initial_status}${draft.corrective_action ? `\n🛠️ *Corrective Action:* ${draft.corrective_action}` : ''}
 
@@ -1545,11 +1649,17 @@ Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
       }
 
       case 'UPDATE_COMPLAINT': {
-        const targetRef = draft.complaint_id || draft.linked_inquiry_or_po;
+        const matchedCmp = await findAndMatchComplaint(draft);
+
+        if (!matchedCmp) {
+          const refDisplay = draft.company_name || draft.linked_inquiry_or_po || 'specified reference';
+          return `⚠️ Could not find an active complaint for *${refDisplay}*.\n\nPlease verify the Customer Name, Inquiry ID, or PO Number.`;
+        }
+
         const updates = draft.updates || {};
         const cmpUpdates = {};
 
-        if (updates.complaint_type) cmpUpdates.complaint_type = updates.complaint_type;
+        if (updates.complaint_type) cmpUpdates.complaint_type = normalizeComplaintType(updates.complaint_type);
         if (updates.complaint_description) cmpUpdates.description = updates.complaint_description;
         if (updates.corrective_action) cmpUpdates.corrective_action = updates.corrective_action;
         if (updates.resolution_notes) cmpUpdates.resolution_notes = updates.resolution_notes;
@@ -1561,30 +1671,52 @@ Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
           }
         }
 
-        if (targetRef) {
-          const { data: allComplaints } = await supabase
-            .from('complaints')
-            .select('id, customer_name, po_number, deal_id')
-            .order('created_at', { ascending: false })
-            .limit(50);
-
-          const matchedCmp = allComplaints?.find(c => {
-            const clean = targetRef.replace(/^#?(?:CMP|INQ|PO)-?/i, '').replace(/-/g, '').toLowerCase();
-            const cId = (c.id || '').replace(/-/g, '').toLowerCase();
-            const po = (c.po_number || '').toLowerCase();
-            const cust = (c.customer_name || '').toLowerCase();
-            return cId.includes(clean) || po.includes(clean) || cust.includes(targetRef.toLowerCase());
-          });
-
-          if (matchedCmp && Object.keys(cmpUpdates).length > 0) {
-            await supabase.from('complaints').update(cmpUpdates).eq('id', matchedCmp.id);
-          }
+        if (Object.keys(cmpUpdates).length === 0) {
+          return `ℹ️ No updates were provided for the complaint of *${matchedCmp.customer_name}*.`;
         }
 
-        return `✅ *Customer Complaint Updated Successfully!*
+        const { error: updateErr } = await supabase
+          .from('complaints')
+          .update(cmpUpdates)
+          .eq('id', matchedCmp.id);
 
-🔗 *Reference:* ${targetRef}
-${updates.status ? `🚦 *New Status:* ${updates.status}\n` : ''}Updated details saved to Customer Complaints Card! ✅`;
+        if (updateErr) {
+          console.error('[CatalogFlow] Supabase complaint update error:', updateErr);
+          return `❌ Failed to update complaint: ${updateErr.message}`;
+        }
+
+        // Log to activity_logs
+        try {
+          const { logBotActivity } = require('../utils/activityLogger');
+          logBotActivity({
+            salesperson_phone: senderPhone,
+            description: `Complaint updated for ${matchedCmp.customer_name}: ${Object.entries(cmpUpdates).map(([k, v]) => `${k}=${v}`).join(', ')}`,
+            module: 'Complaints',
+            customer_name: matchedCmp.customer_name,
+          });
+        } catch (actErr) {
+          console.warn('[CatalogFlow] Activity log notice:', actErr?.message);
+        }
+
+        const linkedOrderRef = matchedCmp.po_number
+          ? `PO: *${matchedCmp.po_number}*`
+          : matchedCmp.deal_id
+          ? `Inquiry: *#INQ-${matchedCmp.deal_id.replace(/^#?(?:INQ|DEAL)-?/i, '').substring(0, 6).toUpperCase()}*`
+          : '';
+
+        let fieldsSummary = '';
+        if (cmpUpdates.complaint_type) fieldsSummary += `• *Complaint Type:* ${cmpUpdates.complaint_type}\n`;
+        if (updates.status) fieldsSummary += `• *Status:* ${updates.status}\n`;
+        if (cmpUpdates.description) fieldsSummary += `• *Description:* ${cmpUpdates.description}\n`;
+        if (cmpUpdates.corrective_action) fieldsSummary += `• *Corrective Action:* ${cmpUpdates.corrective_action}\n`;
+        if (cmpUpdates.resolution_notes) fieldsSummary += `• *Resolution Notes:* ${cmpUpdates.resolution_notes}\n`;
+
+        return `✅ *Customer Complaint Updated Successfully!*\n\n` +
+          `🏢 *Customer:* *${matchedCmp.customer_name}*\n` +
+          (linkedOrderRef ? `🔗 *Linked Order:* ${linkedOrderRef}\n` : '') +
+          `\n*Updated Fields:*\n` +
+          fieldsSummary +
+          `\nUpdated details saved to Customer Complaints Card! ✅`;
       }
 
       default:
@@ -1602,12 +1734,13 @@ function isOperationalQuery(text) {
   if (!text || typeof text !== 'string') return false;
   const lower = text.toLowerCase().trim();
 
+  // If message begins with an action verb, it is NEVER a read query
+  if (/^(?:update|change|modify|set|mark|log|record|create|add|raise|report|new|submit|resolve)\b/i.test(lower)) {
+    return false;
+  }
+
   // Common query patterns
   if (/^(?:show|list|get|check|find|filter|tell me|what|which|how many|total|status of|view|search|is there|who has|compare|rankings|leaderboard)\b/i.test(lower)) {
-    // Exception: "show quotation", "create inquiry", "log visit", etc.
-    if (/^(?:create|log|add|record|raise|report|new|submit)\b/i.test(lower)) {
-      return false;
-    }
     return true;
   }
 
@@ -1615,7 +1748,11 @@ function isOperationalQuery(text) {
     return true;
   }
 
-  if (/\b(?:inquiry id|deal id|status|summary|leaderboard|pipeline|radar|360|knowledge base|sop|moq|pricing sheet)\b/i.test(lower)) {
+  if (/\b(?:inquiry id|deal id|summary|leaderboard|pipeline|radar|360|knowledge base|sop|moq|pricing sheet)\b/i.test(lower)) {
+    return true;
+  }
+
+  if (/\b(?:kya status hai|status check|status kya hai|status of)\b/i.test(lower)) {
     return true;
   }
 
@@ -1634,7 +1771,7 @@ function detectOperationalAction(text) {
     if (/\b(?:inquiry|deal|inq-)\b/i.test(lower)) return 'UPDATE_INQUIRY';
     if (/\b(?:order|po-)\b/i.test(lower)) return 'UPDATE_ORDER';
     if (/\b(?:visit|vis-)\b/i.test(lower)) return 'UPDATE_VISIT';
-    if (/\b(?:complaint|cmp-)\b/i.test(lower)) return 'UPDATE_COMPLAINT';
+    if (/\b(?:complaint|complaints)\b/i.test(lower)) return 'UPDATE_COMPLAINT';
   }
 
   // 2. Complaint patterns (prioritized because complaints often cite PO numbers or visit dates)

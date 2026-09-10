@@ -54,6 +54,19 @@ Rules:
 Return ONLY the JSON object.
 `;
 
+function normalizeComplaintType(typeStr) {
+  if (!typeStr || typeof typeStr !== 'string') return 'Quality Defect';
+  const t = typeStr.trim().toLowerCase();
+  if (t.includes('spec') || t.includes('mismatch')) return 'Specification Mismatch';
+  if (t.includes('damage') || t.includes('physical') || t.includes('broken') || t.includes('crack') || t.includes('bend')) return 'Physical Damage';
+  if (t.includes('short') || t.includes('qty') || t.includes('quantity') || t.includes('kam')) return 'Quantity Shortage';
+  if (t.includes('delay') || t.includes('late') || t.includes('delivery')) return 'Delivery Delay';
+  if (t.includes('bill') || t.includes('invoice') || t.includes('price') || t.includes('rate') || t.includes('amount')) return 'Billing Mismatch';
+  if (t.includes('quality') || t.includes('rust') || t.includes('defect') || t.includes('reject')) return 'Quality Defect';
+  if (t.includes('other')) return 'Other';
+  return typeStr.trim().replace(/\b\w/g, l => l.toUpperCase());
+}
+
 /**
  * Fetch won/active deals for a customer.
  */
@@ -344,7 +357,7 @@ async function processSingleComplaint(data, originalText, senderPhone) {
   }
 
   const finalCustomerName = officialCustomerName;
-  const complaintType = data.complaint_type || 'quality';
+  const complaintType = normalizeComplaintType(data.complaint_type || 'Quality Defect');
   const affectedProduct = data.affected_product || null;
   const cleanDescription = data.description || originalText;
 
