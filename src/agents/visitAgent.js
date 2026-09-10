@@ -159,7 +159,7 @@ function resolveVisitDate(text, dateFromLlm) {
     lowerLlm.includes('day before yesterday') ||
     lowerLlm.includes('parso') ||
     lowerText.includes('day before yesterday') ||
-    /\bparso\b/.test(lowerText)
+    /\bparso(?:n)?\b/.test(lowerText)
   ) {
     const d = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
     return formatResolvedDate(d);
@@ -168,6 +168,7 @@ function resolveVisitDate(text, dateFromLlm) {
   if (
     lowerLlm.includes('tarso') ||
     lowerText.includes('tarso') ||
+    /\btarso(?:n)?\b/.test(lowerText) ||
     lowerText.includes('3 days ago') ||
     lowerLlm.includes('3 days ago')
   ) {
@@ -197,7 +198,7 @@ function resolveVisitDate(text, dateFromLlm) {
     return formatResolvedDate(d);
   }
 
-  // 2. Relative Weekdays: "last Monday", "this Monday", "on Monday", "Monday ko"
+  // 2. Relative Weekdays: "last Monday", "last week Monday", "this Monday", "on Monday", "Monday ko", "pichle somwar"
   const weekdayMap = {
     sunday: 0,
     raviwar: 0,
@@ -218,7 +219,7 @@ function resolveVisitDate(text, dateFromLlm) {
   };
 
   const weekdayRegex =
-    /\b(?:(last|past|previous|this|on|pichle)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|somwar|mangalwar|budhwar|guruwar|veervar|shukrawar|shaniwar|raviwar|itwar)\b/i;
+    /\b(?:(last(?:\s+week)?|past(?:\s+week)?|previous(?:\s+week)?|this(?:\s+week)?|on|pichle(?:\s+hafte)?)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|somwar|mangalwar|budhwar|guruwar|veervar|shukrawar|shaniwar|raviwar|itwar)(?:\s+ko)?\b/i;
   const matchWeekday =
     lowerText.match(weekdayRegex) || lowerLlm.match(weekdayRegex);
 
@@ -231,10 +232,10 @@ function resolveVisitDate(text, dateFromLlm) {
       const currentDay = now.getDay(); // 0-6 (0 is Sunday, 4 is Thursday)
       let diff = currentDay - targetDay;
       if (
-        prefix === 'last' ||
-        prefix === 'past' ||
-        prefix === 'previous' ||
-        prefix === 'pichle'
+        prefix.includes('last') ||
+        prefix.includes('past') ||
+        prefix.includes('previous') ||
+        prefix.includes('pichle')
       ) {
         if (diff <= 0) {
           diff += 7;
@@ -261,7 +262,19 @@ function resolveVisitDate(text, dateFromLlm) {
     }
   }
 
-  // 4. Regex for DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+  // 4. Regex for ISO format YYYY-MM-DD
+  const isoMatch = lowerText.match(/\b(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})\b/);
+  if (isoMatch) {
+    const year = parseInt(isoMatch[1], 10);
+    const month = parseInt(isoMatch[2], 10) - 1;
+    const day = parseInt(isoMatch[3], 10);
+    const d = new Date(year, month, day);
+    if (!isNaN(d.getTime())) {
+      return formatResolvedDate(d);
+    }
+  }
+
+  // 5. Regex for DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
   const dmyMatch = lowerText.match(
     /\b(\d{1,2})[\/\-\.](\d{1,2})(?:[\/\-\.](\d{2,4}))?\b/,
   );
@@ -276,8 +289,23 @@ function resolveVisitDate(text, dateFromLlm) {
     }
   }
 
-  // 5. Regex for "10th September", "9th Sep", "9 September", etc.
-  const naturalMatch =
+  const monthNames = [
+    'jan',
+    'feb',
+    'mar',
+    'apr',
+    'may',
+    'jun',
+    'jul',
+    'aug',
+    'sep',
+    'oct',
+    'nov',
+    'dec',
+  ];
+
+  // 6. Regex for Day Month: "10th September", "9th Sep", "9 September", "5th September 2026"
+  const dayMonthMatch =
     lowerText.match(
       /\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(\d{2,4}))?\b/i,
     ) ||
@@ -285,27 +313,39 @@ function resolveVisitDate(text, dateFromLlm) {
       /\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(\d{2,4}))?\b/i,
     );
 
-  if (naturalMatch) {
-    const day = parseInt(naturalMatch[1], 10);
-    const monthNames = [
-      'jan',
-      'feb',
-      'mar',
-      'apr',
-      'may',
-      'jun',
-      'jul',
-      'aug',
-      'sep',
-      'oct',
-      'nov',
-      'dec',
-    ];
+  if (dayMonthMatch) {
+    const day = parseInt(dayMonthMatch[1], 10);
     const month = monthNames.findIndex((m) =>
-      naturalMatch[2].toLowerCase().startsWith(m),
+      dayMonthMatch[2].toLowerCase().startsWith(m),
     );
-    let year = naturalMatch[3]
-      ? parseInt(naturalMatch[3], 10)
+    let year = dayMonthMatch[3]
+      ? parseInt(dayMonthMatch[3], 10)
+      : now.getFullYear();
+    if (year < 100) year += 2000;
+    if (month >= 0) {
+      const d = new Date(year, month, day);
+      if (!isNaN(d.getTime())) {
+        return formatResolvedDate(d);
+      }
+    }
+  }
+
+  // 7. Regex for Month Day: "September 5th", "Sep 5", "September 5, 2026"
+  const monthDayMatch =
+    lowerText.match(
+      /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{2,4}))?\b/i,
+    ) ||
+    lowerLlm.match(
+      /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{2,4}))?\b/i,
+    );
+
+  if (monthDayMatch) {
+    const month = monthNames.findIndex((m) =>
+      monthDayMatch[1].toLowerCase().startsWith(m),
+    );
+    const day = parseInt(monthDayMatch[2], 10);
+    let year = monthDayMatch[3]
+      ? parseInt(monthDayMatch[3], 10)
       : now.getFullYear();
     if (year < 100) year += 2000;
     if (month >= 0) {
