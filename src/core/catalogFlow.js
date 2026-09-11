@@ -52,7 +52,7 @@ What would you like to do today?
 *7️⃣ New Customer Acquisition*
 *8️⃣ Log Customer Complaint*
 *9️⃣ Update Customer Complaint*
-*🔟 Other / General Query*
+*1️⃣0️⃣ Other / General Query*
 
 Reply with a number (1–10) or type what you'd like to do.`;
 
@@ -242,7 +242,7 @@ function isGreeting(text) {
 
 function matchActionFromInput(text) {
   if (!text || typeof text !== 'string') return null;
-  const clean = text.trim().toLowerCase().replace(/[️⃣*]/g, '').trim();
+  const clean = text.trim().toLowerCase().replace(/[🔟*️⃣\uFE0F\u20E3]/g, '').trim();
 
   // If text is a full sentence with arguments/details, let natural action detection & LLM extraction handle it
   if (clean.length > 35 || /\b(?:for|to|on|of|with|at|rate|qty|status|inq-|po-|midc|midc\s+pune|midc\s+bhosari|mt|tons|plate|sheet|coil)\b/i.test(clean)) {
@@ -278,7 +278,7 @@ function matchActionFromInput(text) {
   if (clean === '9' || clean === '9.' || clean === 'update complaint' || clean === 'update customer complaint' || clean === 'start_update_complaint') {
     return 'UPDATE_COMPLAINT';
   }
-  if (clean === '10' || clean === '10.' || clean === 'other' || clean === 'general query' || clean === 'other query' || clean === 'general_query') {
+  if (clean === '10' || clean === '10.' || clean === 'other' || clean === 'general query' || clean === 'other query' || clean === 'general_query' || clean === 'other / general query' || text.includes('🔟') || text.includes('1️⃣0️⃣')) {
     return 'GENERAL_QUERY';
   }
 
