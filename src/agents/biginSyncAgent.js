@@ -1483,6 +1483,7 @@ async function pullBiginToDatabase() {
             status: 'needs_review',
           }]);
           results.dealsImported++;
+        } else {
           // Update existing deal in DB
           const ex = existingDeal[0];
           await sb.from('deals').update({
