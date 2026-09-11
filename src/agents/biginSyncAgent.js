@@ -816,10 +816,10 @@ async function syncActivity(activityType, data) {
     let zohoNoteId = null;
     let summary = '';
 
-    // Guard: skip if Zoho not configured
-    if (!process.env.ZOHO_REFRESH_TOKEN || !process.env.ZOHO_CLIENT_ID) {
-      console.log('[BiginSync] Zoho credentials not configured - logging local KRA 6 event');
-      summary = `Local CRM record created for ${customerName} (${normalizedType})`;
+    // Guard: skip if Zoho in READ-ONLY mode or not configured
+    if (process.env.ZOHO_READ_ONLY_MODE === 'true' || !process.env.ZOHO_REFRESH_TOKEN || !process.env.ZOHO_CLIENT_ID) {
+      console.log(`[BiginSync] ${process.env.ZOHO_READ_ONLY_MODE === 'true' ? 'Read-only mode active' : 'Zoho credentials not configured'} - logging local KRA 6 event`);
+      summary = `Local CRM record created for ${customerName} (${normalizedType}) [Read-Only Mode]`;
 
       await logKRA6Event({
         salespersonPhone: senderPhone,
@@ -1126,6 +1126,9 @@ async function syncActivity(activityType, data) {
 // ── Cleanup Utility ───────────────────────────────────────────────────────────
 
 async function clearAllBiginData() {
+  if (process.env.ZOHO_READ_ONLY_MODE === 'true') {
+    throw new Error('Action blocked: ZOHO_READ_ONLY_MODE is enabled');
+  }
   const results = { deleted: {}, errors: [] };
   try {
     const token = await getZohoToken();
@@ -1174,6 +1177,9 @@ async function clearAllBiginData() {
 }
 
 async function syncAllDatabaseToBigin() {
+  if (process.env.ZOHO_READ_ONLY_MODE === 'true') {
+    throw new Error('Action blocked: ZOHO_READ_ONLY_MODE is enabled');
+  }
   const sb = getSupabase();
   const token = await getZohoToken();
   const results = { contactsSynced: 0, dealsSynced: 0, errors: [] };
