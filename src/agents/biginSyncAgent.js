@@ -1450,6 +1450,12 @@ async function pullBiginToDatabase() {
 
     for (const d of biginDeals) {
       try {
+        const layoutId = d.Layout?.id || d.Layout || '';
+        const layoutName = (d.Layout?.name || '').toLowerCase();
+        const pipeline = (d.Pipeline || '').toLowerCase();
+        const isSalesPipeline = layoutId === '931435000000644718' || layoutName === 'sales' || pipeline.includes('sales');
+        if (!isSalesPipeline) continue;
+
         const dealId = d.id;
         const dealName = d.Deal_Name || '';
         const custName = d.Contact_Name?.name || d.Account_Name?.name || dealName.split('-')[0].trim();
