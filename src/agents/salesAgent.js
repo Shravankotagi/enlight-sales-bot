@@ -3594,6 +3594,22 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       customerName,
       senderPhone,
     );
+
+    if (!officialCustomerName) {
+      const { getAssignedCustomersList, saveActiveSession } = require('../supabase');
+      const assignedList = await getAssignedCustomersList(senderPhone);
+      if (assignedList && assignedList.length > 0) {
+        const listDisplay = assignedList
+          .slice(0, 15)
+          .map((c, i) => `  ${i + 1}. *${c.customer_name}*`)
+          .join('\n');
+        await saveActiveSession(senderPhone, 'Unknown', 'pending_customer_for_deal');
+        return `❌ *Customer Not Found in Assigned Accounts*\n\n` +
+          `"${customerName}" is not registered under your assigned customer directory.\n\n` +
+          `Please reply with a valid company name from your assigned accounts:\n\n${listDisplay}`;
+      }
+    }
+
     const finalCustomerName = officialCustomerName || customerName;
 
     const { data: custRecord } = await supabase

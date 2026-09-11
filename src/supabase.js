@@ -377,7 +377,11 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
       return rec;
     }
 
-    // 2. Insert new record only if genuine new customer and valid name
+    // 2. Insert new record only if caller is Admin or explicit customer creation flow
+    if (!scope.isAdmin && !extraData.allowCreate) {
+      return null;
+    }
+
     const insertPayload = {
       customer_name: cleanName,
       assigned_salesperson_phone:
@@ -513,6 +517,29 @@ const DISTINCTIVE_INDUSTRY_WORDS = [
   'construction',
 ];
 
+function levenshtein(a, b) {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1, // substitution
+          matrix[i][j - 1] + 1,     // insertion
+          matrix[i - 1][j] + 1      // deletion
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
 const CORPORATE_LEGAL_SUFFIXES = [
   'pvt',
   'ltd',
@@ -525,6 +552,10 @@ const CORPORATE_LEGAL_SUFFIXES = [
   'co',
   'and',
   '&',
+  'enterprises',
+  'enterprise',
+  'industries',
+  'industry',
 ];
 
 function normalizeCoreCompanyName(name) {
@@ -536,6 +567,74 @@ function normalizeCoreCompanyName(name) {
     .filter((w) => w.length > 0 && !CORPORATE_LEGAL_SUFFIXES.includes(w))
     .join(' ')
     .trim();
+}
+
+function matchCustomerFromList(inputName, customerList) {
+  if (!inputName || !customerList || customerList.length === 0) return null;
+  const clean = inputName.trim().toLowerCase().replace(/\s+/g, ' ');
+
+  // 1. Exact match (case-insensitive)
+  const exact = customerList.find((c) => c.toLowerCase().trim() === clean);
+  if (exact) return exact;
+
+  // 2. Normalized Core Match (ignoring legal/corporate noise words)
+  const cleanNorm = normalizeCoreCompanyName(clean);
+  if (cleanNorm) {
+    const normMatch = customerList.find(
+      (c) => normalizeCoreCompanyName(c) === cleanNorm,
+    );
+    if (normMatch) return normMatch;
+  }
+
+  // 3. Prefix / Substring match on core name
+  if (cleanNorm.length >= 3) {
+    const subMatches = customerList.filter((c) => {
+      const candNorm = normalizeCoreCompanyName(c);
+      return (
+        candNorm.startsWith(cleanNorm) ||
+        candNorm.includes(cleanNorm) ||
+        (cleanNorm.startsWith(candNorm) && candNorm.length >= 4)
+      );
+    });
+    if (subMatches.length === 1) return subMatches[0];
+  }
+
+  // 4. Token Set / Word Overlap match
+  const queryTokens = cleanNorm.split(' ').filter((t) => t.length >= 2);
+  if (queryTokens.length > 0) {
+    const tokenMatches = customerList.filter((c) => {
+      const candTokens = normalizeCoreCompanyName(c)
+        .split(' ')
+        .filter((t) => t.length >= 2);
+      return queryTokens.every((qt) => candTokens.includes(qt));
+    });
+    if (tokenMatches.length === 1) return tokenMatches[0];
+  }
+
+  // 5. Letter-to-letter Typo Match (Levenshtein distance per token)
+  if (queryTokens.length > 0) {
+    const typoScores = customerList.map((c) => {
+      const candTokens = normalizeCoreCompanyName(c)
+        .split(' ')
+        .filter((t) => t.length >= 2);
+      let matchedCount = 0;
+      for (const qt of queryTokens) {
+        const isMatched = candTokens.some((ct) => {
+          if (qt === ct) return true;
+          const maxDist = qt.length <= 4 ? 1 : 2;
+          return levenshtein(qt, ct) <= maxDist;
+        });
+        if (isMatched) matchedCount++;
+      }
+      const matchRatio = matchedCount / queryTokens.length;
+      return { customer: c, matchRatio };
+    });
+
+    const bestMatches = typoScores.filter((s) => s.matchRatio >= 1.0);
+    if (bestMatches.length === 1) return bestMatches[0].customer;
+  }
+
+  return null;
 }
 
 function hasConflictingIndustryNoun(name1, name2) {
@@ -581,29 +680,23 @@ async function fuzzyMatchCustomer(text, customerList) {
 
     const prompt = `
 You are a Strict Entity Resolution Engine for B2B industrial company names.
-Given a user-provided company name and a list of registered customer names, determine if ANY registered customer is EXACTLY the same business entity.
+Given a user-provided company name and a list of registered customer names, determine if ANY registered customer is the intended business entity.
 
 Target Company Name: "${text}"
 
 Registered Customer Candidates:
 ${customerList.map((c, i) => `${i + 1}. "${c}"`).join('\n')}
 
-STRICT MATCHING & ANTI-ALIASING RULES:
-1. MATCH ONLY IF:
-   - The candidate is the EXACT same company with minor spelling typo or phonetic variation (e.g. "Vardhaman" vs "Vardhman", "Rishabh" vs "Rishab").
-   - The candidate is the SAME company with or without standard corporate legal suffixes (e.g. "Pvt Ltd", "Private Limited", "LLP", "Corp", "Enterprises", "Co."). For example: "ABC Steel" MATCHES "ABC Steel Pvt Ltd".
-2. STRICTLY REJECT (RETURN ONLY "0") IF:
-   - The core business noun or industry descriptor is different! For example:
-     * "ABC Steel" DOES NOT MATCH "ABC Fabricators" -> Return 0.
-     * "Tata Motors" DOES NOT MATCH "Tata Steel" -> Return 0.
-     * "Apex Steel" DOES NOT MATCH "Apex Industries" -> Return 0.
-     * "Jindal Pipes" DOES NOT MATCH "Jindal Fabricators" -> Return 0.
-     * "Supreme Infrastructure" DOES NOT MATCH "Supreme Steel" -> Return 0.
-   - The user name is a new prospect/company whose distinct name is not in the list.
-   - In case of ANY ambiguity, doubt, or multiple different companies sharing a prefix word, return "0".
+MATCHING RULES:
+1. MATCH IF:
+   - The candidate is the SAME company with minor spelling typos, phonetic differences, or abbreviations (e.g. "Omega Metal" matches "Omega Metal & Alloy Industries", "Matrix Steel" matches "Matrix Steel Fabricators", "Titanium Pipes" matches "Titanium Pipes & Flanges Corp").
+   - The candidate is the SAME company with or without corporate suffixes (Pvt Ltd, Ltd, Corp, LLP, Enterprises, Works, Co.).
+2. REJECT (RETURN ONLY "0") IF:
+   - The candidate is a completely different company name and unrelated business.
+   - There are multiple conflicting candidates and you cannot be certain.
 
-If there is a definite, high-confidence match according to these rules, return ONLY the 1-based index (e.g. "1").
-If there is NO exact entity match, return ONLY "0".
+If there is a definite match, return ONLY the 1-based index (e.g. "1").
+If there is NO match, return ONLY "0".
 `;
 
     const response = await invokeWithFallback([new HumanMessage(prompt)]);
@@ -619,10 +712,7 @@ If there is NO exact entity match, return ONLY "0".
       matchIndex > 0 &&
       matchIndex <= customerList.length
     ) {
-      const candidate = customerList[matchIndex - 1];
-      if (!hasConflictingIndustryNoun(text, candidate)) {
-        return candidate;
-      }
+      return customerList[matchIndex - 1];
     }
   } catch (err) {
     console.error('fuzzyMatchCustomer error:', err.message);
@@ -631,9 +721,50 @@ If there is NO exact entity match, return ONLY "0".
 }
 
 /**
+ * Fetches all active customers assigned to a salesperson or within their management scope.
+ * Supports Admin (all active), Sales Manager (team assigned), and Salesperson (own assigned).
+ * Handles both 10-digit and 12-digit phone formats.
+ */
+async function getAssignedCustomersList(senderPhone) {
+  if (!senderPhone) return [];
+  try {
+    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+    let query = supabase
+      .from('recurring_customers')
+      .select('*')
+      .eq('is_active', true)
+      .order('customer_name', { ascending: true });
+
+    if (scope.phones !== null) {
+      if (scope.phones.length === 0) return [];
+      const phoneSet = new Set();
+      for (const p of scope.phones) {
+        if (!p) continue;
+        const raw = String(p).replace(/\D/g, '');
+        phoneSet.add(raw);
+        if (raw.length === 10) phoneSet.add(`91${raw}`);
+        if (raw.length === 12 && raw.startsWith('91')) phoneSet.add(raw.slice(2));
+      }
+      const targetPhones = Array.from(phoneSet);
+      query = query.in('assigned_salesperson_phone', targetPhones);
+    }
+
+    const { data: customers, error } = await query;
+    if (error) {
+      console.error('[getAssignedCustomersList] error:', error.message);
+      return [];
+    }
+    return customers || [];
+  } catch (err) {
+    console.error('[getAssignedCustomersList] exception:', err.message);
+    return [];
+  }
+}
+
+/**
  * Verifies if a customer is registered in the user's account / accessible scope.
- * Supports Admin (company-wide), Sales Manager (team-wide), and Salesperson (own).
- * Handles exact matching and fuzzy matching (typos/Hinglish) with indexed SQL candidate pre-filtering.
+ * Supports Admin (company-wide), Sales Manager (team-wide), and Salesperson (own assigned).
+ * Handles exact matching and fuzzy matching (typos/letter-to-letter/Hinglish).
  * Returns the matched official name or null if not found.
  */
 async function verifyAndGetCustomerName(customerName, senderPhone) {
@@ -647,145 +778,56 @@ async function verifyAndGetCustomerName(customerName, senderPhone) {
     return null;
 
   try {
+    // 1. Fetch assigned customers for this salesperson
+    const assignedCustomers = await getAssignedCustomersList(senderPhone);
+    const assignedNames = assignedCustomers.map((c) => c.customer_name).filter(Boolean);
+
+    if (assignedNames.length > 0) {
+      // Deterministic multi-stage match (exact, core normalized, prefix, token overlap, Levenshtein typo)
+      const matched = matchCustomerFromList(clean, assignedNames);
+      if (matched) return matched;
+
+      // LLM fuzzy match fallback across assigned accounts if 1-20 candidates
+      if (assignedNames.length <= 30) {
+        const llmMatched = await fuzzyMatchCustomer(clean, assignedNames);
+        if (llmMatched) return llmMatched;
+      }
+      return null;
+    }
+
+    // 2. If no assigned customers found in direct list (e.g. Admin or Global scope)
     const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
-
-    // 1. Fast exact match at SQL level
-    let exactQuery = supabase
-      .from('recurring_customers')
-      .select('customer_name')
-      .eq('is_active', true)
-      .ilike('customer_name', clean)
-      .limit(1);
-
-    if (scope.phones !== null) {
-      if (scope.phones.length === 1) {
-        exactQuery = exactQuery.eq(
-          'assigned_salesperson_phone',
-          scope.phones[0],
-        );
-      } else if (scope.phones.length > 1) {
-        exactQuery = exactQuery.in('assigned_salesperson_phone', scope.phones);
-      } else {
-        return null;
-      }
-    }
-
-    const { data: exactRows } = await exactQuery;
-    if (exactRows && exactRows.length > 0) {
-      return exactRows[0].customer_name;
-    }
-
-    // 2. Substring candidate retrieval (scoped, max 15)
-    let subQuery = supabase
-      .from('recurring_customers')
-      .select('customer_name')
-      .eq('is_active', true)
-      .ilike('customer_name', `%${clean}%`)
-      .limit(15);
-
-    if (scope.phones !== null) {
-      if (scope.phones.length === 1) {
-        subQuery = subQuery.eq('assigned_salesperson_phone', scope.phones[0]);
-      } else if (scope.phones.length > 1) {
-        subQuery = subQuery.in('assigned_salesperson_phone', scope.phones);
-      }
-    }
-
-    let { data: candidateRows } = await subQuery;
-
-    // If Admin and not found in rep scope, try company-wide
-    if ((!candidateRows || candidateRows.length === 0) && scope.isAdmin) {
-      const { data: adminSub } = await supabase
+    if (scope.isAdmin) {
+      let query = supabase
         .from('recurring_customers')
         .select('customer_name')
         .eq('is_active', true)
         .ilike('customer_name', `%${clean}%`)
-        .limit(15);
-      candidateRows = adminSub;
-    }
+        .limit(20);
 
-    // 3. Word token candidate retrieval for typos or word order differences (max 20 candidates)
-    // IMPORTANT: stopWords must ONLY strip legal corporate suffixes, NEVER core business words like steel, fabricators, tubes
-    if (!candidateRows || candidateRows.length === 0) {
-      const words = clean
-        .split(/\s+/)
-        .filter(
-          (w) =>
-            w.length > 2 && !CORPORATE_LEGAL_SUFFIXES.includes(w.toLowerCase()),
-        );
-
-      if (words.length > 0) {
-        const orTokens = words
-          .map((w) => `customer_name.ilike.%${w}%`)
-          .join(',');
-        let wordQuery = supabase
-          .from('recurring_customers')
-          .select('customer_name')
-          .eq('is_active', true)
-          .or(orTokens)
-          .limit(20);
-
-        if (scope.phones !== null) {
-          if (scope.phones.length === 1) {
-            wordQuery = wordQuery.eq(
-              'assigned_salesperson_phone',
-              scope.phones[0],
-            );
-          } else if (scope.phones.length > 1) {
-            wordQuery = wordQuery.in(
-              'assigned_salesperson_phone',
-              scope.phones,
-            );
-          }
-        }
-
-        const { data: wordRows } = await wordQuery;
-        candidateRows = wordRows;
-
-        if ((!candidateRows || candidateRows.length === 0) && scope.isAdmin) {
-          const { data: adminWordRows } = await supabase
+      let { data: globalCandidates } = await query;
+      if (!globalCandidates || globalCandidates.length === 0) {
+        const words = clean.split(/\s+/).filter((w) => w.length > 2);
+        if (words.length > 0) {
+          const orTokens = words.map((w) => `customer_name.ilike.%${w}%`).join(',');
+          const { data: wordCandidates } = await supabase
             .from('recurring_customers')
             .select('customer_name')
             .eq('is_active', true)
             .or(orTokens)
             .limit(20);
-          candidateRows = adminWordRows;
+          globalCandidates = wordCandidates;
         }
       }
-    }
 
-    if (!candidateRows || candidateRows.length === 0) return null;
+      if (globalCandidates && globalCandidates.length > 0) {
+        const candidateNames = Array.from(new Set(globalCandidates.map((c) => c.customer_name)));
+        const matched = matchCustomerFromList(clean, candidateNames);
+        if (matched) return matched;
 
-    const customerList = Array.from(
-      new Set(candidateRows.map((c) => c.customer_name)),
-    );
-
-    // Exact match in candidates
-    const exactMatch = customerList.find(
-      (c) => c.toLowerCase().trim() === clean.toLowerCase(),
-    );
-    if (exactMatch) return exactMatch;
-
-    // Suffix-normalized core match (e.g. "ABC Steel" vs "ABC Steel Pvt Ltd")
-    const cleanNormalized = normalizeCoreCompanyName(clean);
-    const suffixNormalizedMatch = customerList.find(
-      (c) => normalizeCoreCompanyName(c) === cleanNormalized,
-    );
-    if (suffixNormalizedMatch) return suffixNormalizedMatch;
-
-    // Filter out candidates that have conflicting industry/business descriptors before fuzzy matching
-    const nonConflictingCandidates = customerList.filter(
-      (c) => !hasConflictingIndustryNoun(clean, c),
-    );
-    if (nonConflictingCandidates.length === 0) return null;
-
-    // Fuzzy match with Gemini only across non-conflicting candidates (max 20)
-    const fuzzyMatch = await fuzzyMatchCustomer(
-      clean,
-      nonConflictingCandidates,
-    );
-    if (fuzzyMatch && !hasConflictingIndustryNoun(clean, fuzzyMatch)) {
-      return fuzzyMatch;
+        const llmMatched = await fuzzyMatchCustomer(clean, candidateNames);
+        if (llmMatched) return llmMatched;
+      }
     }
   } catch (err) {
     console.error('verifyAndGetCustomerName error:', err.message);
@@ -1244,6 +1286,7 @@ module.exports = {
   getEmployeeByPhone,
   normalizePhone,
   getAccessibleSalespersonPhonesForBot,
+  getAssignedCustomersList,
   ensureCustomerRecord,
   checkAndLogNewCustomer,
   fuzzyMatchCustomer,

@@ -14,7 +14,14 @@
 
 const { invokeWithFallback } = require('./modelRouter');
 const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
-const { supabase, saveActiveSession, getFullActiveSession, ensureCustomerRecord } = require('../supabase');
+const {
+  supabase,
+  saveActiveSession,
+  getFullActiveSession,
+  ensureCustomerRecord,
+  verifyAndGetCustomerName,
+  getAssignedCustomersList,
+} = require('../supabase');
 const { detectHsnCode } = require('../utils/hsnDetector');
 const { safeParseJSON } = require('../utils/jsonUtils');
 const {
@@ -794,6 +801,47 @@ function validateMandatoryFields(action, draft) {
   }
 
   return missing;
+}
+
+// ── VERIFY DRAFT CUSTOMER (ROLE & ACCOUNT SCOPED) ───────────────────────────
+
+async function verifyDraftCustomer(action, draft, senderPhone) {
+  if (!draft || !draft.company_name) return { isValid: true };
+
+  const rawName = String(draft.company_name).trim();
+  if (!rawName || rawName.toLowerCase() === 'null' || rawName.toLowerCase() === 'unknown') {
+    draft.company_name = null;
+    return { isValid: true };
+  }
+
+  // Attempt verification against assigned accounts / scope
+  const officialName = await verifyAndGetCustomerName(rawName, senderPhone);
+  if (officialName) {
+    draft.company_name = officialName;
+    return { isValid: true, officialName };
+  }
+
+  // Check if caller has assigned accounts
+  const assignedList = await getAssignedCustomersList(senderPhone);
+  if (assignedList && assignedList.length > 0) {
+    const listDisplay = assignedList
+      .slice(0, 15)
+      .map((c, i) => `  ${i + 1}. *${c.customer_name}*`)
+      .join('\n');
+
+    const rejectionMessage = `❌ *Customer Not Found in Assigned Accounts*\n\n` +
+      `"${rawName}" is not registered under your assigned customer directory.\n\n` +
+      `Please reply with a valid company name from your assigned accounts:\n\n${listDisplay}\n\n` +
+      `_(Your other entered details like products and rates have been preserved)_`;
+
+    return {
+      isValid: false,
+      rejectionMessage,
+      unverifiedName: rawName,
+    };
+  }
+
+  return { isValid: true };
 }
 
 // ── BUILD CONFIRMATION SUMMARY ───────────────────────────────────────────────
@@ -2009,6 +2057,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
       cleanInput === 'sure'
     ) {
       await recordSessionMessage(senderPhone, 'user', text);
+
+      // Verify customer before final execution
+      const custCheck = await verifyDraftCustomer(action, draft, senderPhone);
+      if (!custCheck.isValid) {
+        draft.company_name = null;
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
+        return { handled: true, reply: custCheck.rejectionMessage };
+      }
+
       const reply = await executeAction(action, draft, senderPhone);
       await recordSessionMessage(senderPhone, 'assistant', reply, {
         action_type: action,
@@ -2103,6 +2161,14 @@ async function handleCatalogFlow(rawText, senderPhone) {
     // Direct inline edit attempt during confirmation
     await recordSessionMessage(senderPhone, 'user', text);
     const updatedDraft = await extractFieldsWithLLM(action, text, draft);
+    const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
+    if (!custCheck.isValid) {
+      updatedDraft.company_name = null;
+      await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
+      await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+      return { handled: true, reply: custCheck.rejectionMessage };
+    }
+
     const missing = validateMandatoryFields(action, updatedDraft);
     if (missing.length === 0) {
       const summary = buildConfirmationSummary(action, updatedDraft);
@@ -2136,6 +2202,14 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     await recordSessionMessage(senderPhone, 'user', text);
     const updatedDraft = await extractFieldsWithLLM(action, text, draft);
+    const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
+    if (!custCheck.isValid) {
+      updatedDraft.company_name = null;
+      await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
+      await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+      return { handled: true, reply: custCheck.rejectionMessage };
+    }
+
     const missing = validateMandatoryFields(action, updatedDraft);
 
     if (missing.length === 0) {
@@ -2210,6 +2284,14 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // Extract fields from user message
     const updatedDraft = await extractFieldsWithLLM(action, text, existingDraft);
+    const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
+    if (!custCheck.isValid) {
+      updatedDraft.company_name = null;
+      await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
+      await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+      return { handled: true, reply: custCheck.rejectionMessage };
+    }
+
     const missing = validateMandatoryFields(action, updatedDraft);
 
     if (missing.length === 0) {
@@ -2297,6 +2379,14 @@ async function handleCatalogFlow(rawText, senderPhone) {
   if (detectedAction) {
     await recordSessionMessage(senderPhone, 'user', text);
     const extracted = await extractFieldsWithLLM(detectedAction, text, {});
+    const custCheck = await verifyDraftCustomer(detectedAction, extracted, senderPhone);
+    if (!custCheck.isValid) {
+      extracted.company_name = null;
+      await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: detectedAction });
+      await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(extracted)}`);
+      return { handled: true, reply: custCheck.rejectionMessage };
+    }
+
     const hasCompany = Boolean(extracted.company_name || (Array.isArray(extracted.entries) && extracted.entries.some(e => e.company_name)));
     const hasLineItems = Array.isArray(extracted.line_items) && extracted.line_items.length > 0;
     const hasUpdates = extracted.updates && Object.keys(extracted.updates).length > 0;
