@@ -398,7 +398,7 @@ function parseDateFilter(dateFilter) {
 // ─── Domain Parsing Utilities ───────────────────────────────────────────────
 
 function parseVisitRemarks(remarks) {
-  if (!remarks) {
+  if (!remarks || typeof remarks !== 'string') {
     return {
       outcome: null,
       follow_up_action: null,
@@ -416,48 +416,82 @@ function parseVisitRemarks(remarks) {
     const rawOut = outcomeMatch[1].toLowerCase().trim();
     if (rawOut === 'positive' || rawOut === 'negative' || rawOut === 'neutral') {
       outcome = rawOut;
+    } else if (rawOut.includes('positive') || rawOut.includes('interested') || rawOut.includes('won')) {
+      outcome = 'positive';
+    } else if (rawOut.includes('negative') || rawOut.includes('lost') || rawOut.includes('rejected')) {
+      outcome = 'negative';
+    } else {
+      outcome = 'neutral';
     }
   }
 
   let followUpAction = null;
-  const followUpMatch = remarks.match(/\[Follow-?Up:\s*([^\]]+)\]/i);
+  const followUpMatch =
+    remarks.match(/\[(?:Follow-?Up|Follow-?up\s*Action):\s*([^\]]+)\]/i) ||
+    remarks.match(/(?:^|\||\n)\s*Follow-?up(?:\s*Action)?:\s*([^|\]\n]+)/i);
+
   if (followUpMatch) {
     const fu = followUpMatch[1].trim();
-    if (fu && !fu.toLowerCase().startsWith('no remarks') && fu.toLowerCase() !== 'none') {
+    const lowerFu = fu.toLowerCase();
+    const isNonAction =
+      !fu ||
+      lowerFu === 'none' ||
+      lowerFu === '-' ||
+      lowerFu === 'nil' ||
+      lowerFu === 'n/a' ||
+      lowerFu === 'na' ||
+      lowerFu === 'null' ||
+      lowerFu.startsWith('no remarks') ||
+      lowerFu.startsWith('no follow') ||
+      lowerFu === 'not required' ||
+      lowerFu === 'not needed';
+
+    if (!isNonAction) {
       followUpAction = fu;
     }
   }
 
   let materialRequirement = null;
-  const matMatch = remarks.match(/\[(?:Material )?Requirements?:\s*([^\]]+)\]/i);
+  const matMatch =
+    remarks.match(/\[(?:Material )?Requirements?:\s*([^\]]+)\]/i) ||
+    remarks.match(/(?:^|\||\n)\s*(?:Material )?Requirement:\s*([^|\]\n]+)/i);
   if (matMatch) {
     materialRequirement = matMatch[1].trim();
   }
 
   let location = null;
-  const locMatch = remarks.match(/\[Location:\s*([^\]]+)\]/i);
+  const locMatch =
+    remarks.match(/\[Location:\s*([^\]]+)\]/i) ||
+    remarks.match(/(?:^|\||\n)\s*Location:\s*([^|\]\n]+)/i);
   if (locMatch) {
     location = locMatch[1].trim();
   }
 
   let interests = null;
-  const intMatch = remarks.match(/\[Interests:\s*([^\]]+)\]/i);
+  const intMatch =
+    remarks.match(/\[Interests?:\s*([^\]]+)\]/i) ||
+    remarks.match(/(?:^|\||\n)\s*Interests?:\s*([^|\]\n]+)/i);
   if (intMatch) {
     interests = intMatch[1].trim();
   }
 
   const cleanRemarks = remarks
     .replace(/\[Outcome:\s*[^\]]+\]/gi, '')
-    .replace(/\[Follow-?Up:\s*[^\]]+\]/gi, '')
+    .replace(/\[(?:Follow-?Up|Follow-?up\s*Action):\s*[^\]]+\]/gi, '')
     .replace(/\[(?:Material )?Requirements?:\s*[^\]]+\]/gi, '')
     .replace(/\[Location:\s*[^\]]+\]/gi, '')
-    .replace(/\[Interests:\s*[^\]]+\]/gi, '')
+    .replace(/\[Interests?:\s*[^\]]+\]/gi, '')
+    .replace(/(?:^|\||\n)\s*Follow-?up(?:\s*Action)?:\s*[^|\n]+/gi, '')
+    .replace(/(?:^|\||\n)\s*(?:Material )?Requirement:\s*[^|\n]+/gi, '')
+    .replace(/(?:^|\||\n)\s*Location:\s*[^|\n]+/gi, '')
+    .replace(/(?:^|\||\n)\s*Interests?:\s*[^|\n]+/gi, '')
+    .replace(/^[\s|]+|[\s|]+$/g, '')
     .trim();
 
   return {
     outcome,
     follow_up_action: followUpAction,
-    requires_follow_up: Boolean(followUpAction && followUpAction.toLowerCase() !== 'none'),
+    requires_follow_up: Boolean(followUpAction),
     material_requirement: materialRequirement,
     location,
     interests,
@@ -1185,7 +1219,13 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     const loc = r.location || r.customer_address || parsed.location || 'N/A';
     const person = r.person_met || r.contact_person || 'N/A';
     const phone = r.contact_phone || r.contact_no || 'N/A';
-    const followUp = r.follow_up_action || r.follow_up || parsed.follow_up_action;
+    const rawFu = r.follow_up_action || r.follow_up || parsed.follow_up_action;
+    const isFuValid =
+      rawFu &&
+      !['none', 'nil', 'n/a', 'na', '-', 'null'].includes(String(rawFu).toLowerCase().trim()) &&
+      !String(rawFu).toLowerCase().startsWith('no remarks') &&
+      !String(rawFu).toLowerCase().startsWith('no follow');
+    const followUp = isFuValid ? String(rawFu).trim() : null;
 
     return {
       id: r.id,
@@ -1197,7 +1237,7 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
       location: loc,
       outcome: out,
       follow_up_action: followUp,
-      requires_follow_up: Boolean(followUp && followUp !== 'none') || parsed.requires_follow_up,
+      requires_follow_up: Boolean(followUp) || parsed.requires_follow_up,
       material_requirement: r.material_requirement || r.requirement || parsed.material_requirement,
       remarks: parsed.clean_remarks || rawRemarks,
       created_at: r.created_at || r.visited_at,
@@ -1311,8 +1351,14 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     mode === 'pending_follow_up' ||
     mode === 'followup_pending' ||
     mode === 'follow_up_pending' ||
+    mode === 'pending_followups' ||
+    mode === 'pending' ||
+    mode === 'follow_up' ||
+    mode === 'followup' ||
     args?.pending_followup ||
-    args?.pending_follow_up
+    args?.pending_follow_up ||
+    args?.requires_follow_up ||
+    args?.follow_up_only
   ) {
     const pending = materialized.filter((v) => v.requires_follow_up);
     return {
