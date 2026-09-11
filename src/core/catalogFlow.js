@@ -851,95 +851,118 @@ function buildConfirmationSummary(action, draft) {
   let summary = `✅ *Here's what I've captured${indexTag}:*\n\n`;
 
   switch (action) {
-    case 'LOG_INQUIRY':
+    case 'LOG_INQUIRY': {
       summary += `• *Customer / Company:* ${draft.company_name}\n`;
       if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
-        summary += `• *Products:*\n`;
-        draft.line_items.forEach((it, i) => {
+        if (draft.line_items.length === 1) {
+          const it = draft.line_items[0];
           const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
           const qtyStr = it.quantity ? ` — ${it.quantity} ${it.unit || 'MT'}` : '';
-          const rateStr = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}/${it.unit || 'MT'}` : '';
+          const rateVal = it.rate || (draft.rate ? Number(String(draft.rate).replace(/[^\d.]/g, '')) : null);
+          const rateStr = rateVal ? ` @ ₹${Number(rateVal).toLocaleString('en-IN')}/${it.unit || 'MT'}` : '';
           const amtStr = it.amount ? ` (₹${Number(it.amount).toLocaleString('en-IN')})` : '';
-          summary += `  ${i + 1}. *${it.sku_text || it.description}*${specStr}${qtyStr}${rateStr}${amtStr}\n`;
-        });
+          summary += `• *Product:* ${it.sku_text || it.description}${specStr}${qtyStr}${rateStr}${amtStr}\n`;
+        } else {
+          summary += `• *Products:*\n`;
+          draft.line_items.forEach((it) => {
+            const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
+            const qtyStr = it.quantity ? ` — ${it.quantity} ${it.unit || 'MT'}` : '';
+            const rateStr = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}/${it.unit || 'MT'}` : '';
+            const amtStr = it.amount ? ` (₹${Number(it.amount).toLocaleString('en-IN')})` : '';
+            summary += `  • ${it.sku_text || it.description}${specStr}${qtyStr}${rateStr}${amtStr}\n`;
+          });
+        }
       } else {
-        summary += `• *Product Description / Quantity:* ${draft.product_description}\n`;
-        if (draft.rate) summary += `• *Rate:* ₹${Number(String(draft.rate).replace(/[^\d.]/g, '')).toLocaleString('en-IN')} / MT\n`;
+        const rateStr = draft.rate ? ` @ ₹${Number(String(draft.rate).replace(/[^\d.]/g, '')).toLocaleString('en-IN')}/MT` : '';
+        summary += `• *Product:* ${draft.product_description}${rateStr}\n`;
       }
       if (draft.preferred_make) summary += `• *Preferred Make:* ${draft.preferred_make}\n`;
-      summary += `• *Payment Terms:* ${draft.payment_terms}\n`;
-      summary += `• *Delivery Location:* ${draft.delivery_location}\n`;
+      if (draft.payment_terms) summary += `• *Payment Terms:* ${draft.payment_terms}\n`;
+      if (draft.delivery_location) summary += `• *Delivery Location:* ${draft.delivery_location}\n`;
       if (draft.additional_notes) summary += `• *Additional Notes:* ${draft.additional_notes}\n`;
       break;
+    }
 
-    case 'UPDATE_INQUIRY':
+    case 'UPDATE_INQUIRY': {
       summary += `• *Inquiry ID:* ${draft.inquiry_id}\n`;
       const hasHeaderUpdates = draft.updates && Object.values(draft.updates).some(v => v !== null && v !== undefined && v !== '');
       if (hasHeaderUpdates) {
-        summary += `*Updating Fields:*\n`;
+        summary += `• *Updating Fields:*\n`;
         for (const [k, v] of Object.entries(draft.updates || {})) {
           if (v) {
             const label = k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
             const valStr = k.toLowerCase().includes('rate') ? `₹${Number(String(v).replace(/[^\d.]/g, '')).toLocaleString('en-IN')} / MT` : v;
-            summary += `• Updating *${label}* → ${valStr}\n`;
+            summary += `  • *${label}* → ${valStr}\n`;
           }
         }
       }
       if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0) {
-        summary += `*Updating Products / Rates:*\n`;
+        summary += `• *Updating Products / Rates:*\n`;
         draft.line_item_updates.forEach((it, i) => {
           const name = it.sku_text || it.description || `Item ${i + 1}`;
           const parts = [];
           if (it.quantity) parts.push(`Qty: ${it.quantity} ${it.unit || 'MT'}`);
           if (it.rate) parts.push(`Rate: ₹${Number(String(it.rate).replace(/[^\d.]/g, '')).toLocaleString('en-IN')}/${it.unit || 'MT'}`);
-          summary += `  ${i + 1}. *${name}* → ${parts.join(' | ')}\n`;
+          summary += `  • *${name}* → ${parts.join(' | ')}\n`;
         });
       }
       break;
+    }
 
-    case 'LOG_ORDER':
+    case 'LOG_ORDER': {
       summary += `• *Customer / Company:* ${draft.company_name}\n`;
       summary += `• *PO Number:* ${draft.po_number}\n`;
       summary += `• *PO Date:* ${draft.po_date}\n`;
       summary += `• *Delivery Location:* ${draft.delivery_location}\n`;
-      summary += `• *Payment Terms:* ${draft.payment_terms}\n\n`;
-      summary += `*Line Items:*\n`;
+      summary += `• *Payment Terms:* ${draft.payment_terms}\n`;
       let totalAmount = 0;
-      (draft.line_items || []).forEach((it, i) => {
+      if (Array.isArray(draft.line_items) && draft.line_items.length === 1) {
+        const it = draft.line_items[0];
         const qty = Number(it.quantity) || 0;
         const rate = Number(it.rate) || 0;
         const amount = Number(it.amount) || qty * rate;
         totalAmount += amount;
         const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
         const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
-        summary += `${i + 1}. *${it.sku_text || it.description}*${specStr}${hsnStr}\n`;
-        summary += `   • Quantity: ${qty} ${it.unit || 'MT'}\n`;
-        summary += `   • Rate: ₹${rate.toLocaleString('en-IN')} / ${it.unit || 'MT'}\n`;
-        summary += `   • Amount: ₹${amount.toLocaleString('en-IN')}\n`;
-      });
-      summary += `\n💰 *Total Order Value:* ₹${totalAmount.toLocaleString('en-IN')}\n`;
+        summary += `• *Product:* ${it.sku_text || it.description}${specStr}${hsnStr} — ${qty} ${it.unit || 'MT'} @ ₹${rate.toLocaleString('en-IN')}/${it.unit || 'MT'}\n`;
+        summary += `• *Total Order Value:* ₹${totalAmount.toLocaleString('en-IN')}\n`;
+      } else if (Array.isArray(draft.line_items) && draft.line_items.length > 1) {
+        summary += `• *Line Items:*\n`;
+        (draft.line_items || []).forEach((it) => {
+          const qty = Number(it.quantity) || 0;
+          const rate = Number(it.rate) || 0;
+          const amount = Number(it.amount) || qty * rate;
+          totalAmount += amount;
+          const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
+          const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
+          summary += `  • ${it.sku_text || it.description}${specStr}${hsnStr} — ${qty} ${it.unit || 'MT'} @ ₹${rate.toLocaleString('en-IN')}/${it.unit || 'MT'} (₹${amount.toLocaleString('en-IN')})\n`;
+        });
+        summary += `• *Total Order Value:* ₹${totalAmount.toLocaleString('en-IN')}\n`;
+      }
       break;
+    }
 
-    case 'UPDATE_ORDER':
+    case 'UPDATE_ORDER': {
       summary += `• *PO Number:* ${draft.po_number}\n`;
       if (draft.updates && Object.keys(draft.updates).length > 0) {
-        summary += `*Header Updates:*\n`;
+        summary += `• *Header Updates:*\n`;
         for (const [k, v] of Object.entries(draft.updates)) {
           if (v) {
             const label = k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-            summary += `• Updating *${label}* → ${v}\n`;
+            summary += `  • *${label}* → ${v}\n`;
           }
         }
       }
       if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0) {
-        summary += `*Line Item Updates:*\n`;
+        summary += `• *Line Item Updates:*\n`;
         draft.line_item_updates.forEach((liu) => {
-          summary += `• [${(liu.operation || 'update').toUpperCase()}] ${liu.item_reference || liu.description || 'Line Item'}: Qty ${liu.quantity || '-'}, Rate ₹${liu.rate || '-'}\n`;
+          summary += `  • [${(liu.operation || 'update').toUpperCase()}] ${liu.item_reference || liu.description || 'Line Item'}: Qty ${liu.quantity || '-'}, Rate ₹${liu.rate || '-'}\n`;
         });
       }
       break;
+    }
 
-    case 'LOG_VISIT':
+    case 'LOG_VISIT': {
       summary += `• *Customer / Company:* ${draft.company_name}\n`;
       summary += `• *Person Met:* ${draft.person_met}\n`;
       summary += `• *Contact Phone:* ${draft.contact_phone}\n`;
@@ -949,20 +972,22 @@ function buildConfirmationSummary(action, draft) {
       if (draft.followup_action) summary += `• *Follow-up Action:* ${draft.followup_action}\n`;
       summary += `• *Meeting Remarks:* ${draft.meeting_remarks}\n`;
       break;
+    }
 
-    case 'UPDATE_VISIT':
+    case 'UPDATE_VISIT': {
       const targetVis = draft.visit_id || `${draft.company_name} on ${draft.visit_date}`;
       summary += `• *Target Visit:* ${targetVis}\n`;
-      summary += `*Updating Fields:*\n`;
+      summary += `• *Updating Fields:*\n`;
       for (const [k, v] of Object.entries(draft.updates || {})) {
         if (v) {
           const label = k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-          summary += `• Updating *${label}* → ${v}\n`;
+          summary += `  • *${label}* → ${v}\n`;
         }
       }
       break;
+    }
 
-    case 'LOG_COMPLAINT':
+    case 'LOG_COMPLAINT': {
       summary += `• *Customer / Company:* ${draft.company_name}\n`;
       if (draft.affected_product || draft.product_name) {
         summary += `• *Product / Material:* ${draft.affected_product || draft.product_name}\n`;
@@ -975,6 +1000,7 @@ function buildConfirmationSummary(action, draft) {
       if (draft.corrective_action) summary += `• *Corrective Action:* ${draft.corrective_action}\n`;
       summary += `• *Initial Status:* ${draft.initial_status || 'Pending'}\n`;
       break;
+    }
 
     case 'UPDATE_COMPLAINT': {
       const targetCmp = draft.linked_inquiry_or_po || draft.company_name || draft.complaint_id || 'Active Complaint';
@@ -982,18 +1008,18 @@ function buildConfirmationSummary(action, draft) {
       if (draft.company_name && draft.linked_inquiry_or_po && draft.company_name !== draft.linked_inquiry_or_po) {
         summary += `• *Customer:* ${draft.company_name}\n`;
       }
-      summary += `*Updating Fields:*\n`;
+      summary += `• *Updating Fields:*\n`;
       for (const [k, v] of Object.entries(draft.updates || {})) {
         if (v) {
           const label = k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-          summary += `• Updating *${label}* → ${v}\n`;
+          summary += `  • *${label}* → ${v}\n`;
         }
       }
       break;
     }
   }
 
-  summary += `\n*Reply:*\n✔️ *Yes* — to save\n✏️ *Edit* — to change something\n❌ *Cancel* — to discard`;
+  summary += `\n*Reply:*\n• *Yes* — to save\n• *Edit* — to change something\n• *Cancel* — to discard`;
   return summary;
 }
 
@@ -2097,7 +2123,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
             reply: nextPrompt,
           };
         } else {
-          const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
+          const missingList = missing.map((m) => `• *${m}*`).join('\n');
           const nextPrompt = `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's complete the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\nPlease provide the remaining mandatory details:\n\n${missingList}`;
           await recordSessionMessage(senderPhone, 'assistant', nextPrompt, {
             action_type: nextAction,
@@ -2180,7 +2206,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
       return { handled: true, reply: summary };
     }
 
-    const retryPrompt = `Please reply with:\n✔️ *Yes* — to save\n✏️ *Edit* — to change a field\n❌ *Cancel* — to discard`;
+    const retryPrompt = `Please reply with:\n• *Yes* — to save\n• *Edit* — to change a field\n• *Cancel* — to discard`;
     await recordSessionMessage(senderPhone, 'assistant', retryPrompt);
     return {
       handled: true,
@@ -2221,7 +2247,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(updatedDraft)}`);
       return { handled: true, reply: summary };
     } else {
-      const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
+      const missingList = missing.map((m) => `• *${m}*`).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
       const askMissing = `Let's finish your ${actionName}${indexTag} first. Please provide the missing mandatory details:\n\n${missingList}`;
@@ -2305,7 +2331,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
       return { handled: true, reply: summary };
     } else {
       // Missing mandatory fields -> Ask only for missing fields
-      const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
+      const missingList = missing.map((m) => `• *${m}*`).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
       const askMissing = `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
@@ -2403,7 +2429,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
         await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_confirm|${detectedAction}|${JSON.stringify(extracted)}`);
         return { handled: true, reply: summary };
       } else {
-        const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
+        const missingList = missing.map((m) => `• *${m}*`).join('\n');
         const actionName = getActionFriendlyName(detectedAction);
         const indexTag = extracted._totalCount > 1 ? ` (${extracted._currentIndex || 1} of ${extracted._totalCount}: ${extracted.company_name || 'Item'})` : '';
         const askMissing = `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
