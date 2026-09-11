@@ -142,12 +142,10 @@ Please provide the following details. Fields marked with * are mandatory:
 
   UPDATE_VISIT: `✏️ *Update Field Visit*
 
-To identify the visit, provide ONE of the following:
-• *Visit ID:* * (e.g. VIS-2026-0015)
-OR
-• *Company Name + Visit Date:* * (e.g. ABC Steels, 10-09-2026)
+• *Customer / Company Name:* * (e.g. Vanguard Industrial Automation Systems)
+• *(Optional) Visit ID or Date:* (e.g. VIS-2026-0015 or 10-09-2026)
 
-What would you like to update?
+Which fields do you want to update? Mention the field name and new value.
 
 *Updatable Fields:*
 • Person Met
@@ -159,7 +157,7 @@ What would you like to update?
 • Status (Completed / Follow-up Pending / Cancelled)
 
 Example:
-"ABC Steels visit on 10-09-2026, update outcome to Positive, follow-up action to Send quotation by Friday"`,
+"Vanguard Industrial Automation Systems, update person met to Amit Sharma, outcome to Positive"`,
 
   LOG_NEW_CUSTOMER: `👤 *New Customer Acquisition*
 
@@ -542,15 +540,15 @@ UPDATE_VISIT:
 {
   "action": "UPDATE_VISIT",
   "visit_id": "<Visit ID e.g. VIS-2026-0015 if mentioned, else null>",
-  "company_name": "<Company Name if mentioned, else null>",
+  "company_name": "<Customer / Company Name if mentioned (strip leading possessives like 'my' or 'our'), else null>",
   "visit_date": "<Visit Date if mentioned, else null>",
   "updates": {
-    "person_met": "<if updated, else null>",
-    "contact_phone": "<if updated, else null>",
-    "city_location": "<if updated, else null>",
+    "person_met": "<Person met if updated, else null>",
+    "contact_phone": "<Contact phone if updated, else null>",
+    "city_location": "<City / Location if updated, else null>",
     "visit_outcome": "<Positive | Negative | Neutral | Follow-up Required if updated, else null>",
-    "followup_action": "<if updated, else null>",
-    "meeting_remarks": "<if updated, else null>",
+    "followup_action": "<Follow-up action if updated, else null>",
+    "meeting_remarks": "<Meeting remarks if updated, else null>",
     "status": "<Completed | Follow-up Pending | Cancelled if updated, else null>"
   }
 }
@@ -707,7 +705,9 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
           }
         }
       } else {
-        if (key.includes('date') && typeof val === 'string') {
+        if (key === 'company_name' && typeof val === 'string') {
+          merged.company_name = val.replace(/^my\s*/i, '').replace(/^our\s+/i, '').replace(/^for\s+/i, '').trim();
+        } else if (key.includes('date') && typeof val === 'string') {
           if (/\b(?:day before yesterday|parso)\b/i.test(userInput)) {
             const dby = new Date(Date.now() - 48 * 3600 * 1000);
             merged[key] = formatDateDDMMYYYY(dby);
@@ -818,16 +818,16 @@ function validateMandatoryFields(action, draft) {
       if (!draft.meeting_remarks) missing.push('Meeting Remarks & Requirements');
       break;
 
-    case 'UPDATE_VISIT':
-      const hasVisitId = Boolean(draft.visit_id);
-      const hasCompanyAndDate = Boolean(draft.company_name && draft.visit_date);
-      if (!hasVisitId && !hasCompanyAndDate) {
-        missing.push('Visit ID (e.g. VIS-2026-0015) OR Company Name + Visit Date');
+    case 'UPDATE_VISIT': {
+      const hasVisitIdentifier = Boolean(draft.visit_id || draft.company_name);
+      if (!hasVisitIdentifier) {
+        missing.push('Customer / Company Name OR Visit ID');
       }
       const visUpdates = draft.updates || {};
       const hasVisUpdate = Object.values(visUpdates).some(v => v !== null && v !== undefined && v !== '');
-      if (!hasVisUpdate) missing.push('At least one field to update');
+      if (!hasVisUpdate) missing.push('At least one field to update (e.g. Person Met, Contact Phone, City/Location, Outcome, Follow-up, Remarks)');
       break;
+    }
 
     case 'LOG_NEW_CUSTOMER':
       if (!draft.company_name) missing.push('Company Name');
@@ -1021,8 +1021,8 @@ function buildConfirmationSummary(action, draft) {
     }
 
     case 'UPDATE_VISIT': {
-      const targetVis = draft.visit_id || `${draft.company_name} on ${draft.visit_date}`;
-      summary += `• *Target Visit:* ${targetVis}\n`;
+      const targetVis = draft.visit_id || `${draft.company_name}${draft.visit_date ? ` on ${draft.visit_date}` : ''}`;
+      summary += `• *Customer / Target Visit:* ${targetVis}\n`;
       summary += `• *Updating Fields:*\n`;
       for (const [k, v] of Object.entries(draft.updates || {})) {
         if (v) {
@@ -1742,19 +1742,24 @@ Logged to Customer Visits Card! ✅`;
       }
 
       case 'UPDATE_VISIT': {
-        const { data: visits } = await supabase
-          .from('customer_visits')
-          .select('id, customer_name, visited_at')
-          .ilike('customer_name', `%${(draft.company_name || '').trim()}%`)
-          .order('visited_at', { ascending: false })
-          .limit(1);
+        const companyName = (draft.company_name || '').trim();
+        const visitId = (draft.visit_id || '').trim();
+
+        let visitQuery = supabase.from('customer_visits').select('id, customer_name, visited_at, salesperson_phone');
+        if (visitId) {
+          const rawId = visitId.replace(/^#?(?:VIS|VISIT)-?/i, '').trim();
+          visitQuery = visitQuery.or(`id.ilike.%${rawId}%,id.eq.${visitId}`);
+        } else if (companyName) {
+          visitQuery = visitQuery.ilike('customer_name', `%${companyName}%`);
+        }
+        const { data: visits } = await visitQuery.order('visited_at', { ascending: false }).limit(1);
 
         const targetVisit = visits && visits.length > 0 ? visits[0] : null;
         const updates = draft.updates || {};
         const visitUpdates = {};
 
         if (updates.person_met) visitUpdates.person_met = updates.person_met;
-        if (updates.contact_phone) visitUpdates.contact_no = updates.contact_phone;
+        if (updates.contact_phone) visitUpdates.contact_no = cleanPhone(updates.contact_phone) || updates.contact_phone;
         if (updates.city_location) visitUpdates.customer_address = updates.city_location;
         if (updates.meeting_remarks || updates.visit_outcome || updates.followup_action) {
           const outcomeTag = updates.visit_outcome ? `[Outcome: ${updates.visit_outcome}] ` : '';
@@ -1766,9 +1771,11 @@ Logged to Customer Visits Card! ✅`;
           await supabase.from('customer_visits').update(visitUpdates).eq('id', targetVisit.id);
         }
 
+        const resolvedCust = targetVisit ? targetVisit.customer_name : (draft.company_name || 'Customer');
+
         return `✅ *Field Visit Updated Successfully!*
 
-🏢 *Customer:* ${draft.company_name || (targetVisit ? targetVisit.customer_name : 'Customer')}
+🏢 *Customer:* ${resolvedCust}
 Visit details updated in Customer Visits Card! ✅`;
       }
 
