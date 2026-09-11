@@ -13,6 +13,8 @@ const { HumanMessage, SystemMessage, AIMessage, ToolMessage } = require('@langch
 const { createTools }        = require('./tools');
 const { invokeWithFallback } = require('./modelRouter');
 const { getChatHistory, addChatHistory, getActiveContextPrompt } = require('./memory');
+const { recordSessionMessage } = require('./sessionManager');
+
 
 // ── System Prompt - Senior Sales Operations Manager Persona & Few-Shot Examples ──
 
@@ -267,7 +269,7 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
 
     // Fetch active context, chat history, and user permissions ONCE concurrently for ultra-low latency
     const [activeContextPrompt, historyMessages, userScope] = await Promise.all([
-      getActiveContextPrompt(senderPhone),
+      getActiveContextPrompt(senderPhone, true),
       getChatHistory(senderPhone),
       getAccessibleSalespersonPhonesForBot(senderPhone),
     ]);
@@ -458,6 +460,12 @@ function stripAsterisks(text) {
           deal_id: turnDealId,
           customer_name: turnCustomerName,
         });
+        await recordSessionMessage(senderPhone, 'user', text);
+        await recordSessionMessage(senderPhone, 'assistant', cleanContent, {
+          agent: turnAgent,
+          deal_id: turnDealId,
+          customer_name: turnCustomerName,
+        });
         console.log(`[Orchestrator] Direct tool message forwarded (${cleanContent.length} chars)`);
         return cleanContent;
       }
@@ -498,6 +506,12 @@ function stripAsterisks(text) {
     const cleanFinalReply = stripAsterisks(reply);
 
     await addChatHistory(senderPhone, text, cleanFinalReply, {
+      agent: turnAgent,
+      deal_id: turnDealId,
+      customer_name: turnCustomerName,
+    });
+    await recordSessionMessage(senderPhone, 'user', text);
+    await recordSessionMessage(senderPhone, 'assistant', cleanFinalReply, {
       agent: turnAgent,
       deal_id: turnDealId,
       customer_name: turnCustomerName,

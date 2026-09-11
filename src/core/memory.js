@@ -77,14 +77,22 @@ async function getRawChatHistory(senderPhone) {
       .order('updated_at', { ascending: false })
       .limit(1);
 
-    if (session && session.length > 0 && Array.isArray(session[0].chat_history)) {
-      const rawList = session[0].chat_history
+    if (session && session.length > 0) {
+      const rawChatHistory = session[0].chat_history;
+      let rawList = [];
+      if (Array.isArray(rawChatHistory)) {
+        rawList = rawChatHistory;
+      } else if (rawChatHistory && typeof rawChatHistory === 'object' && rawChatHistory.current_session?.messages) {
+        rawList = rawChatHistory.current_session.messages;
+      }
+
+      const formatted = rawList
         .map(normalizeMessageObj)
         .filter(Boolean)
         .slice(-MAX_MESSAGES);
 
-      rawHistoryMap.set(pKey, rawList);
-      return rawList;
+      rawHistoryMap.set(pKey, formatted);
+      return formatted;
     }
   } catch (err) {
     console.error('[Memory] Error loading chat history from DB:', err.message);
@@ -383,7 +391,7 @@ async function getCustomerFactSheet(customerName, senderPhone) {
 /**
  * Assembles the full Multi-Tier context prompt for LLM execution.
  */
-async function getActiveContextPrompt(senderPhone) {
+async function getActiveContextPrompt(senderPhone, isOption9 = false) {
   if (!senderPhone) return '';
   const variants = getCanonicalPhoneVariants(senderPhone);
 
@@ -404,8 +412,22 @@ async function getActiveContextPrompt(senderPhone) {
       historySection = '\n\n## ROLLING CONVERSATION HISTORY (Last ' + crossCtx.messages.length + ' Messages across all agents):\n' + crossCtx.formattedHistory;
     }
 
+    // Historical sessions block - ONLY injected on Option 9 / General Query
+    let historicalSessionsSection = '';
+    if (isOption9) {
+      try {
+        const { formatHistoricalSessionsForLLM } = require('./sessionManager');
+        const histText = await formatHistoricalSessionsForLLM(senderPhone);
+        if (histText) {
+          historicalSessionsSection = '\n\n' + histText;
+        }
+      } catch (sessErr) {
+        console.warn('[Memory] Error formatting historical sessions:', sessErr.message);
+      }
+    }
+
     if (!activeCustomer) {
-      return historySection;
+      return historySection + historicalSessionsSection;
     }
 
     // Tier 3: Stateful Business Fact Sheet
@@ -421,7 +443,7 @@ async function getActiveContextPrompt(senderPhone) {
 
     const activeDealStr = crossCtx.activeDealId ? '#' + crossCtx.activeDealId : 'None';
 
-    return historySection + threadSection + factSheet + '\n\n## ACTIVE CONTEXT WINDOW (Memory for this Salesperson)\n' +
+    return historySection + threadSection + factSheet + historicalSessionsSection + '\n\n## ACTIVE CONTEXT WINDOW (Memory for this Salesperson)\n' +
       '- Currently Active Customer: "' + activeCustomer + '"\n' +
       '- Active Inquiry ID: ' + activeDealStr + '\n' +
       '- Last Action/Intent: ' + lastIntent + '\n\n' +

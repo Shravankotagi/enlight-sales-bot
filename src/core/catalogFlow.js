@@ -17,6 +17,12 @@ const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
 const { supabase, saveActiveSession, getFullActiveSession, ensureCustomerRecord } = require('../supabase');
 const { detectHsnCode } = require('../utils/hsnDetector');
 const { safeParseJSON } = require('../utils/jsonUtils');
+const {
+  startNewCatalogSession,
+  recordSessionMessage,
+  finalizeCurrentSession,
+} = require('./sessionManager');
+
 
 // ── CATALOG MENU ─────────────────────────────────────────────────────────────
 
@@ -1960,6 +1966,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
   // ── 1. GREETING CHECK ──────────────────────────────────────────────────────
   if (isGreeting(text)) {
     await saveActiveSession(senderPhone, 'Unknown', 'general');
+    await startNewCatalogSession(senderPhone, CATALOG_MENU);
     return {
       handled: true,
       reply: CATALOG_MENU,
@@ -2001,7 +2008,14 @@ async function handleCatalogFlow(rawText, senderPhone) {
       cleanInput === 'ok' ||
       cleanInput === 'sure'
     ) {
+      await recordSessionMessage(senderPhone, 'user', text);
       const reply = await executeAction(action, draft, senderPhone);
+      await recordSessionMessage(senderPhone, 'assistant', reply, {
+        action_type: action,
+        customer_name: draft.company_name,
+        po_number: draft.po_number,
+        inquiry_id: draft.inquiry_id,
+      });
 
       // Check if there are queued entries (e.g. 2nd customer visit/inquiry)
       if (draft._queue && Array.isArray(draft._queue) && draft._queue.length > 0) {
@@ -2014,21 +2028,37 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
         if (missing.length === 0) {
           const summary = buildConfirmationSummary(nextAction, nextEntry);
+          const nextPrompt = `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's confirm the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\n${summary}`;
+          await recordSessionMessage(senderPhone, 'assistant', nextPrompt, {
+            action_type: nextAction,
+            customer_name: nextEntry.company_name,
+          });
           await saveActiveSession(senderPhone, nextEntry.company_name || 'Customer', `catalog_confirm|${nextAction}|${JSON.stringify(nextEntry)}`);
           return {
             handled: true,
-            reply: `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's confirm the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\n${summary}`,
+            reply: nextPrompt,
           };
         } else {
           const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
+          const nextPrompt = `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's complete the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\nPlease provide the remaining mandatory details:\n\n${missingList}`;
+          await recordSessionMessage(senderPhone, 'assistant', nextPrompt, {
+            action_type: nextAction,
+            customer_name: nextEntry.company_name,
+          });
           await saveActiveSession(senderPhone, nextEntry.company_name || 'Customer', `catalog_flow|${nextAction}|${JSON.stringify(nextEntry)}`);
           return {
             handled: true,
-            reply: `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's complete the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\nPlease provide the remaining mandatory details:\n\n${missingList}`,
+            reply: nextPrompt,
           };
         }
       }
 
+      await finalizeCurrentSession(senderPhone, null, {
+        action_type: action,
+        customer_name: draft.company_name,
+        po_number: draft.po_number,
+        inquiry_id: draft.inquiry_id,
+      });
       await saveActiveSession(senderPhone, draft.company_name || 'Customer', 'general');
       return { handled: true, reply };
     }
@@ -2041,10 +2071,13 @@ async function handleCatalogFlow(rawText, senderPhone) {
       cleanInput === 'update' ||
       cleanInput === '2'
     ) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      const editPrompt = `Which field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")`;
+      await recordSessionMessage(senderPhone, 'assistant', editPrompt);
       await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_editing|${action}|${draftJsonStr}`);
       return {
         handled: true,
-        reply: `Which field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")`,
+        reply: editPrompt,
       };
     }
 
@@ -2056,25 +2089,36 @@ async function handleCatalogFlow(rawText, senderPhone) {
       cleanInput === '3' ||
       cleanInput === 'stop'
     ) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
+      await recordSessionMessage(senderPhone, 'assistant', cancelReply);
+      await finalizeCurrentSession(senderPhone, `Cancelled ${getActionFriendlyName(action)} draft for ${draft.company_name || 'customer'}`);
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return {
         handled: true,
-        reply: `❌ Discarded. Send 'Hi' to start again.`,
+        reply: cancelReply,
       };
     }
 
     // Direct inline edit attempt during confirmation
+    await recordSessionMessage(senderPhone, 'user', text);
     const updatedDraft = await extractFieldsWithLLM(action, text, draft);
     const missing = validateMandatoryFields(action, updatedDraft);
     if (missing.length === 0) {
       const summary = buildConfirmationSummary(action, updatedDraft);
+      await recordSessionMessage(senderPhone, 'assistant', summary, {
+        action_type: action,
+        customer_name: updatedDraft.company_name,
+      });
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(updatedDraft)}`);
       return { handled: true, reply: summary };
     }
 
+    const retryPrompt = `Please reply with:\n✔️ *Yes* — to save\n✏️ *Edit* — to change a field\n❌ *Cancel* — to discard`;
+    await recordSessionMessage(senderPhone, 'assistant', retryPrompt);
     return {
       handled: true,
-      reply: `Please reply with:\n✔️ *Yes* — to save\n✏️ *Edit* — to change a field\n❌ *Cancel* — to discard`,
+      reply: retryPrompt,
     };
   }
 
@@ -2090,21 +2134,31 @@ async function handleCatalogFlow(rawText, senderPhone) {
       return { handled: false };
     }
 
+    await recordSessionMessage(senderPhone, 'user', text);
     const updatedDraft = await extractFieldsWithLLM(action, text, draft);
     const missing = validateMandatoryFields(action, updatedDraft);
 
     if (missing.length === 0) {
       const summary = buildConfirmationSummary(action, updatedDraft);
+      await recordSessionMessage(senderPhone, 'assistant', summary, {
+        action_type: action,
+        customer_name: updatedDraft.company_name,
+      });
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(updatedDraft)}`);
       return { handled: true, reply: summary };
     } else {
       const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
+      const askMissing = `Let's finish your ${actionName}${indexTag} first. Please provide the missing mandatory details:\n\n${missingList}`;
+      await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+        action_type: action,
+        customer_name: updatedDraft.company_name,
+      });
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
       return {
         handled: true,
-        reply: `Let's finish your ${actionName}${indexTag} first. Please provide the missing mandatory details:\n\n${missingList}`,
+        reply: askMissing,
       };
     }
   }
@@ -2121,28 +2175,36 @@ async function handleCatalogFlow(rawText, senderPhone) {
       return { handled: false };
     }
 
+    await recordSessionMessage(senderPhone, 'user', text);
+
     // Check if user wants to abort / switch
     const newActionMatch = matchActionFromInput(text);
     if (newActionMatch && newActionMatch !== action) {
       if (newActionMatch === 'GENERAL_QUERY') {
+        const queryReply = `Please let me know what you would like to search or check in the CRM!`;
+        await recordSessionMessage(senderPhone, 'assistant', queryReply, { action_type: 'GENERAL_QUERY' });
         await saveActiveSession(senderPhone, 'Unknown', 'general');
         return {
           handled: true,
-          reply: `Please let me know what you would like to search or check in the CRM!`,
+          reply: queryReply,
         };
       }
       const initialPrompt = MODULE_PROMPTS[newActionMatch];
       if (initialPrompt) {
+        await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: newActionMatch });
         await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${newActionMatch}|{}`);
         return { handled: true, reply: initialPrompt };
       }
     }
 
     if (/^(?:cancel|stop|discard|exit|quit)$/i.test(text)) {
+      const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
+      await recordSessionMessage(senderPhone, 'assistant', cancelReply);
+      await finalizeCurrentSession(senderPhone, `Discarded ${getActionFriendlyName(action)} flow`);
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return {
         handled: true,
-        reply: `❌ Discarded. Send 'Hi' to start again.`,
+        reply: cancelReply,
       };
     }
 
@@ -2153,6 +2215,10 @@ async function handleCatalogFlow(rawText, senderPhone) {
     if (missing.length === 0) {
       // All mandatory fields present -> Show confirmation summary
       const summary = buildConfirmationSummary(action, updatedDraft);
+      await recordSessionMessage(senderPhone, 'assistant', summary, {
+        action_type: action,
+        customer_name: updatedDraft.company_name,
+      });
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(updatedDraft)}`);
       return { handled: true, reply: summary };
     } else {
@@ -2160,10 +2226,15 @@ async function handleCatalogFlow(rawText, senderPhone) {
       const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
+      const askMissing = `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
+      await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+        action_type: action,
+        customer_name: updatedDraft.company_name,
+      });
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
       return {
         handled: true,
-        reply: `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`,
+        reply: askMissing,
       };
     }
   }
@@ -2171,16 +2242,20 @@ async function handleCatalogFlow(rawText, senderPhone) {
   // ── 6. DIRECT ACTION ROUTING (Menu Selection 1-9 or Action Keywords) ────────
   const matchedAction = matchActionFromInput(text);
   if (matchedAction) {
+    await recordSessionMessage(senderPhone, 'user', text);
     if (matchedAction === 'GENERAL_QUERY') {
+      const genReply = `What would you like to search or know? You can ask about inquiries, visits, won orders, customer profiles, or pipeline status.`;
+      await recordSessionMessage(senderPhone, 'assistant', genReply, { action_type: 'GENERAL_QUERY' });
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return {
         handled: true,
-        reply: `What would you like to search or know? You can ask about inquiries, visits, won orders, customer profiles, or pipeline status.`,
+        reply: genReply,
       };
     }
 
     const initialPrompt = MODULE_PROMPTS[matchedAction];
     if (initialPrompt) {
+      await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: matchedAction });
       await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${matchedAction}|{}`);
       return { handled: true, reply: initialPrompt };
     }
@@ -2220,6 +2295,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
   }
 
   if (detectedAction) {
+    await recordSessionMessage(senderPhone, 'user', text);
     const extracted = await extractFieldsWithLLM(detectedAction, text, {});
     const hasCompany = Boolean(extracted.company_name || (Array.isArray(extracted.entries) && extracted.entries.some(e => e.company_name)));
     const hasLineItems = Array.isArray(extracted.line_items) && extracted.line_items.length > 0;
@@ -2230,16 +2306,25 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
       if (missing.length === 0) {
         const summary = buildConfirmationSummary(detectedAction, extracted);
+        await recordSessionMessage(senderPhone, 'assistant', summary, {
+          action_type: detectedAction,
+          customer_name: extracted.company_name,
+        });
         await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_confirm|${detectedAction}|${JSON.stringify(extracted)}`);
         return { handled: true, reply: summary };
       } else {
         const missingList = missing.map((m, i) => `${i + 1}. *${m}*`).join('\n');
         const actionName = getActionFriendlyName(detectedAction);
         const indexTag = extracted._totalCount > 1 ? ` (${extracted._currentIndex || 1} of ${extracted._totalCount}: ${extracted.company_name || 'Item'})` : '';
+        const askMissing = `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
+        await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+          action_type: detectedAction,
+          customer_name: extracted.company_name,
+        });
         await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(extracted)}`);
         return {
           handled: true,
-          reply: `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`,
+          reply: askMissing,
         };
       }
     }
