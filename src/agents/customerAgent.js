@@ -302,6 +302,7 @@ async function processCustomerMessage(text, senderPhone) {
       city: data.city || null,
       contact_person: data.contact_person || null,
       avg_order_frequency_days: data.order_frequency_days || 30,
+      allowCreate: true,
     });
 
     // Save active session

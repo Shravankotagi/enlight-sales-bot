@@ -21,6 +21,7 @@ const {
   ensureCustomerRecord,
   verifyAndGetCustomerName,
   getAssignedCustomersList,
+  normalizeCoreCompanyName,
 } = require('../supabase');
 const { detectHsnCode } = require('../utils/hsnDetector');
 const { safeParseJSON } = require('../utils/jsonUtils');
@@ -30,6 +31,11 @@ const {
   finalizeCurrentSession,
 } = require('./sessionManager');
 
+function cleanPhone(p) {
+  if (!p) return '';
+  const digits = String(p).replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : digits;
+}
 
 // ── CATALOG MENU ─────────────────────────────────────────────────────────────
 
@@ -43,11 +49,12 @@ What would you like to do today?
 *4️⃣ Update Order*
 *5️⃣ Log Customer Field Visit*
 *6️⃣ Update Field Visit*
-*7️⃣ Log Customer Complaint*
-*8️⃣ Update Customer Complaint*
-*9️⃣ Other / General Query*
+*7️⃣ New Customer Acquisition*
+*8️⃣ Log Customer Complaint*
+*9️⃣ Update Customer Complaint*
+*🔟 Other / General Query*
 
-Reply with a number (1–9) or type what you'd like to do.`;
+Reply with a number (1–10) or type what you'd like to do.`;
 
 // ── MODULE COLLECTION PROMPTS ────────────────────────────────────────────────
 
@@ -154,6 +161,22 @@ What would you like to update?
 Example:
 "ABC Steels visit on 10-09-2026, update outcome to Positive, follow-up action to Send quotation by Friday"`,
 
+  LOG_NEW_CUSTOMER: `👤 *New Customer Acquisition*
+
+Please provide the following customer details. Fields marked with * are mandatory:
+
+• *Company Name:* *
+• *Contact Person:* *
+• *Mobile Number:* *
+• *Delivery Location:* *
+• *Email:* (optional)
+• *GST Number:* (optional)
+
+You can reply in any format — just include the field names or values in order.
+
+Example:
+"Apex Steel Structures, Contact: Rajesh Sharma, Phone: 9820123456, Location: Chakan Pune, Email: rajesh@apexsteel.com, GST: 27AABCU9603R1ZM"`,
+
   LOG_COMPLAINT: `⚠️ *Log Customer Complaint*
 
 Please provide the following details. Fields marked with * are mandatory:
@@ -196,6 +219,7 @@ function getActionFriendlyName(action) {
     case 'UPDATE_ORDER': return 'order update';
     case 'LOG_VISIT': return 'visit report';
     case 'UPDATE_VISIT': return 'visit update';
+    case 'LOG_NEW_CUSTOMER': return 'customer acquisition';
     case 'LOG_COMPLAINT': return 'complaint';
     case 'UPDATE_COMPLAINT': return 'complaint update';
     default: return 'action';
@@ -222,7 +246,7 @@ function matchActionFromInput(text) {
 
   // If text is a full sentence with arguments/details, let natural action detection & LLM extraction handle it
   if (clean.length > 35 || /\b(?:for|to|on|of|with|at|rate|qty|status|inq-|po-|midc|midc\s+pune|midc\s+bhosari|mt|tons|plate|sheet|coil)\b/i.test(clean)) {
-    if (!/^(?:1|2|3|4|5|6|7|8|9)\.?$/i.test(clean) && !/^(?:log|update|record|start_log_|start_update_)\s*(?:new\s*)?(?:inquiry|order|visit|complaint|field visit|customer visit|customer complaint)$/i.test(clean)) {
+    if (!/^(?:1|2|3|4|5|6|7|8|9|10)\.?$/i.test(clean) && !/^(?:log|update|record|start_log_|start_update_)\s*(?:new\s*)?(?:inquiry|order|visit|complaint|customer|customer acquisition|field visit|customer visit|customer complaint)$/i.test(clean)) {
       return null;
     }
   }
@@ -245,13 +269,16 @@ function matchActionFromInput(text) {
   if (clean === '6' || clean === '6.' || clean === 'update visit' || clean === 'update field visit' || clean === 'start_update_visit') {
     return 'UPDATE_VISIT';
   }
-  if (clean === '7' || clean === '7.' || clean === 'log complaint' || clean === 'log customer complaint' || clean === 'new complaint' || clean === 'start_log_complaint') {
+  if (clean === '7' || clean === '7.' || clean === 'new customer' || clean === 'new customer acquisition' || clean === 'customer acquisition' || clean === 'add customer' || clean === 'onboard customer' || clean === 'log customer' || clean === 'start_log_customer') {
+    return 'LOG_NEW_CUSTOMER';
+  }
+  if (clean === '8' || clean === '8.' || clean === 'log complaint' || clean === 'log customer complaint' || clean === 'new complaint' || clean === 'start_log_complaint') {
     return 'LOG_COMPLAINT';
   }
-  if (clean === '8' || clean === '8.' || clean === 'update complaint' || clean === 'update customer complaint' || clean === 'start_update_complaint') {
+  if (clean === '9' || clean === '9.' || clean === 'update complaint' || clean === 'update customer complaint' || clean === 'start_update_complaint') {
     return 'UPDATE_COMPLAINT';
   }
-  if (clean === '9' || clean === '9.' || clean === 'other' || clean === 'general query' || clean === 'other query' || clean === 'general_query') {
+  if (clean === '10' || clean === '10.' || clean === 'other' || clean === 'general query' || clean === 'other query' || clean === 'general_query') {
     return 'GENERAL_QUERY';
   }
 
@@ -528,6 +555,27 @@ UPDATE_VISIT:
   }
 }
 
+LOG_NEW_CUSTOMER:
+{
+  "action": "LOG_NEW_CUSTOMER",
+  "company_name": "<Customer / Company Name, else null>",
+  "contact_person": "<Owner / Contact Person Name, else null>",
+  "mobile_number": "<10-digit mobile number, digits only, else null>",
+  "delivery_location": "<City / Delivery Address / Location, else null>",
+  "email": "<Email address if mentioned, else null>",
+  "gst_number": "<GST number if mentioned, else null>",
+  "entries": [
+    {
+      "company_name": "<Company Name>",
+      "contact_person": "<Contact Person>",
+      "mobile_number": "<Mobile Number>",
+      "delivery_location": "<Location>",
+      "email": "<Email>",
+      "gst_number": "<GST>"
+    }
+  ]
+}
+
 LOG_COMPLAINT:
 {
   "action": "LOG_COMPLAINT",
@@ -781,6 +829,13 @@ function validateMandatoryFields(action, draft) {
       if (!hasVisUpdate) missing.push('At least one field to update');
       break;
 
+    case 'LOG_NEW_CUSTOMER':
+      if (!draft.company_name) missing.push('Company Name');
+      if (!draft.contact_person) missing.push('Contact Person');
+      if (!draft.mobile_number && !draft.phone && !draft.contact_phone) missing.push('Mobile Number');
+      if (!draft.delivery_location && !draft.city_location && !draft.address) missing.push('Delivery Location');
+      break;
+
     case 'LOG_COMPLAINT':
       if (!draft.company_name) missing.push('Company / Customer Name');
       if (!draft.complaint_description && !draft.affected_product) {
@@ -807,6 +862,7 @@ function validateMandatoryFields(action, draft) {
 
 async function verifyDraftCustomer(action, draft, senderPhone) {
   if (!draft || !draft.company_name) return { isValid: true };
+  if (action === 'LOG_NEW_CUSTOMER') return { isValid: true };
 
   const rawName = String(draft.company_name).trim();
   if (!rawName || rawName.toLowerCase() === 'null' || rawName.toLowerCase() === 'unknown') {
@@ -821,27 +877,17 @@ async function verifyDraftCustomer(action, draft, senderPhone) {
     return { isValid: true, officialName };
   }
 
-  // Check if caller has assigned accounts
-  const assignedList = await getAssignedCustomersList(senderPhone);
-  if (assignedList && assignedList.length > 0) {
-    const listDisplay = assignedList
-      .slice(0, 15)
-      .map((c, i) => `  ${i + 1}. *${c.customer_name}*`)
-      .join('\n');
+  // Unrecognized customer -> Prompt for implicit new customer confirmation
+  const askNewCustomerPrompt = `⚠️ *"${rawName}"* is not in your customer list.\n\n` +
+    `Is this a new customer?\n` +
+    `👉 Reply *Yes* to onboard as a new customer, or *No* to re-enter the correct company name.`;
 
-    const rejectionMessage = `❌ *Customer Not Found in Assigned Accounts*\n\n` +
-      `"${rawName}" is not registered under your assigned customer directory.\n\n` +
-      `Please reply with a valid company name from your assigned accounts:\n\n${listDisplay}\n\n` +
-      `_(Your other entered details like products and rates have been preserved)_`;
-
-    return {
-      isValid: false,
-      rejectionMessage,
-      unverifiedName: rawName,
-    };
-  }
-
-  return { isValid: true };
+  return {
+    isValid: false,
+    isUnrecognizedCustomer: true,
+    unverifiedName: rawName,
+    prompt: askNewCustomerPrompt,
+  };
 }
 
 // ── BUILD CONFIRMATION SUMMARY ───────────────────────────────────────────────
@@ -984,6 +1030,19 @@ function buildConfirmationSummary(action, draft) {
           summary += `  • *${label}* → ${v}\n`;
         }
       }
+      break;
+    }
+
+    case 'LOG_NEW_CUSTOMER': {
+      summary += `• *Company Name:* ${draft.company_name}\n`;
+      summary += `• *Contact Person:* ${draft.contact_person}\n`;
+      const phoneVal = draft.mobile_number || draft.phone || draft.contact_phone;
+      summary += `• *Mobile Number:* ${phoneVal}\n`;
+      const locVal = draft.delivery_location || draft.city_location || draft.address;
+      summary += `• *Delivery Location:* ${locVal}\n`;
+      if (draft.email) summary += `• *Email:* ${draft.email}\n`;
+      const gstVal = draft.gst_number || draft.gst;
+      if (gstVal) summary += `• *GST Number:* ${gstVal}\n`;
       break;
     }
 
@@ -1713,6 +1772,93 @@ Logged to Customer Visits Card! ✅`;
 Visit details updated in Customer Visits Card! ✅`;
       }
 
+      case 'LOG_NEW_CUSTOMER': {
+        const companyName = String(draft.company_name || '').trim();
+        const contactPerson = draft.contact_person ? String(draft.contact_person).trim() : null;
+        const mobileNumber = cleanPhone(draft.mobile_number || draft.phone || draft.contact_phone);
+        const deliveryLoc = (draft.delivery_location || draft.city_location || draft.address || '').trim() || null;
+        const gstNum = (draft.gst_number || draft.gst || '').trim() || null;
+        const email = draft.email ? String(draft.email).trim() : null;
+
+        // 1. Exact duplicate check across recurring_customers
+        const { data: existingCusts } = await supabase
+          .from('recurring_customers')
+          .select('*')
+          .ilike('customer_name', companyName)
+          .limit(10);
+
+        const exactMatch = (existingCusts || []).find(c =>
+          c.customer_name.trim().toLowerCase() === companyName.toLowerCase() ||
+          (normalizeCoreCompanyName(c.customer_name) && normalizeCoreCompanyName(c.customer_name) === normalizeCoreCompanyName(companyName))
+        );
+
+        if (exactMatch) {
+          return `⚠️ *Customer Already Exists!*\n\n` +
+            `• *Company Name:* ${exactMatch.customer_name}\n` +
+            (exactMatch.contact_person ? `• *Contact Person:* ${exactMatch.contact_person}\n` : '') +
+            (exactMatch.customer_phone ? `• *Mobile Number:* ${exactMatch.customer_phone}\n` : '') +
+            (exactMatch.customer_address ? `• *Location:* ${exactMatch.customer_address}\n` : '') +
+            (exactMatch.customer_gst ? `• *GST:* ${exactMatch.customer_gst}\n` : '') +
+            `\n_This customer is already registered in the system. Duplicate record creation was prevented._`;
+        }
+
+        // 2. Insert new record into recurring_customers
+        const { data: newCust, error: custErr } = await supabase
+          .from('recurring_customers')
+          .insert({
+            customer_name: companyName,
+            contact_person: contactPerson,
+            customer_phone: mobileNumber || null,
+            customer_address: deliveryLoc,
+            customer_gst: gstNum,
+            notes: email ? `Email: ${email}` : null,
+            assigned_salesperson_phone: senderPhone,
+            is_active: true,
+            avg_order_frequency_days: 30,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .select()
+          .single();
+
+        if (custErr) console.error('[CatalogFlow] Customer insert error:', custErr);
+
+        // 3. Log KRA 2 (New Customer Acquisition)
+        await supabase.from('kra_logs').insert({
+          salesperson_phone: senderPhone,
+          kra_number: 2,
+          kra_type: 'new_customer',
+          customer_name: companyName,
+          description: `New Customer Acquired: ${companyName}`,
+          month: new Date().getMonth() + 1,
+          year: new Date().getFullYear(),
+          created_at: new Date().toISOString(),
+        });
+
+        // 4. Log KRA 6 (CRM Compliance)
+        await supabase.from('kra_logs').insert({
+          salesperson_phone: senderPhone,
+          kra_number: 6,
+          kra_type: 'new_customer',
+          customer_name: companyName,
+          description: `Added New Customer: ${companyName}`,
+          month: new Date().getMonth() + 1,
+          year: new Date().getFullYear(),
+          created_at: new Date().toISOString(),
+        });
+
+        const custId = newCust ? newCust.id : '';
+
+        return `🎉 *New Customer Successfully Added!*
+
+🏢 *Company Name:* ${companyName}
+👤 *Contact Person:* ${contactPerson || 'N/A'}
+📱 *Mobile Number:* ${mobileNumber || 'N/A'}
+📍 *Delivery Location:* ${deliveryLoc || 'N/A'}${email ? `\n📧 *Email:* ${email}` : ''}${gstNum ? `\n🧾 *GST Number:* ${gstNum}` : ''}
+
+Customer record created & added to your portfolio! ✅`;
+      }
+
       case 'LOG_COMPLAINT': {
         const companyName = (draft.company_name || 'Customer').trim();
         await ensureCustomerRecord(companyName, senderPhone);
@@ -2021,6 +2167,13 @@ function detectOperationalAction(text) {
     }
   }
 
+  // 6. Customer Acquisition patterns
+  if (
+    /\b(?:new\s+customer|customer\s+acquisition|onboard\s+customer|add\s+customer|acquire\s+customer|register\s+customer|nayi\s+party|naya\s+customer|customer\s+onboarding)\b/i.test(lower)
+  ) {
+    return 'LOG_NEW_CUSTOMER';
+  }
+
   return null;
 }
 
@@ -2056,7 +2209,215 @@ async function handleCatalogFlow(rawText, senderPhone) {
     return { handled: false };
   }
 
-  // ── 3. HANDLE CONFIRMATION STATE (catalog_confirm|...) ──────────────────────
+  // ── 3a. HANDLE IMPLICIT CUSTOMER CONFIRMATION ASK (catalog_implicit_cust_ask|...) ──
+  if (lastIntent.startsWith('catalog_implicit_cust_ask|')) {
+    const parts = lastIntent.split('|');
+    const originalAction = parts[1];
+    const unrecognizedName = parts[2];
+    const originalDraftJsonStr = parts.slice(3).join('|');
+    const originalDraft = safeParseJSON(originalDraftJsonStr, {});
+
+    if (isOperationalQuery(text)) {
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return { handled: false };
+    }
+
+    await recordSessionMessage(senderPhone, 'user', text);
+    const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
+
+    // User confirmed YES (This is a new customer)
+    if (
+      cleanInput === 'yes' ||
+      cleanInput === 'y' ||
+      cleanInput === '1' ||
+      cleanInput === 'confirm' ||
+      cleanInput === 'haan' ||
+      cleanInput === 'ha' ||
+      cleanInput === 'sahi hai' ||
+      cleanInput === 'ok' ||
+      cleanInput === 'sure' ||
+      cleanInput === 'new customer' ||
+      cleanInput === 'add'
+    ) {
+      const custDraft = {
+        action: 'LOG_NEW_CUSTOMER',
+        company_name: unrecognizedName,
+        contact_person: originalDraft.person_met || null,
+        mobile_number: originalDraft.contact_phone || null,
+        delivery_location: originalDraft.delivery_location || originalDraft.city_location || null,
+        email: null,
+        gst_number: null,
+        _parentAction: originalAction,
+        _parentDraft: originalDraft,
+      };
+
+      const custMissing = validateMandatoryFields('LOG_NEW_CUSTOMER', custDraft);
+
+      if (custMissing.length === 0) {
+        // All customer mandatory fields already supplied (e.g. from field visit)
+        await executeAction('LOG_NEW_CUSTOMER', custDraft, senderPhone);
+
+        originalDraft.company_name = custDraft.company_name;
+        const parentMissing = validateMandatoryFields(originalAction, originalDraft);
+
+        if (parentMissing.length === 0) {
+          const summary = buildConfirmationSummary(originalAction, originalDraft);
+          const resumeMsg = `✅ *New Customer "${custDraft.company_name}" Created!*\n\n` +
+            `Now continuing with your ${getActionFriendlyName(originalAction)}:\n\n${summary}`;
+          await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
+            action_type: originalAction,
+            customer_name: originalDraft.company_name,
+          });
+          await saveActiveSession(senderPhone, originalDraft.company_name || 'Customer', `catalog_confirm|${originalAction}|${JSON.stringify(originalDraft)}`);
+          return { handled: true, reply: resumeMsg };
+        } else {
+          const parentMissingList = parentMissing.map(m => `• *${m}*`).join('\n');
+          const resumeMsg = `✅ *New Customer "${custDraft.company_name}" Created!*\n\n` +
+            `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${parentMissingList}`;
+          await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
+            action_type: originalAction,
+            customer_name: originalDraft.company_name,
+          });
+          await saveActiveSession(senderPhone, originalDraft.company_name || 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+          return { handled: true, reply: resumeMsg };
+        }
+      } else {
+        const missingList = custMissing.map(m => `• *${m}*`).join('\n');
+        const askCustMsg = `👤 *New Customer Acquisition — ${unrecognizedName}*\n\n` +
+          `Please provide the required customer details before we continue with your ${getActionFriendlyName(originalAction)}:\n\n` +
+          `${missingList}\n\n` +
+          `_(e.g. "Contact Person: Rajesh Sharma, Mobile: 9820123456, Delivery Location: Bhosari Pune")_`;
+
+        await recordSessionMessage(senderPhone, 'assistant', askCustMsg, {
+          action_type: 'LOG_NEW_CUSTOMER',
+          customer_name: unrecognizedName,
+        });
+        await saveActiveSession(senderPhone, unrecognizedName, `catalog_implicit_cust_collect|${originalAction}|${JSON.stringify(custDraft)}`);
+        return { handled: true, reply: askCustMsg };
+      }
+    }
+
+    // User confirmed NO (Not a new customer -> re-enter correct name)
+    if (
+      cleanInput === 'no' ||
+      cleanInput === 'n' ||
+      cleanInput === 'nahi' ||
+      cleanInput === 'wrong' ||
+      cleanInput === 'galat' ||
+      cleanInput === 'cancel'
+    ) {
+      originalDraft.company_name = null;
+      const assignedList = await getAssignedCustomersList(senderPhone);
+      const listDisplay = assignedList && assignedList.length > 0
+        ? `\n\n*Your Assigned Accounts:*\n` + assignedList.slice(0, 10).map((c, i) => `  ${i + 1}. *${c.customer_name}*`).join('\n')
+        : '';
+
+      const reEnterPrompt = `Understood! 👍 Please reply with the correct *Company Name* so we can proceed with your ${getActionFriendlyName(originalAction)}.${listDisplay}\n\n` +
+        `_(Your other entered details have been preserved)_`;
+
+      await recordSessionMessage(senderPhone, 'assistant', reEnterPrompt, {
+        action_type: originalAction,
+      });
+      await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+      return { handled: true, reply: reEnterPrompt };
+    }
+
+    // If user directly typed the correct company name
+    const recheckedName = await verifyAndGetCustomerName(text, senderPhone);
+    if (recheckedName) {
+      originalDraft.company_name = recheckedName;
+      const parentMissing = validateMandatoryFields(originalAction, originalDraft);
+      if (parentMissing.length === 0) {
+        const summary = buildConfirmationSummary(originalAction, originalDraft);
+        await recordSessionMessage(senderPhone, 'assistant', summary, {
+          action_type: originalAction,
+          customer_name: originalDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, originalDraft.company_name, `catalog_confirm|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return { handled: true, reply: summary };
+      } else {
+        const missingList = parentMissing.map(m => `• *${m}*`).join('\n');
+        const askMissing = `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
+        await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+          action_type: originalAction,
+          customer_name: originalDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, originalDraft.company_name, `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return { handled: true, reply: askMissing };
+      }
+    }
+
+    const retryPrompt = `Please reply *Yes* to onboard *${unrecognizedName}* as a new customer, or *No* to re-enter the company name.`;
+    await recordSessionMessage(senderPhone, 'assistant', retryPrompt);
+    return { handled: true, reply: retryPrompt };
+  }
+
+  // ── 3b. HANDLE IMPLICIT CUSTOMER DETAILS COLLECTION (catalog_implicit_cust_collect|...) ──
+  if (lastIntent.startsWith('catalog_implicit_cust_collect|')) {
+    const parts = lastIntent.split('|');
+    const originalAction = parts[1];
+    const custDraftJsonStr = parts.slice(2).join('|');
+    const custDraft = safeParseJSON(custDraftJsonStr, {});
+
+    if (isOperationalQuery(text)) {
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return { handled: false };
+    }
+
+    await recordSessionMessage(senderPhone, 'user', text);
+
+    if (/^(?:cancel|stop|discard|exit|quit)$/i.test(text)) {
+      const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
+      await recordSessionMessage(senderPhone, 'assistant', cancelReply);
+      await finalizeCurrentSession(senderPhone, `Discarded customer onboarding flow`);
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return { handled: true, reply: cancelReply };
+    }
+
+    const updatedCustDraft = await extractFieldsWithLLM('LOG_NEW_CUSTOMER', text, custDraft);
+    const custMissing = validateMandatoryFields('LOG_NEW_CUSTOMER', updatedCustDraft);
+
+    if (custMissing.length === 0) {
+      await executeAction('LOG_NEW_CUSTOMER', updatedCustDraft, senderPhone);
+
+      const originalDraft = updatedCustDraft._parentDraft || {};
+      originalDraft.company_name = updatedCustDraft.company_name;
+      const parentMissing = validateMandatoryFields(originalAction, originalDraft);
+
+      if (parentMissing.length === 0) {
+        const summary = buildConfirmationSummary(originalAction, originalDraft);
+        const resumeMsg = `✅ *New Customer "${updatedCustDraft.company_name}" Successfully Created!*\n\n` +
+          `Now continuing with your ${getActionFriendlyName(originalAction)}:\n\n${summary}`;
+        await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
+          action_type: originalAction,
+          customer_name: originalDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, originalDraft.company_name || 'Customer', `catalog_confirm|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return { handled: true, reply: resumeMsg };
+      } else {
+        const parentMissingList = parentMissing.map(m => `• *${m}*`).join('\n');
+        const resumeMsg = `✅ *New Customer "${updatedCustDraft.company_name}" Successfully Created!*\n\n` +
+          `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${parentMissingList}`;
+        await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
+          action_type: originalAction,
+          customer_name: originalDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, originalDraft.company_name || 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return { handled: true, reply: resumeMsg };
+      }
+    } else {
+      const missingList = custMissing.map(m => `• *${m}*`).join('\n');
+      const askRemaining = `Please provide the remaining customer details for *${updatedCustDraft.company_name}*:\n\n${missingList}`;
+      await recordSessionMessage(senderPhone, 'assistant', askRemaining, {
+        action_type: 'LOG_NEW_CUSTOMER',
+        customer_name: updatedCustDraft.company_name,
+      });
+      await saveActiveSession(senderPhone, updatedCustDraft.company_name, `catalog_implicit_cust_collect|${originalAction}|${JSON.stringify(updatedCustDraft)}`);
+      return { handled: true, reply: askRemaining };
+    }
+  }
+
+  // ── 3c. HANDLE CONFIRMATION STATE (catalog_confirm|...) ──────────────────────
   if (lastIntent.startsWith('catalog_confirm|')) {
     const parts = lastIntent.split('|');
     const action = parts[1];
@@ -2087,10 +2448,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
       // Verify customer before final execution
       const custCheck = await verifyDraftCustomer(action, draft, senderPhone);
       if (!custCheck.isValid) {
-        draft.company_name = null;
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
-        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
-        return { handled: true, reply: custCheck.rejectionMessage };
+        if (custCheck.isUnrecognizedCustomer) {
+          await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+          await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(draft)}`);
+          return { handled: true, reply: custCheck.prompt };
+        } else {
+          draft.company_name = null;
+          await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
+          await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
+          return { handled: true, reply: custCheck.rejectionMessage };
+        }
       }
 
       const reply = await executeAction(action, draft, senderPhone);
@@ -2189,10 +2556,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const updatedDraft = await extractFieldsWithLLM(action, text, draft);
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
-      updatedDraft.company_name = null;
-      await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
-      await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
-      return { handled: true, reply: custCheck.rejectionMessage };
+      if (custCheck.isUnrecognizedCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: custCheck.prompt };
+      } else {
+        updatedDraft.company_name = null;
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: custCheck.rejectionMessage };
+      }
     }
 
     const missing = validateMandatoryFields(action, updatedDraft);
@@ -2230,10 +2603,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const updatedDraft = await extractFieldsWithLLM(action, text, draft);
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
-      updatedDraft.company_name = null;
-      await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
-      await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
-      return { handled: true, reply: custCheck.rejectionMessage };
+      if (custCheck.isUnrecognizedCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: custCheck.prompt };
+      } else {
+        updatedDraft.company_name = null;
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: custCheck.rejectionMessage };
+      }
     }
 
     const missing = validateMandatoryFields(action, updatedDraft);
@@ -2312,10 +2691,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const updatedDraft = await extractFieldsWithLLM(action, text, existingDraft);
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
-      updatedDraft.company_name = null;
-      await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
-      await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
-      return { handled: true, reply: custCheck.rejectionMessage };
+      if (custCheck.isUnrecognizedCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: custCheck.prompt };
+      } else {
+        updatedDraft.company_name = null;
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: custCheck.rejectionMessage };
+      }
     }
 
     const missing = validateMandatoryFields(action, updatedDraft);
@@ -2347,7 +2732,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
   }
 
-  // ── 6. DIRECT ACTION ROUTING (Menu Selection 1-9 or Action Keywords) ────────
+  // ── 6. DIRECT ACTION ROUTING (Menu Selection 1-10 or Action Keywords) ────────
   const matchedAction = matchActionFromInput(text);
   if (matchedAction) {
     await recordSessionMessage(senderPhone, 'user', text);
@@ -2369,8 +2754,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
   }
 
-  // ── 7. NATURAL OPERATIONAL ACTION DETECTION (Visits, Inquiries, Orders, Complaints) ─────────
+  // ── 7. NATURAL OPERATIONAL ACTION DETECTION (Visits, Inquiries, Orders, Complaints, Customers) ──
   const directActionMap = [
+    // Customer Acquisition
+    { pattern: /\b(?:log|record|add|create|onboard|acquire)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?customer\b/i, action: 'LOG_NEW_CUSTOMER' },
+    { pattern: /\b(?:new\s+customer\s+acquisition|customer\s+acquisition|new\s+customer\s+onboarding|new\s+customer)\b/i, action: 'LOG_NEW_CUSTOMER' },
+
     // Complaints
     { pattern: /\b(?:log|record|raise|report|create|add)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?complaint\b/i, action: 'LOG_COMPLAINT' },
     { pattern: /\b(?:update|resolve|change|modify|close|reopen|set|mark)\s+(?:the\s+|a\s+)?(?:customer\s+)?complaint\b/i, action: 'UPDATE_COMPLAINT' },
@@ -2407,10 +2796,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const extracted = await extractFieldsWithLLM(detectedAction, text, {});
     const custCheck = await verifyDraftCustomer(detectedAction, extracted, senderPhone);
     if (!custCheck.isValid) {
-      extracted.company_name = null;
-      await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: detectedAction });
-      await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(extracted)}`);
-      return { handled: true, reply: custCheck.rejectionMessage };
+      if (custCheck.isUnrecognizedCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: detectedAction });
+        await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${detectedAction}|${custCheck.unverifiedName}|${JSON.stringify(extracted)}`);
+        return { handled: true, reply: custCheck.prompt };
+      } else {
+        extracted.company_name = null;
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: detectedAction });
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(extracted)}`);
+        return { handled: true, reply: custCheck.rejectionMessage };
+      }
     }
 
     const hasCompany = Boolean(extracted.company_name || (Array.isArray(extracted.entries) && extracted.entries.some(e => e.company_name)));

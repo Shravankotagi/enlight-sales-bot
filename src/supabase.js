@@ -1296,4 +1296,5 @@ module.exports = {
   getActiveSession,
   getFullActiveSession,
   updateCustomerProfileRecord,
+  normalizeCoreCompanyName,
 };

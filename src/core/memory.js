@@ -391,7 +391,7 @@ async function getCustomerFactSheet(customerName, senderPhone) {
 /**
  * Assembles the full Multi-Tier context prompt for LLM execution.
  */
-async function getActiveContextPrompt(senderPhone, isOption9 = false) {
+async function getActiveContextPrompt(senderPhone, isOption10 = false) {
   if (!senderPhone) return '';
   const variants = getCanonicalPhoneVariants(senderPhone);
 
@@ -412,9 +412,9 @@ async function getActiveContextPrompt(senderPhone, isOption9 = false) {
       historySection = '\n\n## ROLLING CONVERSATION HISTORY (Last ' + crossCtx.messages.length + ' Messages across all agents):\n' + crossCtx.formattedHistory;
     }
 
-    // Historical sessions block - ONLY injected on Option 9 / General Query
+    // Historical sessions block - ONLY injected on Option 10 / General Query
     let historicalSessionsSection = '';
-    if (isOption9) {
+    if (isOption10) {
       try {
         const { formatHistoricalSessionsForLLM } = require('./sessionManager');
         const histText = await formatHistoricalSessionsForLLM(senderPhone);
