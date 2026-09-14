@@ -577,6 +577,110 @@ function getDealTonnage(deal) {
   return convertLineItemToMt(deal);
 }
 
+/**
+ * Normalizes any deal stage, inquiry status, or user phrasing into standard business stages:
+ * - 'quoted' (Price Quote / Quoted / Qualified / Proposal / Saved / Confirmed / Sent to Party)
+ * - 'negotiation' (Negotiation / Review / In Negotiation / Under Negotiation / Discussion)
+ * - 'on_hold' (On Hold / Hold / Paused / Blocked)
+ * - 'new_inquiry' (New Inquiry / New / Inquiry / Draft / Unquoted / Pending / Auto Created / Received)
+ * - 'won' (Won / Order / Order Placed / Order Confirmed / PO Received / Converted)
+ * - 'lost' (Lost / Dropped / Cancelled / Canceled / Rejected / Closed Lost)
+ */
+function normalizeDealStage(rawStage) {
+  if (!rawStage) return 'new_inquiry';
+  const s = String(rawStage).toLowerCase().trim().replace(/[-_]+/g, ' ');
+
+  // Quoted / Price Quote / Qualified / Proposal / Saved / Confirmed
+  if (
+    s === 'quoted' ||
+    s === 'price quote' ||
+    s === 'pricequote' ||
+    s === 'quotation' ||
+    s === 'quotation sent' ||
+    s === 'quotated' ||
+    s === 'proposal' ||
+    s === 'proposal price quote' ||
+    s === 'qualified' ||
+    s === 'saved' ||
+    s === 'confirmed' ||
+    s === 'sent to party'
+  ) {
+    return 'quoted';
+  }
+
+  // Negotiation / Review
+  if (
+    s === 'negotiation' ||
+    s === 'negotaiation' ||
+    s === 'negotiate' ||
+    s === 'negotiating' ||
+    s === 'in negotiation' ||
+    s === 'under negotiation' ||
+    s === 'discussion' ||
+    s === 'review' ||
+    s === 'negotiation review'
+  ) {
+    return 'negotiation';
+  }
+
+  // On Hold
+  if (
+    s === 'on hold' ||
+    s === 'onhold' ||
+    s === 'hold' ||
+    s === 'paused' ||
+    s === 'blocked' ||
+    s === 'put on hold' ||
+    s === 'is on hold'
+  ) {
+    return 'on_hold';
+  }
+
+  // New Inquiry / Draft / Unquoted / Pending / Auto Created / Received
+  if (
+    s === 'new inquiry' ||
+    s === 'new' ||
+    s === 'inquiry' ||
+    s === 'pending' ||
+    s === 'auto created' ||
+    s === 'received' ||
+    s === 'draft' ||
+    s === 'unquoted'
+  ) {
+    return 'new_inquiry';
+  }
+
+  // Won / Order Placed / Confirmed / Converted / Closed Won / PO
+  if (
+    s === 'won' ||
+    s === 'order' ||
+    s === 'orders' ||
+    s === 'order placed' ||
+    s === 'order confirmed' ||
+    s === 'po received' ||
+    s === 'po' ||
+    s === 'converted' ||
+    s === 'closed won'
+  ) {
+    return 'won';
+  }
+
+  // Lost / Cancelled / Dropped / Rejected / Closed Lost / Not Converted
+  if (
+    s === 'lost' ||
+    s === 'dropped' ||
+    s === 'cancelled' ||
+    s === 'canceled' ||
+    s === 'rejected' ||
+    s === 'closed lost' ||
+    s === 'not converted'
+  ) {
+    return 'lost';
+  }
+
+  return s.replace(/\s+/g, '_');
+}
+
 // ─── 1. GET_INQUIRIES TOOL ──────────────────────────────────────────────────
 
 const inquiriesGlobalCache = new Map();
@@ -759,8 +863,10 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
       customer_name: custName,
       customer_phone: row.sender_phone || linkedDeal?.customer_phone || '',
       inquiry_type: row.inquiry_type || 'standard',
-      status: row.status || 'review',
-      deal_stage: linkedDeal?.stage || 'no_deal_linked',
+      status: normalizeDealStage(row.status) || 'new_inquiry',
+      deal_stage: normalizeDealStage(linkedDeal?.stage) || 'no_deal_linked',
+      raw_status: row.status || 'review',
+      raw_deal_stage: linkedDeal?.stage || 'no_deal_linked',
       po_number: linkedDeal?.po_number || null,
       total_amount_inr: Number(linkedDeal?.total_amount || 0),
       estimated_tonnage_mt: Math.round(estTonnage * 1000) / 1000,
@@ -1079,14 +1185,25 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     filtered = filtered.filter((m) => m.customer_name.toLowerCase().includes(searchName));
   }
   if (rawStatus && rawStatus !== 'all') {
-    if (rawStatus === 'won' || rawStatus === 'converted' || rawStatus === 'orders') {
-      filtered = filtered.filter((m) => m.deal_stage === 'won' || m.status === 'won');
-    } else if (rawStatus === 'lost' || rawStatus === 'not_converted') {
-      filtered = filtered.filter((m) => m.deal_stage === 'lost' || m.status === 'lost');
-    } else if (rawStatus === 'pending' || rawStatus === 'review') {
-      filtered = filtered.filter((m) => m.status === 'review' || m.status === 'pending' || m.status === 'new' || m.status === 'draft');
+    const normStatus = normalizeDealStage(rawStatus);
+    if (normStatus === 'won' || rawStatus === 'converted' || rawStatus === 'orders') {
+      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'won' || normalizeDealStage(m.status) === 'won' || Boolean(m.po_number));
+    } else if (normStatus === 'lost' || rawStatus === 'not_converted') {
+      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'lost' || normalizeDealStage(m.status) === 'lost');
+    } else if (normStatus === 'on_hold') {
+      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'on_hold' || normalizeDealStage(m.status) === 'on_hold');
+    } else if (normStatus === 'negotiation') {
+      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'negotiation' || normalizeDealStage(m.status) === 'negotiation');
+    } else if (normStatus === 'quoted') {
+      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'quoted' || normalizeDealStage(m.status) === 'quoted');
+    } else if (normStatus === 'new_inquiry' || rawStatus === 'pending' || rawStatus === 'review') {
+      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'new_inquiry' || normalizeDealStage(m.status) === 'new_inquiry' || m.status === 'review' || m.status === 'pending' || m.status === 'new' || m.status === 'draft');
     } else {
-      filtered = filtered.filter((m) => m.status.toLowerCase() === rawStatus || m.deal_stage.toLowerCase() === rawStatus);
+      filtered = filtered.filter((m) => {
+        const ds = normalizeDealStage(m.deal_stage);
+        const st = normalizeDealStage(m.status);
+        return ds === normStatus || st === normStatus || m.status?.toLowerCase() === rawStatus || m.deal_stage?.toLowerCase() === rawStatus;
+      });
     }
   }
   if (sourceTypeFilter === 'ocr_document' || sourceTypeFilter === 'document') {
@@ -2119,6 +2236,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
 
   const materialized = (rows || []).map((d) => {
     const shortId = `#INQ-${(d.id || d.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    const normStage = normalizeDealStage(d.stage);
     return {
       inquiry_id: shortId,
       deal_id: shortId,
@@ -2126,7 +2244,8 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
       inquiry_uuid: d.inquiry_id || null,
       customer_name: d.customer_name || 'Unnamed Customer',
       customer_phone: d.customer_phone || '',
-      stage: d.stage || 'new_inquiry',
+      stage: normStage,
+      raw_stage: d.stage || 'new_inquiry',
       po_number: d.po_number || null,
       total_amount_inr: Number(d.total_amount || 0),
       tonnage_mt: getDealTonnage(d),
@@ -2158,6 +2277,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
       if (globalPoDeals && globalPoDeals.length > 0) {
         filtered = globalPoDeals.map((d) => {
           const shortId = `#INQ-${(d.id || d.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+          const normStage = normalizeDealStage(d.stage);
           return {
             inquiry_id: shortId,
             deal_id: shortId,
@@ -2165,7 +2285,8 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
             inquiry_uuid: d.inquiry_id || null,
             customer_name: d.customer_name || 'Unnamed Customer',
             customer_phone: d.customer_phone || '',
-            stage: d.stage || 'new_inquiry',
+            stage: normStage,
+            raw_stage: d.stage || 'new_inquiry',
             po_number: d.po_number || null,
             total_amount_inr: Number(d.total_amount || 0),
             tonnage_mt: getDealTonnage(d),
@@ -2180,10 +2301,27 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   }
   if (locFilter) filtered = filtered.filter((d) => (d.delivery_location || '').toLowerCase().includes(locFilter));
   if (stageFilter && stageFilter !== 'all') {
-    if (stageFilter === 'won' || stageFilter === 'orders') filtered = filtered.filter((d) => d.stage === 'won' || Boolean(d.po_number));
-    else if (stageFilter === 'lost') filtered = filtered.filter((d) => d.stage === 'lost');
-    else if (stageFilter === 'open') filtered = filtered.filter((d) => d.stage !== 'won' && d.stage !== 'lost' && !d.po_number);
-    else filtered = filtered.filter((d) => d.stage.toLowerCase() === stageFilter);
+    const normFilter = normalizeDealStage(stageFilter);
+    if (normFilter === 'won' || stageFilter === 'orders') {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === 'won' || Boolean(d.po_number));
+    } else if (normFilter === 'lost') {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === 'lost');
+    } else if (stageFilter === 'open' || normFilter === 'open') {
+      filtered = filtered.filter((d) => {
+        const s = normalizeDealStage(d.stage);
+        return s !== 'won' && s !== 'lost' && !d.po_number;
+      });
+    } else if (normFilter === 'on_hold') {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === 'on_hold' || d.raw_stage === 'hold' || d.raw_stage === 'on_hold');
+    } else if (normFilter === 'negotiation') {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === 'negotiation');
+    } else if (normFilter === 'quoted') {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === 'quoted');
+    } else if (normFilter === 'new_inquiry') {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === 'new_inquiry');
+    } else {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === normFilter || (d.raw_stage && d.raw_stage.toLowerCase() === stageFilter));
+    }
   }
 
   const mode = (args?.mode || '').toLowerCase().trim();
@@ -2397,7 +2535,24 @@ async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supab
     if (orParts.length > 0) query = query.or(orParts.join(','));
   }
 
-  if (args?.stage_filter) query = query.eq('stage', args.stage_filter);
+  if (args?.stage_filter) {
+    const norm = normalizeDealStage(args.stage_filter);
+    if (norm === 'quoted') {
+      query = query.in('stage', ['quoted', 'qualified', 'proposal', 'price quote', 'saved', 'confirmed', 'quotation_sent']);
+    } else if (norm === 'negotiation') {
+      query = query.in('stage', ['negotiation', 'review', 'in_negotiation', 'discussion']);
+    } else if (norm === 'on_hold') {
+      query = query.in('stage', ['on_hold', 'hold', 'paused']);
+    } else if (norm === 'new_inquiry') {
+      query = query.in('stage', ['new_inquiry', 'new', 'inquiry', 'review', 'pending', 'auto_created']);
+    } else if (norm === 'won') {
+      query = query.in('stage', ['won', 'order', 'order_placed', 'order_confirmed']);
+    } else if (norm === 'lost') {
+      query = query.in('stage', ['lost', 'dropped', 'cancelled', 'rejected']);
+    } else {
+      query = query.eq('stage', args.stage_filter);
+    }
+  }
 
   const { data: deals, error } = await query.order('created_at', { ascending: false });
   if (error) throw new Error(`get_team_pipeline error: ${error.message}`);
@@ -2407,7 +2562,7 @@ async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supab
   const stageStats = {};
 
   rows.forEach((d) => {
-    const st = d.stage || 'unknown';
+    const st = normalizeDealStage(d.stage);
     const val = Number(d.total_amount || 0);
     grandTotal += val;
     if (!stageStats[st]) stageStats[st] = { count: 0, total_value: 0 };
@@ -2424,7 +2579,8 @@ async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supab
       customer_name: d.customer_name,
       customer_phone: d.customer_phone,
       total_amount: Number(d.total_amount || 0),
-      stage: d.stage,
+      stage: normalizeDealStage(d.stage),
+      raw_stage: d.stage,
       status: d.status,
       po_number: d.po_number,
       created_at: d.created_at,
@@ -2693,6 +2849,7 @@ module.exports = {
   parseVisitRemarks,
   categorizeProductFamily,
   deriveCustomerSegment,
+  normalizeDealStage,
   executeGetInquiries,
   executeGetVisits,
   executeGetComplaints,

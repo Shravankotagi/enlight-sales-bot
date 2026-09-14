@@ -2856,7 +2856,8 @@ async function extractOrderFilters(text) {
     lower.includes('won orders') ||
     lower.includes('won deals') ||
     lower.includes('completed orders') ||
-    lower.includes('completed deals')
+    lower.includes('completed deals') ||
+    /\b(won|order confirmed|po received)\b/i.test(lower)
   ) {
     filters.stage = 'won';
   } else if (
@@ -2864,12 +2865,32 @@ async function extractOrderFilters(text) {
     lower.includes('stage lost') ||
     lower.includes('lost orders') ||
     lower.includes('lost deals') ||
-    lower.includes('rejected')
+    lower.includes('rejected') ||
+    /\b(lost|dropped|cancelled|canceled)\b/i.test(lower)
   ) {
     filters.stage = 'lost';
-  } else if (lower.includes('negotiation')) {
+  } else if (
+    lower.includes('on hold') ||
+    lower.includes('on_hold') ||
+    lower.includes('hold') ||
+    lower.includes('paused')
+  ) {
+    filters.stage = 'on_hold';
+  } else if (
+    lower.includes('negotiation') ||
+    lower.includes('negotaiation') ||
+    lower.includes('negotiating') ||
+    lower.includes('in negotiation') ||
+    lower.includes('under negotiation')
+  ) {
     filters.stage = 'negotiation';
-  } else if (lower.includes('quoted')) {
+  } else if (
+    lower.includes('quoted') ||
+    lower.includes('price quote') ||
+    lower.includes('quotation') ||
+    lower.includes('proposal') ||
+    lower.includes('qualified')
+  ) {
     filters.stage = 'quoted';
   } else if (lower.includes('review')) {
     filters.stage = 'review';
@@ -2914,7 +2935,7 @@ Return ONLY a JSON object (no markdown, no backticks, no prose):
   "delivery_location": "<city or destination if specified e.g. 'Mumbai', 'Pune', 'Chakan', else null>",
   "customer_name": "<company or customer name if specified e.g. 'Dynamic Industries', 'Patel Construction', else null>",
   "product": "<material, grade, SKU, or dimension if specified e.g. 'HR coil', 'MS plate', 'CR sheet', '8mm', else null>",
-  "stage": "<'won'|'lost'|'negotiation'|'quoted'|'review'|'new_inquiry'|'pending'|null>",
+  "stage": "<'won'|'lost'|'negotiation'|'quoted'|'on_hold'|'review'|'new_inquiry'|'pending'|null>",
   "min_amount": <numeric minimum rupee amount if specified e.g. 1000000, else null>,
   "max_amount": <numeric maximum rupee amount if specified, else null>,
   "min_quantity": <numeric minimum MT tonnage if specified, else null>,
@@ -2986,15 +3007,20 @@ async function getFilteredOrders(scopeOrPhone, text = '') {
 
     // Stage filter at DB level if applicable
     if (filters.stage === 'won') {
-      query = query.eq('stage', 'won');
+      query = query.in('stage', ['won', 'order', 'order_placed', 'order_confirmed']);
     } else if (filters.stage === 'lost') {
-      query = query.eq('stage', 'lost');
+      query = query.in('stage', ['lost', 'dropped', 'cancelled', 'rejected']);
     } else if (filters.stage === 'pending') {
       query = query.not('stage', 'in', '("won","lost")');
-    } else if (
-      filters.stage &&
-      ['negotiation', 'quoted', 'review', 'new_inquiry'].includes(filters.stage)
-    ) {
+    } else if (filters.stage === 'on_hold') {
+      query = query.in('stage', ['on_hold', 'hold', 'paused']);
+    } else if (filters.stage === 'quoted') {
+      query = query.in('stage', ['quoted', 'qualified', 'proposal', 'price quote', 'saved', 'confirmed', 'quotation_sent']);
+    } else if (filters.stage === 'negotiation') {
+      query = query.in('stage', ['negotiation', 'review', 'in_negotiation', 'discussion']);
+    } else if (filters.stage === 'new_inquiry') {
+      query = query.in('stage', ['new_inquiry', 'new', 'inquiry', 'review', 'pending', 'auto_created']);
+    } else if (filters.stage) {
       query = query.eq('stage', filters.stage);
     }
 
