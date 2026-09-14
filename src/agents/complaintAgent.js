@@ -33,9 +33,9 @@ Extract into ONLY a JSON object (no prose, no markdown, no backticks):
       "action": "report|resolve",
       "customer_name": "<customer/company name, else null>",
       "deal_id": "<inquiry ID e.g. 'INQ-C538B6', 'DEAL-C538B6' or UUID if mentioned in text, else null>",
-      "po_number": "<PO number e.g. 'PO-2026-001' or 'DEW/RFQ/2026/089' if mentioned, else null>",
+      "po_number": "<PO number e.g. '6712', 'PO-2026-001' or 'DEW/RFQ/2026/089' if mentioned, else null>",
       "complaint_type": "quality|delivery|quantity|billing|specification|other",
-      "affected_product": "<specific product/material affected e.g. 'HR Coil 12 MT', 'CR Sheet 1.20mm coils' - else null>",
+      "affected_product": "<specific product/material affected e.g. 'HR Coil 12 MT', 'CR Sheet 1.20mm coils', 'MS Angle Bars' - else null>",
       "description": "<detailed description of complaint or resolution notes for this specific customer/incident>",
       "is_confirmation": <true if the user is replying 'yes', 'confirm', 'haan', 'correct', 'right', 'sahi hai' to a previous deal confirmation question, else false>,
       "confidence": <float 0.0 to 1.0>
@@ -48,8 +48,9 @@ Rules:
 - "action": "resolve" -> issue settled, sorted, material replaced, customer accepted, resolved.
 - If multiple companies or separate complaint sentences exist, CREATE A SEPARATE ENTRY IN THE "complaints" ARRAY FOR EACH ONE!
 - "affected_product": Extract specific steel category, dimensions, or product form for that specific complaint.
-- "deal_id": Extract any #INQ-XXXXXX or #DEAL-XXXXXX mentioned.
-- "po_number": Extract any PO number (PO-XXXX, Purchase Order #) mentioned.
+- "deal_id": Extract any #INQ-XXXXXX or #DEAL-XXXXXX mentioned (do NOT put PO numbers here).
+- "po_number": Extract any PO number (PO #6712, PO-XXXX, Purchase Order #) mentioned (do NOT put Inquiry IDs here).
+- Status at creation is ALWAYS "open". Ignore any user-supplied initial status such as "Status: In Progress".
 
 Return ONLY the JSON object.
 `;
@@ -68,7 +69,7 @@ function normalizeComplaintType(typeStr) {
 }
 
 /**
- * Fetch won/active deals for a customer.
+ * Fetch won deals (orders) with PO for a customer.
  */
 async function getCustomerActiveDeals(customerName) {
   if (!customerName) return [];
@@ -77,6 +78,42 @@ async function getCustomerActiveDeals(customerName) {
     .select('id, stage, po_number, customer_name, total_amount, created_at')
     .ilike('customer_name', `%${customerName.trim()}%`)
     .eq('stage', 'won')
+    .order('created_at', { ascending: false })
+    .limit(6);
+
+  if (!deals || deals.length === 0) return [];
+
+  const dealIds = deals.map(d => d.id);
+  const { data: items } = await supabase
+    .from('deal_items')
+    .select('deal_id, sku_text, dimensions, quantity, unit')
+    .in('deal_id', dealIds);
+
+  const itemMap = new Map();
+  (items || []).forEach(it => {
+    const list = itemMap.get(it.deal_id) || [];
+    list.push(it);
+    itemMap.set(it.deal_id, list);
+  });
+
+  return deals.map(d => ({
+    ...d,
+    deal_code: `#INQ-${d.id.substring(0, 6).toUpperCase()}`,
+    items: itemMap.get(d.id) || [],
+  }));
+}
+
+/**
+ * Fetch active open inquiries (pre-won pipeline deals) for a customer.
+ */
+async function getCustomerOpenInquiries(customerName) {
+  if (!customerName) return [];
+  const { data: deals } = await supabase
+    .from('deals')
+    .select('id, stage, po_number, customer_name, total_amount, created_at')
+    .ilike('customer_name', `%${customerName.trim()}%`)
+    .neq('stage', 'won')
+    .neq('stage', 'lost')
     .order('created_at', { ascending: false })
     .limit(6);
 
@@ -303,7 +340,7 @@ async function processSingleComplaint(data, originalText, senderPhone) {
         if (!data.deal_id && draft.dealId) data.deal_id = draft.dealId;
         if (!data.po_number && draft.poNumber) data.po_number = draft.poNumber;
         if (!data.affected_product && draft.product) data.affected_product = draft.product;
-        if ((!data.description || data.description === originalText) && draft.description) data.description = draft.description;
+        if (draft.description) data.description = draft.description;
         if ((!data.complaint_type || data.complaint_type === 'other') && draft.complaintType) data.complaint_type = draft.complaintType;
         data.is_confirmation = true;
       }
@@ -516,64 +553,115 @@ async function processSingleComplaint(data, originalText, senderPhone) {
 
   // ── REPORT / CREATE FLOW ───────────────────────────────────────────
 
-  // Step 1: Check if Deal ID / PO is already identified or explicitly in text
-  let targetDealId = null;
-  let targetPoNumber = data.po_number || null;
-
-  const candidateDealCode = (data.deal_id || '').match(/#?(?:DEAL|INQ)-([A-F0-9_-]{4,36})/i)?.[1]
-    || originalText.match(/#?(?:DEAL|INQ)-([A-F0-9_-]{4,36})/i)?.[1]
-    || (data.deal_id ? data.deal_id.replace(/^#?(?:DEAL|INQ)-/i, '').trim() : null);
-
-  if (candidateDealCode) {
-    const { findDealByCodeOrId } = require('./salesAgent');
-    const matchedDeal = await findDealByCodeOrId(candidateDealCode, senderPhone);
-    if (matchedDeal) {
-      targetDealId = matchedDeal.id;
-      if (matchedDeal.po_number) targetPoNumber = matchedDeal.po_number;
-      if (!finalCustomerName && matchedDeal.customer_name) finalCustomerName = matchedDeal.customer_name;
-    } else {
-      targetDealId = candidateDealCode;
+  // Step 1: Identify reference type provided (PO Number vs Inquiry ID vs None)
+  let rawPoCandidate = null;
+  if (data.po_number && String(data.po_number).trim() && !/^(null|undefined|none|na|n\/a)$/i.test(String(data.po_number).trim())) {
+    rawPoCandidate = String(data.po_number).trim();
+  } else {
+    const poMatch = originalText.match(/\b(?:PO|Purchase\s*Order)\b[\s#:-]*([A-Z0-9\/-]+)/i);
+    if (poMatch && poMatch[1] && !/^(null|undefined|none|na|n\/a)$/i.test(poMatch[1].trim())) {
+      rawPoCandidate = poMatch[1].trim();
     }
   }
 
-  if (!targetPoNumber) {
-    const poMatch = originalText.match(/PO[-:\s]*([A-Z0-9\/-]+)/i);
-    if (poMatch) {
-      const poCandidate = poMatch[1].trim();
-      const { data: matchedDeals } = await supabase
-        .from('deals')
-        .select('id, po_number, customer_name')
-        .ilike('po_number', `%${poCandidate}%`)
-        .limit(1);
-      if (matchedDeals && matchedDeals.length > 0) {
-        targetPoNumber = matchedDeals[0].po_number;
-        if (!targetDealId) targetDealId = matchedDeals[0].id;
-        if (!finalCustomerName && matchedDeals[0].customer_name) finalCustomerName = matchedDeals[0].customer_name;
+  let cleanPo = null;
+  if (rawPoCandidate) {
+    cleanPo = rawPoCandidate
+      .replace(/^\b(?:PO|Purchase\s*Order)\b[\s#:-]*/i, '')
+      .replace(/^#+/, '')
+      .trim();
+    if (cleanPo.length < 2) cleanPo = null;
+  }
+
+  let rawInquiryCandidate = null;
+  const inqMatch = (data.deal_id || '').match(/#?(?:DEAL|INQ)-([A-F0-9_-]{4,36})/i)
+    || originalText.match(/#?(?:DEAL|INQ)-([A-F0-9_-]{4,36})/i)
+    || (data.deal_id && !/^(null|undefined|none|na|n\/a)$/i.test(String(data.deal_id).trim()) ? [null, String(data.deal_id).replace(/^#?(?:DEAL|INQ)-/i, '').trim()] : null);
+
+  if (inqMatch && inqMatch[1]) {
+    rawInquiryCandidate = inqMatch[1].trim().toUpperCase();
+  }
+
+  let targetDealId = null;
+  let targetPoNumber = null;
+
+  // Step 2: Enforce Hard Validation Gate (Non-Negotiable)
+
+  // Case A: PO Number explicitly provided -> Must exist in Orders records for this customer
+  if (cleanPo) {
+    const { data: customerDeals } = await supabase
+      .from('deals')
+      .select('id, inquiry_id, customer_name, po_number, stage, total_amount, created_at')
+      .ilike('customer_name', `%${finalCustomerName.trim()}%`);
+
+    const matchingDeal = (customerDeals || []).find(d => {
+      if (!d.po_number) return false;
+      const dPo = String(d.po_number).trim().toUpperCase();
+      const cPo = cleanPo.toUpperCase();
+      const dPoClean = dPo.replace(/^(?:PO|Purchase\s*Order)[\s#:-]*/i, '').replace(/^#+/, '');
+      return dPo === cPo || dPoClean === cPo || dPo.includes(cPo) || cPo.includes(dPoClean);
+    });
+
+    if (!matchingDeal) {
+      // Validation failed: Hard stop, do NOT create complaint
+      const displayPo = cleanPo.startsWith('PO') || cleanPo.startsWith('#') ? cleanPo : `#${cleanPo}`;
+      return `PO ${displayPo} was not found in the Orders records for ${finalCustomerName}. A complaint can only be raised against an existing PO or inquiry. Please verify the PO number and try again.`;
+    }
+
+    targetDealId = matchingDeal.id;
+    targetPoNumber = matchingDeal.po_number || cleanPo;
+  }
+  // Case B: Inquiry ID explicitly provided (and no PO provided) -> Must exist for this customer
+  else if (rawInquiryCandidate) {
+    const cleanInqCode = rawInquiryCandidate.replace(/^(?:DEAL|INQ)-/i, '').replace(/^#+/, '').trim().toUpperCase();
+
+    const { data: customerDeals } = await supabase
+      .from('deals')
+      .select('id, inquiry_id, customer_name, po_number, stage, total_amount, created_at')
+      .ilike('customer_name', `%${finalCustomerName.trim()}%`);
+
+    const matchingDeal = (customerDeals || []).find(d => {
+      const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+      const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+      return dId.startsWith(cleanInqCode) || inqId.startsWith(cleanInqCode) || (d.id || '').toUpperCase().startsWith(cleanInqCode);
+    });
+
+    if (matchingDeal) {
+      targetDealId = matchingDeal.id;
+      targetPoNumber = matchingDeal.po_number || null;
+    } else {
+      const { data: customerInqs } = await supabase
+        .from('inquiries')
+        .select('id, customer_name, sender_name, status, created_at')
+        .ilike('customer_name', `%${finalCustomerName.trim()}%`);
+
+      const matchingInq = (customerInqs || []).find(i => {
+        const iId = (i.id || '').replace(/-/g, '').toUpperCase();
+        return iId.startsWith(cleanInqCode) || (i.id || '').toUpperCase().startsWith(cleanInqCode);
+      });
+
+      if (matchingInq) {
+        targetDealId = matchingInq.id;
       }
     }
-  }
 
-  // If targetDealId is present but targetPoNumber is still missing, lookup deal's po_number
-  if (targetDealId && !targetPoNumber) {
-    const { findDealByCodeOrId } = require('./salesAgent');
-    const matchedDeal = await findDealByCodeOrId(targetDealId, senderPhone);
-    if (matchedDeal && matchedDeal.po_number) {
-      targetPoNumber = matchedDeal.po_number;
+    if (!targetDealId) {
+      // Validation failed: Hard stop, do NOT create complaint
+      const displayInq = cleanInqCode.startsWith('INQ-') ? cleanInqCode : `INQ-${cleanInqCode}`;
+      return `Inquiry #${displayInq} was not found for ${finalCustomerName}. A complaint can only be raised against an existing PO or inquiry. Please verify the inquiry ID and try again.`;
     }
   }
+  // Case C: Neither PO nor Inquiry ID was explicitly provided
+  else {
+    const activeWonDeals = await getCustomerActiveDeals(finalCustomerName);
 
-  // Step 2: If no Deal ID or PO provided, lookup customer's active won deals
-  if (!targetDealId && !targetPoNumber) {
-    const activeDeals = await getCustomerActiveDeals(finalCustomerName);
-
-    if (activeDeals.length === 1 && !data.is_confirmation) {
-      const d = activeDeals[0];
+    if (activeWonDeals.length === 1 && !data.is_confirmation) {
+      const d = activeWonDeals[0];
       const itemSummary = d.items.length > 0
         ? d.items.map(it => `${it.sku_text} ${it.dimensions || ''} ${it.quantity ? `${it.quantity} ${it.unit || 'MT'}` : ''}`.trim()).join(', ')
         : (affectedProduct || 'Steel Material');
 
       const poDisplay = d.po_number ? `PO: *${d.po_number}* (${d.deal_code})` : `*${d.deal_code}*`;
-
       const resolvedDraftProd = affectedProduct || itemSummary;
       const draftPayload = JSON.stringify({
         customer_name: finalCustomerName,
@@ -592,9 +680,8 @@ async function processSingleComplaint(data, originalText, senderPhone) {
         `• ${poDisplay} — ${itemSummary}\n\n` +
         `Is this complaint for ${poDisplay}?\n` +
         `👉 Reply *"Yes"* to confirm, or provide the PO Number / Inquiry ID.`;
-    } else if (activeDeals.length > 1 && !data.is_confirmation) {
-      // Multiple active won deals -> List with PO primary
-      const dealListFormatted = activeDeals.map((d, idx) => {
+    } else if (activeWonDeals.length > 1 && !data.is_confirmation) {
+      const dealListFormatted = activeWonDeals.map((d, idx) => {
         const itemSummary = d.items.length > 0
           ? d.items.map(it => `${it.sku_text} ${it.dimensions || ''} ${it.quantity ? `${it.quantity}${it.unit || 'MT'}` : ''}`.trim()).join(', ')
           : 'Steel Material';
@@ -604,8 +691,7 @@ async function processSingleComplaint(data, originalText, senderPhone) {
         return `${idx + 1}. *${d.deal_code}* — ${itemSummary}`;
       }).join('\n');
 
-      const samplePo = activeDeals[0].po_number || activeDeals[0].deal_code;
-
+      const samplePo = activeWonDeals[0].po_number || activeWonDeals[0].deal_code;
       const draftPayload = JSON.stringify({
         customer_name: finalCustomerName,
         product: affectedProduct || null,
@@ -619,13 +705,67 @@ async function processSingleComplaint(data, originalText, senderPhone) {
         `Please specify which order or PO this complaint is about:\n\n` +
         `${dealListFormatted}\n\n` +
         `👉 Please reply with the *PO Number* (e.g. _"${samplePo}"_) or *Inquiry ID*.`;
-    } else if (activeDeals.length === 1 && data.is_confirmation) {
-      targetDealId = activeDeals[0].id;
-      targetPoNumber = activeDeals[0].po_number || null;
+    } else if (activeWonDeals.length === 1 && data.is_confirmation) {
+      targetDealId = activeWonDeals[0].id;
+      targetPoNumber = activeWonDeals[0].po_number || null;
+    } else if (activeWonDeals.length === 0) {
+      const openInquiries = await getCustomerOpenInquiries(finalCustomerName);
+
+      if (openInquiries.length === 1 && !data.is_confirmation) {
+        const inq = openInquiries[0];
+        const itemSummary = inq.items.length > 0
+          ? inq.items.map(it => `${it.sku_text} ${it.dimensions || ''} ${it.quantity ? `${it.quantity} ${it.unit || 'MT'}` : ''}`.trim()).join(', ')
+          : (affectedProduct || 'Steel Material');
+
+        const draftPayload = JSON.stringify({
+          customer_name: finalCustomerName,
+          dealId: inq.id,
+          poNumber: inq.po_number || null,
+          product: affectedProduct || itemSummary,
+          complaintType: complaintType,
+          description: cleanDescription,
+        });
+
+        await saveActiveSession(senderPhone, finalCustomerName, `complaint_confirm_deal|${draftPayload}`);
+
+        return `🔍 *Confirm Linked Inquiry for Complaint*\n\n` +
+          `Customer: *${finalCustomerName}*\n` +
+          `Found 1 open inquiry in pipeline:\n` +
+          `• *${inq.deal_code}* — ${itemSummary}\n\n` +
+          `Is this complaint for *${inq.deal_code}*?\n` +
+          `👉 Reply *"Yes"* to confirm, or provide the Inquiry ID.`;
+      } else if (openInquiries.length > 1 && !data.is_confirmation) {
+        const inqListFormatted = openInquiries.map((inq, idx) => {
+          const itemSummary = inq.items.length > 0
+            ? inq.items.map(it => `${it.sku_text} ${it.dimensions || ''} ${it.quantity ? `${it.quantity}${it.unit || 'MT'}` : ''}`.trim()).join(', ')
+            : 'Steel Material';
+          return `${idx + 1}. *${inq.deal_code}* (Stage: ${inq.stage}) — ${itemSummary}`;
+        }).join('\n');
+
+        const draftPayload = JSON.stringify({
+          customer_name: finalCustomerName,
+          product: affectedProduct || null,
+          complaintType: complaintType,
+          description: cleanDescription,
+        });
+
+        await saveActiveSession(senderPhone, finalCustomerName, `complaint_confirm_deal|${draftPayload}`);
+
+        return `⚠️ *Multiple Open Inquiries Found for ${finalCustomerName}*\n\n` +
+          `Please specify which inquiry this complaint is about:\n\n` +
+          `${inqListFormatted}\n\n` +
+          `👉 Please reply with the *Inquiry ID* (e.g. _"${openInquiries[0].deal_code}"_).`;
+      } else if (openInquiries.length === 1 && data.is_confirmation) {
+        targetDealId = openInquiries[0].id;
+        targetPoNumber = openInquiries[0].po_number || null;
+      } else {
+        return `⚠️ *No Orders or Inquiries Found for ${finalCustomerName}*\n\n` +
+          `A complaint can only be raised against an existing PO or inquiry. Please create an inquiry or order for ${finalCustomerName} first before logging a complaint.`;
+      }
     }
   }
 
-  // Step 3: Insert new complaint record
+  // Step 3: Insert new complaint record (Creation Status is strictly "open")
   const nowIso = new Date().toISOString();
   const reportedAt = new Date();
   const slaDueAt = new Date(reportedAt.getTime() + 48 * 60 * 60 * 1000); // 48h SLA
@@ -638,6 +778,11 @@ async function processSingleComplaint(data, originalText, senderPhone) {
     cleanDescription || originalText
   );
 
+  // Sanitize description to remove any custom status prefix
+  const sanitizedDescription = cleanDescription
+    .replace(/^status:\s*(?:in progress|pending|open|resolved|closed)[,\s]*/i, '')
+    .trim() || cleanDescription;
+
   const insertPayload = {
     customer_name: finalCustomerName,
     deal_id: targetDealId || null,
@@ -646,7 +791,7 @@ async function processSingleComplaint(data, originalText, senderPhone) {
     affected_product: finalProduct,
     reported_by: senderPhone,
     complaint_type: complaintType,
-    description: cleanDescription,
+    description: sanitizedDescription,
     status: 'open',
     created_at: nowIso,
     reported_at: nowIso,
@@ -702,14 +847,14 @@ async function processSingleComplaint(data, originalText, senderPhone) {
   const cleanCode = targetDealId ? (targetDealId.startsWith('DEAL-') || targetDealId.startsWith('INQ-') ? targetDealId.replace(/^(?:DEAL|INQ)-/, '') : targetDealId.substring(0, 6).toUpperCase()) : '';
   const orderRef = targetPoNumber
     ? `PO: *${targetPoNumber}* ${cleanCode ? `(#INQ-${cleanCode})` : ''}`
-    : cleanCode ? `#INQ-${cleanCode}` : 'Unlinked';
+    : cleanCode ? `Inquiry *#INQ-${cleanCode}*` : 'Unlinked';
 
   return `🚨 *Customer Complaint Logged*\n\n` +
     `Customer: *${finalCustomerName}*\n` +
-    `Linked Order: ${orderRef}\n` +
+    `Linked Ref: ${orderRef}\n` +
     `Product: *${finalProduct}*\n` +
     `Type: *${complaintType.toUpperCase()}*\n` +
-    `Details: ${cleanDescription}\n` +
+    `Details: ${sanitizedDescription}\n` +
     `Status: *Open ⏱️ (48-Hour SLA Clock Started)*\n` +
     `SLA Due: *${slaDueAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}*\n\n` +
     `Updated Customer Complaints Card! ✅\n\n` +
