@@ -695,7 +695,7 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   const sourceTypeFilter = (args?.source_type || '').toLowerCase().trim();
   const sortBy = (args?.sort_by || '').toLowerCase().trim();
   const limit = args?.recent_only ? 5 : Math.min(Math.max(Number(args?.limit) || 20, 1), 100);
-  const searchName = (args?.customer_name_search || '').trim().toLowerCase();
+  const searchName = (args?.customer_name_search || args?.customer_name || args?.company_name || '').trim().toLowerCase();
   const dateRange = args?.date_range;
   const mode = (args?.mode || 'list').toLowerCase().trim();
 
@@ -1258,7 +1258,8 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   const custFilter = (args?.customer_name_search || args?.customer_name || '').trim().toLowerCase();
   const repFilter = (args?.salesperson_name || '').trim().toLowerCase();
   const locFilter = (args?.location || '').trim().toLowerCase();
-  const outcomeFilter = (args?.outcome_filter || '').trim().toLowerCase();
+  const outcomeFilter = (args?.outcome_filter || args?.outcome || '').trim().toLowerCase();
+  const requiresFollowUp = args?.requires_follow_up !== undefined ? Boolean(args.requires_follow_up) : (args?.requires_followup !== undefined ? Boolean(args.requires_followup) : null);
   const dateRange = args?.date_range;
   const mode = (args?.mode || 'list').toLowerCase().trim();
   const missingLocation = Boolean(args?.missing_location || args?.missing_field === 'location');
@@ -1563,6 +1564,7 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   if (repFilter) filtered = filtered.filter((v) => v.salesperson_name.toLowerCase().includes(repFilter));
   if (locFilter) filtered = filtered.filter((v) => v.location.toLowerCase().includes(locFilter) || v.remarks.toLowerCase().includes(locFilter));
   if (outcomeFilter && outcomeFilter !== 'all') filtered = filtered.filter((v) => v.outcome === outcomeFilter);
+  if (requiresFollowUp !== null) filtered = filtered.filter((v) => v.requires_follow_up === requiresFollowUp);
 
   let pos = 0, neu = 0, neg = 0, fu = 0;
   filtered.forEach((v) => {
@@ -2182,10 +2184,10 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
 // ─── 5. GET_MY_OPEN_DEALS TOOL ──────────────────────────────────────────────
 
 async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supabase) {
-  const stageFilter = (args?.stage_filter || '').trim().toLowerCase();
-  const custName = (args?.customer_name || '').trim().toLowerCase();
-  const poFilter = (args?.po_number || '').trim().toLowerCase();
-  const locFilter = (args?.delivery_location || '').trim().toLowerCase();
+  const stageFilter = (args?.stage_filter || args?.status_filter || args?.stage || args?.status || '').trim().toLowerCase();
+  const custName = (args?.customer_name || args?.company_name || args?.customer || '').trim().toLowerCase();
+  const poFilter = (args?.po_number || args?.po || '').trim().toLowerCase();
+  const locFilter = (args?.delivery_location || args?.location || args?.city || '').trim().toLowerCase();
   const dateRange = args?.date_range;
   const limit = Math.min(Math.max(Number(args?.limit) || 20, 1), 100);
 
