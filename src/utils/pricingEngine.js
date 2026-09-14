@@ -164,13 +164,13 @@ function convertLineItemToMt(item) {
   }
 
   if (thickness && widthM && lengthM) {
-    const wtKgPerPc = lengthM * widthM * thickness * 7.85;
+    const wtKgPerPc = lengthM * widthM * thickness * 8;
     return (wtKgPerPc * qty) / 1000;
   }
 
   if (thickness) {
     // Default sheet size: 1.25m x 2.5m (1250 x 2500 mm)
-    const wtKgPerPc = 2.5 * 1.25 * thickness * 7.85;
+    const wtKgPerPc = 2.5 * 1.25 * thickness * 8;
     return (wtKgPerPc * qty) / 1000;
   }
 

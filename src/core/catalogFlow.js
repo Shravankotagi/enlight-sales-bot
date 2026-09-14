@@ -2195,17 +2195,21 @@ function isOperationalQuery(text) {
   if (!text || typeof text !== 'string') return false;
   const lower = text.toLowerCase().trim();
 
-  // If message begins with an action verb, it is NEVER a read query
-  if (/^(?:update|change|modify|set|mark|log|record|create|add|raise|report|new|submit|resolve)\b/i.test(lower)) {
+  // If message begins with an explicit write action verb, it is NOT a read query
+  if (/^(?:update|change|modify|set|mark|log|record|create|add|raise|new\b|submit|resolve)\b/i.test(lower)) {
     return false;
   }
 
-  // Common query patterns
-  if (/^(?:show|list|get|check|find|filter|tell me|what|which|how many|total|status of|view|search|is there|who has|compare|rankings|leaderboard)\b/i.test(lower)) {
+  // Common query patterns (Who, What, When, Where, Which, How, Show, List, Check, Find, Get, Tell me, etc.)
+  if (/^(?:show|list|get|check|find|filter|tell me|what|which|who|whom|whose|when|where|why|how|how many|how much|total|status|view|search|is there|are there|can you|give me|display|fetch|details? of|history of|info on|compare|rankings|leaderboard)\b/i.test(lower)) {
     return true;
   }
 
-  if (/\b(?:kya hai|batao|dikhao|dikhaye|kitne|kitna|kaun hai|kiska|list karo|check karo)\b/i.test(lower)) {
+  if (/\b(?:kya hai|batao|dikhao|dikhaye|kitne|kitna|kaun hai|kaun tha|kiska|kab hua|kahan|list karo|check karo|details batao)\b/i.test(lower)) {
+    return true;
+  }
+
+  if (/\b(?:who was|who is|who met|who did|person met|contact person|meeting with|whom did)\b/i.test(lower) && /\b(?:who|which|what|when|where|tell|show|check|find|get)\b/i.test(lower)) {
     return true;
   }
 
@@ -2214,6 +2218,10 @@ function isOperationalQuery(text) {
   }
 
   if (/\b(?:kya status hai|status check|status kya hai|status of)\b/i.test(lower)) {
+    return true;
+  }
+
+  if (lower.endsWith('?')) {
     return true;
   }
 
