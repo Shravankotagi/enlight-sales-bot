@@ -269,7 +269,7 @@ function createTools(senderPhone, rawUserText = '') {
       description: `Retrieves customer inquiries, raw WhatsApp messages, and resulting deal status. Supports direct inquiry ID lookups (#INQ-XXXXXX), channel breakdown (WhatsApp vs Dashboard), conversion breakdown, highest tonnage inquiry, salesperson conversion rankings, open inquiries from dormant buyers, month-over-month comparison, and monthly summary.`,
       schema: z.object({
         inquiry_id: z.string().optional().nullable().describe('Optional specific Inquiry ID or Deal ID (e.g. "#INQ-2C788F", "INQ-2C788F", or UUID) to fetch status and details for that exact inquiry.'),
-        status_filter: z.string().optional().nullable().describe('Optional filter by inquiry status or deal outcome: "all", "won" / "orders", "lost", "review", "pending", "quoted", "negotiation".'),
+        status_filter: z.string().optional().nullable().describe('Optional filter by inquiry status or deal outcome: "all", "won" / "orders", "lost", "review", "pending", "quoted" (includes price quote, proposal, qualified), "negotiation", "on_hold".'),
         source_channel: z.string().optional().nullable().describe('Optional filter by incoming channel: "all", "whatsapp", "dashboard", "whatsapp_text", "web_dashboard".'),
         source_type: z.string().optional().nullable().describe('Optional filter by inquiry format: "all", "ocr_document" (documents/PDFs/images), "text".'),
         date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
@@ -365,9 +365,9 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'get_my_open_deals',
-      description: `Retrieves deals and confirmed orders (negotiations, quotations, won orders, or lost deals). Can filter by stage (e.g. stage_filter="won" for orders), customer name, date range, PO number, or delivery location. Supports modes: "invalid_delivery_locations" (flag bad/incomplete addresses), "highest_tonnage", and total items/tonnage metrics.`,
+      description: `Retrieves deals and confirmed orders (negotiations, quotations, won orders, or lost deals). Can filter by stage (e.g. stage_filter="won" for orders, stage_filter="quoted", stage_filter="negotiation", stage_filter="on_hold"), customer name, date range, PO number, or delivery location. Supports modes: "invalid_delivery_locations" (flag bad/incomplete addresses), "highest_tonnage", and total items/tonnage metrics.`,
       schema: z.object({
-        stage_filter: z.string().optional().nullable().describe('Optional filter by deal stage: "all", "won" (orders), "quoted", "negotiation", "review", "lost".'),
+        stage_filter: z.string().optional().nullable().describe('Optional filter by deal stage: "all", "won" (orders), "quoted" (includes price quote, proposal, qualified), "negotiation", "on_hold", "review", "lost".'),
         customer_name: z.string().optional().nullable().describe('Optional customer name filter.'),
         po_number: z.string().optional().nullable().describe('Optional PO number filter.'),
         delivery_location: z.string().optional().nullable().describe('Optional delivery destination city.'),

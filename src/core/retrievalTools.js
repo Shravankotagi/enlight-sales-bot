@@ -398,7 +398,7 @@ function parseDateFilter(dateFilter) {
 // ─── Domain Parsing Utilities ───────────────────────────────────────────────
 
 function parseVisitRemarks(remarks) {
-  if (!remarks) {
+  if (!remarks || typeof remarks !== 'string') {
     return {
       outcome: null,
       follow_up_action: null,
@@ -416,48 +416,82 @@ function parseVisitRemarks(remarks) {
     const rawOut = outcomeMatch[1].toLowerCase().trim();
     if (rawOut === 'positive' || rawOut === 'negative' || rawOut === 'neutral') {
       outcome = rawOut;
+    } else if (rawOut.includes('positive') || rawOut.includes('interested') || rawOut.includes('won')) {
+      outcome = 'positive';
+    } else if (rawOut.includes('negative') || rawOut.includes('lost') || rawOut.includes('rejected')) {
+      outcome = 'negative';
+    } else {
+      outcome = 'neutral';
     }
   }
 
   let followUpAction = null;
-  const followUpMatch = remarks.match(/\[Follow-?Up:\s*([^\]]+)\]/i);
+  const followUpMatch =
+    remarks.match(/\[(?:Follow-?Up|Follow-?up\s*Action):\s*([^\]]+)\]/i) ||
+    remarks.match(/(?:^|\||\n)\s*Follow-?up(?:\s*Action)?:\s*([^|\]\n]+)/i);
+
   if (followUpMatch) {
     const fu = followUpMatch[1].trim();
-    if (fu && !fu.toLowerCase().startsWith('no remarks') && fu.toLowerCase() !== 'none') {
+    const lowerFu = fu.toLowerCase();
+    const isNonAction =
+      !fu ||
+      lowerFu === 'none' ||
+      lowerFu === '-' ||
+      lowerFu === 'nil' ||
+      lowerFu === 'n/a' ||
+      lowerFu === 'na' ||
+      lowerFu === 'null' ||
+      lowerFu.startsWith('no remarks') ||
+      lowerFu.startsWith('no follow') ||
+      lowerFu === 'not required' ||
+      lowerFu === 'not needed';
+
+    if (!isNonAction) {
       followUpAction = fu;
     }
   }
 
   let materialRequirement = null;
-  const matMatch = remarks.match(/\[(?:Material )?Requirements?:\s*([^\]]+)\]/i);
+  const matMatch =
+    remarks.match(/\[(?:Material )?Requirements?:\s*([^\]]+)\]/i) ||
+    remarks.match(/(?:^|\||\n)\s*(?:Material )?Requirement:\s*([^|\]\n]+)/i);
   if (matMatch) {
     materialRequirement = matMatch[1].trim();
   }
 
   let location = null;
-  const locMatch = remarks.match(/\[Location:\s*([^\]]+)\]/i);
+  const locMatch =
+    remarks.match(/\[Location:\s*([^\]]+)\]/i) ||
+    remarks.match(/(?:^|\||\n)\s*Location:\s*([^|\]\n]+)/i);
   if (locMatch) {
     location = locMatch[1].trim();
   }
 
   let interests = null;
-  const intMatch = remarks.match(/\[Interests:\s*([^\]]+)\]/i);
+  const intMatch =
+    remarks.match(/\[Interests?:\s*([^\]]+)\]/i) ||
+    remarks.match(/(?:^|\||\n)\s*Interests?:\s*([^|\]\n]+)/i);
   if (intMatch) {
     interests = intMatch[1].trim();
   }
 
   const cleanRemarks = remarks
     .replace(/\[Outcome:\s*[^\]]+\]/gi, '')
-    .replace(/\[Follow-?Up:\s*[^\]]+\]/gi, '')
+    .replace(/\[(?:Follow-?Up|Follow-?up\s*Action):\s*[^\]]+\]/gi, '')
     .replace(/\[(?:Material )?Requirements?:\s*[^\]]+\]/gi, '')
     .replace(/\[Location:\s*[^\]]+\]/gi, '')
-    .replace(/\[Interests:\s*[^\]]+\]/gi, '')
+    .replace(/\[Interests?:\s*[^\]]+\]/gi, '')
+    .replace(/(?:^|\||\n)\s*Follow-?up(?:\s*Action)?:\s*[^|\n]+/gi, '')
+    .replace(/(?:^|\||\n)\s*(?:Material )?Requirement:\s*[^|\n]+/gi, '')
+    .replace(/(?:^|\||\n)\s*Location:\s*[^|\n]+/gi, '')
+    .replace(/(?:^|\||\n)\s*Interests?:\s*[^|\n]+/gi, '')
+    .replace(/^[\s|]+|[\s|]+$/g, '')
     .trim();
 
   return {
     outcome,
     follow_up_action: followUpAction,
-    requires_follow_up: Boolean(followUpAction && followUpAction.toLowerCase() !== 'none'),
+    requires_follow_up: Boolean(followUpAction),
     material_requirement: materialRequirement,
     location,
     interests,
@@ -543,6 +577,110 @@ function getDealTonnage(deal) {
   return convertLineItemToMt(deal);
 }
 
+/**
+ * Normalizes any deal stage, inquiry status, or user phrasing into standard business stages:
+ * - 'quoted' (Price Quote / Quoted / Qualified / Proposal / Saved / Confirmed / Sent to Party)
+ * - 'negotiation' (Negotiation / Review / In Negotiation / Under Negotiation / Discussion)
+ * - 'on_hold' (On Hold / Hold / Paused / Blocked)
+ * - 'new_inquiry' (New Inquiry / New / Inquiry / Draft / Unquoted / Pending / Auto Created / Received)
+ * - 'won' (Won / Order / Order Placed / Order Confirmed / PO Received / Converted)
+ * - 'lost' (Lost / Dropped / Cancelled / Canceled / Rejected / Closed Lost)
+ */
+function normalizeDealStage(rawStage) {
+  if (!rawStage) return 'new_inquiry';
+  const s = String(rawStage).toLowerCase().trim().replace(/[-_]+/g, ' ');
+
+  // Quoted / Price Quote / Qualified / Proposal / Saved / Confirmed
+  if (
+    s === 'quoted' ||
+    s === 'price quote' ||
+    s === 'pricequote' ||
+    s === 'quotation' ||
+    s === 'quotation sent' ||
+    s === 'quotated' ||
+    s === 'proposal' ||
+    s === 'proposal price quote' ||
+    s === 'qualified' ||
+    s === 'saved' ||
+    s === 'confirmed' ||
+    s === 'sent to party'
+  ) {
+    return 'quoted';
+  }
+
+  // Negotiation / Review
+  if (
+    s === 'negotiation' ||
+    s === 'negotaiation' ||
+    s === 'negotiate' ||
+    s === 'negotiating' ||
+    s === 'in negotiation' ||
+    s === 'under negotiation' ||
+    s === 'discussion' ||
+    s === 'review' ||
+    s === 'negotiation review'
+  ) {
+    return 'negotiation';
+  }
+
+  // On Hold
+  if (
+    s === 'on hold' ||
+    s === 'onhold' ||
+    s === 'hold' ||
+    s === 'paused' ||
+    s === 'blocked' ||
+    s === 'put on hold' ||
+    s === 'is on hold'
+  ) {
+    return 'on_hold';
+  }
+
+  // New Inquiry / Draft / Unquoted / Pending / Auto Created / Received
+  if (
+    s === 'new inquiry' ||
+    s === 'new' ||
+    s === 'inquiry' ||
+    s === 'pending' ||
+    s === 'auto created' ||
+    s === 'received' ||
+    s === 'draft' ||
+    s === 'unquoted'
+  ) {
+    return 'new_inquiry';
+  }
+
+  // Won / Order Placed / Confirmed / Converted / Closed Won / PO
+  if (
+    s === 'won' ||
+    s === 'order' ||
+    s === 'orders' ||
+    s === 'order placed' ||
+    s === 'order confirmed' ||
+    s === 'po received' ||
+    s === 'po' ||
+    s === 'converted' ||
+    s === 'closed won'
+  ) {
+    return 'won';
+  }
+
+  // Lost / Cancelled / Dropped / Rejected / Closed Lost / Not Converted
+  if (
+    s === 'lost' ||
+    s === 'dropped' ||
+    s === 'cancelled' ||
+    s === 'canceled' ||
+    s === 'rejected' ||
+    s === 'closed lost' ||
+    s === 'not converted'
+  ) {
+    return 'lost';
+  }
+
+  return s.replace(/\s+/g, '_');
+}
+
 // ─── 1. GET_INQUIRIES TOOL ──────────────────────────────────────────────────
 
 const inquiriesGlobalCache = new Map();
@@ -557,7 +695,7 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   const sourceTypeFilter = (args?.source_type || '').toLowerCase().trim();
   const sortBy = (args?.sort_by || '').toLowerCase().trim();
   const limit = args?.recent_only ? 5 : Math.min(Math.max(Number(args?.limit) || 20, 1), 100);
-  const searchName = (args?.customer_name_search || '').trim().toLowerCase();
+  const searchName = (args?.customer_name_search || args?.customer_name || args?.company_name || '').trim().toLowerCase();
   const dateRange = args?.date_range;
   const mode = (args?.mode || 'list').toLowerCase().trim();
 
@@ -725,8 +863,10 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
       customer_name: custName,
       customer_phone: row.sender_phone || linkedDeal?.customer_phone || '',
       inquiry_type: row.inquiry_type || 'standard',
-      status: row.status || 'review',
-      deal_stage: linkedDeal?.stage || 'no_deal_linked',
+      status: normalizeDealStage(row.status) || 'new_inquiry',
+      deal_stage: normalizeDealStage(linkedDeal?.stage) || 'no_deal_linked',
+      raw_status: row.status || 'review',
+      raw_deal_stage: linkedDeal?.stage || 'no_deal_linked',
       po_number: linkedDeal?.po_number || null,
       total_amount_inr: Number(linkedDeal?.total_amount || 0),
       estimated_tonnage_mt: Math.round(estTonnage * 1000) / 1000,
@@ -1045,14 +1185,25 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     filtered = filtered.filter((m) => m.customer_name.toLowerCase().includes(searchName));
   }
   if (rawStatus && rawStatus !== 'all') {
-    if (rawStatus === 'won' || rawStatus === 'converted' || rawStatus === 'orders') {
-      filtered = filtered.filter((m) => m.deal_stage === 'won' || m.status === 'won');
-    } else if (rawStatus === 'lost' || rawStatus === 'not_converted') {
-      filtered = filtered.filter((m) => m.deal_stage === 'lost' || m.status === 'lost');
-    } else if (rawStatus === 'pending' || rawStatus === 'review') {
-      filtered = filtered.filter((m) => m.status === 'review' || m.status === 'pending' || m.status === 'new' || m.status === 'draft');
+    const normStatus = normalizeDealStage(rawStatus);
+    if (normStatus === 'won' || rawStatus === 'converted' || rawStatus === 'orders') {
+      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'won' || normalizeDealStage(m.status) === 'won' || Boolean(m.po_number));
+    } else if (normStatus === 'lost' || rawStatus === 'not_converted') {
+      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'lost' || normalizeDealStage(m.status) === 'lost');
+    } else if (normStatus === 'on_hold') {
+      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'on_hold' || normalizeDealStage(m.status) === 'on_hold');
+    } else if (normStatus === 'negotiation') {
+      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'negotiation' || normalizeDealStage(m.status) === 'negotiation');
+    } else if (normStatus === 'quoted') {
+      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'quoted' || normalizeDealStage(m.status) === 'quoted');
+    } else if (normStatus === 'new_inquiry' || rawStatus === 'pending' || rawStatus === 'review') {
+      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'new_inquiry' || normalizeDealStage(m.status) === 'new_inquiry' || m.status === 'review' || m.status === 'pending' || m.status === 'new' || m.status === 'draft');
     } else {
-      filtered = filtered.filter((m) => m.status.toLowerCase() === rawStatus || m.deal_stage.toLowerCase() === rawStatus);
+      filtered = filtered.filter((m) => {
+        const ds = normalizeDealStage(m.deal_stage);
+        const st = normalizeDealStage(m.status);
+        return ds === normStatus || st === normStatus || m.status?.toLowerCase() === rawStatus || m.deal_stage?.toLowerCase() === rawStatus;
+      });
     }
   }
   if (sourceTypeFilter === 'ocr_document' || sourceTypeFilter === 'document') {
@@ -1107,7 +1258,8 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   const custFilter = (args?.customer_name_search || args?.customer_name || '').trim().toLowerCase();
   const repFilter = (args?.salesperson_name || '').trim().toLowerCase();
   const locFilter = (args?.location || '').trim().toLowerCase();
-  const outcomeFilter = (args?.outcome_filter || '').trim().toLowerCase();
+  const outcomeFilter = (args?.outcome_filter || args?.outcome || '').trim().toLowerCase();
+  const requiresFollowUp = args?.requires_follow_up !== undefined ? Boolean(args.requires_follow_up) : (args?.requires_followup !== undefined ? Boolean(args.requires_followup) : null);
   const dateRange = args?.date_range;
   const mode = (args?.mode || 'list').toLowerCase().trim();
   const missingLocation = Boolean(args?.missing_location || args?.missing_field === 'location');
@@ -1185,7 +1337,13 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     const loc = r.location || r.customer_address || parsed.location || 'N/A';
     const person = r.person_met || r.contact_person || 'N/A';
     const phone = r.contact_phone || r.contact_no || 'N/A';
-    const followUp = r.follow_up_action || r.follow_up || parsed.follow_up_action;
+    const rawFu = r.follow_up_action || r.follow_up || parsed.follow_up_action;
+    const isFuValid =
+      rawFu &&
+      !['none', 'nil', 'n/a', 'na', '-', 'null'].includes(String(rawFu).toLowerCase().trim()) &&
+      !String(rawFu).toLowerCase().startsWith('no remarks') &&
+      !String(rawFu).toLowerCase().startsWith('no follow');
+    const followUp = isFuValid ? String(rawFu).trim() : null;
 
     return {
       id: r.id,
@@ -1197,7 +1355,7 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
       location: loc,
       outcome: out,
       follow_up_action: followUp,
-      requires_follow_up: Boolean(followUp && followUp !== 'none') || parsed.requires_follow_up,
+      requires_follow_up: Boolean(followUp) || parsed.requires_follow_up,
       material_requirement: r.material_requirement || r.requirement || parsed.material_requirement,
       remarks: parsed.clean_remarks || rawRemarks,
       created_at: r.created_at || r.visited_at,
@@ -1311,8 +1469,14 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     mode === 'pending_follow_up' ||
     mode === 'followup_pending' ||
     mode === 'follow_up_pending' ||
+    mode === 'pending_followups' ||
+    mode === 'pending' ||
+    mode === 'follow_up' ||
+    mode === 'followup' ||
     args?.pending_followup ||
-    args?.pending_follow_up
+    args?.pending_follow_up ||
+    args?.requires_follow_up ||
+    args?.follow_up_only
   ) {
     const pending = materialized.filter((v) => v.requires_follow_up);
     return {
@@ -1400,6 +1564,7 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   if (repFilter) filtered = filtered.filter((v) => v.salesperson_name.toLowerCase().includes(repFilter));
   if (locFilter) filtered = filtered.filter((v) => v.location.toLowerCase().includes(locFilter) || v.remarks.toLowerCase().includes(locFilter));
   if (outcomeFilter && outcomeFilter !== 'all') filtered = filtered.filter((v) => v.outcome === outcomeFilter);
+  if (requiresFollowUp !== null) filtered = filtered.filter((v) => v.requires_follow_up === requiresFollowUp);
 
   let pos = 0, neu = 0, neg = 0, fu = 0;
   filtered.forEach((v) => {
@@ -2019,10 +2184,10 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
 // ─── 5. GET_MY_OPEN_DEALS TOOL ──────────────────────────────────────────────
 
 async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supabase) {
-  const stageFilter = (args?.stage_filter || '').trim().toLowerCase();
-  const custName = (args?.customer_name || '').trim().toLowerCase();
-  const poFilter = (args?.po_number || '').trim().toLowerCase();
-  const locFilter = (args?.delivery_location || '').trim().toLowerCase();
+  const stageFilter = (args?.stage_filter || args?.status_filter || args?.stage || args?.status || '').trim().toLowerCase();
+  const custName = (args?.customer_name || args?.company_name || args?.customer || '').trim().toLowerCase();
+  const poFilter = (args?.po_number || args?.po || '').trim().toLowerCase();
+  const locFilter = (args?.delivery_location || args?.location || args?.city || '').trim().toLowerCase();
   const dateRange = args?.date_range;
   const limit = Math.min(Math.max(Number(args?.limit) || 20, 1), 100);
 
@@ -2073,6 +2238,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
 
   const materialized = (rows || []).map((d) => {
     const shortId = `#INQ-${(d.id || d.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    const normStage = normalizeDealStage(d.stage);
     return {
       inquiry_id: shortId,
       deal_id: shortId,
@@ -2080,7 +2246,8 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
       inquiry_uuid: d.inquiry_id || null,
       customer_name: d.customer_name || 'Unnamed Customer',
       customer_phone: d.customer_phone || '',
-      stage: d.stage || 'new_inquiry',
+      stage: normStage,
+      raw_stage: d.stage || 'new_inquiry',
       po_number: d.po_number || null,
       total_amount_inr: Number(d.total_amount || 0),
       tonnage_mt: getDealTonnage(d),
@@ -2112,6 +2279,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
       if (globalPoDeals && globalPoDeals.length > 0) {
         filtered = globalPoDeals.map((d) => {
           const shortId = `#INQ-${(d.id || d.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+          const normStage = normalizeDealStage(d.stage);
           return {
             inquiry_id: shortId,
             deal_id: shortId,
@@ -2119,7 +2287,8 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
             inquiry_uuid: d.inquiry_id || null,
             customer_name: d.customer_name || 'Unnamed Customer',
             customer_phone: d.customer_phone || '',
-            stage: d.stage || 'new_inquiry',
+            stage: normStage,
+            raw_stage: d.stage || 'new_inquiry',
             po_number: d.po_number || null,
             total_amount_inr: Number(d.total_amount || 0),
             tonnage_mt: getDealTonnage(d),
@@ -2134,10 +2303,27 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   }
   if (locFilter) filtered = filtered.filter((d) => (d.delivery_location || '').toLowerCase().includes(locFilter));
   if (stageFilter && stageFilter !== 'all') {
-    if (stageFilter === 'won' || stageFilter === 'orders') filtered = filtered.filter((d) => d.stage === 'won' || Boolean(d.po_number));
-    else if (stageFilter === 'lost') filtered = filtered.filter((d) => d.stage === 'lost');
-    else if (stageFilter === 'open') filtered = filtered.filter((d) => d.stage !== 'won' && d.stage !== 'lost' && !d.po_number);
-    else filtered = filtered.filter((d) => d.stage.toLowerCase() === stageFilter);
+    const normFilter = normalizeDealStage(stageFilter);
+    if (normFilter === 'won' || stageFilter === 'orders') {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === 'won' || Boolean(d.po_number));
+    } else if (normFilter === 'lost') {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === 'lost');
+    } else if (stageFilter === 'open' || normFilter === 'open') {
+      filtered = filtered.filter((d) => {
+        const s = normalizeDealStage(d.stage);
+        return s !== 'won' && s !== 'lost' && !d.po_number;
+      });
+    } else if (normFilter === 'on_hold') {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === 'on_hold' || d.raw_stage === 'hold' || d.raw_stage === 'on_hold');
+    } else if (normFilter === 'negotiation') {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === 'negotiation');
+    } else if (normFilter === 'quoted') {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === 'quoted');
+    } else if (normFilter === 'new_inquiry') {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === 'new_inquiry');
+    } else {
+      filtered = filtered.filter((d) => normalizeDealStage(d.stage) === normFilter || (d.raw_stage && d.raw_stage.toLowerCase() === stageFilter));
+    }
   }
 
   const mode = (args?.mode || '').toLowerCase().trim();
@@ -2351,7 +2537,24 @@ async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supab
     if (orParts.length > 0) query = query.or(orParts.join(','));
   }
 
-  if (args?.stage_filter) query = query.eq('stage', args.stage_filter);
+  if (args?.stage_filter) {
+    const norm = normalizeDealStage(args.stage_filter);
+    if (norm === 'quoted') {
+      query = query.in('stage', ['quoted', 'qualified', 'proposal', 'price quote', 'saved', 'confirmed', 'quotation_sent']);
+    } else if (norm === 'negotiation') {
+      query = query.in('stage', ['negotiation', 'review', 'in_negotiation', 'discussion']);
+    } else if (norm === 'on_hold') {
+      query = query.in('stage', ['on_hold', 'hold', 'paused']);
+    } else if (norm === 'new_inquiry') {
+      query = query.in('stage', ['new_inquiry', 'new', 'inquiry', 'review', 'pending', 'auto_created']);
+    } else if (norm === 'won') {
+      query = query.in('stage', ['won', 'order', 'order_placed', 'order_confirmed']);
+    } else if (norm === 'lost') {
+      query = query.in('stage', ['lost', 'dropped', 'cancelled', 'rejected']);
+    } else {
+      query = query.eq('stage', args.stage_filter);
+    }
+  }
 
   const { data: deals, error } = await query.order('created_at', { ascending: false });
   if (error) throw new Error(`get_team_pipeline error: ${error.message}`);
@@ -2361,7 +2564,7 @@ async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supab
   const stageStats = {};
 
   rows.forEach((d) => {
-    const st = d.stage || 'unknown';
+    const st = normalizeDealStage(d.stage);
     const val = Number(d.total_amount || 0);
     grandTotal += val;
     if (!stageStats[st]) stageStats[st] = { count: 0, total_value: 0 };
@@ -2378,7 +2581,8 @@ async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supab
       customer_name: d.customer_name,
       customer_phone: d.customer_phone,
       total_amount: Number(d.total_amount || 0),
-      stage: d.stage,
+      stage: normalizeDealStage(d.stage),
+      raw_stage: d.stage,
       status: d.status,
       po_number: d.po_number,
       created_at: d.created_at,
@@ -2647,6 +2851,7 @@ module.exports = {
   parseVisitRemarks,
   categorizeProductFamily,
   deriveCustomerSegment,
+  normalizeDealStage,
   executeGetInquiries,
   executeGetVisits,
   executeGetComplaints,

@@ -12,8 +12,8 @@
  * - Sessions older than the last 7 are dropped.
  *
  * LLM Context Injection:
- * - Options 1-8: Handled with current session context only (zero historical sessions passed).
- * - Option 9 (Other / General Query): The only trigger where the last 7 saved sessions are retrieved and passed to the LLM.
+ * - Options 1-9: Handled with current session context only (zero historical sessions passed).
+ * - Option 10 (Other / General Query): The only trigger where the last 7 saved sessions are retrieved and passed to the LLM.
  */
 
 const { supabase } = require('../supabase');
@@ -361,8 +361,8 @@ async function getCurrentSessionMessages(senderPhone) {
 }
 
 /**
- * Formats the last 7 sessions into a clean, rich context block for Option 9 (Other / General Query).
- * STRICTLY ONLY INJECTED ON OPTION 9.
+ * Formats the last 7 sessions into a clean, rich context block for Option 10 (Other / General Query).
+ * STRICTLY ONLY INJECTED ON OPTION 10.
  */
 async function formatHistoricalSessionsForLLM(senderPhone) {
   const sessions = await getHistoricalSessions(senderPhone);
@@ -370,8 +370,8 @@ async function formatHistoricalSessionsForLLM(senderPhone) {
     return '';
   }
 
-  let text = `\n\n## RECENT CONVERSATION SESSIONS (Last ${sessions.length} Sessions History - Option 9 Reference Only)\n`;
-  text += `The user previously conducted the following recent sessions before opening Option 9 (Other / General Query). Use this context to answer follow-ups, summarize recent activities, or clarify references without asking the user to repeat themselves:\n\n`;
+  let text = `\n\n## RECENT CONVERSATION SESSIONS (Last ${sessions.length} Sessions History - Option 10 Reference Only)\n`;
+  text += `The user previously conducted the following recent sessions before opening Option 10 (Other / General Query). Use this context to answer follow-ups, summarize recent activities, or clarify references without asking the user to repeat themselves:\n\n`;
 
   sessions.forEach((s, idx) => {
     const num = idx + 1;
