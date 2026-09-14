@@ -2431,10 +2431,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     if (!data) {
       const extractedCodeFromMsg = extractDealIdFromText(cleanText);
       const isChoiceOrConfirmation =
-        /^(?:yes|correct|confirm|confirmed|proceed|haan?|sahi\s+hai|update\s+(?:it|this|deal|inquiry|rates?)|ok|okay|yep|sure|ha|[1-9]|option\s*[1-9]|deal\s*[1-9]|#?(?:DEAL|INQ)-[A-F0-9]{4,8}|[A-F0-9]{6})\b/i.test(cleanText) ||
-        /\b(?:yes\s+its\s+correct|just\s+update\s+the\s+rates?|update\s+the\s+rates?\s+provided|apply\s+these\s+rates?)\b/i.test(cleanText) ||
-        /(?:(?:for\s+)?(?:inquiry|inq|deal|record|id|ref)\s*(?:with\s+)?(?:id|no|num|number)?\s*[:=-]?\s*)#?((?:(?:DEAL|INQ)[-_:#\s]*)?[A-Fa-f0-9_-]{4,36})\b/i.test(cleanText) ||
-        (extractedCodeFromMsg !== null && cleanText.length <= 50);
+        /^(?:yes|correct|confirm|confirmed|proceed|haan?|sahi\s+hai|ok|okay|yep|sure|ha|[1-9]|option\s*[1-9]|deal\s*[1-9]|#?(?:DEAL|INQ)-[A-F0-9]{4,8}|[A-F0-9]{6})$/i.test(cleanText) ||
+        /^(?:yes\s+(?:it'?s?\s+)?correct|just\s+update(?:\s+the)?\s+rates?|update\s+the\s+rates?\s+provided|apply\s+these\s+rates?|update\s+(?:it|this|deal|inquiry|rates?))$/i.test(cleanText) ||
+        /^(?:(?:for\s+)?(?:inquiry|inq|deal|record|id|ref)\s*(?:with\s+)?(?:id|no|num|number)?\s*[:=-]?\s*)#?((?:(?:DEAL|INQ)[-_:#\s]*)?[A-Fa-f0-9_-]{4,36})$/i.test(cleanText) ||
+        (extractedCodeFromMsg !== null && cleanText.length <= 40 && !/\b(?:mark|move|put|set|change|won|lost|negotiation|hold|requires?|needs?|order|inquiry|complaint|visit|@|\/mt|\/kg)\b/i.test(cleanText));
 
       if (isChoiceOrConfirmation) {
         try {
@@ -3009,11 +3009,13 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       const dealAmount = Number(dealToUpdate.total_amount) || 0;
       const dealCode = getDealCode(dealToUpdate);
 
-      // Check if deal is in New Inquiry / Unquoted stage
+      // Check if deal is in New Inquiry / Unquoted stage (no rates quoted and total amount is 0)
+      const hasQuotedRates = dealAmount > 0 || (dealToUpdate.deal_items && dealToUpdate.deal_items.some(i => i.rate && Number(i.rate) > 0));
+      const isUnquoted = !hasQuotedRates;
+
       const isNewInquiryStage =
-        ['new_inquiry', 'review', 'auto_created', 'pending', 'draft', 'needs_review'].includes(currentStage) ||
-        (dealToUpdate.is_inquiry_source && currentStage === 'new_inquiry') ||
-        (dealAmount === 0 && currentStage === 'new_inquiry');
+        (['new_inquiry', 'review', 'auto_created', 'pending', 'draft', 'needs_review'].includes(currentStage) && isUnquoted) ||
+        (dealToUpdate.is_inquiry_source && isUnquoted);
 
       // Stage Gate 1: If deal is already closed
       if (currentStage === 'won' || currentStage === 'lost') {
@@ -3771,7 +3773,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     };
 
     let inqId = existingDeal?.inquiry_id || null;
-    const initialInqStatus = dbStage === 'won' ? 'confirmed' : 'review';
+    const initialInqStatus = dbStage === 'won' ? 'confirmed' : ((dealAmount > 0 || processedItems.some(i => i.rate > 0)) ? 'quoted' : 'review');
 
     if (!dealId || !inqId) {
       try {
@@ -3920,7 +3922,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
       activeDealObj = { id: dealId, ...updatePayload };
     } else {
-      const effectiveStage = (dbStage === 'won' || dbStage === 'lost') ? dbStage : 'new_inquiry';
+      const effectiveStage = (dbStage === 'won' || dbStage === 'lost') ? dbStage : ((dealAmount > 0 || processedItems.some(i => i.rate > 0)) ? 'quoted' : 'new_inquiry');
       const { data: newDeal, error: dealInsertErr } = await supabase
         .from('deals')
         .insert({

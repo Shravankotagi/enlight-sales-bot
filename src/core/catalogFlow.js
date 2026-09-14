@@ -1466,12 +1466,14 @@ Logged to Sales Pipeline & Inquiries! ✅`;
 
         if (updates.payment_terms) dealUpdates.payment_terms = updates.payment_terms;
         if (updates.delivery_location) dealUpdates.delivery_location = updates.delivery_location;
-        if (updates.status) {
-          const s = updates.status.toLowerCase();
-          if (s.includes('won')) dealUpdates.stage = 'won';
+        if (updates.status || updates.stage) {
+          const s = String(updates.status || updates.stage).toLowerCase();
+          if (s.includes('won') || s.includes('order')) dealUpdates.stage = 'won';
           else if (s.includes('lost')) dealUpdates.stage = 'lost';
-          else if (s.includes('quote')) dealUpdates.stage = 'quoted';
-          else dealUpdates.stage = updates.status;
+          else if (s.includes('negot')) dealUpdates.stage = 'negotiation';
+          else if (s.includes('hold')) dealUpdates.stage = 'on_hold';
+          else if (s.includes('quote') || s.includes('price')) dealUpdates.stage = 'quoted';
+          else dealUpdates.stage = updates.status || updates.stage;
         }
 
         if (deal) {
@@ -1569,6 +1571,10 @@ Logged to Sales Pipeline & Inquiries! ✅`;
 
         if (deal && Object.keys(dealUpdates).length > 0) {
           await supabase.from('deals').update(dealUpdates).eq('id', deal.id);
+          if (dealUpdates.stage && deal.inquiry_id) {
+            const inqStatus = dealUpdates.stage === 'won' ? 'confirmed' : dealUpdates.stage;
+            await supabase.from('inquiries').update({ status: inqStatus }).eq('id', deal.inquiry_id);
+          }
         }
 
         return `✅ *Inquiry Updated Successfully!*
@@ -2220,6 +2226,15 @@ function detectOperationalAction(text) {
 
   // If message is a pure query / search, do not intercept
   if (isOperationalQuery(lower)) return null;
+
+  // Direct sales agent operations (stage transitions & rate updates) should bypass catalog flow
+  if (
+    /\b(?:mark|move|update|set|change|put)\b.*?\b(negotiation|won|lost|quoted|quotated|on\s+hold|hold)\b/i.test(lower) ||
+    /\b(?:is\s+on\s+hold|is\s+lost|is\s+won|is\s+negotiation|is\s+quoted|deal\s+won|deal\s+lost)\b/i.test(lower) ||
+    /\b(?:rates?|prices?)\s+for\b|\bupdate\s+(?:the\s+)?rates?\b|@\s*[\d,.]+|\bper\s+mt\b|\/mt\b/i.test(lower)
+  ) {
+    return null;
+  }
 
   // 1. Explicit Update patterns
   if (/\b(?:update|change|modify|set|mark|resolve|close|reopen)\b/i.test(lower)) {
