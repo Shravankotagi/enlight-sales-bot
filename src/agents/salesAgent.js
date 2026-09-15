@@ -3352,10 +3352,59 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
               .replace(/\b(?:rs|inr|\/mt|\/kg)\b/gi, ''),
           );
         const hasExplicitQtyInMsg = isQtyUpdateContext;
-        let explicitTargetQty = null;
-        const fromToMatch = (effectiveTextForLLM || text).match(/(?:(?:from\s+[\d,.]+\s*(?:mt|tons?|kg|pcs|nos|sheets?|plates?|coils?|bars?)?\s+)?to\s+|change\s+(?:quantity|qty)?\s*to\s+|set\s+(?:quantity|qty)?\s*to\s+|increase\s+(?:the\s+)?(?:quantity|qty)?\s*(?:of\s+[^0-9]+)?\s*to\s+|reduce\s+(?:the\s+)?(?:quantity|qty)?\s*(?:of\s+[^0-9]+)?\s*to\s+)(\d+(?:\.\d+)?)/i);
+
+        // 1. From-To Pattern Detection (e.g. "from 25 MT to 45 MT" or "from 10000 KG to 12000 KG")
+        const fromToRegex = /\bfrom\s+(\d+(?:\.\d+)?)\s*(mt|tons?|tonne|kg|kgs|pcs|nos|sheets?|plates?|coils?|bars?)?\s+to\s+(\d+(?:\.\d+)?)\s*(mt|tons?|tonne|kg|kgs|pcs|nos|sheets?|plates?|coils?|bars?)?\b/i;
+        const fromToMatch = (effectiveTextForLLM || text).match(fromToRegex);
+
+        let fromToTargetIdx = -1;
+        let fromToNewQty = null;
+        let fromToNewUnit = null;
+
         if (fromToMatch) {
-          explicitTargetQty = Number(fromToMatch[1]);
+          const fromVal = Number(fromToMatch[1]);
+          const rawFromUnit = fromToMatch[2] ? fromToMatch[2].toUpperCase() : null;
+          const fromUnit = rawFromUnit ? (rawFromUnit.startsWith('TON') ? 'MT' : rawFromUnit) : null;
+          fromToNewQty = Number(fromToMatch[3]);
+          const rawToUnit = fromToMatch[4] ? fromToMatch[4].toUpperCase() : null;
+          fromToNewUnit = rawToUnit ? (rawToUnit.startsWith('TON') ? 'MT' : rawToUnit) : null;
+
+          for (let i = 0; i < existingItems.length; i++) {
+            const it = existingItems[i];
+            const itQty = Number(it.quantity || 0);
+            const rawUnit = (it.unit || 'MT').toUpperCase();
+            const itUnit = rawUnit.startsWith('TON') ? 'MT' : rawUnit;
+
+            let isMatch = false;
+            if (itQty === fromVal) {
+              if (!fromUnit || fromUnit === itUnit) isMatch = true;
+            } else if (fromUnit === 'MT' && (itUnit === 'KG' || itUnit === 'KGS')) {
+              if (Math.abs(itQty / 1000 - fromVal) < 0.001) isMatch = true;
+            } else if ((fromUnit === 'KG' || fromUnit === 'KGS') && itUnit === 'MT') {
+              if (Math.abs(itQty * 1000 - fromVal) < 0.001) isMatch = true;
+            }
+
+            if (isMatch) {
+              fromToTargetIdx = i;
+              break;
+            }
+          }
+
+          // If user gave an explicit "from X to Y" quantity, but NO existing item matches that fromVal:
+          if (fromToTargetIdx === -1) {
+            const itemListStr = existingItems
+              .map(it => `• ${it.sku_text || 'Item'}${it.dimensions ? ` (${it.dimensions})` : ''}: ${Number(it.quantity).toLocaleString('en-IN')} ${it.unit || 'MT'}`)
+              .join('\n');
+            return `⚠️ Could not find any line item with quantity ${fromVal}${fromUnit ? ` ${fromUnit}` : ''} in Inquiry ${dealCode}.\n\nCurrent Line Items:\n${itemListStr}\n\nPlease specify which product you would like to update (e.g. "Change ${existingItems[0]?.sku_text || 'GP Sheet'} quantity to ${fromToNewQty} ${fromToNewUnit || 'MT'}").`;
+          }
+        }
+
+        let explicitTargetQty = fromToNewQty;
+        if (explicitTargetQty === null) {
+          const directToMatch = (effectiveTextForLLM || text).match(/(?:(?:change|set|update)\s+(?:quantity|qty)?\s*to\s+|increase\s+(?:the\s+)?(?:quantity|qty)?\s*(?:of\s+[^0-9]+)?\s*to\s+|reduce\s+(?:the\s+)?(?:quantity|qty)?\s*(?:of\s+[^0-9]+)?\s*to\s+|to\s+)(\d+(?:\.\d+)?)/i);
+          if (directToMatch) {
+            explicitTargetQty = Number(directToMatch[1]);
+          }
         }
 
         const firstRate = data.line_items?.[0]?.rate_per_mt || (processedItems[0]?.rate > 0 ? processedItems[0]?.rate : null);
@@ -3367,25 +3416,66 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
 
         const { matchedMap, unmatchedProcessed } = matchProcessedItemsToExisting(existingItems, processedItems);
 
+        // Explicit Item number index (e.g. "Item 1", "Line 2", "1st item")
+        const itemNumMatch = (effectiveTextForLLM || text).match(/\b(?:item|line)\s*#?([1-9])\b/i);
+        let explicitItemIdx = itemNumMatch ? parseInt(itemNumMatch[1], 10) - 1 : -1;
+        if (explicitItemIdx < 0) {
+          if (/\b(?:first|1st)\s*(?:item|line)?\b/i.test(effectiveTextForLLM || text)) explicitItemIdx = 0;
+          else if (/\b(?:second|2nd)\s*(?:item|line)?\b/i.test(effectiveTextForLLM || text)) explicitItemIdx = 1;
+          else if (/\b(?:third|3rd)\s*(?:item|line)?\b/i.test(effectiveTextForLLM || text)) explicitItemIdx = 2;
+        }
+
+        // If from-to matched a specific item, register it in matchedMap
+        if (fromToTargetIdx >= 0) {
+          matchedMap.set(fromToTargetIdx, {
+            qty: fromToNewQty,
+            unit: fromToNewUnit || null,
+          });
+        } else if (explicitItemIdx >= 0 && explicitItemIdx < existingItems.length) {
+          matchedMap.set(explicitItemIdx, {
+            qty: explicitTargetQty,
+            rate: firstRate,
+          });
+        }
+
+        // 2. Disambiguation Guard: Multiple items in inquiry and user gives a quantity/rate update without specifying which product
+        if (
+          existingItems.length > 1 &&
+          matchedMap.size === 0 &&
+          fromToTargetIdx === -1 &&
+          explicitItemIdx === -1 &&
+          (hasQtyUpdate || hasRateUpdate || hasUnitUpdate) &&
+          !hasDeliveryUpdate &&
+          !hasPaymentUpdate &&
+          !data.delivery_date
+        ) {
+          const itemListStr = existingItems
+            .map((it, i) => `• Item ${i + 1}: ${it.sku_text || 'Item'}${it.dimensions ? ` (${it.dimensions})` : ''} - ${Number(it.quantity).toLocaleString('en-IN')} ${it.unit || 'MT'}${it.rate ? ` @ ₹${it.rate}` : ''}`)
+            .join('\n');
+          return `⚠️ Inquiry ${dealCode} contains ${existingItems.length} line items. Please specify which product you would like to update:\n\n${itemListStr}\n\nExample: "Change ${existingItems[0]?.sku_text || 'Item 1'} quantity to ${explicitTargetQty || 45} MT"`;
+        }
+
         for (let idx = 0; idx < existingItems.length; idx++) {
           const itm = existingItems[idx];
           const matchedP = matchedMap.get(idx) || (existingItems.length === 1 && !hasAnyProductName ? processedItems[0] : null);
 
           // Check if extractedUnitList or explicit unit in message has a match for this item
-          const explicitUnitMatch = (effectiveTextForLLM || text).match(/\b\d+(?:\.\d+)?\s*(mt|ton|tons|tonne|kg|kgs|pcs|piece|pieces|nos|bundles|sheets?|plates?|coils?|bars?|lengths)\b/i);
           let matchedUnit = null;
-          if (extractedUnitList.length > 0) {
+          if (matchedP?.unit) {
+            matchedUnit = matchedP.unit;
+          } else if (extractedUnitList.length > 0) {
             const unitMatch = extractedUnitList.find(u => {
               if (!u.productCandidate) return existingItems.length === 1 || idx === 0;
               return computeMatchScore(itm, { pName: u.productCandidate }) > 0;
             });
             if (unitMatch) matchedUnit = unitMatch.unit;
-          } else if (explicitUnitMatch) {
-            let uStr = explicitUnitMatch[1].toUpperCase();
-            if (uStr.startsWith('TON')) uStr = 'MT';
-            matchedUnit = uStr;
-          } else if (hasUnitUpdate && matchedP?.unit) {
-            matchedUnit = matchedP.unit;
+          } else if (hasUnitUpdate && (matchedP || existingItems.length === 1)) {
+            const explicitUnitMatch = (effectiveTextForLLM || text).match(/\b\d+(?:\.\d+)?\s*(mt|ton|tons|tonne|kg|kgs|pcs|piece|pieces|nos|bundles|sheets?|plates?|coils?|bars?|lengths)\b/i);
+            if (explicitUnitMatch) {
+              let uStr = explicitUnitMatch[1].toUpperCase();
+              if (uStr.startsWith('TON')) uStr = 'MT';
+              matchedUnit = uStr;
+            }
           }
 
           let matchedHsn = matchedP?.hsn_code || null;
