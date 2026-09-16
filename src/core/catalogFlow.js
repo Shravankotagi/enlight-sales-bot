@@ -55,8 +55,6 @@ function getPhoneVariants(phone) {
   return Array.from(variants);
 }
 
-// ── CATALOG MENU ─────────────────────────────────────────────────────────────
-
 const CATALOG_MENU = `👋 Welcome to *SalesOS Assistant*!
 
 What would you like to do today?
@@ -73,6 +71,45 @@ What would you like to do today?
 *1️⃣0️⃣ Other / General Query*
 
 Reply with a number (1–10) or type what you'd like to do.`;
+
+const CONFIRMATION_BUTTONS = [
+  { id: 'btn_confirm_yes', title: 'Save / Yes' },
+  { id: 'btn_confirm_edit', title: 'Edit Details' },
+  { id: 'btn_confirm_cancel', title: 'Cancel' },
+];
+
+const NEW_CUSTOMER_BUTTONS = [
+  { id: 'btn_cust_yes', title: 'Yes, Add Customer' },
+  { id: 'btn_cust_no', title: 'No / Cancel' },
+];
+
+const CATALOG_MENU_SECTIONS = [
+  {
+    title: 'Inquiries & Orders',
+    rows: [
+      { id: 'menu_1', title: '1. Log New Inquiry', description: 'Capture customer requirements' },
+      { id: 'menu_2', title: '2. Update Inquiry', description: 'Update rates, specs or stage' },
+      { id: 'menu_3', title: '3. Log New Order', description: 'Record new confirmed PO' },
+      { id: 'menu_4', title: '4. Update Order', description: 'Attach PO, update items' },
+    ],
+  },
+  {
+    title: 'Visits & Customers',
+    rows: [
+      { id: 'menu_5', title: '5. Log Field Visit', description: 'Record client meeting' },
+      { id: 'menu_6', title: '6. Update Field Visit', description: 'Update meeting outcome' },
+      { id: 'menu_7', title: '7. New Acquisition', description: 'Add new customer profile' },
+    ],
+  },
+  {
+    title: 'Complaints & Queries',
+    rows: [
+      { id: 'menu_8', title: '8. Log Complaint', description: 'Report quality or delay' },
+      { id: 'menu_9', title: '9. Update Complaint', description: 'Update resolution status' },
+      { id: 'menu_10', title: '10. General Query', description: 'Ask policy or stock queries' },
+    ],
+  },
+];
 
 // ── MODULE COLLECTION PROMPTS ────────────────────────────────────────────────
 
@@ -2671,6 +2708,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
     return {
       handled: true,
       reply: CATALOG_MENU,
+      interactiveType: 'list',
+      interactiveList: {
+        bodyText: `Welcome to *SalesOS Assistant*!\n\nWhat would you like to do today? Select an option below or type what you need.`,
+        buttonText: 'Choose Action',
+        sections: CATALOG_MENU_SECTIONS,
+      },
     };
   }
 
@@ -2743,7 +2786,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
             customer_name: originalDraft.company_name,
           });
           await saveActiveSession(senderPhone, originalDraft.company_name || 'Customer', `catalog_confirm|${originalAction}|${JSON.stringify(originalDraft)}`);
-          return { handled: true, reply: resumeMsg };
+          return {
+            handled: true,
+            reply: resumeMsg,
+            interactiveType: 'buttons',
+            interactiveButtons: CONFIRMATION_BUTTONS,
+          };
         } else {
           const parentMissingList = parentMissing.map(m => `• *${m}*`).join('\n');
           const resumeMsg = `✅ *New Customer "${custDraft.company_name}" Created!*\n\n` +
@@ -2808,7 +2856,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
           customer_name: originalDraft.company_name,
         });
         await saveActiveSession(senderPhone, originalDraft.company_name, `catalog_confirm|${originalAction}|${JSON.stringify(originalDraft)}`);
-        return { handled: true, reply: summary };
+        return {
+          handled: true,
+          reply: summary,
+          interactiveType: 'buttons',
+          interactiveButtons: CONFIRMATION_BUTTONS,
+        };
       } else {
         const missingList = parentMissing.map(m => `• *${m}*`).join('\n');
         const askMissing = `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
@@ -2823,7 +2876,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     const retryPrompt = `Please reply *Yes* to onboard *${unrecognizedName}* as a new customer, or *No* to re-enter the company name.`;
     await recordSessionMessage(senderPhone, 'assistant', retryPrompt);
-    return { handled: true, reply: retryPrompt };
+    return {
+      handled: true,
+      reply: retryPrompt,
+      interactiveType: 'buttons',
+      interactiveButtons: NEW_CUSTOMER_BUTTONS,
+    };
   }
 
   // ── 3b. HANDLE IMPLICIT CUSTOMER DETAILS COLLECTION (catalog_implicit_cust_collect|...) ──
@@ -2867,7 +2925,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
           customer_name: originalDraft.company_name,
         });
         await saveActiveSession(senderPhone, originalDraft.company_name || 'Customer', `catalog_confirm|${originalAction}|${JSON.stringify(originalDraft)}`);
-        return { handled: true, reply: resumeMsg };
+        return {
+          handled: true,
+          reply: resumeMsg,
+          interactiveType: 'buttons',
+          interactiveButtons: CONFIRMATION_BUTTONS,
+        };
       } else {
         const parentMissingList = parentMissing.map(m => `• *${m}*`).join('\n');
         const resumeMsg = `✅ *New Customer "${updatedCustDraft.company_name}" Successfully Created!*\n\n` +
@@ -3033,7 +3096,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
-        return { handled: true, reply: custCheck.prompt };
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: NEW_CUSTOMER_BUTTONS,
+        };
       } else {
         updatedDraft.company_name = null;
         await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
@@ -3050,7 +3118,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
         customer_name: updatedDraft.company_name,
       });
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(updatedDraft)}`);
-      return { handled: true, reply: summary };
+      return {
+        handled: true,
+        reply: summary,
+        interactiveType: 'buttons',
+        interactiveButtons: CONFIRMATION_BUTTONS,
+      };
     }
 
     const retryPrompt = `Please reply with:\n• *Yes* — to save\n• *Edit* — to change a field\n• *Cancel* — to discard`;
@@ -3058,6 +3131,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
     return {
       handled: true,
       reply: retryPrompt,
+      interactiveType: 'buttons',
+      interactiveButtons: CONFIRMATION_BUTTONS,
     };
   }
 
@@ -3107,7 +3182,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
         customer_name: updatedDraft.company_name,
       });
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(updatedDraft)}`);
-      return { handled: true, reply: summary };
+      return {
+        handled: true,
+        reply: summary,
+        interactiveType: 'buttons',
+        interactiveButtons: CONFIRMATION_BUTTONS,
+      };
     } else {
       const missingList = missing.map((m) => `• *${m}*`).join('\n');
       const actionName = getActionFriendlyName(action);
@@ -3226,7 +3306,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
-        return { handled: true, reply: custCheck.prompt };
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: NEW_CUSTOMER_BUTTONS,
+        };
       } else {
         updatedDraft.company_name = null;
         await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
@@ -3258,7 +3343,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
         customer_name: updatedDraft.company_name,
       });
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(updatedDraft)}`);
-      return { handled: true, reply: summary };
+      return {
+        handled: true,
+        reply: summary,
+        interactiveType: 'buttons',
+        interactiveButtons: CONFIRMATION_BUTTONS,
+      };
     } else {
       // Missing mandatory fields -> Ask only for missing fields
       const missingList = missing.map((m) => `• *${m}*`).join('\n');
@@ -3347,7 +3437,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: detectedAction });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${detectedAction}|${custCheck.unverifiedName}|${JSON.stringify(extracted)}`);
-        return { handled: true, reply: custCheck.prompt };
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: NEW_CUSTOMER_BUTTONS,
+        };
       } else {
         extracted.company_name = null;
         await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: detectedAction });
@@ -3391,7 +3486,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
           customer_name: extracted.company_name,
         });
         await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_confirm|${detectedAction}|${JSON.stringify(extracted)}`);
-        return { handled: true, reply: summary };
+        return {
+          handled: true,
+          reply: summary,
+          interactiveType: 'buttons',
+          interactiveButtons: CONFIRMATION_BUTTONS,
+        };
       } else {
         const missingList = missing.map((m) => `• *${m}*`).join('\n');
         const actionName = getActionFriendlyName(detectedAction);

@@ -1,7 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const { supabase, saveInquiry, saveDeal, getEmployeeByPhone } = require('./supabase');
-const { sendTextMessage, downloadMedia } = require('./whatsapp');
+const {
+  sendTextMessage,
+  sendInteractiveButtons,
+  sendInteractiveList,
+  downloadMedia,
+} = require('./whatsapp');
 const { extractFromText, extractFromImage, classifyIntent } = require('./gemini');
 const { transcribeAudio } = require('./assemblyai');
 const { isQuery, handleQuery } = require('./queryhandler');
@@ -181,6 +186,31 @@ router.post('/', async (req, res) => {
               media_urls = [message.document.id];
             }
             break;
+          case 'interactive':
+            if (message.interactive) {
+              if (message.interactive.type === 'button_reply' && message.interactive.button_reply) {
+                const btnId = message.interactive.button_reply.id || '';
+                const btnTitle = message.interactive.button_reply.title || '';
+                if (btnId === 'btn_confirm_yes' || btnId === 'btn_cust_yes') {
+                  raw_text = 'yes';
+                } else if (btnId === 'btn_confirm_edit') {
+                  raw_text = 'edit';
+                } else if (btnId === 'btn_confirm_cancel' || btnId === 'btn_cust_no') {
+                  raw_text = 'cancel';
+                } else {
+                  raw_text = btnId || btnTitle;
+                }
+              } else if (message.interactive.type === 'list_reply' && message.interactive.list_reply) {
+                const listId = message.interactive.list_reply.id || '';
+                const listTitle = message.interactive.list_reply.title || '';
+                if (listId.startsWith('menu_')) {
+                  raw_text = listId.replace('menu_', '');
+                } else {
+                  raw_text = listId || listTitle;
+                }
+              }
+            }
+            break;
           default:
             raw_text = `${messageType} message type received`;
             break;
@@ -203,12 +233,29 @@ router.post('/', async (req, res) => {
         let isMediaMessage = messageType === 'image' || messageType === 'document';
         const { getFullActiveSession, saveActiveSession } = require('./supabase');
 
-        // ── GUIDED CATALOG & CONVERSATIONAL FORM FLOW (Greetings, 1-9 Routing, Confirmations) ──
-        if (messageType === 'text' && raw_text) {
+        // ── GUIDED CATALOG & CONVERSATIONAL FORM FLOW (Greetings, 1-10 Routing, Confirmations) ──
+        if ((messageType === 'text' || messageType === 'interactive') && raw_text) {
           const { handleCatalogFlow } = require('./core/catalogFlow');
           const catalogResult = await handleCatalogFlow(raw_text, senderPhone);
           if (catalogResult && catalogResult.handled && catalogResult.reply) {
-            await sendTextMessage(senderPhone, catalogResult.reply);
+            if (catalogResult.interactiveType === 'buttons' && Array.isArray(catalogResult.interactiveButtons)) {
+              await sendInteractiveButtons(
+                senderPhone,
+                catalogResult.reply,
+                catalogResult.interactiveButtons,
+                catalogResult.interactiveOptions || {}
+              );
+            } else if (catalogResult.interactiveType === 'list' && catalogResult.interactiveList) {
+              await sendInteractiveList(
+                senderPhone,
+                catalogResult.interactiveList.bodyText || catalogResult.reply,
+                catalogResult.interactiveList.buttonText || 'Choose Action',
+                catalogResult.interactiveList.sections || [],
+                catalogResult.interactiveOptions || {}
+              );
+            } else {
+              await sendTextMessage(senderPhone, catalogResult.reply);
+            }
             return;
           }
         }
