@@ -3364,6 +3364,15 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         updateFields.customer_phone = data.customer_phone;
       }
 
+      const explicitPo = data.po_number || data.poNumber || extractPoNumber(effectiveTextForLLM || text);
+      if (explicitPo && !/^(?:null|undefined|none|na|n\/a)$/i.test(String(explicitPo).trim())) {
+        updateFields.po_number = String(explicitPo).trim();
+        updatedLabels.push(`PO Number (${updateFields.po_number})`);
+        if (!targetExplicitDeal.po_date) {
+          updateFields.po_date = new Date().toISOString().split('T')[0];
+        }
+      }
+
       const notesMatch = textToInspect.match(/(?:notes?|remarks?|additional\s*notes?)\s*[:=-]\s*([^\n\r]+)/i);
       const noteContent = notesMatch ? notesMatch[1].trim() : (data.notes || data.additional_notes || null);
       if (noteContent) {

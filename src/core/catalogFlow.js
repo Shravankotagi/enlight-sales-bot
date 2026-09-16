@@ -110,22 +110,18 @@ Please provide the following details. Fields marked with * are mandatory:
 
   UPDATE_ORDER: `✏️ *Update Order*
 
+To identify the order, please provide ONE of the following:
+• *Inquiry ID:* * (e.g. INQ-936C7B or #INQ-3C86DE)
 • *PO Number:* * (e.g. PO-2026-0042)
 
 What would you like to update?
+• *Attach / Update PO Number:* (e.g. "attach PO-2026-8899")
+• *Header Fields:* PO Date, Delivery Location, Payment Terms, Status
+• *Line Item Updates:* Quantity, Rate, Add/Remove Items
 
-*Updatable Header Fields:*
-• PO Date
-• Delivery Location
-• Payment Terms
-• Status (Pending / Processing / Dispatched / Delivered / Cancelled)
-
-*Updatable Line Item Fields:*
-• To update a line item, mention the item number or product name and the new values
-• You can also add a new line item or remove an existing one
-
-Example:
-"PO-2026-0042, update delivery location to Pune MIDC, change item 1 rate to 58000, add new item: MS Plate 10mm, HSN 720837, 5 MT, ₹55000"`,
+*Examples:*
+• "For Inquiry INQ-936C7B, attach PO number PO-2026-8899"
+• "PO-2026-0042, update delivery location to Pune MIDC, change item 1 rate to 58000"`,
 
   LOG_VISIT: `📍 *Log Customer Field Visit*
 
@@ -489,12 +485,15 @@ LOG_ORDER:
 UPDATE_ORDER:
 {
   "action": "UPDATE_ORDER",
-  "po_number": "<PO Number e.g. PO-2026-0042, else null>",
+  "inquiry_id": "<Inquiry ID if mentioned e.g. INQ-936C7B, #INQ-3C86DE, INQ-2026-0042, else null>",
+  "po_number": "<PO Number to lookup or attach e.g. PO-2026-0042, else null>",
+  "company_name": "<Customer / Company Name if mentioned, else null>",
   "updates": {
+    "po_number": "<new or attached PO number if updating/attaching to inquiry e.g. PO-2026-8899, else null>",
     "po_date": "<new PO date if updated, else null>",
     "delivery_location": "<new delivery location if updated, else null>",
     "payment_terms": "<new payment terms if updated, else null>",
-    "status": "<Pending | Processing | Dispatched | Delivered | Cancelled if updated, else null>"
+    "status": "<Pending | Processing | Dispatched | Delivered | Cancelled | Won if updated, else null>"
   },
   "line_item_updates": [
     {
@@ -620,6 +619,7 @@ CRITICAL RULES:
 7. MULTIPLE ENTITIES / COMPANIES (CRITICAL): If and only if the user message itself introduces multiple distinct companies/records (e.g. 'Visited two customers today: ABC Steel in Mumbai (positive) and Sharma Construction in Pune (neutral)' or 'Inquiry from ABC for 10 MT and XYZ for 20 MT'):
 Output an 'entries' array containing a separate object for EACH individual customer/visit/inquiry/complaint!
 If only a single company is mentioned or if filling missing fields for an existing draft, return the top-level fields (e.g. company_name, person_met, contact_phone, etc.) and do NOT output an entries array.
+8. In UPDATE_ORDER: If the user provides an Inquiry ID (e.g. INQ-936C7B, #INQ-3C86DE) and asks to attach/set/update a PO number (e.g. 'attach PO-2026-8899 to INQ-936C7B' or 'INQ-936C7B PO is PO-2026-8899'), extract the inquiry ID into 'inquiry_id' and the PO number into 'po_number' and 'updates.po_number'.
 `;
 
   const userPrompt = `Existing Active Draft:
@@ -799,13 +799,20 @@ function validateMandatoryFields(action, draft) {
       }
       break;
 
-    case 'UPDATE_ORDER':
-      if (!draft.po_number) missing.push('PO Number (e.g. PO-2026-0042)');
+    case 'UPDATE_ORDER': {
+      const hasOrderIdentifier = Boolean(draft.po_number || draft.inquiry_id || draft.company_name);
+      if (!hasOrderIdentifier) {
+        missing.push('Inquiry ID OR PO Number (e.g. INQ-936C7B or PO-2026-0042)');
+      }
       const ordUpdates = draft.updates || {};
       const hasOrdHeader = Object.values(ordUpdates).some(v => v !== null && v !== undefined && v !== '');
       const hasLineUpdates = Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0;
-      if (!hasOrdHeader && !hasLineUpdates) missing.push('At least one header or line item update');
+      const hasPoToAttach = Boolean(draft.inquiry_id && (draft.po_number || ordUpdates.po_number));
+      if (!hasOrdHeader && !hasLineUpdates && !hasPoToAttach) {
+        missing.push('At least one field to update (e.g. PO Number to attach, PO Date, Delivery Location, Payment Terms, or Line Items)');
+      }
       break;
+    }
 
     case 'LOG_VISIT':
       if (!draft.company_name) missing.push('Customer / Company Name');
@@ -1055,11 +1062,21 @@ function buildConfirmationSummary(action, draft) {
     }
 
     case 'UPDATE_ORDER': {
-      summary += `• *PO Number:* ${draft.po_number}\n`;
+      if (draft.inquiry_id) {
+        summary += `• *Inquiry ID:* ${draft.inquiry_id}\n`;
+      }
+      const poToDisplay = draft.updates?.po_number || draft.po_number;
+      if (poToDisplay) {
+        summary += `• *${draft.inquiry_id ? 'Attached PO Number' : 'PO Number'}:* ${poToDisplay}\n`;
+      }
+      if (draft.company_name) {
+        summary += `• *Customer:* ${draft.company_name}\n`;
+      }
       if (draft.updates && Object.keys(draft.updates).length > 0) {
-        summary += `• *Header Updates:*\n`;
-        for (const [k, v] of Object.entries(draft.updates)) {
-          if (v) {
+        const headerEntries = Object.entries(draft.updates).filter(([k, v]) => v && k !== 'po_number');
+        if (headerEntries.length > 0) {
+          summary += `• *Header Updates:*\n`;
+          for (const [k, v] of headerEntries) {
             const label = k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
             summary += `  • *${label}* → ${v}\n`;
           }
@@ -1727,32 +1744,190 @@ Updated Sales Achievement Card! 🏆`;
       }
 
       case 'UPDATE_ORDER': {
-        const cleanPo = (draft.po_number || '').trim();
+        const rawInqId = (draft.inquiry_id || '').trim();
+        const cleanInqId = rawInqId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').trim().toUpperCase();
+        const rawPo = (draft.updates?.po_number || draft.po_number || '').trim();
+        const cleanPo = rawPo.replace(/^(?:PO[-_:#\s]*)/i, '').trim();
+        const rawCompany = (draft.company_name || '').trim();
+
+        // 1. Fetch recent deals to match
         const { data: deals } = await supabase
           .from('deals')
-          .select('id, po_number, customer_name')
-          .ilike('po_number', `%${cleanPo}%`)
-          .limit(1);
+          .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at')
+          .order('created_at', { ascending: false })
+          .limit(100);
 
-        const deal = deals && deals.length > 0 ? deals[0] : null;
+        let deal = null;
+        if (deals && deals.length > 0) {
+          // A. Match by Inquiry ID / Deal ID prefix or exact code
+          if (cleanInqId) {
+            deal = deals.find(d => {
+              const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+              const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+              return dId.startsWith(cleanInqId) || inqId.startsWith(cleanInqId) || dId.includes(cleanInqId) || inqId.includes(cleanInqId);
+            }) || null;
+          }
+
+          // B. Match by existing PO Number (if inquiry ID was not specified)
+          if (!deal && rawPo) {
+            deal = deals.find(d => {
+              if (!d.po_number) return false;
+              const dPo = String(d.po_number).trim();
+              return dPo.toLowerCase() === rawPo.toLowerCase() ||
+                     (cleanPo && dPo.toLowerCase().includes(cleanPo.toLowerCase()));
+            }) || null;
+          }
+
+          // C. Match by Customer Name
+          if (!deal && rawCompany) {
+            deal = deals.find(d => d.customer_name && d.customer_name.toLowerCase().includes(rawCompany.toLowerCase())) || null;
+          }
+        }
+
+        // 2. If not found in deals and cleanInqId was supplied, check inquiries table
+        if (!deal && cleanInqId) {
+          const { data: inqRows } = await supabase
+            .from('inquiries')
+            .select('id, company_name, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
+            .order('created_at', { ascending: false })
+            .limit(50);
+          if (inqRows) {
+            for (const inq of inqRows) {
+              const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
+              if (inqCode.startsWith(cleanInqId) || inqCode.includes(cleanInqId)) {
+                if (inq.deals && inq.deals.length > 0) {
+                  deal = inq.deals[0];
+                } else {
+                  const inqJson = inq.ai_extraction_json || {};
+                  const { data: newDealRows } = await supabase
+                    .from('deals')
+                    .insert({
+                      inquiry_id: inq.id,
+                      customer_name: inq.company_name || inq.sender_name || 'Customer',
+                      salesperson_phone: inq.salesperson_phone || senderPhone,
+                      stage: 'won',
+                      won_at: new Date().toISOString(),
+                      po_number: rawPo || null,
+                      po_date: new Date().toISOString().split('T')[0],
+                      total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0),
+                      delivery_location: inqJson.delivery_location || inqJson.location || null,
+                      payment_terms: inqJson.payment_terms || null,
+                      status: 'active',
+                    })
+                    .select();
+                  if (newDealRows && newDealRows.length > 0) {
+                    deal = newDealRows[0];
+                  }
+                }
+                break;
+              }
+            }
+          }
+        }
+
+        if (!deal) {
+          const missingIdentifier = draft.inquiry_id ? `Inquiry ID "${draft.inquiry_id}"` : `PO Number "${rawPo}"`;
+          return `❌ Could not find an existing order or inquiry matching ${missingIdentifier}.\n\nPlease check the Inquiry ID or PO Number and try again.`;
+        }
+
         const updates = draft.updates || {};
         const dealUpdates = {};
 
-        if (updates.po_date) dealUpdates.po_date = updates.po_date;
-        if (updates.delivery_location) dealUpdates.delivery_location = updates.delivery_location;
-        if (updates.payment_terms) dealUpdates.payment_terms = updates.payment_terms;
-        if (updates.status) dealUpdates.stage = updates.status.toLowerCase();
-
-        if (deal && Object.keys(dealUpdates).length > 0) {
-          await supabase.from('deals').update(dealUpdates).eq('id', deal.id);
+        // Attach / update PO number
+        if (rawPo) {
+          dealUpdates.po_number = rawPo;
+        }
+        if (updates.po_date) {
+          dealUpdates.po_date = updates.po_date;
+        }
+        if (updates.delivery_location) {
+          dealUpdates.delivery_location = updates.delivery_location;
+        }
+        if (updates.payment_terms) {
+          dealUpdates.payment_terms = updates.payment_terms;
         }
 
-        return `✅ *Order Updated Successfully!*
+        if (updates.status || updates.stage) {
+          const s = String(updates.status || updates.stage).toLowerCase();
+          if (s.includes('won') || s.includes('order') || s.includes('confirm')) dealUpdates.stage = 'won';
+          else if (s.includes('lost') || s.includes('cancel')) dealUpdates.stage = 'lost';
+          else if (s.includes('negot')) dealUpdates.stage = 'negotiation';
+          else if (s.includes('hold')) dealUpdates.stage = 'on_hold';
+          else if (s.includes('quote') || s.includes('price')) dealUpdates.stage = 'quoted';
+          else dealUpdates.stage = updates.status || updates.stage;
+        }
 
-🛒 *PO Number:* ${draft.po_number}
-🏢 *Customer:* ${deal ? deal.customer_name : 'Customer'}
+        // When deal is won, ensure won_at and po_date are set
+        if (deal.stage === 'won' || dealUpdates.stage === 'won') {
+          if (!deal.won_at && !dealUpdates.won_at) {
+            dealUpdates.won_at = new Date().toISOString();
+          }
+          if (!deal.po_date && !dealUpdates.po_date) {
+            dealUpdates.po_date = new Date().toISOString().split('T')[0];
+          }
+        }
 
-Order details updated in Sales Achievement Card! 🏆`;
+        // Line item updates if any
+        if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0) {
+          const { data: dItems } = await supabase.from('deal_items').select('*').eq('deal_id', deal.id);
+          if (dItems && dItems.length > 0) {
+            let totalAmount = 0;
+            for (let i = 0; i < dItems.length; i++) {
+              const currentItem = dItems[i];
+              const curSku = (currentItem.sku_text || currentItem.description || '').toLowerCase();
+              const matchedUpd = draft.line_item_updates.find((upd, uIdx) => {
+                const updSku = (upd.sku_text || upd.description || '').toLowerCase();
+                if (!updSku) return uIdx === i;
+                const cleanCur = curSku.replace(/[^a-z0-9]/g, '');
+                const cleanUpd = updSku.replace(/[^a-z0-9]/g, '');
+                return cleanCur.includes(cleanUpd) || cleanUpd.includes(cleanCur) || uIdx === i;
+              });
+
+              let itRate = Number(currentItem.rate) || 0;
+              let itQty = Number(currentItem.quantity) || 0;
+              if (matchedUpd) {
+                if (matchedUpd.rate !== null && matchedUpd.rate !== undefined && matchedUpd.rate !== '') {
+                  itRate = Number(String(matchedUpd.rate).replace(/[^\d.]/g, '')) || itRate;
+                }
+                if (matchedUpd.quantity !== null && matchedUpd.quantity !== undefined && matchedUpd.quantity !== '') {
+                  itQty = Number(String(matchedUpd.quantity).replace(/[^\d.]/g, '')) || itQty;
+                }
+              }
+              const itAmt = itQty > 0 && itRate > 0 ? itQty * itRate : 0;
+              totalAmount += itAmt;
+              await supabase.from('deal_items').update({
+                rate: itRate,
+                quantity: itQty,
+                amount: itAmt,
+              }).eq('id', currentItem.id);
+            }
+            if (totalAmount > 0) dealUpdates.total_amount = totalAmount;
+          }
+        }
+
+        if (Object.keys(dealUpdates).length > 0) {
+          await supabase.from('deals').update(dealUpdates).eq('id', deal.id);
+          if (deal.inquiry_id && dealUpdates.stage) {
+            const inqStatus = dealUpdates.stage === 'won' ? 'confirmed' : dealUpdates.stage;
+            await supabase.from('inquiries').update({ status: inqStatus }).eq('id', deal.inquiry_id);
+          }
+        }
+
+        const displayPo = dealUpdates.po_number || deal.po_number || rawPo || 'N/A';
+        const displayInq = deal.inquiry_id ? `#INQ-${deal.inquiry_id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : (draft.inquiry_id || `#INQ-${deal.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`);
+        const displayCust = deal.customer_name || draft.company_name || 'Customer';
+        const displayTotal = dealUpdates.total_amount || deal.total_amount || 0;
+        const displayLoc = dealUpdates.delivery_location || deal.delivery_location || 'Not specified';
+        const displayPayment = dealUpdates.payment_terms || deal.payment_terms || 'Not specified';
+
+        return `✅ *Order Updated Successfully!*\n\n` +
+          `📋 *Inquiry ID:* ${displayInq}\n` +
+          `🛒 *Official PO Number:* ${displayPo}\n` +
+          `🏢 *Customer:* ${displayCust}\n` +
+          `💰 *Total Value:* ₹${Number(displayTotal).toLocaleString('en-IN')}${displayTotal > 0 ? ' + GST' : ''}\n` +
+          `📍 *Delivery Location:* ${displayLoc}\n` +
+          `💳 *Payment Terms:* ${displayPayment}\n\n` +
+          `Attached PO number to won order and logged in Orders module! 🏆`;
       }
 
       case 'LOG_VISIT': {
@@ -2245,7 +2420,7 @@ function detectOperationalAction(text) {
   }
 
   // 1. Explicit Update patterns
-  if (/\b(?:update|change|modify|set|mark|resolve|close|reopen)\b/i.test(lower)) {
+  if (/\b(?:update|change|modify|set|mark|resolve|close|reopen|attach|link|add\s+po)\b/i.test(lower)) {
     // 1a. Complaints (Check FIRST: user messages updating a complaint often cite #INQ-xxx or PO-xxx)
     if (
       /\b(?:complaint|complaints|defect|defective|rejection|damage|damaged|rust)\b/i.test(lower) ||
@@ -2260,18 +2435,24 @@ function detectOperationalAction(text) {
     }
 
     // 1c. Orders
-    if (/\b(?:order|orders|purchase\s+order|po\s*no|po\s*number|delivery\s*date|po\s*date)\b/i.test(lower)) {
+    if (/\b(?:order|orders|purchase\s+order|po\s*no|po\s*number|delivery\s*date|po\s*date|attach\s+po|link\s+po|attach\s+(?:the\s+)?po|set\s+po)\b/i.test(lower)) {
       return 'UPDATE_ORDER';
     }
 
     // 1d. Inquiries
     if (/\b(?:inquiry|inquiries|deal|quote|quotation|rfq)\b/i.test(lower)) {
+      if (/\b(?:po[-_:#\s]*\d+|po\s*no|po\s*number|purchase\s*order)\b/i.test(lower) && /\b(?:attach|link|set)\b/i.test(lower)) {
+        return 'UPDATE_ORDER';
+      }
       return 'UPDATE_INQUIRY';
     }
 
     // 1e. ID-only updates without explicit entity keyword
-    if (/\b(?:inq-)\b/i.test(lower)) return 'UPDATE_INQUIRY';
     if (/\b(?:po-)\b/i.test(lower)) return 'UPDATE_ORDER';
+    if (/\b(?:inq-)\b/i.test(lower)) {
+      if (/\b(?:attach|link|set|update)\b.*?\b(?:po-|\bpo\b)/i.test(lower)) return 'UPDATE_ORDER';
+      return 'UPDATE_INQUIRY';
+    }
     if (/\b(?:vis-)\b/i.test(lower)) return 'UPDATE_VISIT';
   }
 
@@ -2922,6 +3103,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
     // Orders
     { pattern: /\b(?:record|log|create|add)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:purchase\s+)?order\b/i, action: 'LOG_ORDER' },
     { pattern: /\b(?:update|change|modify)\s+(?:the\s+|a\s+)?(?:purchase\s+)?order\b/i, action: 'UPDATE_ORDER' },
+    { pattern: /\b(?:attach|link|add|set|update)\s+(?:the\s+)?po\s*(?:no|number|#)?\b/i, action: 'UPDATE_ORDER' },
+    { pattern: /\b(?:attach|link)\s+(?:the\s+|a\s+)?(?:po|purchase\s+order)\b/i, action: 'UPDATE_ORDER' },
 
     // Inquiries
     { pattern: /\b(?:log|create|new|add)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?inquiry\b/i, action: 'LOG_INQUIRY' },
