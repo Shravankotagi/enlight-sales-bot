@@ -3799,7 +3799,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     // ── SCENARIO 1 & 2: NEW INQUIRY CREATION (Customer + Product Name) ────────
     if (!customerName || customerName.length < 2 || isInvalidCustomerName(customerName)) {
       const { saveActiveSession } = require('../supabase');
-      await saveActiveSession(senderPhone, 'Unknown', 'pending_customer_for_deal');
+      const sessionPayload = {
+        raw_text: text,
+        extracted: data,
+      };
+      await saveActiveSession(senderPhone, 'Unknown', `pending_customer_for_deal|${JSON.stringify(sessionPayload)}`);
       return `❓ Which customer is this inquiry for? Please reply with the customer/company name (e.g. _"Inquiry for ABC Steel"_).`;
     }
 

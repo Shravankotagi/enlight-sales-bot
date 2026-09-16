@@ -2523,8 +2523,17 @@ function isOperationalQuery(text) {
     return false;
   }
 
+  // If message contains explicit operational data / metal / quantity / order keywords, it is NOT a read query
+  if (
+    /\b(?:\d+\s*(?:mt|tons?|kg|pcs?|sheets?|bundles?|coils?|nos?))\b/i.test(lower) ||
+    /\b(?:hr\s*coil|cr\s*sheet|ms\s*sheet|ms\s*plate|ms\s*angle|chequered\s*plate|galvanized|gi\s*sheet|gp\s*sheet|beam|channel|tmt|billet|pipe|flange)\b/i.test(lower) ||
+    /\b(?:payment\s*terms|advance\s*received|delivery\s*location|delivery\s*address|po\s*number|po\s*date|person\s*met)\b/i.test(lower)
+  ) {
+    return false;
+  }
+
   // Common query patterns (Who, What, When, Where, Which, How, Show, List, Check, Find, Get, Tell me, etc.)
-  if (/^(?:show|list|get|check|find|filter|tell me|what|which|who|whom|whose|when|where|why|how|how many|how much|total|status|view|search|is there|are there|can you|give me|display|fetch|details? of|history of|info on|compare|rankings|leaderboard)\b/i.test(lower)) {
+  if (/^(?:show|list|get|check|find|filter|tell me|what|which|who|whom|whose|when|where|why|how|how many|how much|total|status|view|search|is there|are there|give me|display|fetch|details? of|history of|info on|compare|rankings|leaderboard)\b/i.test(lower)) {
     return true;
   }
 
@@ -2536,15 +2545,11 @@ function isOperationalQuery(text) {
     return true;
   }
 
-  if (/\b(?:inquiry id|deal id|summary|leaderboard|pipeline|radar|360|knowledge base|sop|moq|pricing sheet)\b/i.test(lower)) {
+  if (/^(?:inquiry id|deal id|summary|leaderboard|pipeline|radar|360|knowledge base|sop|moq|pricing sheet)\b/i.test(lower)) {
     return true;
   }
 
   if (/\b(?:kya status hai|status check|status kya hai|status of)\b/i.test(lower)) {
-    return true;
-  }
-
-  if (lower.endsWith('?')) {
     return true;
   }
 
@@ -3127,7 +3132,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const draftJsonStr = parts.slice(2).join('|');
     let existingDraft = safeParseJSON(draftJsonStr, {});
 
-    if (isOperationalQuery(text)) {
+    const isExplicitReportQuery = /^(?:show|list|tell me|get|check)\b.*?\b(?:kra|leaderboard|ranking|pipeline summary|reports?|visits? list|deals? list)\b/i.test(text);
+    if (isExplicitReportQuery) {
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return { handled: false };
     }

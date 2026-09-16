@@ -609,6 +609,30 @@ router.post('/', async (req, res) => {
             return;
           }
 
+          if (activeSession?.last_intent?.startsWith('pending_customer_for_deal|')) {
+            const rawContextStr = activeSession.last_intent.slice('pending_customer_for_deal|'.length);
+            const { safeParseJSON } = require('./utils/jsonUtils');
+            const storedContext = safeParseJSON(rawContextStr, {});
+            const cleanCompany = raw_text.trim();
+
+            await saveActiveSession(senderPhone, cleanCompany, 'general');
+
+            const { processSalesMessage } = require('./agents/salesAgent');
+            const syntheticText = `${cleanCompany} requirement ${storedContext.raw_text || ''}`;
+            const reply = await processSalesMessage(syntheticText, senderPhone, storedContext.extracted);
+            await sendTextMessage(senderPhone, reply);
+            return;
+          }
+
+          if (activeSession?.last_intent === 'pending_customer_for_deal') {
+            const cleanCompany = raw_text.trim();
+            await saveActiveSession(senderPhone, cleanCompany, 'general');
+            const { processSalesMessage } = require('./agents/salesAgent');
+            const reply = await processSalesMessage(`Inquiry for ${cleanCompany}`, senderPhone);
+            await sendTextMessage(senderPhone, reply);
+            return;
+          }
+
           if (activeSession?.last_intent === 'pending_company_for_deal_lookup') {
             const cleanCompany = raw_text.trim();
             await saveActiveSession(senderPhone, cleanCompany, 'deal_inquiry');
