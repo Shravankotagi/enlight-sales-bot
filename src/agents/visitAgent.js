@@ -944,19 +944,16 @@ async function handleVisitCorrection(text, senderPhone) {
     }
 
     // Fetch recent visits to resolve target
+    const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+    const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+
     let query = supabase
       .from('customer_visits')
       .select(
         'id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, salesperson_phone, outcome',
       )
       .order('visited_at', { ascending: false })
-      .limit(15);
-
-    if (senderPhone) {
-      query = query.or(
-        `salesperson_phone.eq.${senderPhone},salesperson_phone.is.null`,
-      );
-    }
+      .limit(30);
 
     const { data: recentVisits, error: fetchErr } = await query;
     if (fetchErr) {
@@ -966,7 +963,37 @@ async function handleVisitCorrection(text, senderPhone) {
       );
     }
 
-    const visitsList = recentVisits || [];
+    const allVisits = recentVisits || [];
+    let visitsList = allVisits.filter(v => {
+      if (!v.salesperson_phone) return true;
+      if (scope.isAdmin || scope.phones === null) return true;
+      const cleanV = String(v.salesperson_phone).replace(/\D/g, '');
+      const accessibleSet = new Set();
+      if (Array.isArray(scope.phones)) scope.phones.forEach(p => {
+        const c = String(p).replace(/\D/g, '');
+        accessibleSet.add(c);
+        if (c.length === 10) accessibleSet.add(`91${c}`);
+        if (c.length === 12 && c.startsWith('91')) accessibleSet.add(c.slice(2));
+      });
+      if (senderPhone) {
+        const s = String(senderPhone).replace(/\D/g, '');
+        accessibleSet.add(s);
+        if (s.length === 10) accessibleSet.add(`91${s}`);
+        if (s.length === 12 && s.startsWith('91')) accessibleSet.add(s.slice(2));
+      }
+      return accessibleSet.has(cleanV);
+    });
+
+    if (visitsList.length === 0 && allVisits.length > 0) {
+      visitsList = allVisits;
+    }
+
+    // Filter out synthetic Bigin sync logs
+    const realVisits = visitsList.filter(v => !(v.remarks && v.remarks.startsWith('Contact Synced from Zoho Bigin')));
+    if (realVisits.length > 0) {
+      visitsList = realVisits;
+    }
+
     if (visitsList.length === 0) {
       return `No recent customer visit records were found to update. Please log the visit first or specify the customer name.`;
     }

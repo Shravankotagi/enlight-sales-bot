@@ -37,6 +37,24 @@ function cleanPhone(p) {
   return digits.length >= 10 ? digits.slice(-10) : digits;
 }
 
+function getPhoneVariants(phone) {
+  if (!phone) return [];
+  const clean = String(phone).replace(/\D/g, '');
+  const variants = new Set();
+  if (clean.length === 10) {
+    variants.add(clean);
+    variants.add(`91${clean}`);
+    variants.add(`+91${clean}`);
+  } else if (clean.length === 12 && clean.startsWith('91')) {
+    variants.add(clean);
+    variants.add(clean.slice(2));
+    variants.add(`+${clean}`);
+  } else {
+    variants.add(clean);
+  }
+  return Array.from(variants);
+}
+
 // ── CATALOG MENU ─────────────────────────────────────────────────────────────
 
 const CATALOG_MENU = `👋 Welcome to *SalesOS Assistant*!
@@ -1991,17 +2009,56 @@ Logged to Customer Visits Card! ✅`;
       case 'UPDATE_VISIT': {
         const companyName = (draft.company_name || '').trim();
         const visitId = (draft.visit_id || '').trim();
+        const targetDate = draft.visit_date || draft.updates?.visit_date || null;
 
-        let visitQuery = supabase.from('customer_visits').select('id, customer_name, visited_at, salesperson_phone');
+        const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+        const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+
+        let visitQuery = supabase.from('customer_visits').select('*').order('visited_at', { ascending: false });
         if (visitId) {
           const rawId = visitId.replace(/^#?(?:VIS|VISIT)-?/i, '').trim();
           visitQuery = visitQuery.or(`id.ilike.%${rawId}%,id.eq.${visitId}`);
         } else if (companyName) {
           visitQuery = visitQuery.ilike('customer_name', `%${companyName}%`);
         }
-        const { data: visits } = await visitQuery.order('visited_at', { ascending: false }).limit(1);
+        const { data: allVisits } = await visitQuery.limit(50);
 
-        const targetVisit = visits && visits.length > 0 ? visits[0] : null;
+        // 1. Accessibility filtering by salesperson phone
+        let candidateVisits = (allVisits || []).filter(v => {
+          if (!v.salesperson_phone) return true;
+          if (scope.isAdmin || scope.phones === null) return true;
+          const vPhones = getPhoneVariants(v.salesperson_phone);
+          const accessibleSet = new Set();
+          if (Array.isArray(scope.phones)) scope.phones.forEach(p => getPhoneVariants(p).forEach(pv => accessibleSet.add(pv)));
+          if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => accessibleSet.add(pv));
+          return vPhones.some(vp => accessibleSet.has(vp));
+        });
+
+        if (candidateVisits.length === 0 && allVisits && allVisits.length > 0) {
+          candidateVisits = allVisits;
+        }
+
+        // 2. Separate real site visits from Bigin sync placeholder visits
+        const realVisits = candidateVisits.filter(v => !(v.remarks && v.remarks.startsWith('Contact Synced from Zoho Bigin')));
+        const pool = realVisits.length > 0 ? realVisits : candidateVisits;
+
+        // 3. Match by date if specified
+        let targetVisit = null;
+        if (targetDate) {
+          const cleanTargetDate = parseDDMMYYYYtoISO(targetDate);
+          if (cleanTargetDate) {
+            targetVisit = pool.find(v => v.visited_at && v.visited_at.startsWith(cleanTargetDate.slice(0, 10))) || null;
+          }
+        }
+
+        if (!targetVisit) {
+          targetVisit = pool[0] || null;
+        }
+
+        if (!targetVisit) {
+          return `❌ Could not find an existing customer visit record for "${companyName || visitId}". Please check the customer name or visit ID and try again.`;
+        }
+
         const updates = draft.updates || {};
         const visitUpdates = {};
 
@@ -2014,16 +2071,30 @@ Logged to Customer Visits Card! ✅`;
           visitUpdates.remarks = `${outcomeTag}${updates.meeting_remarks || ''}${followupTag}`.trim();
         }
 
-        if (targetVisit && Object.keys(visitUpdates).length > 0) {
+        if (Object.keys(visitUpdates).length > 0) {
           await supabase.from('customer_visits').update(visitUpdates).eq('id', targetVisit.id);
+
+          // Sync customer master profile if contact details changed
+          if (updates.person_met || updates.contact_phone || updates.city_location) {
+            const custUpdates = { updated_at: new Date().toISOString() };
+            if (updates.person_met) custUpdates.contact_person = updates.person_met;
+            if (updates.contact_phone) custUpdates.customer_phone = cleanPhone(updates.contact_phone) || updates.contact_phone;
+            if (updates.city_location) custUpdates.customer_address = updates.city_location;
+            await supabase
+              .from('recurring_customers')
+              .update(custUpdates)
+              .ilike('customer_name', `%${targetVisit.customer_name}%`);
+          }
         }
 
         const resolvedCust = targetVisit ? targetVisit.customer_name : (draft.company_name || 'Customer');
 
-        return `✅ *Field Visit Updated Successfully!*
-
-🏢 *Customer:* ${resolvedCust}
-Visit details updated in Customer Visits Card! ✅`;
+        return `✅ *Field Visit Updated Successfully!*\n\n` +
+          `🏢 *Customer:* ${resolvedCust}\n` +
+          (visitUpdates.person_met ? `👤 *Person Met:* ${visitUpdates.person_met}\n` : '') +
+          (visitUpdates.contact_no ? `📞 *Contact Phone:* ${visitUpdates.contact_no}\n` : '') +
+          (visitUpdates.customer_address ? `📍 *Location:* ${visitUpdates.customer_address}\n` : '') +
+          `\nVisit details updated in Customer Visits Card! ✅`;
       }
 
       case 'LOG_NEW_CUSTOMER': {
@@ -2371,7 +2442,7 @@ function isOperationalQuery(text) {
   const lower = text.toLowerCase().trim();
 
   // If message begins with an explicit write action verb, it is NOT a read query
-  if (/^(?:update|change|modify|set|mark|log|record|create|add|raise|new\b|submit|resolve)\b/i.test(lower)) {
+  if (/^(?:update|change|modify|set|mark|log|record|create|add|raise|new\b|submit|resolve|correct|fix|edit|amend|revise)\b/i.test(lower)) {
     return false;
   }
 
@@ -2420,7 +2491,7 @@ function detectOperationalAction(text) {
   }
 
   // 1. Explicit Update patterns
-  if (/\b(?:update|change|modify|set|mark|resolve|close|reopen|attach|link|add\s+po)\b/i.test(lower)) {
+  if (/\b(?:update|change|modify|set|mark|resolve|close|reopen|attach|link|add\s+po|correct|fix|edit|amend|revise)\b/i.test(lower)) {
     // 1a. Complaints (Check FIRST: user messages updating a complaint often cite #INQ-xxx or PO-xxx)
     if (
       /\b(?:complaint|complaints|defect|defective|rejection|damage|damaged|rust)\b/i.test(lower) ||
@@ -2430,7 +2501,7 @@ function detectOperationalAction(text) {
     }
 
     // 1b. Visits (Check SECOND: visits might mention inquiries discussed)
-    if (/\b(?:visit|vis-|site\s+visit|field\s+visit|meeting|person\s+met)\b/i.test(lower)) {
+    if (/\b(?:visit|vis-|site\s+visit|field\s+visit|meeting|person\s+met|contact\s+person)\b/i.test(lower)) {
       return 'UPDATE_VISIT';
     }
 
@@ -3098,7 +3169,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // Visits
     { pattern: /\b(?:log|record|add|create)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'LOG_VISIT' },
-    { pattern: /\b(?:update|change|modify|set)\s+(?:the\s+|a\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'UPDATE_VISIT' },
+    { pattern: /\b(?:update|change|modify|set|correct|fix|edit|amend|revise)\s+(?:the\s+|a\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'UPDATE_VISIT' },
+    { pattern: /\b(?:correct|fix|change|update|edit|modify)\s+(?:the\s+)?(?:contact\s+person|person\s+met|location|address|remarks|outcome|date)\s+for\b/i, action: 'UPDATE_VISIT' },
 
     // Orders
     { pattern: /\b(?:record|log|create|add)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:purchase\s+)?order\b/i, action: 'LOG_ORDER' },
