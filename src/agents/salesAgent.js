@@ -2344,7 +2344,7 @@ function extractDeterministicRateItems(text) {
 /**
  * Main text message handler.
  */
-async function processSalesMessage(text, senderPhone, overrideData = null) {
+async function processSalesMessage(text, senderPhone, overrideData = null, callerChannel = null) {
   try {
     // 0. Check if this is an explicit request to send / email a quotation or answering email prompt
     const isStageOrStatusUpdate =
@@ -4007,7 +4007,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         const { data: insertedInq, error: inqInsErr } = await supabase
           .from('inquiries')
           .insert({
-            source_channel: 'whatsapp_text',
+            source_channel: callerChannel || (typeof data?.source_channel === 'string' ? data.source_channel : 'whatsapp_text'),
             raw_text: data.raw_text || text,
             sender_name: finalCustomerName || null,
             sender_phone: actualCustomerPhone || null,
