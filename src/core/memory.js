@@ -58,42 +58,36 @@ function normalizeMessageObj(item) {
 
 /**
  * Tier 1: Get raw recent chat history objects (up to 15 messages) for a salesperson.
+ * Scoped: Returns rolling 15 messages on continuation/active session, or empty on new/unrelated flow.
  */
-async function getRawChatHistory(senderPhone) {
+async function getRawChatHistory(senderPhone, incomingText = null) {
   if (!senderPhone) return [];
   const pKey = getCanonicalPhoneKey(senderPhone);
   if (!pKey) return [];
 
-  if (rawHistoryMap.has(pKey)) {
-    return rawHistoryMap.get(pKey);
-  }
-
   try {
-    const variants = getCanonicalPhoneVariants(senderPhone);
-    const { data: session } = await supabase
-      .from('conversation_sessions')
-      .select('chat_history')
-      .in('salesperson_phone', variants)
-      .order('updated_at', { ascending: false })
-      .limit(1);
-
-    if (session && session.length > 0) {
-      const rawChatHistory = session[0].chat_history;
-      let rawList = [];
-      if (Array.isArray(rawChatHistory)) {
-        rawList = rawChatHistory;
-      } else if (rawChatHistory && typeof rawChatHistory === 'object' && rawChatHistory.current_session?.messages) {
-        rawList = rawChatHistory.current_session.messages;
-      }
-
-      const formatted = rawList
+    const { getScopedSessionContext, getSessionEnvelope } = require('./sessionManager');
+    if (incomingText) {
+      const scoped = await getScopedSessionContext(senderPhone, incomingText);
+      const formatted = (scoped.messages || [])
         .map(normalizeMessageObj)
         .filter(Boolean)
         .slice(-MAX_MESSAGES);
-
-      rawHistoryMap.set(pKey, formatted);
       return formatted;
     }
+
+    const envelope = await getSessionEnvelope(senderPhone);
+    const rawList = Array.isArray(envelope.rolling_messages) && envelope.rolling_messages.length > 0
+      ? envelope.rolling_messages
+      : (envelope.current_session?.messages || []);
+
+    const formatted = rawList
+      .map(normalizeMessageObj)
+      .filter(Boolean)
+      .slice(-MAX_MESSAGES);
+
+    rawHistoryMap.set(pKey, formatted);
+    return formatted;
   } catch (err) {
     console.error('[Memory] Error loading chat history from DB:', err.message);
   }
@@ -104,8 +98,8 @@ async function getRawChatHistory(senderPhone) {
 /**
  * Get recent chat history as LangChain messages for model execution.
  */
-async function getChatHistory(senderPhone) {
-  const rawList = await getRawChatHistory(senderPhone);
+async function getChatHistory(senderPhone, incomingText = null) {
+  const rawList = await getRawChatHistory(senderPhone, incomingText);
   return rawList.map((m) => {
     if (m.role === 'user') return new HumanMessage(m.content);
     return new AIMessage(m.content);
@@ -389,13 +383,16 @@ async function getCustomerFactSheet(customerName, senderPhone) {
 }
 
 /**
- * Assembles the full Multi-Tier context prompt for LLM execution.
+ * Assembles the full Multi-Tier context prompt for LLM execution with continuation scoping.
  */
-async function getActiveContextPrompt(senderPhone, isOption10 = false) {
+async function getActiveContextPrompt(senderPhone, incomingText = null, isOption10 = false) {
   if (!senderPhone) return '';
   const variants = getCanonicalPhoneVariants(senderPhone);
 
   try {
+    const { getScopedSessionContext, searchDatabaseForOption10 } = require('./sessionManager');
+    const scopedCtx = await getScopedSessionContext(senderPhone, incomingText);
+
     const { data: session } = await supabase
       .from('conversation_sessions')
       .select('active_customer_name, last_intent, updated_at')
@@ -403,31 +400,55 @@ async function getActiveContextPrompt(senderPhone, isOption10 = false) {
       .order('updated_at', { ascending: false })
       .limit(1);
 
-    const crossCtx = await getCrossAgentContext(senderPhone);
-    const activeCustomer = session?.[0]?.active_customer_name || crossCtx.activeCustomer;
     const lastIntent = session?.[0]?.last_intent || 'general';
+    const activeCustomer = scopedCtx.activeCustomer || (scopedCtx.isContinuation ? scopedCtx.lastActivity?.customer_name : null);
 
+    // 1. History Section (Rolling 15 messages)
     let historySection = '';
-    if (crossCtx.formattedHistory) {
-      historySection = '\n\n## ROLLING CONVERSATION HISTORY (Last ' + crossCtx.messages.length + ' Messages across all agents):\n' + crossCtx.formattedHistory;
+    if (scopedCtx.messages && scopedCtx.messages.length > 0) {
+      const transcriptLines = scopedCtx.messages.map((m, idx) => {
+        const roleTag = m.role === 'user' ? 'Salesperson' : 'Assistant (' + (m.agent || 'Bot') + ')';
+        const metaTag = [
+          m.customer_name ? 'Customer: ' + m.customer_name : null,
+          m.deal_id ? 'Deal: #' + m.deal_id : null,
+        ]
+          .filter(Boolean)
+          .join(', ');
+
+        return '[Msg ' + (idx + 1) + '/' + scopedCtx.messages.length + '] ' + roleTag + (metaTag ? ' [' + metaTag + ']' : '') + ': "' + m.content.replace(/\n+/g, ' ') + '"';
+      });
+      historySection = '\n\n## ROLLING CONVERSATION HISTORY (Last ' + scopedCtx.messages.length + ' Messages):\n' + transcriptLines.join('\n');
     }
 
-    // Historical sessions block - ONLY injected on Option 10 / General Query
-    let historicalSessionsSection = '';
-    if (isOption10) {
+    // 2. Activity Continuation Context Block
+    let continuationSection = '';
+    if (scopedCtx.isContinuation && scopedCtx.lastActivity) {
+      const act = scopedCtx.lastActivity;
+      const refStr = act.inquiry_id ? ` | Ref: #${act.inquiry_id}` : (act.deal_id ? ` | Deal: #${act.deal_id}` : (act.po_number ? ` | PO: ${act.po_number}` : ''));
+      continuationSection = `\n\n## ⚡ RECENTLY COMPLETED ACTIVITY (Continuation Active)\n` +
+        `- Action: ${act.action_type || 'Sales Activity'}\n` +
+        `- Customer: ${act.customer_name || 'N/A'}${refStr}\n` +
+        `- Summary: ${act.summary || 'Completed activity'}\n` +
+        `- Details: ${JSON.stringify(act.extracted_data || {})}\n` +
+        `INSTRUCTION: The salesperson's message is a direct follow-up / modification to this completed activity. Apply requested changes or lookups for "${act.customer_name}" without asking them to re-enter the company name.`;
+    }
+
+    // 3. Option 10 / Semantic Database Retrieval Block
+    let retrievalSection = '';
+    if (isOption10 && incomingText) {
       try {
-        const { formatHistoricalSessionsForLLM } = require('./sessionManager');
-        const histText = await formatHistoricalSessionsForLLM(senderPhone);
-        if (histText) {
-          historicalSessionsSection = '\n\n' + histText;
+        const matchedDbText = await searchDatabaseForOption10(senderPhone, incomingText);
+        if (matchedDbText) {
+          retrievalSection = '\n\n' + matchedDbText;
         }
-      } catch (sessErr) {
-        console.warn('[Memory] Error formatting historical sessions:', sessErr.message);
+      } catch (dbErr) {
+        console.warn('[Memory] Error searching database for Option 10:', dbErr.message);
       }
     }
 
+    // If completely new/unrelated flow and no active customer
     if (!activeCustomer) {
-      return historySection + historicalSessionsSection;
+      return historySection + continuationSection + retrievalSection;
     }
 
     // Tier 3: Stateful Business Fact Sheet
@@ -441,9 +462,9 @@ async function getActiveContextPrompt(senderPhone, isOption10 = false) {
         thread.map((t, i) => '[' + (i + 1) + '] ' + (t.role === 'user' ? 'Salesperson' : 'Bot') + ': "' + t.content.replace(/\n+/g, ' ') + '"').join('\n');
     }
 
-    const activeDealStr = crossCtx.activeDealId ? '#' + crossCtx.activeDealId : 'None';
+    const activeDealStr = (scopedCtx.lastActivity?.inquiry_id ? '#' + scopedCtx.lastActivity.inquiry_id : (scopedCtx.lastActivity?.deal_id ? '#' + scopedCtx.lastActivity.deal_id : 'None'));
 
-    return historySection + threadSection + factSheet + historicalSessionsSection + '\n\n## ACTIVE CONTEXT WINDOW (Memory for this Salesperson)\n' +
+    return historySection + continuationSection + threadSection + factSheet + retrievalSection + '\n\n## ACTIVE CONTEXT WINDOW (Memory for this Salesperson)\n' +
       '- Currently Active Customer: "' + activeCustomer + '"\n' +
       '- Active Inquiry ID: ' + activeDealStr + '\n' +
       '- Last Action/Intent: ' + lastIntent + '\n\n' +

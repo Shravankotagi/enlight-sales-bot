@@ -106,7 +106,7 @@ const CATALOG_MENU_SECTIONS = [
     rows: [
       { id: 'menu_8', title: '8. Log Complaint', description: 'Report quality or delay' },
       { id: 'menu_9', title: '9. Update Complaint', description: 'Update resolution status' },
-      { id: 'menu_10', title: '10. General Query', description: 'Ask policy or stock queries' },
+      { id: 'menu_10', title: '10. General Query', description: 'Ask any data retrieval query' },
     ],
   },
 ];
@@ -2555,42 +2555,88 @@ function isOperationalQuery(text) {
   if (!text || typeof text !== 'string') return false;
   const lower = text.toLowerCase().trim();
 
-  // If message begins with an explicit write action verb, it is NOT a read query
-  if (/^(?:update|change|modify|set|mark|log|record|create|add|raise|new\b|submit|resolve|correct|fix|edit|amend|revise)\b/i.test(lower)) {
+  // 1. Explicit greeting or navigation selections / confirmation buttons (Yes, No, Edit, Cancel, 1-10) are NOT queries
+  if (/^(?:hi|hello|hey|namaste|yes|no|y|n|1|2|3|4|5|6|7|8|9|10|confirm|edit|cancel|save|discard|stop|exit|quit)$/i.test(lower)) {
     return false;
   }
 
-  // If message contains explicit operational data / metal / quantity / order keywords, it is NOT a read query
+  // 2. Explicit Operational Logging / Creation / Action Commands
+  if (/^(?:log|record|add|create|raise|onboard|acquire)\s+(?:new\s+|a\s+|an\s+)?(?:inquiry|deal|order|visit|complaint|customer|acquisition|po)\b/i.test(lower)) {
+    return false;
+  }
+  if (/^(?:update|change|modify|set|mark|close|resolve|reopen)\s+(?:the\s+|a\s+)?(?:inquiry|deal|order|visit|complaint|customer|rate|price|status|stage)\b/i.test(lower)) {
+    return false;
+  }
+
+  // 3. Clear Read / Retrieval / Question Patterns
   if (
-    /\b(?:\d+\s*(?:mt|tons?|kg|pcs?|sheets?|bundles?|coils?|nos?))\b/i.test(lower) ||
-    /\b(?:hr\s*coil|cr\s*sheet|ms\s*sheet|ms\s*plate|ms\s*angle|chequered\s*plate|galvanized|gi\s*sheet|gp\s*sheet|beam|channel|tmt|billet|pipe|flange)\b/i.test(lower) ||
-    /\b(?:payment\s*terms|advance\s*received|delivery\s*location|delivery\s*address|po\s*number|po\s*date|person\s*met)\b/i.test(lower)
+    /^(?:show|list|get|check|find|filter|tell me|what|which|who|whom|whose|when|where|why|how|how many|how much|did we|is there|are there|give me|display|fetch|details? of|history of|info on|compare|rankings|leaderboard)\b/i.test(lower) ||
+    /\b(?:kya hai|batao|dikhao|dikhaye|kitne|kitna|kaun hai|kaun tha|kiska|kab hua|kahan|list karo|check karo|details batao)\b/i.test(lower) ||
+    /\b(?:what is the|what was the|what are the|how many|how much|status of|status kya hai|outcome of|last rate|rates? quoted|pending complaints|closed complaints|my visits|my inquiries|my orders|my deals)\b/i.test(lower) ||
+    lower.endsWith('?')
   ) {
-    return false;
-  }
-
-  // Common query patterns (Who, What, When, Where, Which, How, Show, List, Check, Find, Get, Tell me, etc.)
-  if (/^(?:show|list|get|check|find|filter|tell me|what|which|who|whom|whose|when|where|why|how|how many|how much|total|status|view|search|is there|are there|give me|display|fetch|details? of|history of|info on|compare|rankings|leaderboard)\b/i.test(lower)) {
     return true;
   }
 
-  if (/\b(?:kya hai|batao|dikhao|dikhaye|kitne|kitna|kaun hai|kaun tha|kiska|kab hua|kahan|list karo|check karo|details batao)\b/i.test(lower)) {
-    return true;
-  }
-
-  if (/\b(?:who was|who is|who met|who did|person met|contact person|meeting with|whom did)\b/i.test(lower) && /\b(?:who|which|what|when|where|tell|show|check|find|get)\b/i.test(lower)) {
-    return true;
-  }
-
+  // 4. Standalone lookup terms
   if (/^(?:inquiry id|deal id|summary|leaderboard|pipeline|radar|360|knowledge base|sop|moq|pricing sheet)\b/i.test(lower)) {
     return true;
   }
 
-  if (/\b(?:kya status hai|status check|status kya hai|status of)\b/i.test(lower)) {
-    return true;
+  return false;
+}
+
+/**
+ * Handles a read/retrieval query mid-flow without dropping or wiping the active catalog state.
+ * Returns the answer along with a prompt to resume the active form.
+ */
+async function handleMidFlowRetrievalQuery(text, senderPhone, activeState, action, draft) {
+  const { runOrchestrator } = require('./orchestrator');
+  const queryAnswer = await runOrchestrator(text, senderPhone);
+
+  const actionName = getActionFriendlyName(action);
+  let resumePrompt = '';
+  let interactiveType = null;
+  let interactiveButtons = null;
+
+  if (activeState === 'catalog_confirm') {
+    const summary = buildConfirmationSummary(action, draft);
+    resumePrompt = `Now resuming your ${actionName}:\n\n${summary}`;
+    interactiveType = 'buttons';
+    interactiveButtons = CONFIRMATION_BUTTONS;
+  } else if (activeState === 'catalog_editing') {
+    resumePrompt = `Now resuming your ${actionName}.\n\nWhich field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")`;
+  } else if (activeState === 'catalog_implicit_cust_ask') {
+    resumePrompt = `Now resuming your ${actionName}.\n\nPlease reply *Yes* to onboard *${draft.company_name || 'customer'}* as a new customer, or *No* to re-enter the company name.`;
+    interactiveType = 'buttons';
+    interactiveButtons = NEW_CUSTOMER_BUTTONS;
+  } else {
+    // catalog_flow or catalog_implicit_cust_collect
+    const missing = validateMandatoryFields(action, draft);
+    if (missing.length === 0) {
+      const summary = buildConfirmationSummary(action, draft);
+      resumePrompt = `Now resuming your ${actionName}:\n\n${summary}`;
+      interactiveType = 'buttons';
+      interactiveButtons = CONFIRMATION_BUTTONS;
+    } else {
+      const missingList = missing.map((m) => `• *${m}*`).join('\n');
+      resumePrompt = `Now resuming your ${actionName}.\n\nPlease provide the remaining mandatory details:\n\n${missingList}`;
+    }
   }
 
-  return false;
+  const combinedReply = `${queryAnswer}\n\n━━━━━━━━━━━━━━━━━━━━\n*(Resuming your ${actionName})*\n${resumePrompt}`;
+  await recordSessionMessage(senderPhone, 'user', text);
+  await recordSessionMessage(senderPhone, 'assistant', combinedReply, {
+    action_type: action,
+    customer_name: draft.company_name || null,
+  });
+
+  return {
+    handled: true,
+    reply: combinedReply,
+    interactiveType,
+    interactiveButtons,
+  };
 }
 
 function detectOperationalAction(text) {
@@ -2735,8 +2781,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const originalDraft = safeParseJSON(originalDraftJsonStr, {});
 
     if (isOperationalQuery(text)) {
-      await saveActiveSession(senderPhone, 'Unknown', 'general');
-      return { handled: false };
+      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_implicit_cust_ask', originalAction, originalDraft);
     }
 
     await recordSessionMessage(senderPhone, 'user', text);
@@ -2892,8 +2937,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const custDraft = safeParseJSON(custDraftJsonStr, {});
 
     if (isOperationalQuery(text)) {
-      await saveActiveSession(senderPhone, 'Unknown', 'general');
-      return { handled: false };
+      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_implicit_cust_collect', 'LOG_NEW_CUSTOMER', custDraft);
     }
 
     await recordSessionMessage(senderPhone, 'user', text);
@@ -2962,8 +3006,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const draft = safeParseJSON(draftJsonStr, {});
 
     if (isOperationalQuery(text)) {
-      await saveActiveSession(senderPhone, 'Unknown', 'general');
-      return { handled: false };
+      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_confirm', action, draft);
     }
 
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
@@ -3046,6 +3089,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
         customer_name: draft.company_name,
         po_number: draft.po_number,
         inquiry_id: draft.inquiry_id,
+        extracted_data: draft,
       });
       await saveActiveSession(senderPhone, draft.company_name || 'Customer', 'general');
       return { handled: true, reply };
@@ -3144,8 +3188,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const draft = safeParseJSON(draftJsonStr, {});
 
     if (isOperationalQuery(text)) {
-      await saveActiveSession(senderPhone, 'Unknown', 'general');
-      return { handled: false };
+      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_editing', action, draft);
     }
 
     await recordSessionMessage(senderPhone, 'user', text);
@@ -3212,10 +3255,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const draftJsonStr = parts.slice(2).join('|');
     let existingDraft = safeParseJSON(draftJsonStr, {});
 
-    const isExplicitReportQuery = /^(?:show|list|tell me|get|check)\b.*?\b(?:kra|leaderboard|ranking|pipeline summary|reports?|visits? list|deals? list)\b/i.test(text);
-    if (isExplicitReportQuery) {
-      await saveActiveSession(senderPhone, 'Unknown', 'general');
-      return { handled: false };
+    if (isOperationalQuery(text)) {
+      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_flow', action, existingDraft);
     }
 
     await recordSessionMessage(senderPhone, 'user', text);
@@ -3259,7 +3300,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
       if (switchAction && switchAction !== action) {
         if (switchAction === 'GENERAL_QUERY') {
-          const queryReply = `Please let me know what you would like to search or check in the CRM!`;
+          const queryReply = `🔍 *SalesOS Search & Intelligence*\n\nAsk any question about your inquiries, quotations, customer profiles, site visits, or complaints!\n\n_Example: "What was the last rate quoted to Horizon Sheet Metal?" or "Show pending complaints"_`;
           await recordSessionMessage(senderPhone, 'assistant', queryReply, { action_type: 'GENERAL_QUERY' });
           await saveActiveSession(senderPhone, 'Unknown', 'general');
           return {
@@ -3372,7 +3413,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
   if (matchedAction) {
     await recordSessionMessage(senderPhone, 'user', text);
     if (matchedAction === 'GENERAL_QUERY') {
-      const genReply = `What would you like to search or know? You can ask about inquiries, visits, won orders, customer profiles, or pipeline status.`;
+      const genReply = `🔍 *SalesOS Search & Intelligence*\n\nAsk any question about your inquiries, quotations, customer profiles, site visits, or complaints!\n\n_Example: "What was the last rate quoted to Horizon Sheet Metal?" or "Show pending complaints"_`;
       await recordSessionMessage(senderPhone, 'assistant', genReply, { action_type: 'GENERAL_QUERY' });
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return {

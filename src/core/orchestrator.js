@@ -211,7 +211,7 @@ Please reply with your preferred timeframe."
 - **NO CARD FOOTER ON READ-ONLY QUERIES**: For all data retrieval, lookup, search, or summary queries (e.g. "show me visits for Om Traders", "which visits are pending follow-up", "what is my visit count", "inquiry status", "deals list"), NEVER append any confirmation line or card footer (such as "Updated Customer Visits Card!", "Customer Visits Card", "Tracked under Customer Visits Card", "Logged to Sales Pipeline & Inquiries!"). Output only the requested data cleanly.
 - **COMPLAINTS & QUALITY ISSUES**: When a salesperson reports a customer defect, rust, damage, quality complaint, wrong delivery, or complaint resolution, CALL log_complaint. If log_complaint returns a validation error (e.g. 'PO #... was not found in the Orders records for...') or an interactive confirmation question/deal list, output that exact prompt directly to the user so the salesperson can verify or provide the valid PO / Inquiry ID. Newly created complaints are ALWAYS logged in Open status (never In Progress).
 - **SALESPERSON PORTFOLIO & RBAC SCOPING (STRICT)**: When responding to a salesperson, all customer accounts, inquiries, visits, and deal metrics MUST be strictly scoped to their assigned portfolio. NEVER output global company-wide customer counts (such as total accounts in the entire company directory across all sales reps) or company-wide pipeline totals to an individual salesperson. When a specific question is asked (e.g. "list total inquiries this month"), answer ONLY the requested inquiry question directly without appending unrelated pipeline footers or global account counts.
-- **RECENT CONVERSATION SESSIONS (OPTION 10 RECALL)**: When the user asks about what they discussed, logged, or interacted with in their recent sessions or previous interactions (or asks to summarize recent activities), use the 'RECENT CONVERSATION SESSIONS' context block provided in your system context to answer directly, accurately, and comprehensively.`;
+- **INTELLIGENT DATA RETRIEVAL & CONTINUATION CONTEXT**: Use the 'RELEVANT DATABASE RECORDS & RETRIEVAL CONTEXT' or 'RECENTLY COMPLETED ACTIVITY' context blocks provided in your system context to answer queries, recall customer quotes/deals/visits/complaints, or apply follow-up updates directly, accurately, and comprehensively based on live database records.`;
 
 
 // ── State Definition ──────────────────────────────────────────────────────
@@ -272,8 +272,8 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
 
     // Fetch active context, chat history, and user permissions ONCE concurrently for ultra-low latency
     const [activeContextPrompt, historyMessages, userScope] = await Promise.all([
-      getActiveContextPrompt(senderPhone, true),
-      getChatHistory(senderPhone),
+      getActiveContextPrompt(senderPhone, text, true),
+      getChatHistory(senderPhone, text),
       getAccessibleSalespersonPhonesForBot(senderPhone),
     ]);
 
