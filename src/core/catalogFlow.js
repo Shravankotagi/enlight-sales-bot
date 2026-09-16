@@ -37,6 +37,24 @@ function cleanPhone(p) {
   return digits.length >= 10 ? digits.slice(-10) : digits;
 }
 
+function getPhoneVariants(phone) {
+  if (!phone) return [];
+  const clean = String(phone).replace(/\D/g, '');
+  const variants = new Set();
+  if (clean.length === 10) {
+    variants.add(clean);
+    variants.add(`91${clean}`);
+    variants.add(`+91${clean}`);
+  } else if (clean.length === 12 && clean.startsWith('91')) {
+    variants.add(clean);
+    variants.add(clean.slice(2));
+    variants.add(`+${clean}`);
+  } else {
+    variants.add(clean);
+  }
+  return Array.from(variants);
+}
+
 // ── CATALOG MENU ─────────────────────────────────────────────────────────────
 
 const CATALOG_MENU = `👋 Welcome to *SalesOS Assistant*!
@@ -61,7 +79,7 @@ Reply with a number (1–10) or type what you'd like to do.`;
 const MODULE_PROMPTS = {
   LOG_INQUIRY: `📋 *Log New Inquiry*
 
-Please provide the following details. Fields marked with * are mandatory:
+Please provide the following details :
 
 • *Company Name:* *
 • *Product Description / Quantity:* *
@@ -93,7 +111,7 @@ Example:
 
   LOG_ORDER: `🛒 *Record New Order*
 
-Please provide the following details. Fields marked with * are mandatory:
+Please provide the following details :
 
 • *Company Name:* *
 • *PO Number:* * (e.g. PO-2026-0042)
@@ -125,7 +143,7 @@ What would you like to update?
 
   LOG_VISIT: `📍 *Log Customer Field Visit*
 
-Please provide the following details. Fields marked with * are mandatory:
+Please provide the following details :
 
 • *Customer / Company Name:* *
 • *Person Met:* *
@@ -157,7 +175,7 @@ Example:
 
   LOG_NEW_CUSTOMER: `👤 *New Customer Acquisition*
 
-Please provide the following customer details. Fields marked with * are mandatory:
+Please provide the following details :
 
 • *Company Name:* *
 • *Contact Person:* *
@@ -173,7 +191,7 @@ Example:
 
   LOG_COMPLAINT: `⚠️ *Log Customer Complaint*
 
-Please provide the following details. Fields marked with * are mandatory:
+Please provide the following details :
 
 • *Company / Customer Name:* *
 • *Complaint Description & Affected Material:* * (e.g. 12 MT MS angle with bending damage)
@@ -963,6 +981,80 @@ async function validateDraftComplaintReference(draft, senderPhone) {
   return { isValid: true };
 }
 
+// ── MULTI-VISIT DATE DISAMBIGUATION CHECK ────────────────────────────────────
+
+async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
+  if (action !== 'UPDATE_VISIT') return { needsDisambiguation: false };
+  if (draft.visit_id || draft.visit_date || draft.updates?.visit_date) return { needsDisambiguation: false };
+  if (!draft.company_name) return { needsDisambiguation: false };
+
+  const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+
+  const { data: allVisits } = await supabase
+    .from('customer_visits')
+    .select('id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, salesperson_phone')
+    .ilike('customer_name', `%${draft.company_name.trim()}%`)
+    .order('visited_at', { ascending: false })
+    .limit(20);
+
+  if (!allVisits || allVisits.length <= 1) return { needsDisambiguation: false };
+
+  // 1. Accessibility filtering by salesperson phone
+  let candidateVisits = allVisits.filter(v => {
+    if (!v.salesperson_phone) return true;
+    if (scope.isAdmin || scope.phones === null) return true;
+    const vPhones = getPhoneVariants(v.salesperson_phone);
+    const accessibleSet = new Set();
+    if (Array.isArray(scope.phones)) scope.phones.forEach(p => getPhoneVariants(p).forEach(pv => accessibleSet.add(pv)));
+    if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => accessibleSet.add(pv));
+    return vPhones.some(vp => accessibleSet.has(vp));
+  });
+
+  if (candidateVisits.length === 0 && allVisits.length > 0) {
+    candidateVisits = allVisits;
+  }
+
+  // 2. Filter out synthetic Bigin sync logs
+  const realVisits = candidateVisits.filter(v => !(v.remarks && v.remarks.startsWith('Contact Synced from Zoho Bigin')));
+  const pool = realVisits.length > 0 ? realVisits : candidateVisits;
+
+  if (pool.length <= 1) return { needsDisambiguation: false };
+
+  const candidateSummaries = pool.slice(0, 5).map((v, idx) => {
+    const vDate = v.visited_at ? new Date(v.visited_at) : new Date();
+    const dateFormatted = formatDateDDMMYYYY(vDate);
+    const outTagMatch = (v.remarks || '').match(/\[Outcome:\s*([^\]]+)\]/i);
+    const outcome = outTagMatch ? outTagMatch[1] : 'Positive';
+    return {
+      index: idx + 1,
+      id: v.id,
+      date: dateFormatted,
+      visited_at: v.visited_at,
+      person_met: v.person_met || 'Not recorded',
+      location: v.customer_address || 'Not recorded',
+      outcome: outcome,
+    };
+  });
+
+  const choicesText = candidateSummaries
+    .map(c => `• *${c.index}.* *${c.date}* — Met: ${c.person_met} (${c.location}, ${c.outcome})`)
+    .join('\n');
+
+  const prompt = `📅 *Multiple Visits Found for ${draft.company_name}*\n\n` +
+    `Please specify which visit date you want to update:\n\n` +
+    `${choicesText}\n\n` +
+    `Reply with the *Visit Date* (e.g. "${candidateSummaries[0].date}") or option number (1–${candidateSummaries.length}).`;
+
+  draft._visit_candidates = candidateSummaries;
+
+  return {
+    needsDisambiguation: true,
+    prompt,
+    draft,
+  };
+}
+
 // ── BUILD CONFIRMATION SUMMARY ───────────────────────────────────────────────
 
 function buildConfirmationSummary(action, draft) {
@@ -1104,7 +1196,7 @@ function buildConfirmationSummary(action, draft) {
     }
 
     case 'UPDATE_VISIT': {
-      const targetVis = draft.visit_id || `${draft.company_name}${draft.visit_date ? ` on ${draft.visit_date}` : ''}`;
+      const targetVis = draft.visit_id ? `${draft.company_name ? `${draft.company_name} ` : ''}(#${draft.visit_id.slice(0, 8)})` : `${draft.company_name}${draft.visit_date ? ` (Visit Date: ${draft.visit_date})` : ''}`;
       summary += `• *Customer / Target Visit:* ${targetVis}\n`;
       summary += `• *Updating Fields:*\n`;
       for (const [k, v] of Object.entries(draft.updates || {})) {
@@ -1991,17 +2083,59 @@ Logged to Customer Visits Card! ✅`;
       case 'UPDATE_VISIT': {
         const companyName = (draft.company_name || '').trim();
         const visitId = (draft.visit_id || '').trim();
+        const targetDate = draft.visit_date || draft.updates?.visit_date || null;
 
-        let visitQuery = supabase.from('customer_visits').select('id, customer_name, visited_at, salesperson_phone');
-        if (visitId) {
-          const rawId = visitId.replace(/^#?(?:VIS|VISIT)-?/i, '').trim();
-          visitQuery = visitQuery.or(`id.ilike.%${rawId}%,id.eq.${visitId}`);
+        const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+        const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+
+        let visitQuery = supabase.from('customer_visits').select('*').order('visited_at', { ascending: false });
+        const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(visitId);
+        if (visitId && isUUID) {
+          visitQuery = visitQuery.eq('id', visitId);
         } else if (companyName) {
           visitQuery = visitQuery.ilike('customer_name', `%${companyName}%`);
         }
-        const { data: visits } = await visitQuery.order('visited_at', { ascending: false }).limit(1);
+        const { data: allVisits } = await visitQuery.limit(50);
 
-        const targetVisit = visits && visits.length > 0 ? visits[0] : null;
+        // 1. Accessibility filtering by salesperson phone
+        let candidateVisits = (allVisits || []).filter(v => {
+          if (!v.salesperson_phone) return true;
+          if (scope.isAdmin || scope.phones === null) return true;
+          const vPhones = getPhoneVariants(v.salesperson_phone);
+          const accessibleSet = new Set();
+          if (Array.isArray(scope.phones)) scope.phones.forEach(p => getPhoneVariants(p).forEach(pv => accessibleSet.add(pv)));
+          if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => accessibleSet.add(pv));
+          return vPhones.some(vp => accessibleSet.has(vp));
+        });
+
+        if (candidateVisits.length === 0 && allVisits && allVisits.length > 0) {
+          candidateVisits = allVisits;
+        }
+
+        // 2. Separate real site visits from Bigin sync placeholder visits
+        const realVisits = candidateVisits.filter(v => !(v.remarks && v.remarks.startsWith('Contact Synced from Zoho Bigin')));
+        const pool = realVisits.length > 0 ? realVisits : candidateVisits;
+
+        // 3. Match by visit_id or date if specified
+        let targetVisit = null;
+        if (visitId) {
+          targetVisit = pool.find(v => v.id === visitId || v.id.toLowerCase().includes(visitId.toLowerCase())) || null;
+        }
+        if (!targetVisit && targetDate) {
+          const cleanTargetDate = parseDDMMYYYYtoISO(targetDate);
+          if (cleanTargetDate) {
+            targetVisit = pool.find(v => v.visited_at && v.visited_at.startsWith(cleanTargetDate.slice(0, 10))) || null;
+          }
+        }
+
+        if (!targetVisit) {
+          targetVisit = pool[0] || null;
+        }
+
+        if (!targetVisit) {
+          return `❌ Could not find an existing customer visit record for "${companyName || visitId}". Please check the customer name or visit ID and try again.`;
+        }
+
         const updates = draft.updates || {};
         const visitUpdates = {};
 
@@ -2014,16 +2148,30 @@ Logged to Customer Visits Card! ✅`;
           visitUpdates.remarks = `${outcomeTag}${updates.meeting_remarks || ''}${followupTag}`.trim();
         }
 
-        if (targetVisit && Object.keys(visitUpdates).length > 0) {
+        if (Object.keys(visitUpdates).length > 0) {
           await supabase.from('customer_visits').update(visitUpdates).eq('id', targetVisit.id);
+
+          // Sync customer master profile if contact details changed
+          if (updates.person_met || updates.contact_phone || updates.city_location) {
+            const custUpdates = { updated_at: new Date().toISOString() };
+            if (updates.person_met) custUpdates.contact_person = updates.person_met;
+            if (updates.contact_phone) custUpdates.customer_phone = cleanPhone(updates.contact_phone) || updates.contact_phone;
+            if (updates.city_location) custUpdates.customer_address = updates.city_location;
+            await supabase
+              .from('recurring_customers')
+              .update(custUpdates)
+              .ilike('customer_name', `%${targetVisit.customer_name}%`);
+          }
         }
 
         const resolvedCust = targetVisit ? targetVisit.customer_name : (draft.company_name || 'Customer');
 
-        return `✅ *Field Visit Updated Successfully!*
-
-🏢 *Customer:* ${resolvedCust}
-Visit details updated in Customer Visits Card! ✅`;
+        return `✅ *Field Visit Updated Successfully!*\n\n` +
+          `🏢 *Customer:* ${resolvedCust}\n` +
+          (visitUpdates.person_met ? `👤 *Person Met:* ${visitUpdates.person_met}\n` : '') +
+          (visitUpdates.contact_no ? `📞 *Contact Phone:* ${visitUpdates.contact_no}\n` : '') +
+          (visitUpdates.customer_address ? `📍 *Location:* ${visitUpdates.customer_address}\n` : '') +
+          `\nVisit details updated in Customer Visits Card! ✅`;
       }
 
       case 'LOG_NEW_CUSTOMER': {
@@ -2371,7 +2519,7 @@ function isOperationalQuery(text) {
   const lower = text.toLowerCase().trim();
 
   // If message begins with an explicit write action verb, it is NOT a read query
-  if (/^(?:update|change|modify|set|mark|log|record|create|add|raise|new\b|submit|resolve)\b/i.test(lower)) {
+  if (/^(?:update|change|modify|set|mark|log|record|create|add|raise|new\b|submit|resolve|correct|fix|edit|amend|revise)\b/i.test(lower)) {
     return false;
   }
 
@@ -2420,7 +2568,7 @@ function detectOperationalAction(text) {
   }
 
   // 1. Explicit Update patterns
-  if (/\b(?:update|change|modify|set|mark|resolve|close|reopen|attach|link|add\s+po)\b/i.test(lower)) {
+  if (/\b(?:update|change|modify|set|mark|resolve|close|reopen|attach|link|add\s+po|correct|fix|edit|amend|revise)\b/i.test(lower)) {
     // 1a. Complaints (Check FIRST: user messages updating a complaint often cite #INQ-xxx or PO-xxx)
     if (
       /\b(?:complaint|complaints|defect|defective|rejection|damage|damaged|rust)\b/i.test(lower) ||
@@ -2430,7 +2578,7 @@ function detectOperationalAction(text) {
     }
 
     // 1b. Visits (Check SECOND: visits might mention inquiries discussed)
-    if (/\b(?:visit|vis-|site\s+visit|field\s+visit|meeting|person\s+met)\b/i.test(lower)) {
+    if (/\b(?:visit|vis-|site\s+visit|field\s+visit|meeting|person\s+met|contact\s+person)\b/i.test(lower)) {
       return 'UPDATE_VISIT';
     }
 
@@ -2975,9 +3123,9 @@ async function handleCatalogFlow(rawText, senderPhone) {
   // ── 5. HANDLE DATA COLLECTION FLOW STATE (catalog_flow|...) ────────────────
   if (lastIntent.startsWith('catalog_flow|')) {
     const parts = lastIntent.split('|');
-    const action = parts[1];
+    let action = parts[1];
     const draftJsonStr = parts.slice(2).join('|');
-    const existingDraft = safeParseJSON(draftJsonStr, {});
+    let existingDraft = safeParseJSON(draftJsonStr, {});
 
     if (isOperationalQuery(text)) {
       await saveActiveSession(senderPhone, 'Unknown', 'general');
@@ -2986,23 +3134,64 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     await recordSessionMessage(senderPhone, 'user', text);
 
-    // Check if user wants to abort / switch
-    const newActionMatch = matchActionFromInput(text);
-    if (newActionMatch && newActionMatch !== action) {
-      if (newActionMatch === 'GENERAL_QUERY') {
-        const queryReply = `Please let me know what you would like to search or check in the CRM!`;
-        await recordSessionMessage(senderPhone, 'assistant', queryReply, { action_type: 'GENERAL_QUERY' });
-        await saveActiveSession(senderPhone, 'Unknown', 'general');
-        return {
-          handled: true,
-          reply: queryReply,
-        };
+    // Check if resolving candidate visit selection (by date or number)
+    let candidateResolved = false;
+    if (existingDraft._visit_candidates && Array.isArray(existingDraft._visit_candidates)) {
+      const cleanNum = text.replace(/[.#️⃣*️⃣\s]/g, '');
+      const numIdx = parseInt(cleanNum, 10);
+      let matchedCandidate = null;
+
+      if (!isNaN(numIdx) && numIdx >= 1 && numIdx <= existingDraft._visit_candidates.length) {
+        matchedCandidate = existingDraft._visit_candidates[numIdx - 1];
+      } else {
+        const normInputDate = normalizeDateToDDMMYYYY(text);
+        matchedCandidate = existingDraft._visit_candidates.find(c =>
+          c.date === normInputDate ||
+          (c.visited_at && c.visited_at.startsWith(parseDDMMYYYYtoISO(normInputDate) || 'NOMATCH')) ||
+          text.includes(c.date) ||
+          (c.date && text.replace(/[-/.]/g, '').includes(c.date.replace(/[-/.]/g, '')))
+        );
       }
-      const initialPrompt = MODULE_PROMPTS[newActionMatch];
-      if (initialPrompt) {
-        await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: newActionMatch });
-        await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${newActionMatch}|{}`);
-        return { handled: true, reply: initialPrompt };
+
+      if (matchedCandidate) {
+        existingDraft.visit_id = matchedCandidate.id;
+        existingDraft.visit_date = matchedCandidate.date;
+        delete existingDraft._visit_candidates;
+        candidateResolved = true;
+      }
+    }
+
+    // Check if user wants to abort / switch (only if not resolving candidate selection)
+    if (!candidateResolved) {
+      let switchAction = matchActionFromInput(text);
+      if (!switchAction) {
+        const detected = detectOperationalAction(text);
+        if (detected && detected !== action) {
+          switchAction = detected;
+        }
+      }
+
+      if (switchAction && switchAction !== action) {
+        if (switchAction === 'GENERAL_QUERY') {
+          const queryReply = `Please let me know what you would like to search or check in the CRM!`;
+          await recordSessionMessage(senderPhone, 'assistant', queryReply, { action_type: 'GENERAL_QUERY' });
+          await saveActiveSession(senderPhone, 'Unknown', 'general');
+          return {
+            handled: true,
+            reply: queryReply,
+          };
+        }
+
+        const initialPrompt = MODULE_PROMPTS[switchAction];
+        // If message has specific content beyond just trigger keywords, extract for the new action immediately
+        if (text.length > 25 || /\b(?:for|to|on|with|at|midc|midc\s+pune)\b/i.test(text)) {
+          action = switchAction;
+          existingDraft = {};
+        } else if (initialPrompt) {
+          await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: switchAction });
+          await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${switchAction}|{}`);
+          return { handled: true, reply: initialPrompt };
+        }
       }
     }
 
@@ -3019,6 +3208,13 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // Extract fields from user message
     const updatedDraft = await extractFieldsWithLLM(action, text, existingDraft);
+    if (existingDraft.visit_id && !updatedDraft.visit_id) {
+      updatedDraft.visit_id = existingDraft.visit_id;
+    }
+    if (existingDraft.visit_date && !updatedDraft.visit_date) {
+      updatedDraft.visit_date = existingDraft.visit_date;
+    }
+
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
       if (custCheck.isUnrecognizedCustomer) {
@@ -3036,6 +3232,19 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const missing = validateMandatoryFields(action, updatedDraft);
 
     if (missing.length === 0) {
+      // Disambiguation check if multiple visits exist for the customer and date was not specified
+      if (action === 'UPDATE_VISIT') {
+        const disambig = await checkMultipleVisitsForUpdate(action, updatedDraft, senderPhone);
+        if (disambig.needsDisambiguation) {
+          await recordSessionMessage(senderPhone, 'assistant', disambig.prompt, {
+            action_type: action,
+            customer_name: updatedDraft.company_name,
+          });
+          await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(disambig.draft)}`);
+          return { handled: true, reply: disambig.prompt };
+        }
+      }
+
       // All mandatory fields present -> Show confirmation summary
       const summary = buildConfirmationSummary(action, updatedDraft);
       await recordSessionMessage(senderPhone, 'assistant', summary, {
@@ -3098,7 +3307,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // Visits
     { pattern: /\b(?:log|record|add|create)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'LOG_VISIT' },
-    { pattern: /\b(?:update|change|modify|set)\s+(?:the\s+|a\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'UPDATE_VISIT' },
+    { pattern: /\b(?:update|change|modify|set|correct|fix|edit|amend|revise)\s+(?:the\s+|a\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'UPDATE_VISIT' },
+    { pattern: /\b(?:correct|fix|change|update|edit|modify)\s+(?:the\s+)?(?:contact\s+person|person\s+met|location|address|remarks|outcome|date)\s+for\b/i, action: 'UPDATE_VISIT' },
 
     // Orders
     { pattern: /\b(?:record|log|create|add)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:purchase\s+)?order\b/i, action: 'LOG_ORDER' },
@@ -3157,6 +3367,18 @@ async function handleCatalogFlow(rawText, senderPhone) {
       const missing = validateMandatoryFields(detectedAction, extracted);
 
       if (missing.length === 0) {
+        if (detectedAction === 'UPDATE_VISIT') {
+          const disambig = await checkMultipleVisitsForUpdate(detectedAction, extracted, senderPhone);
+          if (disambig.needsDisambiguation) {
+            await recordSessionMessage(senderPhone, 'assistant', disambig.prompt, {
+              action_type: detectedAction,
+              customer_name: extracted.company_name,
+            });
+            await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(disambig.draft)}`);
+            return { handled: true, reply: disambig.prompt };
+          }
+        }
+
         const summary = buildConfirmationSummary(detectedAction, extracted);
         await recordSessionMessage(senderPhone, 'assistant', summary, {
           action_type: detectedAction,
