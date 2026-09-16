@@ -23,7 +23,13 @@ const {
   getAssignedCustomersList,
   normalizeCoreCompanyName,
 } = require('../supabase');
-const { detectHsnCode } = require('../utils/hsnDetector');
+const {
+  detectHsnCode,
+  normalizeProductToCatalog,
+  isValidCatalogProduct,
+  getUnknownProductClarificationMessage,
+  MASTER_PRODUCTS_CATALOG,
+} = require('../utils/hsnDetector');
 const { safeParseJSON } = require('../utils/jsonUtils');
 const {
   startNewCatalogSession,
@@ -675,6 +681,15 @@ CRITICAL RULES:
 Output an 'entries' array containing a separate object for EACH individual customer/visit/inquiry/complaint!
 If only a single company is mentioned or if filling missing fields for an existing draft, return the top-level fields (e.g. company_name, person_met, contact_phone, etc.) and do NOT output an entries array.
 8. In UPDATE_ORDER: If the user provides an Inquiry ID (e.g. INQ-936C7B, #INQ-3C86DE) and asks to attach/set/update a PO number (e.g. 'attach PO-2026-8899 to INQ-936C7B' or 'INQ-936C7B PO is PO-2026-8899'), extract the inquiry ID into 'inquiry_id' and the PO number into 'po_number' and 'updates.po_number'.
+9. PRODUCT CATALOG RULES:
+The official Enlight Metals product catalog consists of:
+• Flat Steel: HR Coil, HR Sheet, HR Plate, HRPO Coil, HRPO Sheet, CR Coil, CR Sheet, GP Coil, GP Sheet, Galvalume Coil, Galvalume Sheet, Chequered Coil, Chequered Sheet
+• Structural Steel: MS Round Bar, MS Flat Bar, MS Square Bar, TMT Bar, MS Angle, MS Channel, MS Beam
+• Pipes & Tubes: MS Round Pipe, MS Square Pipe, MS Rectangular Tube
+• Value Added: Slotted Angle, Solar Mounting Structure, Cable Tray – Perforated, Cable Tray – Ladder, GI Earthing Strip
+In line_items:
+- "sku_text": Set to the matching catalog product name if recognized (e.g. 'HR Coil', 'CR Sheet', 'MS Angle'). If an unknown product like 'LW coil' or 'Aluminum' is typed, extract the raw text (e.g. 'LW coil 8mm') so validation can detect it.
+- "dimensions" / "spec": Extract thickness, gauge, width, and size (e.g. '8mm', '1250 x 2500', '50x50x6').
 `;
 
   const userPrompt = `Existing Active Draft:
@@ -729,16 +744,19 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             const qty = Number(item.quantity) || 0;
             const rate = Number(item.rate) || 0;
             const amt = item.amount ? Number(item.amount) : (qty && rate ? qty * rate : 0);
-            const skuText = item.sku_text || item.description || '';
+            const rawSku = item.sku_text || item.description || '';
             const itemDim = item.dimensions || item.spec || '';
-            const hsn = item.hsn_code || item.hsn_sac || detectHsnCode(skuText, itemDim) || detectHsnCode(item.description || '') || '72083840';
+            const norm = normalizeProductToCatalog(rawSku, itemDim);
+            const canonicalSku = norm.isValid ? norm.catalogName : rawSku;
+            const hsn = item.hsn_code || item.hsn_sac || (norm.isValid ? norm.hsnCode : (detectHsnCode(rawSku, itemDim) || detectHsnCode(item.description || '') || null));
             return {
-              sku_text: skuText,
-              description: item.description || skuText,
+              sku_text: canonicalSku,
+              description: item.description || canonicalSku,
               dimensions: itemDim,
               spec: itemDim,
               hsn_sac: hsn,
               hsn_code: hsn,
+              is_valid_catalog: norm.isValid,
               quantity: qty || '',
               unit: item.unit || 'MT',
               rate: rate || '',
@@ -825,6 +843,11 @@ function validateMandatoryFields(action, draft) {
       if (!draft.company_name) missing.push('Company Name');
       if (!draft.product_description && (!Array.isArray(draft.line_items) || draft.line_items.length === 0)) {
         missing.push('Product Description / Quantity');
+      } else {
+        const prodCheck = validateDraftProducts('LOG_INQUIRY', draft);
+        if (!prodCheck.isValid) {
+          missing.push(`Valid Product Name (Unrecognized: "${prodCheck.invalidProducts.join(', ')}")`);
+        }
       }
       if (!draft.payment_terms) missing.push('Payment Terms');
       if (!draft.delivery_location) missing.push('Delivery Location');
@@ -836,6 +859,10 @@ function validateMandatoryFields(action, draft) {
       const hasInqUpdate = Object.values(inqUpdates).some(v => v !== null && v !== undefined && v !== '');
       const hasInqLineUpdates = Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0;
       if (!hasInqUpdate && !hasInqLineUpdates) missing.push('At least one field to update');
+      const inqProdCheck = validateDraftProducts('UPDATE_INQUIRY', draft);
+      if (!inqProdCheck.isValid) {
+        missing.push(`Valid Product Name (Unrecognized: "${inqProdCheck.invalidProducts.join(', ')}")`);
+      }
       break;
 
     case 'LOG_ORDER':
@@ -851,6 +878,10 @@ function validateMandatoryFields(action, draft) {
         if (!first.description && !first.sku_text) missing.push('Product Name for line item');
         if (!first.quantity) missing.push('Quantity for line item');
         if (!first.rate) missing.push('Rate (₹ per unit) for line item');
+        const ordProdCheck = validateDraftProducts('LOG_ORDER', draft);
+        if (!ordProdCheck.isValid) {
+          missing.push(`Valid Product Name (Unrecognized: "${ordProdCheck.invalidProducts.join(', ')}")`);
+        }
       }
       break;
 
@@ -1013,6 +1044,67 @@ async function validateDraftComplaintReference(draft, senderPhone) {
         rejectionMessage: `PO ${displayPo} was not found in the Orders records for ${companyName}. A complaint can only be raised against an existing PO or inquiry. Please verify the PO number and try again.`,
       };
     }
+  }
+
+  return { isValid: true };
+}
+
+// ── STRICT PRODUCT CATALOG VERIFICATION ──────────────────────────────────────
+
+function validateDraftProducts(action, draft) {
+  if (!draft || !['LOG_INQUIRY', 'UPDATE_INQUIRY', 'LOG_ORDER', 'UPDATE_ORDER'].includes(action)) {
+    return { isValid: true };
+  }
+
+  const invalidProducts = [];
+
+  // 1. Validate line items
+  if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
+    for (const item of draft.line_items) {
+      const pName = item.sku_text || item.description || '';
+      const dim = item.dimensions || item.spec || '';
+      if (pName && pName.trim()) {
+        const norm = normalizeProductToCatalog(pName, dim);
+        if (!norm.isValid) {
+          invalidProducts.push(pName.trim());
+        }
+      }
+    }
+  }
+
+  // 2. Validate line item updates for UPDATE flows
+  if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0) {
+    for (const item of draft.line_item_updates) {
+      const pName = item.sku_text || item.description || item.item_reference || '';
+      const dim = item.dimensions || item.spec || '';
+      if (pName && pName.trim() && !/^(?:item\s*\d+|\d+)$/i.test(pName.trim())) {
+        const norm = normalizeProductToCatalog(pName, dim);
+        if (!norm.isValid) {
+          invalidProducts.push(pName.trim());
+        }
+      }
+    }
+  }
+
+  // 3. Validate product_description if line_items is empty
+  if ((!draft.line_items || draft.line_items.length === 0) && draft.product_description && typeof draft.product_description === 'string') {
+    const rawDesc = draft.product_description.trim();
+    if (rawDesc.length > 0) {
+      const norm = normalizeProductToCatalog(rawDesc);
+      if (!norm.isValid) {
+        invalidProducts.push(rawDesc);
+      }
+    }
+  }
+
+  if (invalidProducts.length > 0) {
+    const uniqueInvalid = Array.from(new Set(invalidProducts));
+    const clarificationMessage = getUnknownProductClarificationMessage(uniqueInvalid[0]);
+    return {
+      isValid: false,
+      invalidProducts: uniqueInvalid,
+      clarificationMessage,
+    };
   }
 
   return { isValid: true };
@@ -2820,6 +2912,17 @@ async function handleCatalogFlow(rawText, senderPhone) {
         await executeAction('LOG_NEW_CUSTOMER', custDraft, senderPhone);
 
         originalDraft.company_name = custDraft.company_name;
+        const custProdCheck = validateDraftProducts(originalAction, originalDraft);
+        if (!custProdCheck.isValid) {
+          const resumeMsg = `✅ *New Customer "${custDraft.company_name}" Created!*\n\n${custProdCheck.clarificationMessage}`;
+          await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
+            action_type: originalAction,
+            customer_name: originalDraft.company_name,
+          });
+          await saveActiveSession(senderPhone, originalDraft.company_name || 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+          return { handled: true, reply: resumeMsg };
+        }
+
         const parentMissing = validateMandatoryFields(originalAction, originalDraft);
 
         if (parentMissing.length === 0) {
@@ -2893,6 +2996,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const recheckedName = await verifyAndGetCustomerName(text, senderPhone);
     if (recheckedName) {
       originalDraft.company_name = recheckedName;
+      const recheckProd = validateDraftProducts(originalAction, originalDraft);
+      if (!recheckProd.isValid) {
+        await recordSessionMessage(senderPhone, 'assistant', recheckProd.clarificationMessage, {
+          action_type: originalAction,
+          customer_name: originalDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, originalDraft.company_name, `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return { handled: true, reply: recheckProd.clarificationMessage };
+      }
+
       const parentMissing = validateMandatoryFields(originalAction, originalDraft);
       if (parentMissing.length === 0) {
         const summary = buildConfirmationSummary(originalAction, originalDraft);
@@ -2958,6 +3071,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
       const originalDraft = updatedCustDraft._parentDraft || {};
       originalDraft.company_name = updatedCustDraft.company_name;
+      const collectProdCheck = validateDraftProducts(originalAction, originalDraft);
+      if (!collectProdCheck.isValid) {
+        const resumeMsg = `✅ *New Customer "${updatedCustDraft.company_name}" Successfully Created!*\n\n${collectProdCheck.clarificationMessage}`;
+        await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
+          action_type: originalAction,
+          customer_name: originalDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, originalDraft.company_name || 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return { handled: true, reply: resumeMsg };
+      }
       const parentMissing = validateMandatoryFields(originalAction, originalDraft);
 
       if (parentMissing.length === 0) {
@@ -3154,6 +3277,13 @@ async function handleCatalogFlow(rawText, senderPhone) {
       }
     }
 
+    const confirmProdCheck = validateDraftProducts(action, updatedDraft);
+    if (!confirmProdCheck.isValid) {
+      await recordSessionMessage(senderPhone, 'assistant', confirmProdCheck.clarificationMessage, { action_type: action });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+      return { handled: true, reply: confirmProdCheck.clarificationMessage };
+    }
+
     const missing = validateMandatoryFields(action, updatedDraft);
     if (missing.length === 0) {
       const summary = buildConfirmationSummary(action, updatedDraft);
@@ -3214,6 +3344,13 @@ async function handleCatalogFlow(rawText, senderPhone) {
         await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', 'general');
         return { handled: true, reply: refCheck.rejectionMessage };
       }
+    }
+
+    const editProdCheck = validateDraftProducts(action, updatedDraft);
+    if (!editProdCheck.isValid) {
+      await recordSessionMessage(senderPhone, 'assistant', editProdCheck.clarificationMessage, { action_type: action });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+      return { handled: true, reply: editProdCheck.clarificationMessage };
     }
 
     const missing = validateMandatoryFields(action, updatedDraft);
@@ -3361,6 +3498,13 @@ async function handleCatalogFlow(rawText, senderPhone) {
       }
     }
 
+    const flowProdCheck = validateDraftProducts(action, updatedDraft);
+    if (!flowProdCheck.isValid) {
+      await recordSessionMessage(senderPhone, 'assistant', flowProdCheck.clarificationMessage, { action_type: action });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+      return { handled: true, reply: flowProdCheck.clarificationMessage };
+    }
+
     const missing = validateMandatoryFields(action, updatedDraft);
 
     if (missing.length === 0) {
@@ -3499,6 +3643,13 @@ async function handleCatalogFlow(rawText, senderPhone) {
         await saveActiveSession(senderPhone, extracted.company_name || 'Customer', 'general');
         return { handled: true, reply: refCheck.rejectionMessage };
       }
+    }
+
+    const directProdCheck = validateDraftProducts(detectedAction, extracted);
+    if (!directProdCheck.isValid) {
+      await recordSessionMessage(senderPhone, 'assistant', directProdCheck.clarificationMessage, { action_type: detectedAction });
+      await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(extracted)}`);
+      return { handled: true, reply: directProdCheck.clarificationMessage };
     }
 
     const hasCompany = Boolean(extracted.company_name || (Array.isArray(extracted.entries) && extracted.entries.some(e => e.company_name)));
