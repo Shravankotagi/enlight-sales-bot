@@ -54,6 +54,9 @@ let cachedToken = null;
 let tokenExpiresAt = 0;
 
 async function getZohoToken(retryCount = 0) {
+  if (process.env.ZOHO_SYNC_PAUSED === 'true' || process.env.ZOHO_AUTO_SYNC_ENABLED === 'false') {
+    return null;
+  }
   if (cachedToken && Date.now() < tokenExpiresAt) return cachedToken;
 
   try {
