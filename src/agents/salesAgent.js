@@ -22,7 +22,7 @@ const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
 const { supabase, verifyAndGetCustomerName, saveActiveSession, getActiveSession } = require('../supabase');
 const { syncActivity } = require('./biginSyncAgent');
 const { logBotActivity } = require('../utils/activityLogger');
-const { detectHsnCode, normalizeProductToCatalog, isValidCatalogProduct, getUnknownProductClarificationMessage, MASTER_PRODUCTS_CATALOG } = require('../utils/hsnDetector');
+const { detectHsnCode, normalizeProductToCatalog, isValidCatalogProduct, isConversationalNoise, getUnknownProductClarificationMessage, MASTER_PRODUCTS_CATALOG } = require('../utils/hsnDetector');
 
 function extractDealIdFromText(text) {
   if (!text || typeof text !== 'string') return null;
@@ -2407,7 +2407,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
           }
 
           if (resolvedCatalogName) {
-            const oldProdName = pendingPayload.invalid_product;
+            const oldProdName = (pendingPayload.invalid_product || '').trim();
             if (pendingPayload.data && Array.isArray(pendingPayload.data.line_items)) {
               pendingPayload.data.line_items = pendingPayload.data.line_items.filter(itm => {
                 const itmName = (itm.product_requirement || itm.pName || '').trim();
@@ -2415,10 +2415,15 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
               });
               for (const itm of pendingPayload.data.line_items) {
                 const itmName = itm.product_requirement || itm.pName || '';
-                if (itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase())) {
+                const norm = normalizeProductToCatalog(itmName, itm.dimensions);
+                if (!norm.isValid || itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase()) || (oldProdName && oldProdName.toLowerCase().includes(itmName.toLowerCase()))) {
                   itm.product_requirement = resolvedCatalogName;
                   itm.pName = resolvedCatalogName;
                 }
+              }
+              if (pendingPayload.data.line_items.length === 1 && !normalizeProductToCatalog(pendingPayload.data.line_items[0].product_requirement, pendingPayload.data.line_items[0].dimensions).isValid) {
+                pendingPayload.data.line_items[0].product_requirement = resolvedCatalogName;
+                pendingPayload.data.line_items[0].pName = resolvedCatalogName;
               }
             }
             if (Array.isArray(pendingPayload.processedItems)) {
@@ -2428,10 +2433,15 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
               });
               for (const itm of pendingPayload.processedItems) {
                 const itmName = itm.pName || itm.product_requirement || '';
-                if (itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase())) {
+                const norm = normalizeProductToCatalog(itmName, itm.dimensions);
+                if (!norm.isValid || itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase()) || (oldProdName && oldProdName.toLowerCase().includes(itmName.toLowerCase()))) {
                   itm.pName = resolvedCatalogName;
                   itm.product_requirement = resolvedCatalogName;
                 }
+              }
+              if (pendingPayload.processedItems.length === 1 && !normalizeProductToCatalog(pendingPayload.processedItems[0].pName, pendingPayload.processedItems[0].dimensions).isValid) {
+                pendingPayload.processedItems[0].pName = resolvedCatalogName;
+                pendingPayload.processedItems[0].product_requirement = resolvedCatalogName;
               }
             }
 
@@ -2843,16 +2853,21 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
       }
     }
 
-    const GENERIC_PRODUCT_REGEX = /^(?:steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined|address|delivery|delivery address|delivery location|location|destination|payment|payment terms|terms|credit|hsn|sac|unit|this inquiry|this inqiry|this inqiry is inq|inquiry id|deal id)$/i;
+    const GENERIC_PRODUCT_REGEX = /^(?:steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined|address|delivery|delivery address|delivery location|location|destination|payment|payment terms|terms|credit|hsn|sac|unit|this inquiry|this inqiry|this inqiry is inq|inquiry id|deal id|and\s+add|add|and|make|make\s+the|change|change\s+the|set|set\s+the|update|update\s+the|modify|modify\s+the|give|put|apply|also|with|for|the|please|pls|rate|rates|price|prices|qty|quantity|tonnage|ton|tons|mt|kg|per\s+mt|per\s+ton|per\s+kg|credit|advance|days)$/i;
 
     let processedItems = [];
     let calculatedTotal = 0;
 
     for (const item of rawItems) {
       let pName = item.product_requirement ? item.product_requirement.trim() : null;
+      if (pName) {
+        // Strip leading conversational noise words and action verbs
+        pName = pName.replace(/^(?:and\s+add|and|add|make\s+the|make|change\s+the|change|set\s+the|set|update\s+the|update|modify\s+the|modify|give|put|apply|also|with|for|the|please|pls)\s+/i, '').trim();
+      }
       const hasCompanyIndicatorOnly = pName && COMPANY_INDICATORS_REGEX.test(pName) && !STEEL_PRODUCT_TERMS.test(pName);
       if (pName && (
         GENERIC_PRODUCT_REGEX.test(pName) ||
+        isConversationalNoise(pName) ||
         hasCompanyIndicatorOnly ||
         /^\d+$/.test(pName) ||
         /^[0-9.:\s-]+$/.test(pName) ||
@@ -3522,17 +3537,21 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
 
         let explicitTargetQty = fromToNewQty;
         if (explicitTargetQty === null) {
-          const directToMatch = (effectiveTextForLLM || text).match(/(?:(?:change|set|update)\s+(?:quantity|qty)?\s*to\s+|increase\s+(?:the\s+)?(?:quantity|qty)?\s*(?:of\s+[^0-9]+)?\s*to\s+|reduce\s+(?:the\s+)?(?:quantity|qty)?\s*(?:of\s+[^0-9]+)?\s*to\s+|to\s+)(\d+(?:\.\d+)?)/i);
+          const directToMatch = (effectiveTextForLLM || text).match(/(?:(?:change|set|update|make)\s+(?:the\s+)?(?:quantity|qty)?\s*(?:to\s+|is\s+|as\s+|\b)|(?:quantity|qty)\s*[:=-]?\s*(?:to\s+|is\s+|as\s+|\b)|increase\s+(?:the\s+)?(?:quantity|qty)?\s*(?:of\s+[^0-9]+)?\s*to\s+|reduce\s+(?:the\s+)?(?:quantity|qty)?\s*(?:of\s+[^0-9]+)?\s*to\s+|to\s+)(\d+(?:\.\d+)?)/i);
           if (directToMatch) {
             explicitTargetQty = Number(directToMatch[1]);
           }
         }
 
-        const firstRate = data.line_items?.[0]?.rate_per_mt || (processedItems[0]?.rate > 0 ? processedItems[0]?.rate : null);
+        const rawRateMatch = (effectiveTextForLLM || text).match(/\b(?:target\s+price|unit\s+price|rate|price)\s*[:=-]?\s*(?:is\s+|to\s+|of\s+|@\s*)?₹?\s*([\d,.]+)(?:\s*(?:\/|per)\s*[a-zA-Z]+)?/i) || (effectiveTextForLLM || text).match(/@\s*₹?\s*([\d,.]+)/i);
+        const parsedRateFromText = rawRateMatch ? parseFloat(rawRateMatch[1].replace(/,/g, '')) : null;
+        const validParsedRate = parsedRateFromText && parsedRateFromText > 10 && !/^[6-9]\d{9}$/.test(String(Math.round(parsedRateFromText))) ? parsedRateFromText : null;
+
+        const firstRate = data.line_items?.[0]?.rate_per_mt || data.rate_per_mt || data.rate || (processedItems[0]?.rate > 0 ? processedItems[0]?.rate : null) || validParsedRate;
         const firstQty = explicitTargetQty !== null
           ? explicitTargetQty
           : (hasExplicitQtyInMsg
-              ? (data.line_items?.[0]?.quantity || data.line_items?.[0]?.quantity_mt || (processedItems[0]?.qty > 0 ? processedItems[0]?.qty : null))
+              ? (data.line_items?.[0]?.quantity || data.line_items?.[0]?.quantity_mt || data.quantity || data.quantity_mt || (processedItems[0]?.qty > 0 ? processedItems[0]?.qty : null))
               : null);
 
         const { matchedMap, unmatchedProcessed } = matchProcessedItemsToExisting(existingItems, processedItems);

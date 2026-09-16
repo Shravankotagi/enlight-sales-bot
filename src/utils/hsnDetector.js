@@ -245,12 +245,23 @@ function detectHsnCode(productName, dimensions) {
 }
 
 // Map short forms & full forms to official master product name and resolve HSN
+function isConversationalNoise(text) {
+  if (!text || typeof text !== 'string') return true;
+  const clean = text.trim().toLowerCase();
+  if (clean.length < 2) return true;
+  return /^(?:and\s+add|add|and|make|make\s+the|change|change\s+the|set|set\s+the|update|update\s+the|modify|modify\s+the|give|put|apply|also|with|for|the|please|pls|rate|rates|price|prices|qty|quantity|tonnage|ton|tons|mt|kg|per\s+mt|per\s+ton|per\s+kg|credit|advance|days|location|delivery|address|payment|terms|notes?|status|stage|this|that|same|it|item|line\s*item|details?)$/i.test(clean);
+}
+
 function normalizeProductToCatalog(productName, dimensions = null) {
   if (!productName || typeof productName !== 'string') {
     return { isValid: false, catalogName: null, category: null, hsnCode: null };
   }
 
   const p = productName.toLowerCase().trim();
+  if (isConversationalNoise(p)) {
+    return { isValid: false, catalogName: null, category: null, hsnCode: null, isConversationalNoise: true };
+  }
+
   const d = (dimensions || '').toLowerCase().trim();
   const combined = `${p} ${d}`.trim();
   const t = extractThickness(dimensions) || extractThickness(productName);
@@ -467,6 +478,7 @@ module.exports = {
   detectHsnCode,
   normalizeProductToCatalog,
   isValidCatalogProduct,
+  isConversationalNoise,
   getUnknownProductClarificationMessage,
   MASTER_PRODUCTS_CATALOG,
 };

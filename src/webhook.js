@@ -535,23 +535,42 @@ router.post('/', async (req, res) => {
               }
 
               if (resolvedCatalogName && pendingPayload) {
-                const oldProdName = pendingPayload.invalid_product;
+                const { normalizeProductToCatalog } = require('./utils/hsnDetector');
+                const oldProdName = (pendingPayload.invalid_product || '').trim();
                 if (pendingPayload.data && Array.isArray(pendingPayload.data.line_items)) {
+                  pendingPayload.data.line_items = pendingPayload.data.line_items.filter(itm => {
+                    const itmName = (itm.product_requirement || itm.pName || '').trim();
+                    return itmName && !/^\d+$/.test(itmName) && !/^[0-9.:\s-]+$/.test(itmName) && itmName.length >= 2;
+                  });
                   for (const itm of pendingPayload.data.line_items) {
                     const itmName = itm.product_requirement || itm.pName || '';
-                    if (itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase())) {
+                    const norm = normalizeProductToCatalog(itmName, itm.dimensions);
+                    if (!norm.isValid || itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase()) || (oldProdName && oldProdName.toLowerCase().includes(itmName.toLowerCase()))) {
                       itm.product_requirement = resolvedCatalogName;
                       itm.pName = resolvedCatalogName;
                     }
                   }
+                  if (pendingPayload.data.line_items.length === 1 && !normalizeProductToCatalog(pendingPayload.data.line_items[0].product_requirement, pendingPayload.data.line_items[0].dimensions).isValid) {
+                    pendingPayload.data.line_items[0].product_requirement = resolvedCatalogName;
+                    pendingPayload.data.line_items[0].pName = resolvedCatalogName;
+                  }
                 }
                 if (Array.isArray(pendingPayload.processedItems)) {
+                  pendingPayload.processedItems = pendingPayload.processedItems.filter(itm => {
+                    const itmName = (itm.pName || itm.product_requirement || '').trim();
+                    return itmName && !/^\d+$/.test(itmName) && !/^[0-9.:\s-]+$/.test(itmName) && itmName.length >= 2;
+                  });
                   for (const itm of pendingPayload.processedItems) {
                     const itmName = itm.pName || itm.product_requirement || '';
-                    if (itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase())) {
+                    const norm = normalizeProductToCatalog(itmName, itm.dimensions);
+                    if (!norm.isValid || itmName.toLowerCase() === oldProdName.toLowerCase() || itmName.toLowerCase().includes(oldProdName.toLowerCase()) || (oldProdName && oldProdName.toLowerCase().includes(itmName.toLowerCase()))) {
                       itm.pName = resolvedCatalogName;
                       itm.product_requirement = resolvedCatalogName;
                     }
+                  }
+                  if (pendingPayload.processedItems.length === 1 && !normalizeProductToCatalog(pendingPayload.processedItems[0].pName, pendingPayload.processedItems[0].dimensions).isValid) {
+                    pendingPayload.processedItems[0].pName = resolvedCatalogName;
+                    pendingPayload.processedItems[0].product_requirement = resolvedCatalogName;
                   }
                 }
 

@@ -740,25 +740,28 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
         }
       } else if (key === 'line_items' && Array.isArray(val)) {
         if (val.length > 0) {
-          merged.line_items = val.map((item) => {
-            const qty = Number(item.quantity) || 0;
-            const rate = Number(item.rate) || 0;
-            const amt = item.amount ? Number(item.amount) : (qty && rate ? qty * rate : 0);
-            const rawSku = item.sku_text || item.description || '';
-            const itemDim = item.dimensions || item.spec || '';
+          const existingList = Array.isArray(baseDraft.line_items) ? baseDraft.line_items : [];
+          merged.line_items = val.map((item, idx) => {
+            const prevItem = existingList[idx] || (existingList.length === 1 ? existingList[0] : null);
+            const qty = Number(item.quantity) || (prevItem ? Number(prevItem.quantity) || 0 : 0);
+            const rawUnit = item.unit || prevItem?.unit || 'MT';
+            const rate = Number(item.rate) || (prevItem ? Number(prevItem.rate) || 0 : 0);
+            const amt = item.amount ? Number(item.amount) : (qty && rate ? qty * rate : (prevItem?.amount ? Number(prevItem.amount) : 0));
+            const rawSku = item.sku_text || item.description || prevItem?.sku_text || prevItem?.description || '';
+            const itemDim = item.dimensions || item.spec || prevItem?.dimensions || prevItem?.spec || '';
             const norm = normalizeProductToCatalog(rawSku, itemDim);
             const canonicalSku = norm.isValid ? norm.catalogName : rawSku;
-            const hsn = item.hsn_code || item.hsn_sac || (norm.isValid ? norm.hsnCode : (detectHsnCode(rawSku, itemDim) || detectHsnCode(item.description || '') || null));
+            const hsn = item.hsn_code || item.hsn_sac || (norm.isValid ? norm.hsnCode : (detectHsnCode(rawSku, itemDim) || detectHsnCode(item.description || '') || prevItem?.hsn_code || null));
             return {
               sku_text: canonicalSku,
-              description: item.description || canonicalSku,
+              description: item.description || prevItem?.description || canonicalSku,
               dimensions: itemDim,
               spec: itemDim,
               hsn_sac: hsn,
               hsn_code: hsn,
               is_valid_catalog: norm.isValid,
               quantity: qty || '',
-              unit: item.unit || 'MT',
+              unit: rawUnit,
               rate: rate || '',
               amount: amt || '',
             };
@@ -776,6 +779,26 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             delete merged.updates.product_description;
           }
         }
+      } else if (key === 'product_description' && typeof val === 'string' && val.trim()) {
+        const norm = normalizeProductToCatalog(val.trim());
+        if (norm.isValid && Array.isArray(merged.line_items) && merged.line_items.length > 0) {
+          merged.line_items = merged.line_items.map(it => {
+            const dim = it.dimensions || '';
+            const itemNorm = normalizeProductToCatalog(it.sku_text, dim);
+            if (!itemNorm.isValid) {
+              return {
+                ...it,
+                sku_text: norm.catalogName,
+                description: norm.catalogName,
+                hsn_code: norm.hsnCode,
+                hsn_sac: norm.hsnCode,
+                is_valid_catalog: true,
+              };
+            }
+            return it;
+          });
+        }
+        merged.product_description = val;
       } else {
         if (key === 'company_name' && typeof val === 'string') {
           merged.company_name = val.replace(/^my\s*/i, '').replace(/^our\s+/i, '').replace(/^for\s+/i, '').trim();
