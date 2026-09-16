@@ -61,6 +61,29 @@ function extractDealIdFromText(text) {
   return null;
 }
 
+function extractPoNumber(text) {
+  if (!text || typeof text !== 'string') return null;
+  const clean = text.replace(/[*_~`]/g, '').trim();
+
+  // 1. Explicit PO Number prefix patterns:
+  // e.g. "PO-2026-0042", "PO #12345", "PO: 9988", "PO NO 4455", "Purchase Order # PO-88", "PO number is PO-102", "PO 8899"
+  const explicitPoMatch = clean.match(/\b(?:purchase\s+order\s*(?:no\.?|num\.?|number|#)?|po\s*(?:no\.?|num\.?|number|#|is|:|\b))\s*[:=-]?\s*([A-Za-z0-9\-_/]{2,30})\b/i);
+  if (explicitPoMatch) {
+    const candidate = explicitPoMatch[1].trim();
+    if (!/^(?:is|number|no|num|for|the|id|deal|inquiry|inq|null|undefined|order|orders|module|won|with|log|same|prices|quotation)$/i.test(candidate)) {
+      return candidate.toUpperCase().startsWith('PO') ? candidate : `PO-${candidate}`;
+    }
+  }
+
+  // 2. Direct PO code format e.g. PO-XXXX, PO/XXXX, PO_XXXX
+  const codeMatch = clean.match(/\b(PO[-_/][A-Za-z0-9-_/]{2,25})\b/i);
+  if (codeMatch) {
+    return codeMatch[1].trim();
+  }
+
+  return null;
+}
+
 const SALES_AGENT_PROMPT = `
 You are the Specialized Sales Achievement & Pipeline Agent for Enlight Metals (B2B Steel Distributor).
 Your job is to analyze salesperson messages reporting sales actions, deal status updates, stage changes, customer product requirements/inquiries, or updates to existing deals.
@@ -2424,6 +2447,46 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
     }
 
+    // Check if there is an active pending PO session for marking a deal won
+    if (activeSess?.last_intent?.startsWith('pending_po_for_deal|')) {
+      const rawClean = (text || '').trim();
+      const isNewInquiryOrLongMsg =
+        rawClean.length > 80 ||
+        rawClean.includes('\n') ||
+        /^\s*(?:log\s+inquiry|create\s+inquiry|new\s+inquiry|log\s+visit|log\s+complaint)\b/i.test(rawClean);
+
+      if (isNewInquiryOrLongMsg) {
+        await saveActiveSession(senderPhone, 'Unknown', 'general');
+      } else {
+        const parts = activeSess.last_intent.split('|');
+        const sessionCustomer = parts[1];
+        const payloadStr = parts.slice(2).join('|');
+        const { safeParseJSON } = require('../utils/jsonUtils');
+        const pendingPayload = safeParseJSON(payloadStr, null);
+
+        if (pendingPayload && pendingPayload.dealId) {
+          const extractedPo = extractPoNumber(rawClean) ||
+            (!/\b(?:inquiry|deal|customer|product|rates?|inq|quoted|won)\b/i.test(rawClean) && rawClean.length <= 40
+              ? (rawClean.toUpperCase().startsWith('PO') ? rawClean : `PO-${rawClean.replace(/^(?:po\s*(?:no\.?|num\.?|number|#|is|:)?|po-)\s*/i, '')}`).trim()
+              : null);
+
+          if (extractedPo && extractedPo.length >= 2) {
+            await saveActiveSession(senderPhone, sessionCustomer || 'Unknown', 'general');
+            return await processSalesMessage(
+              `Mark Inquiry ${pendingPayload.dealCode || pendingPayload.dealId} as WON with PO ${extractedPo}`,
+              senderPhone,
+              {
+                action: 'stage_update',
+                target_stage: 'won',
+                deal_id: pendingPayload.dealId,
+                po_number: extractedPo,
+              }
+            );
+          }
+        }
+      }
+    }
+
     let effectiveTextForLLM = text;
     let data = (typeof overrideData === 'object' && overrideData !== null) ? overrideData : null;
     const cleanText = (text || '').replace(/[*_~`]/g, '').trim();
@@ -3046,9 +3109,48 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         }
       }
 
-      // Stage Gate 4: If deal is in New Inquiry stage and trying to mark Won without PO/items
-      if (isNewInquiryStage && dbStage === 'won' && !data.po_number && data.action !== 'purchase_order') {
-        return `❌ Cannot mark inquiry as Won.\n\nInquiry ${dealCode} is currently in NEW INQUIRY stage. Please quote the deal or provide a Purchase Order (PO) to mark it as Won.`;
+      // Stage Gate 4: WON Stage Validation (Requires PO Number & Quoted Line Items)
+      if (dbStage === 'won') {
+        let extractedPo = data.po_number || data.poNumber || extractPoNumber(effectiveTextForLLM || text) || dealToUpdate.po_number || null;
+        if (extractedPo && /^(?:null|undefined|none|na|n\/a)$/i.test(String(extractedPo).trim())) {
+          extractedPo = null;
+        }
+
+        if (!extractedPo) {
+          const pendingPayload = {
+            dealId: dealToUpdate.id,
+            dealCode,
+            inquiryId: dealToUpdate.inquiry_id,
+            customerName: dealToUpdate.customer_name,
+            totalAmount: dealAmount,
+            isInquirySource: dealToUpdate.is_inquiry_source,
+          };
+          await saveActiveSession(
+            senderPhone,
+            dealToUpdate.customer_name,
+            `pending_po_for_deal|${dealToUpdate.customer_name}|${JSON.stringify(pendingPayload)}`
+          );
+          return `⚠️ Purchase Order (PO) number is required to mark Inquiry ${dealCode} as WON and log it in the Orders module.\n\n` +
+            `Customer: ${dealToUpdate.customer_name}\n` +
+            `Inquiry ID: ${dealCode}\n` +
+            (dealAmount > 0 ? `Total Value: Rs. ${Number(dealAmount).toLocaleString('en-IN')}\n\n` : '\n') +
+            `Please reply with the official PO number (e.g. "PO-2026-0042" or "PO number is 9912").`;
+        }
+
+        // Quoted Rates check: deal must have valid rates on line items and total amount > 0
+        const items = dealToUpdate.deal_items || [];
+        const hasUnquotedItems = isNewInquiryStage || (items.length > 0 && items.some(i => !i.rate || Number(i.rate) <= 0));
+        if (hasUnquotedItems && dealAmount <= 0) {
+          return `❌ Cannot mark Inquiry ${dealCode} as WON.\n\n` +
+            `Quotation rates are missing on line items. Please provide quoted rates before confirming the order.`;
+        }
+
+        const effectiveDelivery = extractedDeliveryLoc || data.delivery_location || dealToUpdate.delivery_location || null;
+        const effectivePayment = extractedPaymentTermsVal || data.payment_terms || dealToUpdate.payment_terms || null;
+
+        data.po_number = extractedPo;
+        if (effectiveDelivery) data.delivery_location = effectiveDelivery;
+        if (effectivePayment) data.payment_terms = effectivePayment;
       }
 
       if (dealToUpdate.is_inquiry_source) {
@@ -3064,7 +3166,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         };
         if (dbStage === 'won') {
           newDealPayload.won_at = new Date().toISOString();
-          if (data.po_number) newDealPayload.po_number = data.po_number;
+          newDealPayload.po_number = data.po_number;
+          newDealPayload.po_date = data.po_date || new Date().toISOString().split('T')[0];
+          if (data.delivery_location) newDealPayload.delivery_location = data.delivery_location;
+          if (data.payment_terms) newDealPayload.payment_terms = data.payment_terms;
         }
         if (dbStage === 'lost' && data.loss_reason) {
           newDealPayload.lost_reason = data.loss_reason;
@@ -3092,7 +3197,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
         };
         if (dbStage === 'won') {
           updatePayload.won_at = new Date().toISOString();
-          if (data.po_number) updatePayload.po_number = data.po_number;
+          updatePayload.po_number = data.po_number;
+          updatePayload.po_date = data.po_date || new Date().toISOString().split('T')[0];
+          if (data.delivery_location) updatePayload.delivery_location = data.delivery_location;
+          if (data.payment_terms) updatePayload.payment_terms = data.payment_terms;
         }
         if (dbStage === 'lost' && data.loss_reason) {
           updatePayload.lost_reason = data.loss_reason;
@@ -3119,7 +3227,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       // Mandatory Database Write Verification
       const { data: verifiedDeals, error: verifyErr } = await supabase
         .from('deals')
-        .select('id, stage, customer_name, inquiry_id')
+        .select('id, stage, customer_name, inquiry_id, po_number')
         .eq('id', dealToUpdate.id);
 
       if (verifyErr || !verifiedDeals || verifiedDeals.length === 0 || verifiedDeals[0].stage !== dbStage) {
@@ -3157,12 +3265,16 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
       }
 
       if (dbStage === 'won') {
-        return `DEAL WON & ORDER CONFIRMED!\n\n` +
+        const finalDelivery = dealToUpdate.delivery_location || data.delivery_location || 'Not specified';
+        const finalPayment = dealToUpdate.payment_terms || data.payment_terms || 'Not specified';
+        return `🎉 DEAL WON & ORDER CONFIRMED!\n\n` +
           `Customer: ${dealToUpdate.customer_name}\n` +
           `Inquiry ID: ${dealCode}\n` +
-          (dealToUpdate.po_number ? `Official PO Number: ${dealToUpdate.po_number}\n` : '') +
-          `Total Value: Rs. ${Number(dealToUpdate.total_amount || 0).toLocaleString('en-IN')}\n\n` +
-          `Updated Sales Achievement Card!`;
+          `Official PO Number: ${dealToUpdate.po_number || data.po_number}\n` +
+          `Total Value: Rs. ${Number(dealToUpdate.total_amount || 0).toLocaleString('en-IN')} + GST\n` +
+          `Delivery Location: ${finalDelivery}\n` +
+          `Payment Terms: ${finalPayment}\n\n` +
+          `Logged to Orders module & Updated Sales Achievement Card!`;
       }
 
       return `Inquiry Updated - ${dealCode}\n\n` +
@@ -3815,13 +3927,25 @@ async function processSalesMessage(text, senderPhone, overrideData = null) {
     let poNumber = existingDeal ? existingDeal.po_number : null;
 
     if (dbStage === 'won') {
-      const explicitPo = data.po_number || data.poNumber;
-      if (explicitPo && explicitPo !== 'null' && explicitPo !== 'None' && String(explicitPo).trim().length > 2) {
+      const explicitPo = data.po_number || data.poNumber || extractPoNumber(effectiveTextForLLM || text) || (existingDeal ? existingDeal.po_number : null);
+      if (explicitPo && explicitPo !== 'null' && explicitPo !== 'None' && String(explicitPo).trim().length >= 2) {
         poNumber = String(explicitPo).trim();
-      } else if (!poNumber) {
-        const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-        const randomNum = Math.floor(1000 + Math.random() * 9000);
-        poNumber = `PO-${todayStr}-${randomNum}`;
+      } else {
+        const pendingPayload = {
+          dealId,
+          dealCode: dealId ? `#INQ-${dealId.substring(0, 6).toUpperCase()}` : null,
+          customerName: finalCustomerName,
+          totalAmount: dealAmount,
+        };
+        await saveActiveSession(
+          senderPhone,
+          finalCustomerName,
+          `pending_po_for_deal|${finalCustomerName}|${JSON.stringify(pendingPayload)}`
+        );
+        return `⚠️ Purchase Order (PO) number is required to confirm this order and mark it as WON.\n\n` +
+          `Customer: ${finalCustomerName}\n` +
+          (dealAmount > 0 ? `Total Value: Rs. ${Number(dealAmount).toLocaleString('en-IN')}\n\n` : '\n') +
+          `Please reply with the official PO number (e.g. "PO-2026-0042" or "PO number is 9912").`;
       }
     } else {
       poNumber = null;
