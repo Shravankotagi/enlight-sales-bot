@@ -3142,13 +3142,13 @@ async function handleMidFlowRetrievalQuery(text, senderPhone, activeState, actio
 
   if (activeState === 'catalog_confirm') {
     const summary = buildConfirmationSummary(action, draft);
-    resumePrompt = `Now resuming your ${actionName}:\n\n${summary}`;
+    resumePrompt = `Continuing your ${actionName}:\n\n${summary}`;
     interactiveType = 'buttons';
     interactiveButtons = CONFIRMATION_BUTTONS;
   } else if (activeState === 'catalog_editing') {
-    resumePrompt = `Now resuming your ${actionName}.\n\nWhich field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")`;
+    resumePrompt = `Continuing your ${actionName} — Which field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")`;
   } else if (activeState === 'catalog_implicit_cust_ask') {
-    resumePrompt = `Now resuming your ${actionName}.\n\nPlease reply *Yes* to onboard *${draft.company_name || 'customer'}* as a new customer, or *No* to re-enter the company name.`;
+    resumePrompt = `Continuing your ${actionName} — Please reply *Yes* to onboard *${draft.company_name || 'customer'}* as a new customer, or *No* to re-enter the company name.`;
     interactiveType = 'buttons';
     interactiveButtons = NEW_CUSTOMER_BUTTONS;
   } else {
@@ -3156,16 +3156,16 @@ async function handleMidFlowRetrievalQuery(text, senderPhone, activeState, actio
     const missing = validateMandatoryFields(action, draft);
     if (missing.length === 0) {
       const summary = buildConfirmationSummary(action, draft);
-      resumePrompt = `Now resuming your ${actionName}:\n\n${summary}`;
+      resumePrompt = `Continuing your ${actionName}:\n\n${summary}`;
       interactiveType = 'buttons';
       interactiveButtons = CONFIRMATION_BUTTONS;
     } else {
       const missingList = missing.map((m) => `• *${m}*`).join('\n');
-      resumePrompt = `Now resuming your ${actionName}.\n\nPlease provide the remaining mandatory details:\n\n${missingList}`;
+      resumePrompt = `Continuing your ${actionName} — Please provide the remaining mandatory details:\n\n${missingList}`;
     }
   }
 
-  const combinedReply = `${queryAnswer}\n\n━━━━━━━━━━━━━━━━━━━━\n*(Resuming your ${actionName})*\n${resumePrompt}`;
+  const combinedReply = `${queryAnswer}\n\n━━━━━━━━━━━━━━━━━━━━\n*(Continuing your ${actionName})*\n${resumePrompt}`;
   await recordSessionMessage(senderPhone, 'user', text);
   await recordSessionMessage(senderPhone, 'assistant', combinedReply, {
     action_type: action,
@@ -3187,20 +3187,19 @@ function detectOperationalAction(text) {
   // If message is a pure query / search, do not intercept
   if (isOperationalQuery(lower)) return null;
 
-  // Direct sales agent operations (stage transitions on existing deals) should bypass catalog flow
+  // Direct sales agent operations (stage transitions on existing deals) -> UPDATE_INQUIRY
   if (
     /\b(?:mark|move|put)\b.*?\b(negotiation|won|lost|quoted|quotated|on\s+hold|hold)\b/i.test(lower) ||
     /\b(?:is\s+on\s+hold|is\s+lost|is\s+won|is\s+negotiation|is\s+quoted|deal\s+won|deal\s+lost)\b/i.test(lower)
   ) {
-    return null;
+    return 'UPDATE_INQUIRY';
   }
 
-  // Pure standalone rate updates on existing deals (without inquiry keywords) should bypass to salesAgent
+  // Standalone rate/quantity updates on existing deals -> UPDATE_INQUIRY
   if (
-    /^(?:make\s+the\s+quantity|update\s+rate|change\s+rate|set\s+rate|rate\s+is\b|rate\s+for\b)/i.test(lower) &&
-    !/\b(?:inquiry|inquiries|requirement|requirements|rfq|enquiry|enquiries)\b/i.test(lower)
+    /^(?:make\s+the\s+quantity|update\s+rate|change\s+rate|set\s+rate|rate\s+is\b|rate\s+for\b|quantity\s+for\b|change\s+quantity|update\s+quantity)/i.test(lower)
   ) {
-    return null;
+    return 'UPDATE_INQUIRY';
   }
 
   // 1. Explicit Update patterns
@@ -3379,6 +3378,9 @@ const DIRECT_ACTION_MAP = [
   { pattern: /\b(?:update|edit|modify|change|correct|revise|amend)\s+(?:an?\s+|the\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i, action: 'UPDATE_INQUIRY' },
   { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:edit|update|change|modify)\s+(?:an?\s+|the\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\s+(?:for|of|from|with|to)\b/i, action: 'UPDATE_INQUIRY' },
   { pattern: /\b(?:update|edit|modify|change)\s+(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i, action: 'UPDATE_INQUIRY' },
+  { pattern: /\b(?:mark|move|put)\s+(?:the\s+|a\s+)?(?:deal|inquiry)?\s*(?:as\s+|to\s+)?(?:won|lost|negotiation|quoted|on\s+hold|hold)\b/i, action: 'UPDATE_INQUIRY' },
+  { pattern: /\b(?:deal\s+won|deal\s+lost|inquiry\s+won|inquiry\s+lost)\b/i, action: 'UPDATE_INQUIRY' },
+  { pattern: /\b(?:update|change|modify|set|revise|correct|edit)\s+(?:the\s+)?(?:rate|price|pricing|payment\s+terms?|credit\s+terms?|terms|delivery\s+location|location|destination|quantity|qty|tonnage|specs?|specifications?|make|preferred\s+make)\b/i, action: 'UPDATE_INQUIRY' },
 
   // 9. Inquiries Log (Extensive phrase matching across all sales terminology)
   { pattern: /^(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal|deals)\b/i, action: 'LOG_INQUIRY' },
@@ -4271,13 +4273,20 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     const initialPrompt = MODULE_PROMPTS[matchedAction];
     if (initialPrompt) {
+      await startNewCatalogSession(senderPhone, initialPrompt);
       await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: matchedAction });
       await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${matchedAction}|{}`);
       return { handled: true, reply: initialPrompt };
     }
   }
 
-  // ── 7. NATURAL OPERATIONAL ACTION DETECTION (Visits, Inquiries, Orders, Complaints, Customers) ──
+  // ── 7. FREE DATA RETRIEVAL QUERIES (Direct DB Lookup, No Catalog, No Flow) ──
+  if (isOperationalQuery(text)) {
+    return { handled: false };
+  }
+
+  // ── 8. STRICT CATALOG-GATED UPDATE/CREATE ATTEMPTS ──────────────────────────
+  // Any update / create / modify intent without an active session MUST be redirected to the catalog menu!
   let detectedAction = null;
   for (const { pattern, action } of DIRECT_ACTION_MAP) {
     if (pattern.test(text)) {
@@ -4290,114 +4299,30 @@ async function handleCatalogFlow(rawText, senderPhone) {
     detectedAction = detectOperationalAction(text);
   }
 
-  // LLM Intent Fallback: If rule matchers did not trigger, invoke fast LLM intent classifier
-  // so NO inquiry or CRM logging prompt can ever be missed!
-  if (!detectedAction && text.length >= 8 && !isOperationalQuery(text)) {
+  // Fast LLM Intent Fallback if text is long enough and not a query
+  if (!detectedAction && text.length >= 8) {
     detectedAction = await detectOperationalActionWithLLM(text);
+    if (detectedAction === 'QUERY') detectedAction = null;
   }
 
   if (detectedAction) {
     await recordSessionMessage(senderPhone, 'user', text);
-    const extracted = await extractFieldsWithLLM(detectedAction, text, {});
-    const custCheck = await verifyDraftCustomer(detectedAction, extracted, senderPhone);
-    if (!custCheck.isValid) {
-      if (custCheck.isUnrecognizedCustomer) {
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: detectedAction });
-        await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${detectedAction}|${custCheck.unverifiedName}|${JSON.stringify(extracted)}`);
-        return {
-          handled: true,
-          reply: custCheck.prompt,
-          interactiveType: 'buttons',
-          interactiveButtons: NEW_CUSTOMER_BUTTONS,
-        };
-      } else {
-        extracted.company_name = null;
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: detectedAction });
-        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(extracted)}`);
-        return { handled: true, reply: custCheck.rejectionMessage };
-      }
-    }
-
-    if (detectedAction === 'LOG_COMPLAINT') {
-      const refCheck = await validateDraftComplaintReference(extracted, senderPhone);
-      if (!refCheck.isValid) {
-        await recordSessionMessage(senderPhone, 'assistant', refCheck.rejectionMessage, { action_type: 'LOG_COMPLAINT' });
-        extracted.linked_inquiry_or_po = null;
-        extracted.po_number = null;
-        await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|LOG_COMPLAINT|${JSON.stringify(extracted)}`);
-        return { handled: true, reply: refCheck.rejectionMessage };
-      }
-    }
-
-    const directProdCheck = validateDraftProducts(detectedAction, extracted);
-    if (!directProdCheck.isValid) {
-      await recordSessionMessage(senderPhone, 'assistant', directProdCheck.clarificationMessage, { action_type: detectedAction });
-      await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(extracted)}`);
-      return { handled: true, reply: directProdCheck.clarificationMessage };
-    }
-
-    if (detectedAction === 'UPDATE_INQUIRY') {
-      const inqCheck = await checkInquiriesForUpdate(detectedAction, extracted, senderPhone, text);
-      if (inqCheck.handled) {
-        await recordSessionMessage(senderPhone, 'assistant', inqCheck.reply, {
-          action_type: detectedAction,
-          customer_name: extracted.company_name,
-        });
-        if (inqCheck.status === 'MULTIPLE_EDITABLE' || inqCheck.status === 'SINGLE_EDITABLE_ASK_DETAILS') {
-          await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(inqCheck.draft)}`);
-        } else {
-          await saveActiveSession(senderPhone, extracted.company_name || 'Customer', 'general');
-        }
-        return { handled: true, reply: inqCheck.reply };
-      }
-      if (inqCheck.draft) Object.assign(extracted, inqCheck.draft);
-    }
-
-    const missing = validateMandatoryFields(detectedAction, extracted);
-
-    if (missing.length === 0) {
-      if (detectedAction === 'UPDATE_VISIT') {
-        const disambig = await checkMultipleVisitsForUpdate(detectedAction, extracted, senderPhone);
-        if (disambig.needsDisambiguation) {
-          await recordSessionMessage(senderPhone, 'assistant', disambig.prompt, {
-            action_type: detectedAction,
-            customer_name: extracted.company_name,
-          });
-          await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(disambig.draft)}`);
-          return { handled: true, reply: disambig.prompt };
-        }
-      }
-
-      const summary = buildConfirmationSummary(detectedAction, extracted);
-      await recordSessionMessage(senderPhone, 'assistant', summary, {
-        action_type: detectedAction,
-        customer_name: extracted.company_name,
-      });
-      await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_confirm|${detectedAction}|${JSON.stringify(extracted)}`);
-      return {
-        handled: true,
-        reply: summary,
-        interactiveType: 'buttons',
-        interactiveButtons: CONFIRMATION_BUTTONS,
-      };
-    } else {
-      const missingList = missing.map((m) => `• *${m}*`).join('\n');
-      const actionName = getActionFriendlyName(detectedAction);
-      const indexTag = extracted._totalCount > 1 ? ` (${extracted._currentIndex || 1} of ${extracted._totalCount}: ${extracted.company_name || 'Item'})` : '';
-      const askMissing = `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
-      await recordSessionMessage(senderPhone, 'assistant', askMissing, {
-        action_type: detectedAction,
-        customer_name: extracted.company_name,
-      });
-      await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(extracted)}`);
-      return {
-        handled: true,
-        reply: askMissing,
-      };
-    }
+    const gatingReply = `Please select the relevant option from the menu to update a record.\n\n` + CATALOG_MENU;
+    await recordSessionMessage(senderPhone, 'assistant', gatingReply, { action_type: 'CATALOG_GATED_PROMPT' });
+    await startNewCatalogSession(senderPhone, gatingReply);
+    return {
+      handled: true,
+      reply: gatingReply,
+      interactiveType: 'list',
+      interactiveList: {
+        bodyText: `Please select the relevant option from the menu to update a record.\n\nWhat would you like to do?`,
+        buttonText: 'Choose Action',
+        sections: CATALOG_MENU_SECTIONS,
+      },
+    };
   }
 
-  // Not intercepted by catalog flow -> let general LangGraph Orchestrator process
+  // Not intercepted by catalog flow -> let general LangGraph Orchestrator process free queries
   return { handled: false };
 }
 

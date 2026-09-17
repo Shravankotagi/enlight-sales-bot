@@ -39,16 +39,12 @@ function createTools(senderPhone, rawUserText = '') {
   // ─── Operational Write Tools ──────────────────────────────────────────────
 
   const logCustomerVisitTool = tool(
-    async ({ text }) => {
-      try {
-        return await getVisitAgent().processVisitMessage(rawUserText || text, senderPhone);
-      } catch (err) {
-        return `Error logging visit: ${err.message}`;
-      }
+    async () => {
+      return `Please select the relevant option from the menu to update a record.`;
     },
     {
       name: 'log_customer_visit',
-      description: `Use this tool when the salesperson reports visiting a customer site, meeting a customer in person, an office visit, a field visit or market visit. This logs to Customer Visits Card (KRA 9) and updates the customer profile.`,
+      description: `Use this tool when the salesperson reports visiting a customer site, meeting a customer in person, an office visit, a field visit or market visit.`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
       }),
@@ -56,16 +52,12 @@ function createTools(senderPhone, rawUserText = '') {
   );
 
   const updateDealStageTool = tool(
-    async ({ text }) => {
-      try {
-        return await getSalesAgent().processSalesMessage(rawUserText || text, senderPhone);
-      } catch (err) {
-        return `Error updating deal: ${err.message}`;
-      }
+    async () => {
+      return `Please select the relevant option from the menu to update a record.`;
     },
     {
       name: 'update_deal_stage',
-      description: `Use this tool when the salesperson creates a new inquiry, updates deal rates, updates quantities or units, adds/removes line items, updates payment terms, delivery address, delivery date, notes, customer details, or updates deal stage/status (e.g. "update status to quoted", "mark as won", "deal lost", "update stage to negotiation", "status is quotated"). DO NOT call this tool for emailing/dispatching PDF quotations (use send_quotation), customer site visits (use log_customer_visit), or complaints (use log_complaint).`,
+      description: `Use this tool when the salesperson creates a new inquiry or updates deal rates/specs.`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
       }),
@@ -82,7 +74,7 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'send_quotation',
-      description: `Use this tool ONLY when the salesperson explicitly requests to send, email, mail, or dispatch a quotation / quote PDF document to an email address or recipient (e.g. "Send quotation to client@gmail.com", "Mail quote to test@example.com", "Send quote to customer via email"). DO NOT use this tool when the user is simply updating the deal status or stage to quoted/quotated (use update_deal_stage instead).`,
+      description: `Use this tool ONLY when the salesperson explicitly requests to send, email, mail, or dispatch a quotation / quote PDF document to an email address or recipient (e.g. "Send quotation to client@gmail.com", "Mail quote to test@example.com", "Send quote to customer via email").`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
         email: z.string().optional().nullable().describe('The email address if mentioned e.g. client@gmail.com, else null'),
@@ -93,16 +85,12 @@ function createTools(senderPhone, rawUserText = '') {
   );
 
   const logPaymentTool = tool(
-    async ({ text }) => {
-      try {
-        return await getPaymentAgent().processPaymentMessage(text, senderPhone);
-      } catch (err) {
-        return `Error logging payment: ${err.message}`;
-      }
+    async () => {
+      return `Please select the relevant option from the menu to update a record.`;
     },
     {
       name: 'log_payment',
-      description: `Use this tool when the salesperson reports receiving a payment, advance, installment, or outstanding balance from a customer.`,
+      description: `Use this tool when the salesperson reports receiving a payment or advance.`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
       }),
@@ -110,16 +98,12 @@ function createTools(senderPhone, rawUserText = '') {
   );
 
   const logComplaintTool = tool(
-    async ({ text }) => {
-      try {
-        return await getComplaintAgent().processComplaintMessage(text, senderPhone);
-      } catch (err) {
-        return `Error logging complaint: ${err.message}`;
-      }
+    async () => {
+      return `Please select the relevant option from the menu to update a record.`;
     },
     {
       name: 'log_complaint',
-      description: `Use this tool when the salesperson reports a customer complaint about quality, quantity, delivery, or billing, or when a complaint is resolved.`,
+      description: `Use this tool when reporting a customer complaint or resolution.`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
       }),
@@ -127,16 +111,12 @@ function createTools(senderPhone, rawUserText = '') {
   );
 
   const logRetentionFollowupTool = tool(
-    async ({ text }) => {
-      try {
-        return await getRetentionAgent().processRetentionMessage(text, senderPhone);
-      } catch (err) {
-        return `Error logging follow-up: ${err.message}`;
-      }
+    async () => {
+      return `Please select the relevant option from the menu to update a record.`;
     },
     {
       name: 'log_retention_followup',
-      description: `Use this ONLY for explicit follow-up calls or check-ins with existing customers on past orders. Do NOT use for new requirements - use update_deal_stage instead.`,
+      description: `Use this for follow-up calls with existing customers.`,
       schema: z.object({
         text: z.string().describe('The full original message from the salesperson'),
       }),
@@ -144,18 +124,14 @@ function createTools(senderPhone, rawUserText = '') {
   );
 
   const onboardNewCustomerTool = tool(
-    async ({ text }) => {
-      try {
-        return await getCustomerAgent().processCustomerMessage(text, senderPhone);
-      } catch (err) {
-        return `Error onboarding customer: ${err.message}`;
-      }
+    async () => {
+      return `Please select the relevant option from the menu to update a record.`;
     },
     {
       name: 'onboard_new_customer',
-      description: `Use this tool when adding a new customer or updating an existing customer's profile details (phone, address, GST, contact person, city).`,
+      description: `Use this tool when adding a new customer or updating customer details.`,
       schema: z.object({
-        text: z.string().describe('The message or contextualized query text containing the company name and details'),
+        text: z.string().describe('The message containing company name and details'),
       }),
     }
   );
