@@ -556,6 +556,7 @@ UPDATE_ORDER:
   "updates": {
     "po_number": "<new or attached PO number if updating/attaching to inquiry e.g. PO-2026-8899, else null>",
     "po_date": "<new PO date if updated, else null>",
+    "delivery_date": "<new delivery date if updated e.g. 25-09-2026, else null>",
     "delivery_location": "<new delivery location if updated, else null>",
     "payment_terms": "<new payment terms if updated, else null>",
     "status": "<Pending | Processing | Dispatched | Delivered | Cancelled | Won if updated, else null>"
@@ -837,6 +838,36 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     }
   }
 
+  // Update normalization for edit workflows
+  if (action === 'UPDATE_ORDER') {
+    if (!merged.updates) merged.updates = {};
+    if (newExtracted.delivery_date && !merged.updates.delivery_date) merged.updates.delivery_date = normalizeDateToDDMMYYYY(newExtracted.delivery_date);
+    if (newExtracted.delivery_location && !merged.updates.delivery_location) merged.updates.delivery_location = newExtracted.delivery_location;
+    if (newExtracted.po_date && !merged.updates.po_date) merged.updates.po_date = normalizeDateToDDMMYYYY(newExtracted.po_date);
+    if (newExtracted.payment_terms && !merged.updates.payment_terms) merged.updates.payment_terms = newExtracted.payment_terms;
+    if (newExtracted.status && !merged.updates.status) merged.updates.status = newExtracted.status;
+    if (newExtracted.po_number && !merged.updates.po_number && merged.inquiry_id) merged.updates.po_number = newExtracted.po_number;
+  } else if (action === 'UPDATE_INQUIRY') {
+    if (!merged.updates) merged.updates = {};
+    if (newExtracted.rate && !merged.updates.rate) merged.updates.rate = newExtracted.rate;
+    if (newExtracted.delivery_location && !merged.updates.delivery_location) merged.updates.delivery_location = newExtracted.delivery_location;
+    if (newExtracted.payment_terms && !merged.updates.payment_terms) merged.updates.payment_terms = newExtracted.payment_terms;
+    if (newExtracted.stage && !merged.updates.stage) merged.updates.stage = newExtracted.stage;
+    if (newExtracted.status && !merged.updates.stage) merged.updates.stage = newExtracted.status;
+  } else if (action === 'UPDATE_VISIT') {
+    if (!merged.updates) merged.updates = {};
+    if (newExtracted.person_met && !merged.updates.person_met) merged.updates.person_met = newExtracted.person_met;
+    if (newExtracted.contact_phone && !merged.updates.contact_phone) merged.updates.contact_phone = newExtracted.contact_phone;
+    if (newExtracted.city_location && !merged.updates.city_location) merged.updates.city_location = newExtracted.city_location;
+    if (newExtracted.visit_outcome && !merged.updates.visit_outcome) merged.updates.visit_outcome = newExtracted.visit_outcome;
+    if (newExtracted.visit_date && !merged.updates.visit_date) merged.updates.visit_date = normalizeDateToDDMMYYYY(newExtracted.visit_date);
+    if (newExtracted.meeting_remarks && !merged.updates.meeting_remarks) merged.updates.meeting_remarks = newExtracted.meeting_remarks;
+  } else if (action === 'UPDATE_COMPLAINT') {
+    if (!merged.updates) merged.updates = {};
+    if (newExtracted.status && !merged.updates.status) merged.updates.status = newExtracted.status;
+    if (newExtracted.resolution_notes && !merged.updates.resolution_notes) merged.updates.resolution_notes = newExtracted.resolution_notes;
+  }
+
   return merged;
 }
 
@@ -918,11 +949,12 @@ function validateMandatoryFields(action, draft) {
         missing.push('Inquiry ID OR PO Number (e.g. INQ-936C7B or PO-2026-0042)');
       }
       const ordUpdates = draft.updates || {};
-      const hasOrdHeader = Object.values(ordUpdates).some(v => v !== null && v !== undefined && v !== '');
+      const hasOrdHeader = Object.values(ordUpdates).some(v => v !== null && v !== undefined && v !== '') ||
+                           Boolean(draft.po_date || draft.delivery_date || draft.delivery_location || draft.payment_terms || draft.status);
       const hasLineUpdates = Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0;
       const hasPoToAttach = Boolean(draft.inquiry_id && (draft.po_number || ordUpdates.po_number));
       if (!hasOrdHeader && !hasLineUpdates && !hasPoToAttach) {
-        missing.push('At least one field to update (e.g. PO Number to attach, PO Date, Delivery Location, Payment Terms, or Line Items)');
+        missing.push('At least one field to update (e.g. PO Number to attach, PO Date, Delivery Date, Delivery Location, Payment Terms, or Line Items)');
       }
       break;
     }
@@ -4210,7 +4242,9 @@ async function handleCatalogFlow(rawText, senderPhone) {
       const refCheck = await validateDraftComplaintReference(extracted, senderPhone);
       if (!refCheck.isValid) {
         await recordSessionMessage(senderPhone, 'assistant', refCheck.rejectionMessage, { action_type: 'LOG_COMPLAINT' });
-        await saveActiveSession(senderPhone, extracted.company_name || 'Customer', 'general');
+        extracted.linked_inquiry_or_po = null;
+        extracted.po_number = null;
+        await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|LOG_COMPLAINT|${JSON.stringify(extracted)}`);
         return { handled: true, reply: refCheck.rejectionMessage };
       }
     }
@@ -4239,53 +4273,47 @@ async function handleCatalogFlow(rawText, senderPhone) {
       if (inqCheck.draft) Object.assign(extracted, inqCheck.draft);
     }
 
-    const hasCompany = Boolean(extracted.company_name || (Array.isArray(extracted.entries) && extracted.entries.some(e => e.company_name)));
-    const hasLineItems = Array.isArray(extracted.line_items) && extracted.line_items.length > 0;
-    const hasUpdates = extracted.updates && Object.keys(extracted.updates).length > 0;
+    const missing = validateMandatoryFields(detectedAction, extracted);
 
-    if (hasCompany || hasLineItems || hasUpdates || extracted.product_description) {
-      const missing = validateMandatoryFields(detectedAction, extracted);
-
-      if (missing.length === 0) {
-        if (detectedAction === 'UPDATE_VISIT') {
-          const disambig = await checkMultipleVisitsForUpdate(detectedAction, extracted, senderPhone);
-          if (disambig.needsDisambiguation) {
-            await recordSessionMessage(senderPhone, 'assistant', disambig.prompt, {
-              action_type: detectedAction,
-              customer_name: extracted.company_name,
-            });
-            await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(disambig.draft)}`);
-            return { handled: true, reply: disambig.prompt };
-          }
+    if (missing.length === 0) {
+      if (detectedAction === 'UPDATE_VISIT') {
+        const disambig = await checkMultipleVisitsForUpdate(detectedAction, extracted, senderPhone);
+        if (disambig.needsDisambiguation) {
+          await recordSessionMessage(senderPhone, 'assistant', disambig.prompt, {
+            action_type: detectedAction,
+            customer_name: extracted.company_name,
+          });
+          await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(disambig.draft)}`);
+          return { handled: true, reply: disambig.prompt };
         }
-
-        const summary = buildConfirmationSummary(detectedAction, extracted);
-        await recordSessionMessage(senderPhone, 'assistant', summary, {
-          action_type: detectedAction,
-          customer_name: extracted.company_name,
-        });
-        await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_confirm|${detectedAction}|${JSON.stringify(extracted)}`);
-        return {
-          handled: true,
-          reply: summary,
-          interactiveType: 'buttons',
-          interactiveButtons: CONFIRMATION_BUTTONS,
-        };
-      } else {
-        const missingList = missing.map((m) => `• *${m}*`).join('\n');
-        const actionName = getActionFriendlyName(detectedAction);
-        const indexTag = extracted._totalCount > 1 ? ` (${extracted._currentIndex || 1} of ${extracted._totalCount}: ${extracted.company_name || 'Item'})` : '';
-        const askMissing = `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
-        await recordSessionMessage(senderPhone, 'assistant', askMissing, {
-          action_type: detectedAction,
-          customer_name: extracted.company_name,
-        });
-        await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(extracted)}`);
-        return {
-          handled: true,
-          reply: askMissing,
-        };
       }
+
+      const summary = buildConfirmationSummary(detectedAction, extracted);
+      await recordSessionMessage(senderPhone, 'assistant', summary, {
+        action_type: detectedAction,
+        customer_name: extracted.company_name,
+      });
+      await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_confirm|${detectedAction}|${JSON.stringify(extracted)}`);
+      return {
+        handled: true,
+        reply: summary,
+        interactiveType: 'buttons',
+        interactiveButtons: CONFIRMATION_BUTTONS,
+      };
+    } else {
+      const missingList = missing.map((m) => `• *${m}*`).join('\n');
+      const actionName = getActionFriendlyName(detectedAction);
+      const indexTag = extracted._totalCount > 1 ? ` (${extracted._currentIndex || 1} of ${extracted._totalCount}: ${extracted.company_name || 'Item'})` : '';
+      const askMissing = `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
+      await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+        action_type: detectedAction,
+        customer_name: extracted.company_name,
+      });
+      await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(extracted)}`);
+      return {
+        handled: true,
+        reply: askMissing,
+      };
     }
   }
 
