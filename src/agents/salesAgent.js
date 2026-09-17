@@ -2087,32 +2087,50 @@ async function getAllOpenDealsForCustomer(customerName, senderPhone) {
 }
 
 function formatOpenDealsListPrompt(customerName, openDeals) {
+  const formatStageLabel = (st) => {
+    const s = String(st || '').toLowerCase();
+    if (s.includes('won') || s.includes('order')) return 'Won';
+    if (s.includes('lost')) return 'Lost';
+    if (s.includes('quote') || s.includes('price')) return 'Price Quote';
+    if (s.includes('negot')) return 'Negotiation';
+    if (s.includes('hold')) return 'On Hold';
+    return 'New Inquiry';
+  };
+
   const dealListLines = openDeals
+    .slice(0, 5)
     .map((d, idx) => {
       const code = getDealCode(d);
       let itemsDesc = '';
       if (d.deal_items && d.deal_items.length > 0) {
-        itemsDesc = d.deal_items
-          .map((it) => {
-            const spec = it.dimensions ? ` ${it.dimensions}` : '';
-            const qty = it.quantity || it.quantity_mt || 0;
-            const unit = it.unit || 'MT';
-            const rate = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}` : '';
-            return `${it.sku_text || 'Item'}${spec} (${qty} ${unit}${rate})`;
-          })
-          .join(', ');
+        if (d.deal_items.length === 1) {
+          const it = d.deal_items[0];
+          const spec = it.dimensions ? ` ${it.dimensions}` : '';
+          const qty = it.quantity || it.quantity_mt || 0;
+          const unit = it.unit || 'MT';
+          const rate = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}/${unit}` : '';
+          itemsDesc = `${it.sku_text || 'Item'}${spec} (${qty} ${unit})${rate}`;
+        } else {
+          const totalQty = d.deal_items.reduce((s, it) => s + (Number(it.quantity || it.quantity_mt) || 0), 0);
+          const names = d.deal_items.slice(0, 2).map(it => it.sku_text || 'Item').join(', ');
+          itemsDesc = `${d.deal_items.length} Items${totalQty > 0 ? ` (${totalQty} MT Total)` : ''} — ${names}`;
+        }
       } else {
         itemsDesc = `Total: ₹${Number(d.total_amount || 0).toLocaleString('en-IN')}`;
       }
-      const stageStr = (d.stage || 'NEW INQUIRY').toUpperCase();
-      return `${idx + 1}. ${code} — ${itemsDesc} [Stage: ${stageStr}]`;
+      const stageStr = formatStageLabel(d.stage);
+      const dateStr = d.created_at ? new Date(d.created_at).toLocaleDateString('en-GB').replace(/\//g, '-') : '';
+      const dateTag = dateStr ? ` (${dateStr})` : '';
+      return `• *${idx + 1}.* *${code}*${dateTag} — ${itemsDesc} [${stageStr}]`;
     })
     .join('\n');
 
+  const firstCode = getDealCode(openDeals[0]);
   return (
-    `There are ${openDeals.length} open inquiries for ${customerName}:\n\n` +
+    `📋 *Multiple Editable Inquiries Found for ${customerName}:*\n\n` +
+    `Please choose which inquiry you want to edit:\n\n` +
     `${dealListLines}\n\n` +
-    `Which Inquiry ID would you like to update? Please reply with the Inquiry ID (e.g. ${getDealCode(openDeals[0])}) or option number (e.g. 1).`
+    `Reply with the *Inquiry ID* (e.g. "${firstCode}") or option number (1–${Math.min(openDeals.length, 5)}).`
   );
 }
 
@@ -2850,6 +2868,76 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
           unit: data.unit || 'MT',
           rate_per_mt: data.rate_per_mt || null,
         }];
+      }
+    }
+
+    // ── DIRECT INQUIRY EDIT & UPDATE INTERCEPTOR (WHATSAPP BOT) ───────────────────
+    const isEditInquiryIntent =
+      /\b(?:i\s+want\s+(?:to\s+)?)?(?:edit|update|change|modify|revise|amend)\s+(?:an?\s+|the\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i.test(effectiveTextForLLM || text) ||
+      /\b(?:update|edit|modify|change)\s+(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i.test(effectiveTextForLLM || text) ||
+      (data && (data.action === 'UPDATE_INQUIRY' || (data.action === 'deal_update' && (customerName || explicitDealCode))));
+
+    if (isEditInquiryIntent && (customerName || explicitDealCode || data.deal_id)) {
+      const { checkInquiriesForUpdate, buildConfirmationSummary } = require('../core/catalogFlow');
+      const draftForInq = {
+        inquiry_id: explicitDealCode || data.deal_id || null,
+        company_name: customerName || null,
+        updates: {},
+        line_item_updates: [],
+      };
+
+      const delLocToUpd = extractDeliveryLocation(effectiveTextForLLM || text) || data.delivery_location;
+      if (delLocToUpd) draftForInq.updates.delivery_location = delLocToUpd;
+
+      const payTermsToUpd = extractPaymentTerms(effectiveTextForLLM || text) || data.payment_terms;
+      if (payTermsToUpd) draftForInq.updates.payment_terms = payTermsToUpd;
+
+      if (data.target_stage) draftForInq.updates.stage = data.target_stage;
+      if (data.po_number) draftForInq.updates.po_number = data.po_number;
+      if (data.notes || data.additional_notes) draftForInq.updates.additional_notes = data.notes || data.additional_notes;
+
+      // Check rate / quantity updates
+      if (Array.isArray(data.line_items) && data.line_items.length > 0) {
+        const lineUpds = data.line_items.filter(li => li.rate_per_mt > 0 || li.quantity > 0 || li.quantity_mt > 0);
+        if (lineUpds.length > 0) {
+          draftForInq.line_item_updates = lineUpds.map(li => ({
+            sku_text: li.product_requirement || li.pName || 'Item',
+            rate: li.rate_per_mt || null,
+            quantity: li.quantity || li.quantity_mt || null,
+          }));
+        }
+      } else if (rawItems.length > 0) {
+        const lineUpds = rawItems.filter(li => (li.rate_per_mt > 0 || li.rate > 0 || li.quantity > 0 || li.quantity_mt > 0));
+        if (lineUpds.length > 0) {
+          draftForInq.line_item_updates = lineUpds.map(li => ({
+            sku_text: li.product_requirement || li.pName || 'Item',
+            rate: li.rate_per_mt || li.rate || null,
+            quantity: li.quantity || li.quantity_mt || null,
+          }));
+        }
+      }
+
+      const structPrice = (effectiveTextForLLM || text).match(/\b(?:target\s+price|unit\s+price|rate|price)\s*[:=-]?\s*(?:is\s+|to\s+)?₹?\s*([\d,.]+)/i);
+      if (structPrice && (!draftForInq.line_item_updates || draftForInq.line_item_updates.length === 0)) {
+        const parsedR = parseFloat(structPrice[1].replace(/,/g, ''));
+        if (parsedR > 0 && parsedR < 10000000 && !/^[6-9]\d{9}$/.test(String(Math.round(parsedR)))) {
+          draftForInq.updates.rate = parsedR;
+        }
+      }
+
+      const inqCheck = await checkInquiriesForUpdate('UPDATE_INQUIRY', draftForInq, senderPhone, effectiveTextForLLM || text);
+      if (inqCheck.handled) {
+        if (inqCheck.status === 'MULTIPLE_EDITABLE' || inqCheck.status === 'SINGLE_EDITABLE_ASK_DETAILS') {
+          await saveActiveSession(senderPhone, draftForInq.company_name || 'Customer', `catalog_flow|UPDATE_INQUIRY|${JSON.stringify(inqCheck.draft)}`);
+        } else {
+          await saveActiveSession(senderPhone, draftForInq.company_name || 'Customer', 'general');
+        }
+        return inqCheck.reply;
+      }
+      if (inqCheck.status === 'SINGLE_EDITABLE_READY') {
+        const summary = buildConfirmationSummary('UPDATE_INQUIRY', inqCheck.draft);
+        await saveActiveSession(senderPhone, draftForInq.company_name || 'Customer', `catalog_confirm|UPDATE_INQUIRY|${JSON.stringify(inqCheck.draft)}`);
+        return summary;
       }
     }
 

@@ -4306,4 +4306,7 @@ module.exports = {
   detectOperationalAction,
   extractFieldsWithLLM,
   mergeDraft,
+  checkInquiriesForUpdate,
+  isCustomerMatch,
+  cleanLegalSuffixes,
 };
