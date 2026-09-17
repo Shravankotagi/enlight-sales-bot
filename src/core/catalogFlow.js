@@ -1002,6 +1002,9 @@ function validateMandatoryFields(action, draft) {
     }
 
     case 'LOG_VISIT':
+      if (!draft.meeting_remarks && (draft.followup_action || draft.notes || draft.additional_notes)) {
+        draft.meeting_remarks = draft.followup_action || draft.notes || draft.additional_notes;
+      }
       if (!draft.company_name) missing.push('Customer / Company Name');
       if (!draft.person_met) missing.push('Person Met');
       if (!draft.contact_phone) missing.push('Contact Phone');
@@ -1346,7 +1349,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, inquiry_type, created_at, salesperson_phone')
     .order('created_at', { ascending: false });
 
-  if (!scope.isAdmin && accessibleList.length > 0) {
+  if (!scope.isAdmin && accessibleList.length > 0 && !cleanInqId) {
     dealsQuery = dealsQuery.in('salesperson_phone', accessibleList);
     inqsQuery = inqsQuery.in('salesperson_phone', accessibleList);
   }
@@ -1356,14 +1359,14 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     dealsQuery = dealsQuery.ilike('customer_name', `%${cleanWord}%`);
   }
 
-  dealsQuery = dealsQuery.limit(100);
-  inqsQuery = inqsQuery.limit(100);
+  dealsQuery = dealsQuery.limit(200);
+  inqsQuery = inqsQuery.limit(200);
 
   const [{ data: allDeals }, { data: allInqs }] = await Promise.all([dealsQuery, inqsQuery]);
 
   // Apply RBAC phone filtering
   const filterByScope = (items) => {
-    if (scope.isAdmin || scope.phones === null) return items || [];
+    if (scope.isAdmin || scope.phones === null || cleanInqId) return items || [];
     return (items || []).filter(item => {
       if (!item.salesperson_phone) return true;
       const itemPhones = getPhoneVariants(item.salesperson_phone);
@@ -2184,9 +2187,6 @@ async function executeAction(action, draft, senderPhone) {
         const companyName = (draft.company_name || 'Customer').trim();
         await ensureCustomerRecord(companyName, senderPhone);
 
-        const hexCode = Math.random().toString(16).substring(2, 8).toUpperCase();
-        const inquiryCode = `INQ-${hexCode}`;
-
         let totalAmount = 0;
         const globalRate = Number(String(draft.rate || 0).replace(/[^\d.]/g, '')) || 0;
 
@@ -2270,6 +2270,7 @@ async function executeAction(action, draft, senderPhone) {
           .from('inquiries')
           .insert({
             source_channel: 'WhatsApp',
+            sender_name: companyName,
             raw_text: humanRawText.trim(),
             sender_phone: senderPhone,
             salesperson_phone: senderPhone,
@@ -2304,6 +2305,16 @@ async function executeAction(action, draft, senderPhone) {
           .single();
 
         if (dealErr) console.error('[CatalogFlow] Deal insert error:', dealErr);
+
+        const targetRecordId = inqRow?.id || dealRow?.id;
+        const hexCode = targetRecordId ? targetRecordId.replace(/-/g, '').slice(0, 6).toUpperCase() : Math.random().toString(16).substring(2, 8).toUpperCase();
+        const inquiryCode = `INQ-${hexCode}`;
+
+        if (inqRow) {
+          structuredAiJson.inquiry_code = inquiryCode;
+          structuredAiJson.display_id = inquiryCode;
+          await supabase.from('inquiries').update({ ai_extraction_json: structuredAiJson }).eq('id', inqRow.id);
+        }
 
         // 3. Insert line items into deal_items
         if (dealRow && structuredLineItems.length > 0) {
@@ -4367,7 +4378,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
         inquiry_id: draft.inquiry_id,
         extracted_data: draft,
       });
-      await saveActiveSession(senderPhone, draft.company_name || 'Customer', 'general');
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
       return { handled: true, reply };
     }
 
@@ -4846,48 +4857,62 @@ async function handleCatalogFlow(rawText, senderPhone) {
     return { handled: false };
   }
 
-  // ── 7b. STAGE UPDATE PROMPTS (Direct Deal / Inquiry Stage Transitions) ────────
-  // Per architecture requirement: Stage update prompts must be recognized directly
-  // (e.g. "stage update to won", "mark deal for SS Industries as won", "deal won", etc.)
-  if (isStageUpdatePrompt(text)) {
+  // ── 7b. DIRECT OPERATIONAL ACTIONS, ID UPDATES & STAGE PROMPTS ────────────
+  const isDirectInqId = /^#?(?:INQ|DEAL)-[A-Z0-9]+/i.test(text.trim());
+  const isDirectPoId = /^#?PO-[A-Z0-9]+/i.test(text.trim());
+  const isDirectVisId = /^#?VIS-[A-Z0-9]+/i.test(text.trim());
+
+  let detectedAction = null;
+  if (isDirectInqId) {
+    detectedAction = 'UPDATE_INQUIRY';
+  } else if (isDirectPoId) {
+    detectedAction = 'UPDATE_ORDER';
+  } else if (isDirectVisId) {
+    detectedAction = 'UPDATE_VISIT';
+  } else if (isStageUpdatePrompt(text)) {
+    detectedAction = 'UPDATE_INQUIRY';
+  } else {
+    detectedAction = await detectNewOperationalIntent(text);
+  }
+
+  if (detectedAction && detectedAction !== 'GENERAL_QUERY') {
     await recordSessionMessage(senderPhone, 'user', text);
-    const action = 'UPDATE_INQUIRY';
+    const action = detectedAction;
     let initialDraft = {};
 
-    // Inherit customer name if recent session customer is known and not overridden
-    const activeCustomer = activeSession ? (activeSession.active_customer_name || activeSession.company_name) : null;
-    if (activeCustomer && activeCustomer !== 'Unknown' && activeCustomer !== 'Customer') {
-      initialDraft.company_name = activeCustomer;
-    }
-
     const updatedDraft = await extractFieldsWithLLM(action, text, initialDraft);
-    if (!updatedDraft.company_name && initialDraft.company_name) {
-      updatedDraft.company_name = initialDraft.company_name;
-    }
-    if (!updatedDraft.inquiry_id && initialDraft.inquiry_id) {
-      updatedDraft.inquiry_id = initialDraft.inquiry_id;
-    }
 
-    const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
-    if (!custCheck.isValid) {
-      if (custCheck.isUnrecognizedCustomer) {
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
-        await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
-        return {
-          handled: true,
-          reply: custCheck.prompt,
-          interactiveType: 'buttons',
-          interactiveButtons: NEW_CUSTOMER_BUTTONS,
-        };
-      } else {
-        updatedDraft.company_name = null;
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
-        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
-        return { handled: true, reply: custCheck.rejectionMessage };
+    // 1. Customer Verification (for new creations)
+    if (['LOG_INQUIRY', 'LOG_ORDER', 'LOG_VISIT', 'LOG_COMPLAINT', 'LOG_NEW_CUSTOMER'].includes(action)) {
+      const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
+      if (!custCheck.isValid) {
+        if (custCheck.isUnrecognizedCustomer) {
+          await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+          await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
+          return {
+            handled: true,
+            reply: custCheck.prompt,
+            interactiveType: 'buttons',
+            interactiveButtons: NEW_CUSTOMER_BUTTONS,
+          };
+        } else {
+          updatedDraft.company_name = null;
+          await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
+          await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+          return { handled: true, reply: custCheck.rejectionMessage };
+        }
+      }
+
+      const prodCheck = validateDraftProducts(action, updatedDraft);
+      if (!prodCheck.isValid) {
+        await recordSessionMessage(senderPhone, 'assistant', prodCheck.clarificationMessage, { action_type: action });
+        await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: prodCheck.clarificationMessage };
       }
     }
 
-    if (updatedDraft.inquiry_id || updatedDraft.company_name) {
+    // 2. UPDATE_INQUIRY checks
+    if (action === 'UPDATE_INQUIRY' && (updatedDraft.inquiry_id || updatedDraft.company_name)) {
       const inqCheck = await checkInquiriesForUpdate(action, updatedDraft, senderPhone, text);
       if (inqCheck && inqCheck.handled) {
         await recordSessionMessage(senderPhone, 'assistant', inqCheck.reply, {
@@ -4897,11 +4922,60 @@ async function handleCatalogFlow(rawText, senderPhone) {
         if (inqCheck.status === 'MULTIPLE_EDITABLE' || inqCheck.status === 'SINGLE_EDITABLE_ASK_DETAILS' || inqCheck.status === 'ID_NOT_FOUND') {
           await saveActiveSession(senderPhone, (inqCheck.draft?.company_name || updatedDraft.company_name || 'Customer'), `catalog_flow|${action}|${JSON.stringify(inqCheck.draft || updatedDraft)}`);
         } else {
-          await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', 'general');
+          await saveActiveSession(senderPhone, 'Unknown', 'general');
         }
         return { handled: true, reply: inqCheck.reply };
       }
       if (inqCheck && inqCheck.draft) Object.assign(updatedDraft, inqCheck.draft);
+    }
+
+    // 3. UPDATE_ORDER checks
+    if (action === 'UPDATE_ORDER' && (updatedDraft.inquiry_id || updatedDraft.po_number || updatedDraft.company_name)) {
+      const ordCheck = await checkOrdersForUpdate(action, updatedDraft, senderPhone, text);
+      if (ordCheck && ordCheck.handled) {
+        await recordSessionMessage(senderPhone, 'assistant', ordCheck.reply, {
+          action_type: action,
+          customer_name: updatedDraft.company_name,
+        });
+        if (ordCheck.status === 'ASK_DETAILS' || ordCheck.status === 'ID_NOT_FOUND') {
+          await saveActiveSession(senderPhone, (ordCheck.draft?.company_name || updatedDraft.company_name || 'Customer'), `catalog_flow|${action}|${JSON.stringify(ordCheck.draft || updatedDraft)}`);
+        } else {
+          await saveActiveSession(senderPhone, 'Unknown', 'general');
+        }
+        return { handled: true, reply: ordCheck.reply };
+      }
+      if (ordCheck && ordCheck.draft) Object.assign(updatedDraft, ordCheck.draft);
+    }
+
+    // 4. UPDATE_VISIT checks
+    if (action === 'UPDATE_VISIT') {
+      const disambig = await checkMultipleVisitsForUpdate(action, updatedDraft, senderPhone);
+      if (disambig.needsDisambiguation) {
+        await recordSessionMessage(senderPhone, 'assistant', disambig.prompt, {
+          action_type: action,
+          customer_name: updatedDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(disambig.draft)}`);
+        return { handled: true, reply: disambig.prompt };
+      }
+    }
+
+    // 5. UPDATE_COMPLAINT checks
+    if (action === 'UPDATE_COMPLAINT' && (updatedDraft.linked_inquiry_or_po || updatedDraft.company_name || updatedDraft.complaint_id)) {
+      const cmpCheck = await checkComplaintsForUpdate(action, updatedDraft, senderPhone, text);
+      if (cmpCheck && cmpCheck.handled) {
+        await recordSessionMessage(senderPhone, 'assistant', cmpCheck.reply, {
+          action_type: action,
+          customer_name: updatedDraft.company_name,
+        });
+        if (cmpCheck.status === 'ASK_DETAILS' || cmpCheck.status === 'NOT_FOUND') {
+          await saveActiveSession(senderPhone, (cmpCheck.draft?.company_name || updatedDraft.company_name || 'Customer'), `catalog_flow|${action}|${JSON.stringify(cmpCheck.draft || updatedDraft)}`);
+        } else {
+          await saveActiveSession(senderPhone, 'Unknown', 'general');
+        }
+        return { handled: true, reply: cmpCheck.reply };
+      }
+      if (cmpCheck && cmpCheck.draft) Object.assign(updatedDraft, cmpCheck.draft);
     }
 
     const missing = validateMandatoryFields(action, updatedDraft);
@@ -4920,7 +4994,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
       };
     } else {
       const missingList = missing.map((m) => `• *${m}*`).join('\n');
-      const askMissing = `Please provide the remaining details to update the deal stage:\n\n${missingList}`;
+      const actionName = getActionFriendlyName(action);
+      const askMissing = `Please provide the remaining mandatory details for this ${actionName}:\n\n${missingList}`;
       await recordSessionMessage(senderPhone, 'assistant', askMissing, {
         action_type: action,
         customer_name: updatedDraft.company_name,
