@@ -3187,7 +3187,43 @@ function detectOperationalAction(text) {
   // If message is a pure query / search, do not intercept
   if (isOperationalQuery(lower)) return null;
 
-  // Direct sales agent operations (stage transitions on existing deals) -> UPDATE_INQUIRY
+  // 1. Customer Acquisition
+  if (
+    /\b(?:new\s+customer|customer\s+acquisition|onboard\s+customer|add\s+customer|acquire\s+customer|register\s+customer|nayi\s+party|naya\s+customer|customer\s+onboarding)\b/i.test(lower)
+  ) {
+    return 'LOG_NEW_CUSTOMER';
+  }
+
+  // 2. Complaint patterns (prioritized so complaints citing POs or Inquiries are categorized as complaints)
+  if (
+    /\b(?:complaint|defect|defective|damaged\s+material|rust\s+on|rusty|short\s+delivery|wrong\s+material|rejection|rejected\s+material|material\s+return|wapas\s+kiya|issue\s+aa\s+gaya|quality\s+issue|bad\s+material|damaged\s+coils|damaged\s+sheets)\b/i.test(lower)
+  ) {
+    if (/\b(?:update|change|modify|set|mark\s+as\s+resolved|mark\s+resolved|resolve|resolved|close|reopen|correct|fix|edit)\b/i.test(lower)) {
+      return 'UPDATE_COMPLAINT';
+    }
+    return 'LOG_COMPLAINT';
+  }
+
+  // 3. New Order / PO Received patterns (prioritized before generic po- ID updates)
+  if (
+    /\b(?:purchase\s+order\s+received|po\s+received|received\s+purchase\s+order|received\s+po|order\s+confirmed|new\s+order|booked\s+order|order\s+logged|order\s+recorded)\b/i.test(lower) ||
+    /^\s*(?:log|record|new)\s+(?:purchase\s+order|order|po)\b/i.test(lower)
+  ) {
+    return 'LOG_ORDER';
+  }
+
+  // 4. Visit / Meeting patterns
+  if (
+    /\b(?:visit(?:ed|ing|s)?|met\b|meet(?:ing)?(?:\s+(?:with|at|in|up|to))?|had\s+a\s+visit|had\s+a\s+meeting|site\s+visit|field\s+visit|client\s+visit|market\s+visit|office\s+visit|factory\s+visit|went\s+to(?:\s+meet)?|gaya\s+tha|mila\s+aaj|milne\s+gaye|visit\s+kiya|visit\s+report)\b/i.test(lower) ||
+    /\b(?:visit\s+outcome|person\s+met|discussion\s+notes|meeting\s+remarks|neutral\s+response|positive\s+response|negative\s+response)\b/i.test(lower)
+  ) {
+    if (/\b(?:update|change|modify|edit|correct|amend)\b/i.test(lower)) {
+      return 'UPDATE_VISIT';
+    }
+    return 'LOG_VISIT';
+  }
+
+  // 5. Direct sales agent operations (stage transitions on existing deals) -> UPDATE_INQUIRY
   if (
     /\b(?:mark|move|put)\b.*?\b(negotiation|won|lost|quoted|quotated|on\s+hold|hold)\b/i.test(lower) ||
     /\b(?:is\s+on\s+hold|is\s+lost|is\s+won|is\s+negotiation|is\s+quoted|deal\s+won|deal\s+lost)\b/i.test(lower)
@@ -3195,16 +3231,24 @@ function detectOperationalAction(text) {
     return 'UPDATE_INQUIRY';
   }
 
-  // Standalone rate/quantity updates on existing deals -> UPDATE_INQUIRY
+  // 6. Standalone rate/quantity updates on existing deals -> UPDATE_INQUIRY
   if (
     /^(?:make\s+the\s+quantity|update\s+rate|change\s+rate|set\s+rate|rate\s+is\b|rate\s+for\b|quantity\s+for\b|change\s+quantity|update\s+quantity)/i.test(lower)
   ) {
     return 'UPDATE_INQUIRY';
   }
 
-  // 1. Explicit Update patterns
-  if (/\b(?:update|change|modify|set|mark|resolve|close|reopen|attach|link|add\s+po|correct|fix|edit|amend|revise)\b/i.test(lower)) {
-    // 1a. Complaints (Check FIRST: user messages updating a complaint often cite #INQ-xxx or PO-xxx)
+  // 7. Explicit ID-based updates
+  if (/\b(?:po-)\b/i.test(lower)) return 'UPDATE_ORDER';
+  if (/\b(?:inq-)\b/i.test(lower)) {
+    if (/\b(?:attach|link|set|update)\b.*?\b(?:po-|\bpo\b)/i.test(lower)) return 'UPDATE_ORDER';
+    return 'UPDATE_INQUIRY';
+  }
+  if (/\b(?:vis-)\b/i.test(lower)) return 'UPDATE_VISIT';
+
+  // 8. Explicit Update patterns
+  if (/\b(?:update|change|modify|set|mark|resolve|close|reopen|attach|link|add\s+po|correct|fix|edit|amend|revise|increase|decrease|reduce|adjust|make)\b/i.test(lower)) {
+    // 8a. Complaints
     if (
       /\b(?:complaint|complaints|defect|defective|rejection|damage|damaged|rust)\b/i.test(lower) ||
       /\b(?:mark\s+as\s+resolved|mark\s+resolved|resolve\s+complaint|close\s+complaint|reopen\s+complaint)\b/i.test(lower)
@@ -3212,49 +3256,26 @@ function detectOperationalAction(text) {
       return 'UPDATE_COMPLAINT';
     }
 
-    // 1b. Visits (Check SECOND: visits might mention inquiries discussed)
+    // 8b. Visits
     if (/\b(?:visit|vis-|site\s+visit|field\s+visit|meeting|person\s+met|contact\s+person)\b/i.test(lower)) {
       return 'UPDATE_VISIT';
     }
 
-    // 1c. Orders
+    // 8c. Orders
     if (/\b(?:order|orders|purchase\s+order|po\s*no|po\s*number|delivery\s*date|po\s*date|attach\s+po|link\s+po|attach\s+(?:the\s+)?po|set\s+po)\b/i.test(lower)) {
       return 'UPDATE_ORDER';
     }
 
-    // 1d. Inquiries
-    if (/\b(?:inquiry|inquiries|deal|quote|quotation|rfq)\b/i.test(lower)) {
+    // 8d. Inquiries
+    if (/\b(?:inquiry|inquiries|deal|deals|quote|quotation|rfq|rate|price|quantity|qty|specs|terms)\b/i.test(lower)) {
       if (/\b(?:po[-_:#\s]*\d+|po\s*no|po\s*number|purchase\s*order)\b/i.test(lower) && /\b(?:attach|link|set)\b/i.test(lower)) {
         return 'UPDATE_ORDER';
       }
       return 'UPDATE_INQUIRY';
     }
-
-    // 1e. ID-only updates without explicit entity keyword
-    if (/\b(?:po-)\b/i.test(lower)) return 'UPDATE_ORDER';
-    if (/\b(?:inq-)\b/i.test(lower)) {
-      if (/\b(?:attach|link|set|update)\b.*?\b(?:po-|\bpo\b)/i.test(lower)) return 'UPDATE_ORDER';
-      return 'UPDATE_INQUIRY';
-    }
-    if (/\b(?:vis-)\b/i.test(lower)) return 'UPDATE_VISIT';
   }
 
-  // 2. Complaint patterns (prioritized because complaints often cite PO numbers or visit dates)
-  if (
-    /\b(?:complaint|defect|defective|damaged\s+material|rust\s+on|rusty|short\s+delivery|wrong\s+material|rejection|rejected\s+material|material\s+return|wapas\s+kiya|issue\s+aa\s+gaya|quality\s+issue|bad\s+material|damaged\s+coils|damaged\s+sheets)\b/i.test(lower)
-  ) {
-    return 'LOG_COMPLAINT';
-  }
-
-  // 3. Visit / Meeting patterns (comprehensive coverage of any visit phrasing)
-  if (
-    /\b(?:visit(?:ed|ing|s)?|met\b|meet(?:ing)?(?:\s+(?:with|at|in|up|to))?|had\s+a\s+visit|had\s+a\s+meeting|site\s+visit|field\s+visit|client\s+visit|market\s+visit|office\s+visit|factory\s+visit|went\s+to(?:\s+meet)?|gaya\s+tha|mila\s+aaj|milne\s+gaye|visit\s+kiya|visit\s+report)\b/i.test(lower) ||
-    /\b(?:visit\s+outcome|person\s+met|discussion\s+notes|meeting\s+remarks|neutral\s+response|positive\s+response|negative\s+response)\b/i.test(lower)
-  ) {
-    return 'LOG_VISIT';
-  }
-
-  // 4. Order / PO patterns
+  // 9. Order / PO patterns (fallback)
   if (
     /\b(?:purchase\s+order|po\s+received|received\s+po|order\s+confirmed|po-\d+|po\s*no|po\s*number|order\s+logged|order\s+recorded|deal\s+won|new\s+order|booked\s+order|order\s+for)\b/i.test(lower) ||
     /^\s*(?:po|purchase\s+order)\b/i.test(lower)
@@ -3262,7 +3283,7 @@ function detectOperationalAction(text) {
     return 'LOG_ORDER';
   }
 
-  // 5. Inquiry / Requirements patterns (Comprehensive coverage: English, Hinglish, Multi-line, Field Labels, Steel + Qty)
+  // 10. Inquiry / Requirements patterns
   if (
     /\b(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal|deals)\b/i.test(lower) ||
     /\b(?:quote|quotes|quotation|quotations|price|pricing|rates?|bhav)\b/i.test(lower) ||
@@ -3277,13 +3298,6 @@ function detectOperationalAction(text) {
     (/\b(?:coil|coils|sheet|sheets|plate|plates|structural|beam|beams|channel|channels|pipe|pipes|tube|tubes|tmt|angle|angles|round|flat|square|metal|steel|hr|cr|hrpo|gp|galvalume|chequered)\b/i.test(lower) && /\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|pcs|nos|pieces|sheets|plates|coils|bundles|lengths)\b/i.test(lower))
   ) {
     return 'LOG_INQUIRY';
-  }
-
-  // 6. Customer Acquisition patterns
-  if (
-    /\b(?:new\s+customer|customer\s+acquisition|onboard\s+customer|add\s+customer|acquire\s+customer|register\s+customer|nayi\s+party|naya\s+customer|customer\s+onboarding)\b/i.test(lower)
-  ) {
-    return 'LOG_NEW_CUSTOMER';
   }
 
   return null;
@@ -3462,7 +3476,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
   // ── 2b. ACTIVE SESSION PREEMPTION CHECK ─────────────────────────────────────
   // If the user was in an active state (confirm, flow, editing, customer onboarding),
-  // but now sends an EXPLICIT NEW operational command, preempt and reset old session!
+  // check if they explicitly sent a NEW operational command or switched menus
   if (lastIntent.startsWith('catalog_')) {
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
     const isControlReply = [
@@ -3477,24 +3491,33 @@ async function handleCatalogFlow(rawText, senderPhone) {
       const currentAction = parts[1];
       const currentDraft = safeParseJSON(parts.slice(2).join('|'), {});
 
-      const detectedNewAction = await detectNewOperationalIntent(text);
-      if (detectedNewAction) {
-        let shouldPreempt = false;
-        if (detectedNewAction !== currentAction) {
-          shouldPreempt = true;
-        } else {
+      // 1. Explicit menu selection (e.g. user sends "1", "3", "5", "menu_1")
+      const matchedMenu = matchActionFromInput(text);
+      if (matchedMenu && matchedMenu !== currentAction) {
+        await finalizeCurrentSession(senderPhone, `Switched to ${getActionFriendlyName(matchedMenu)} menu`);
+        lastIntent = '';
+      } else if (lastIntent.startsWith('catalog_confirm|')) {
+        // 2. In confirmation state: check if user starts a brand new action for another entity
+        const detectedNewAction = await detectNewOperationalIntent(text);
+        if (detectedNewAction) {
           const isCreationCmd = /^(?:new\s+|log\s+|create\s+|record\s+|received\s+|add\s+|raise\s+|report\s+|visited\s+|went\s+to|party:)/i.test(text);
           const hasExplicitPartyPrefix = /\b(?:for|from|to|by|party|client|customer)\s*[:=-]?\s*([A-Za-z0-9\s&.,'-]{3,})/i.test(text);
           const mentionsDifferentCompany = currentDraft.company_name && !text.toLowerCase().includes(currentDraft.company_name.toLowerCase());
 
-          if (isCreationCmd || (hasExplicitPartyPrefix && mentionsDifferentCompany)) {
-            shouldPreempt = true;
+          if (detectedNewAction !== currentAction || isCreationCmd || (hasExplicitPartyPrefix && mentionsDifferentCompany)) {
+            await finalizeCurrentSession(senderPhone, `Preempted by new ${getActionFriendlyName(detectedNewAction)} action`);
+            lastIntent = '';
           }
         }
-
-        if (shouldPreempt) {
-          await finalizeCurrentSession(senderPhone, `Preempted by new ${getActionFriendlyName(detectedNewAction)} action`);
-          lastIntent = '';
+      } else if (lastIntent.startsWith('catalog_flow|') || lastIntent.startsWith('catalog_editing|')) {
+        // 3. In data collection state: only preempt if message has an explicit creation command for a DIFFERENT action
+        const isExplicitDifferentModule = /^(?:log\s+visit|visited\b|went\s+to\s+meet|log\s+complaint|received\s+complaint|raise\s+complaint|log\s+order|received\s+(?:purchase\s+)?order|new\s+customer|onboard\s+customer)/i.test(text);
+        if (isExplicitDifferentModule) {
+          const detectedNewAction = await detectNewOperationalIntent(text);
+          if (detectedNewAction && detectedNewAction !== currentAction) {
+            await finalizeCurrentSession(senderPhone, `Preempted by new ${getActionFriendlyName(detectedNewAction)} action`);
+            lastIntent = '';
+          }
         }
       }
     }
@@ -4110,9 +4133,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
     if (!candidateResolved && !inquiryCandidateResolved) {
       let switchAction = matchActionFromInput(text);
       if (!switchAction) {
-        const detected = detectOperationalAction(text);
-        if (detected && detected !== action) {
-          switchAction = detected;
+        const isExplicitDifferentModule = /^(?:log\s+visit|visited\b|went\s+to\s+meet|log\s+complaint|received\s+complaint|raise\s+complaint|log\s+order|received\s+(?:purchase\s+)?order|new\s+customer|onboard\s+customer)/i.test(text);
+        if (isExplicitDifferentModule) {
+          const detected = detectOperationalAction(text);
+          if (detected && detected !== action) {
+            switchAction = detected;
+          }
         }
       }
 
