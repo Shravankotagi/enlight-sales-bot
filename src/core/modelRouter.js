@@ -2,7 +2,9 @@
  * modelRouter.js - Google Gemini Model Router
  *
  * UNIFIED HIGH-ACCURACY MODEL CONFIGURATION:
- * - Model: gemini-2.5-flash
+ * - Primary Model: gemini-3.7-flash
+ * - Secondary Model: gemini-3.0-flash
+ * - Tertiary Model: gemini-2.5-flash
  * - Key: process.env.GEMINI_PAID_API_KEY || process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_1 || process.env.GEMINI_API_KEY_2
  */
 
@@ -14,9 +16,9 @@ const GEMINI_API_KEY =
   process.env.GEMINI_API_KEY_1 ||
   process.env.GEMINI_API_KEY_2;
 
-const PRIMARY_MODEL = 'gemini-2.5-flash';
-const FALLBACK_MODEL = 'gemini-2.0-flash';
-const LITE_FALLBACK_MODEL = 'gemini-1.5-flash';
+const PRIMARY_MODEL = process.env.GEMINI_PRIMARY_MODEL || 'gemini-3.7-flash';
+const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.0-flash';
+const LITE_FALLBACK_MODEL = process.env.GEMINI_LITE_MODEL || 'gemini-2.5-flash';
 
 /**
  * High-accuracy Gemini model for Image Processing, OCR, PDFs, & Complex Reasoning.
@@ -51,35 +53,49 @@ function getModel(tools = null) {
 }
 
 /**
- * Invoke Gemini with automatic model fallback (gemini-2.5-flash -> gemini-2.0-flash -> gemini-1.5-flash).
+ * Invoke Gemini with automatic model fallback:
+ * 1. gemini-3.7-flash (Primary)
+ * 2. gemini-3.0-flash (Secondary)
+ * 3. gemini-2.5-flash (Tertiary)
+ * 4. gemini-2.0-flash (Quaternary)
+ * 5. gemini-1.5-flash (Final resilient fallback)
  */
 async function invokeWithFallback(messages, tools = null, isPaidTask = false) {
-  try {
-    const model = getPaidHighAccuracyModel(tools);
-    return await model.invoke(messages);
-  } catch (err) {
-    console.warn(`[ModelRouter] Primary model (${PRIMARY_MODEL}) error: ${err.message}. Retrying with fallback (${FALLBACK_MODEL})...`);
+  const cascadeModels = [
+    PRIMARY_MODEL,
+    FALLBACK_MODEL,
+    'gemini-3.5-flash',
+    'gemini-3.6-flash',
+    LITE_FALLBACK_MODEL,
+    'gemini-2.5-flash-lite',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash',
+  ];
+
+  const uniqueModels = Array.from(new Set(cascadeModels.filter(Boolean)));
+  let lastError = null;
+
+  for (let i = 0; i < uniqueModels.length; i++) {
+    const currentModelName = uniqueModels[i];
     try {
-      const fallbackModel = new ChatGoogleGenerativeAI({
-        model: FALLBACK_MODEL,
+      const model = new ChatGoogleGenerativeAI({
+        model: currentModelName,
         apiKey: GEMINI_API_KEY,
         temperature: 0.1,
-        maxRetries: 2,
+        maxRetries: 0,
       });
-      const boundFallback = tools ? fallbackModel.bindTools(tools) : fallbackModel;
-      return await boundFallback.invoke(messages);
-    } catch (fallbackErr) {
-      console.warn(`[ModelRouter] Fallback model (${FALLBACK_MODEL}) error: ${fallbackErr.message}. Retrying with ${LITE_FALLBACK_MODEL}...`);
-      const liteModel = new ChatGoogleGenerativeAI({
-        model: LITE_FALLBACK_MODEL,
-        apiKey: GEMINI_API_KEY,
-        temperature: 0.1,
-        maxRetries: 2,
-      });
-      const boundLite = tools ? liteModel.bindTools(tools) : liteModel;
-      return await boundLite.invoke(messages);
+      const bound = tools ? model.bindTools(tools) : model;
+      return await bound.invoke(messages);
+    } catch (err) {
+      lastError = err;
+      const nextModel = uniqueModels[i + 1];
+      if (nextModel) {
+        console.warn(`[ModelRouter] Model (${currentModelName}) error: ${err.message}. Retrying with fallback (${nextModel})...`);
+      }
     }
   }
+
+  throw lastError || new Error('All Gemini models in fallback cascade failed.');
 }
 
 module.exports = {

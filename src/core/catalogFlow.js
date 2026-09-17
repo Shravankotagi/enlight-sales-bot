@@ -1243,6 +1243,14 @@ function buildConfirmationSummary(action, draft) {
       if (draft.payment_terms) summary += `• *Payment Terms:* ${draft.payment_terms}\n`;
       if (draft.delivery_location) summary += `• *Delivery Location:* ${draft.delivery_location}\n`;
       if (draft.additional_notes) summary += `• *Additional Notes:* ${draft.additional_notes}\n`;
+      if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
+        const totalAmt = draft.line_items.reduce((sum, it) => sum + (Number(it.amount) || ((Number(it.quantity) || 0) * (Number(it.rate) || 0)) || 0), 0);
+        if (totalAmt > 0) {
+          const gstAmt = Math.round(totalAmt * 0.18);
+          const grandTot = totalAmt + gstAmt;
+          summary += `• *Quotation Total:* ₹${Number(totalAmt).toLocaleString('en-IN')} + 18% GST (₹${Number(gstAmt).toLocaleString('en-IN')}) = *₹${Number(grandTot).toLocaleString('en-IN')}*\n`;
+        }
+      }
       break;
     }
 
@@ -2761,11 +2769,18 @@ function detectOperationalAction(text) {
   // If message is a pure query / search, do not intercept
   if (isOperationalQuery(lower)) return null;
 
-  // Direct sales agent operations (stage transitions & rate updates) should bypass catalog flow
+  // Direct sales agent operations (stage transitions on existing deals) should bypass catalog flow
   if (
-    /\b(?:mark|move|update|set|change|put)\b.*?\b(negotiation|won|lost|quoted|quotated|on\s+hold|hold)\b/i.test(lower) ||
-    /\b(?:is\s+on\s+hold|is\s+lost|is\s+won|is\s+negotiation|is\s+quoted|deal\s+won|deal\s+lost)\b/i.test(lower) ||
-    /\b(?:rates?|prices?)\s+for\b|\bupdate\s+(?:the\s+)?rates?\b|@\s*[\d,.]+|\bper\s+mt\b|\/mt\b/i.test(lower)
+    /\b(?:mark|move|put)\b.*?\b(negotiation|won|lost|quoted|quotated|on\s+hold|hold)\b/i.test(lower) ||
+    /\b(?:is\s+on\s+hold|is\s+lost|is\s+won|is\s+negotiation|is\s+quoted|deal\s+won|deal\s+lost)\b/i.test(lower)
+  ) {
+    return null;
+  }
+
+  // Pure standalone rate updates on existing deals (without inquiry keywords) should bypass to salesAgent
+  if (
+    /^(?:make\s+the\s+quantity|update\s+rate|change\s+rate|set\s+rate|rate\s+is\b|rate\s+for\b)/i.test(lower) &&
+    !/\b(?:inquiry|inquiries|requirement|requirements|rfq|enquiry|enquiries)\b/i.test(lower)
   ) {
     return null;
   }
@@ -2830,13 +2845,21 @@ function detectOperationalAction(text) {
     return 'LOG_ORDER';
   }
 
-  // 5. Inquiry / Requirements patterns
+  // 5. Inquiry / Requirements patterns (Comprehensive coverage: English, Hinglish, Multi-line, Field Labels, Steel + Qty)
   if (
-    /\b(?:inquiry|inquiries|requirement|requirements|rfq|enquiry|enquiries|rate\s+manga|chahiye|need|needs|requires|require|interested\s+in|quote\s+for|rates?\s+for|price\s+for|quotation\s+for)\b/i.test(lower)
+    /\b(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal|deals)\b/i.test(lower) ||
+    /\b(?:quote|quotes|quotation|quotations|price|pricing|rates?|bhav)\b/i.test(lower) ||
+    /\b(?:chahiye|manga|pucha|mang\s+rahe|zaroorat|needs?|requires?|wants?|demands?|asking\s+for|interested\s+in)\b/i.test(lower) ||
+    /\b(?:party|client|customer|buyer|company)\s*(?:name)?\s*[:=-]\s*/i.test(lower) ||
+    /\b(?:material|product|item|items|description)\s*[:=-]\s*/i.test(lower) ||
+    /\b(?:qty|quantity|tonnage|tons?|mt|weight)\s*[:=-]\s*/i.test(lower) ||
+    /\b(?:ek\s+)?inquiry\s+(?:aayi\s+hai|aayi|mili|hai)\b/i.test(lower) ||
+    /\b(?:log|create|new|add|record|enter|save)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|deal)\b/i.test(lower) ||
+    /\b(?:new\s+)?deal\s+(?:for|from|with|creation|logging)\b/i.test(lower) ||
+    // Steel product mentioned together with numeric quantity
+    (/\b(?:coil|coils|sheet|sheets|plate|plates|structural|beam|beams|channel|channels|pipe|pipes|tube|tubes|tmt|angle|angles|round|flat|square|metal|steel|hr|cr|hrpo|gp|galvalume|chequered)\b/i.test(lower) && /\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|pcs|nos|pieces|sheets|plates|coils|bundles|lengths)\b/i.test(lower))
   ) {
-    if (/\b(?:coil|sheet|plate|structural|beam|channel|pipe|tube|tmt|steel|metal|iron|mt|ton|tons|kg|pieces|sheets|rate|advance|credit|mm|thk)\b/i.test(lower)) {
-      return 'LOG_INQUIRY';
-    }
+    return 'LOG_INQUIRY';
   }
 
   // 6. Customer Acquisition patterns
@@ -2844,6 +2867,60 @@ function detectOperationalAction(text) {
     /\b(?:new\s+customer|customer\s+acquisition|onboard\s+customer|add\s+customer|acquire\s+customer|register\s+customer|nayi\s+party|naya\s+customer|customer\s+onboarding)\b/i.test(lower)
   ) {
     return 'LOG_NEW_CUSTOMER';
+  }
+
+  return null;
+}
+
+/**
+ * Intelligent Fast LLM Intent Classifier
+ * Used as a fallback when rule-based patterns do not trigger, ensuring NO inquiry or CRM prompt is ever missed.
+ */
+async function detectOperationalActionWithLLM(text) {
+  if (!text || typeof text !== 'string' || text.trim().length < 5) return null;
+  const clean = text.trim();
+
+  const prompt = `You are the Intent Classification Router for Enlight Metals CRM WhatsApp Bot.
+Classify the operational action intended in this salesperson message:
+"${clean}"
+
+Possible Actions:
+- LOG_INQUIRY: User is sharing a customer inquiry, steel requirement, RFQ, price quote request, customer needing steel material/quantities, multi-item specification, or rate request.
+- LOG_ORDER: User is recording a confirmed purchase order with PO number / date.
+- LOG_VISIT: User is reporting a customer site visit, field meeting, or discussion notes.
+- LOG_COMPLAINT: User is reporting damaged material, quality issue, shortage, or customer complaint.
+- LOG_NEW_CUSTOMER: User is creating/onboarding a brand new customer company.
+- UPDATE_INQUIRY: User is modifying an existing inquiry or changing fields of an inquiry.
+- UPDATE_ORDER: User is updating an order or attaching a PO to an inquiry.
+- UPDATE_VISIT: User is updating an existing visit report.
+- UPDATE_COMPLAINT: User is updating an existing complaint.
+- QUERY: User is asking a question or querying database records.
+- NONE: General casual text, greeting, or unclear.
+
+Respond ONLY with the single exact action name (e.g. LOG_INQUIRY) or NONE. No formatting, no extra text.`;
+
+  try {
+    const res = await invokeWithFallback([new HumanMessage(prompt)]);
+    const rawAction = (typeof res.content === 'string' ? res.content : '').trim().replace(/[*_`]/g, '').toUpperCase();
+    const validActions = [
+      'LOG_INQUIRY',
+      'LOG_ORDER',
+      'LOG_VISIT',
+      'LOG_COMPLAINT',
+      'LOG_NEW_CUSTOMER',
+      'UPDATE_INQUIRY',
+      'UPDATE_ORDER',
+      'UPDATE_VISIT',
+      'UPDATE_COMPLAINT',
+    ];
+
+    for (const act of validActions) {
+      if (rawAction === act || rawAction.startsWith(act)) {
+        return act;
+      }
+    }
+  } catch (err) {
+    console.warn('[CatalogFlow] LLM intent detection notice:', err.message);
   }
 
   return null;
@@ -3620,8 +3697,13 @@ async function handleCatalogFlow(rawText, senderPhone) {
     { pattern: /\b(?:attach|link|add|set|update)\s+(?:the\s+)?po\s*(?:no|number|#)?\b/i, action: 'UPDATE_ORDER' },
     { pattern: /\b(?:attach|link)\s+(?:the\s+|a\s+)?(?:po|purchase\s+order)\b/i, action: 'UPDATE_ORDER' },
 
-    // Inquiries
-    { pattern: /\b(?:log|create|new|add)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?inquiry\b/i, action: 'LOG_INQUIRY' },
+    // Inquiries (Extensive phrase matching across all sales terminology)
+    { pattern: /^(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal|deals)\b/i, action: 'LOG_INQUIRY' },
+    { pattern: /\b(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal|deals)\s+(?:from|for|by|of|regarding|with|details?|logging|creation)\b/i, action: 'LOG_INQUIRY' },
+    { pattern: /\b(?:log|create|new|add|received|got|have|had|record|enter|save)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal)\b/i, action: 'LOG_INQUIRY' },
+    { pattern: /\b(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal)\s*[:=-]/i, action: 'LOG_INQUIRY' },
+    { pattern: /\b(?:rate|price|quote|quotation)\s+(?:manga|chahiye|bhejo|do|required|needed)\b/i, action: 'LOG_INQUIRY' },
+    { pattern: /\b(?:party|client|customer)\s*[:=-]\s*.*?\b(?:material|product|requirement|qty|quantity)\s*[:=-]/i, action: 'LOG_INQUIRY' },
     { pattern: /\b(?:update|change|modify)\s+(?:the\s+|a\s+)?inquiry\b/i, action: 'UPDATE_INQUIRY' },
   ];
 
@@ -3635,6 +3717,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
   if (!detectedAction) {
     detectedAction = detectOperationalAction(text);
+  }
+
+  // LLM Intent Fallback: If rule matchers did not trigger, invoke fast LLM intent classifier
+  // so NO inquiry or CRM logging prompt can ever be missed!
+  if (!detectedAction && text.length >= 8 && !isOperationalQuery(text)) {
+    detectedAction = await detectOperationalActionWithLLM(text);
   }
 
   if (detectedAction) {
