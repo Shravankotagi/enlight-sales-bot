@@ -108,23 +108,6 @@ const syncRouteHandler = async (req, res) => {
   }
 };
 
-// Handle bigin-cleanup across all possible URL aliases (GET & POST)
-const cleanupRouteHandler = async (req, res) => {
-  try {
-    const deleteResults = await clearAllBiginData();
-    const syncResults = await syncAllDatabaseToBigin();
-    if (req.method === 'GET' || req.headers.accept?.includes('html')) {
-      return renderSyncResult(res, "✅ Cleaned & Re-synced to Zoho Bigin!", "Old records cleared and database customers/deals re-synced clean.", syncResults);
-    }
-    return res.json({ success: true, deleted: deleteResults.deleted, synced: syncResults });
-  } catch (err) {
-    if (req.method === 'GET' || req.headers.accept?.includes('html')) {
-      return renderSyncResult(res, "", "", null, err.message);
-    }
-    return res.status(500).json({ error: err.message });
-  }
-};
-
 // Register all route aliases
 ['/bigin-import', '/admin/bigin-import', '/webhook/bigin-import', '/webhook/admin/bigin-import'].forEach(p => {
   app.get(p, importRouteHandler);
@@ -136,12 +119,7 @@ const cleanupRouteHandler = async (req, res) => {
   app.post(p, syncRouteHandler);
 });
 
-['/bigin-cleanup', '/admin/bigin-cleanup', '/webhook/bigin-cleanup', '/webhook/admin/bigin-cleanup'].forEach(p => {
-  app.get(p, cleanupRouteHandler);
-  app.post(p, cleanupRouteHandler);
-});
-
-// Root landing page with interactive sync buttons
+// Root landing page
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -158,20 +136,16 @@ app.get('/', (req, res) => {
         .btn-group { display: flex; flex-direction: column; gap: 12px; }
         .btn { display: block; text-align: center; background: #2563eb; color: white; text-decoration: none; font-weight: 600; font-size: 15px; padding: 14px 20px; border-radius: 12px; transition: all 0.2s; }
         .btn-sec { background: #334155; color: #f8fafc; }
-        .btn-imp { background: #059669; color: white; }
         .btn:hover { opacity: 0.9; transform: translateY(-1px); }
       </style>
     </head>
     <body>
       <div class="card">
-        <span class="badge">ENLIGHT CRM AI AGENT 🟢</span>
-        <h1>Enlight Metals Sales Bot & CRM Agent</h1>
-        <p>Bi-Directional Automated Zoho Bigin CRM Agent & WhatsApp Sales Assistant.</p>
+        <span class="badge">ENLIGHT SALES OS 🟢</span>
+        <h1>Enlight Metals Sales Bot</h1>
+        <p>WhatsApp Sales Assistant & Intelligence Platform.</p>
         
         <div class="btn-group">
-          <a href="/bigin-import" class="btn btn-imp">📥 Import All Data from Bigin → Database</a>
-          <a href="/bigin-sync" class="btn">📤 Push All Database Records → Bigin</a>
-          <a href="/bigin-cleanup" class="btn btn-sec">🧹 Clean & Re-sync Zoho Bigin</a>
           <a href="https://bigin.zoho.in/" target="_blank" class="btn btn-sec">Open Zoho Bigin CRM ↗</a>
         </div>
       </div>
