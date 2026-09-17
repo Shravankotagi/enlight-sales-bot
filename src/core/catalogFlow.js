@@ -388,9 +388,12 @@ function normalizeDateToDDMMYYYY(dateStr) {
 }
 
 function formatDateDDMMYYYY(d) {
-  const day = String(d.getDate()).padStart(2, '0');
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const year = d.getFullYear();
+  if (!d) return '';
+  const dObj = d instanceof Date ? d : new Date(d);
+  if (isNaN(dObj.getTime())) return typeof d === 'string' ? d : '';
+  const day = String(dObj.getDate()).padStart(2, '0');
+  const month = String(dObj.getMonth() + 1).padStart(2, '0');
+  const year = dObj.getFullYear();
   return `${day}-${month}-${year}`;
 }
 
@@ -485,6 +488,7 @@ UPDATE_INQUIRY:
 {
   "action": "UPDATE_INQUIRY",
   "inquiry_id": "<Inquiry ID e.g. INQ-2026-0042, INQ-1BB6F1, INQ-B76516, #INQ-0042, else null>",
+  "company_name": "<Customer / Company Name e.g. 'SS Industries', else null>",
   "updates": {
     "product_description": "<if user requested general product text update, else null>",
     "rate": <numeric rate ONLY if a single overall rate was specified without mentioning product names, else null>,
@@ -877,11 +881,11 @@ function validateMandatoryFields(action, draft) {
       break;
 
     case 'UPDATE_INQUIRY':
-      if (!draft.inquiry_id) missing.push('Inquiry ID (e.g. INQ-2026-0042)');
+      if (!draft.inquiry_id && !draft.company_name) missing.push('Inquiry ID (e.g. INQ-2026-0042) or Company Name');
       const inqUpdates = draft.updates || {};
       const hasInqUpdate = Object.values(inqUpdates).some(v => v !== null && v !== undefined && v !== '');
       const hasInqLineUpdates = Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0;
-      if (!hasInqUpdate && !hasInqLineUpdates) missing.push('At least one field to update');
+      if (!hasInqUpdate && !hasInqLineUpdates) missing.push('At least one field to update (e.g. Rate, Quantity, Delivery Location, Payment Terms, or Stage)');
       const inqProdCheck = validateDraftProducts('UPDATE_INQUIRY', draft);
       if (!inqProdCheck.isValid) {
         missing.push(`Valid Product Name (Unrecognized: "${inqProdCheck.invalidProducts.join(', ')}")`);
@@ -977,7 +981,7 @@ function validateMandatoryFields(action, draft) {
 
 async function verifyDraftCustomer(action, draft, senderPhone) {
   if (!draft || !draft.company_name) return { isValid: true };
-  if (action === 'LOG_NEW_CUSTOMER') return { isValid: true };
+  if (action === 'LOG_NEW_CUSTOMER' || action === 'UPDATE_INQUIRY' || action === 'UPDATE_ORDER' || action === 'UPDATE_COMPLAINT') return { isValid: true };
 
   const rawName = String(draft.company_name).trim();
   if (!rawName || rawName.toLowerCase() === 'null' || rawName.toLowerCase() === 'unknown') {
@@ -1207,6 +1211,347 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
   };
 }
 
+// ── CUSTOMER MATCHING HELPERS ────────────────────────────────────────────────
+
+function cleanLegalSuffixes(str) {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    .trim()
+    .replace(/\b(private\s+limited|pvt\s+ltd|pvt\s+limited|private\s+ltd|co\s+ltd|co\s+limited|llp|limited|pvt|ltd|inc|corp|co|corporation)\b/gi, '')
+    .replace(/[^a-z0-9]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isCustomerMatch(custName, custPhone, targetName, targetPhone) {
+  const cClean = cleanLegalSuffixes(custName);
+  const tClean = cleanLegalSuffixes(targetName);
+  if (!cClean || !tClean) return false;
+  if (cClean === tClean) return true;
+  if ((cClean.startsWith(tClean) || tClean.startsWith(cClean)) && Math.min(cClean.length, tClean.length) >= 2) return true;
+  const genericWords = new Set(['steel', 'metals', 'traders', 'industries', 'engineering', 'enterprises', 'enterprise', 'infra', 'works', 'projects', 'systems']);
+  const cWords = cClean.split(' ').filter(w => w.length >= 2 && !genericWords.has(w));
+  const tWords = tClean.split(' ').filter(w => w.length >= 2 && !genericWords.has(w));
+  if (cWords.length > 0 && tWords.length > 0) {
+    if (cWords.every(w => tWords.includes(w)) || tWords.every(w => cWords.includes(w))) return true;
+  }
+  return false;
+}
+
+// ── INQUIRY LOOKUP & EDITABILITY DISAMBIGUATION CHECK ─────────────────────────
+
+async function checkInquiriesForUpdate(action, draft, senderPhone, originalText = '') {
+  if (action !== 'UPDATE_INQUIRY') return { handled: false };
+
+  const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+
+  const rawInqId = (draft.inquiry_id || '').trim();
+  const cleanInqId = rawInqId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
+  const companyName = (draft.company_name || '').trim();
+
+  // If neither ID nor company name is provided, let mandatory field check handle it
+  if (!cleanInqId && !companyName) {
+    return { handled: false };
+  }
+
+  const accessibleSet = new Set();
+  if (Array.isArray(scope.phones)) scope.phones.forEach(p => getPhoneVariants(p).forEach(pv => accessibleSet.add(pv)));
+  if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => accessibleSet.add(pv));
+  const accessibleList = Array.from(accessibleSet);
+
+  // Fetch deals and inquiries to find matches
+  let dealsQuery = supabase
+    .from('deals')
+    .select('id, inquiry_id, customer_name, customer_phone, stage, total_amount, payment_terms, delivery_location, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+    .order('created_at', { ascending: false });
+
+  let inqsQuery = supabase
+    .from('inquiries')
+    .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, inquiry_type, created_at, salesperson_phone')
+    .order('created_at', { ascending: false });
+
+  if (!scope.isAdmin && accessibleList.length > 0) {
+    dealsQuery = dealsQuery.in('salesperson_phone', accessibleList);
+    inqsQuery = inqsQuery.in('salesperson_phone', accessibleList);
+  }
+
+  if (companyName) {
+    const cleanWord = cleanLegalSuffixes(companyName).split(' ').filter(w => w.length >= 2)[0] || companyName;
+    dealsQuery = dealsQuery.ilike('customer_name', `%${cleanWord}%`);
+  }
+
+  dealsQuery = dealsQuery.limit(100);
+  inqsQuery = inqsQuery.limit(100);
+
+  const [{ data: allDeals }, { data: allInqs }] = await Promise.all([dealsQuery, inqsQuery]);
+
+  // Apply RBAC phone filtering
+  const filterByScope = (items) => {
+    if (scope.isAdmin || scope.phones === null) return items || [];
+    return (items || []).filter(item => {
+      if (!item.salesperson_phone) return true;
+      const itemPhones = getPhoneVariants(item.salesperson_phone);
+      return itemPhones.some(ip => accessibleSet.has(ip));
+    });
+  };
+
+  const scopedDeals = filterByScope(allDeals);
+  const scopedInqs = filterByScope(allInqs);
+
+  const dealMapByInqId = new Map();
+  scopedDeals.forEach(d => {
+    if (d.inquiry_id) dealMapByInqId.set(d.inquiry_id, d);
+  });
+
+  const matchedCandidates = [];
+  const seenKeys = new Set();
+
+  // 1. Direct ID match if inquiry_id was provided
+  if (cleanInqId) {
+    scopedDeals.forEach(d => {
+      const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+      const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+      if (dId.startsWith(cleanInqId) || inqId.startsWith(cleanInqId) || (cleanInqId.length >= 4 && (dId.includes(cleanInqId) || inqId.includes(cleanInqId)))) {
+        const stage = (d.stage || 'new_inquiry').toLowerCase();
+        const displayId = `INQ-${(d.inquiry_id || d.id).slice(0, 6).toUpperCase()}`;
+        matchedCandidates.push({
+          id: d.inquiry_id || d.id,
+          deal_id: d.id,
+          inquiry_id: d.inquiry_id,
+          displayId,
+          company_name: d.customer_name || 'Customer',
+          stage,
+          payment_terms: d.payment_terms || 'Not specified',
+          delivery_location: d.delivery_location || 'Not specified',
+          total_amount: Number(d.total_amount) || 0,
+          deal_items: d.deal_items || [],
+          created_at: d.created_at,
+          dateFormatted: formatDateDDMMYYYY(d.created_at),
+          raw_text: '',
+        });
+        seenKeys.add(d.id);
+        if (d.inquiry_id) seenKeys.add(d.inquiry_id);
+      }
+    });
+
+    scopedInqs.forEach(inq => {
+      if (seenKeys.has(inq.id)) return;
+      const inqId = (inq.id || '').replace(/-/g, '').toUpperCase();
+      if (inqId.startsWith(cleanInqId) || (cleanInqId.length >= 4 && inqId.includes(cleanInqId))) {
+        const ai = inq.ai_extraction_json || {};
+        const stage = (inq.status || 'new_inquiry').toLowerCase();
+        const displayId = `INQ-${inq.id.slice(0, 6).toUpperCase()}`;
+        matchedCandidates.push({
+          id: inq.id,
+          deal_id: null,
+          inquiry_id: inq.id,
+          displayId,
+          company_name: inq.sender_name || ai.companyName || ai.customer_name || 'Customer',
+          stage,
+          payment_terms: ai.paymentTerms || ai.payment_terms || 'Not specified',
+          delivery_location: ai.deliveryLocation || ai.delivery_location || 'Not specified',
+          total_amount: Number(ai.totalAmount) || Number(ai.grandTotal) || 0,
+          deal_items: ai.lineItems || ai.line_items || [],
+          created_at: inq.created_at,
+          dateFormatted: formatDateDDMMYYYY(inq.created_at),
+          raw_text: inq.raw_text,
+        });
+        seenKeys.add(inq.id);
+      }
+    });
+  }
+
+  // 2. Company Name Match if no direct ID match or if company_name provided
+  if (matchedCandidates.length === 0 && companyName) {
+    scopedInqs.forEach(inq => {
+      const ai = inq.ai_extraction_json || {};
+      const candidateName = inq.sender_name || ai.companyName || ai.customer_name || ai.customer?.name || '';
+      if (isCustomerMatch(companyName, null, candidateName, inq.sender_phone)) {
+        const linkedDeal = dealMapByInqId.get(inq.id);
+        const stage = (linkedDeal?.stage || inq.status || 'new_inquiry').toLowerCase();
+        const displayId = `INQ-${(linkedDeal?.id || inq.id).slice(0, 6).toUpperCase()}`;
+        matchedCandidates.push({
+          id: inq.id,
+          deal_id: linkedDeal?.id || null,
+          inquiry_id: inq.id,
+          displayId,
+          company_name: linkedDeal?.customer_name || candidateName || companyName,
+          stage,
+          payment_terms: linkedDeal?.payment_terms || ai.paymentTerms || ai.payment_terms || 'Not specified',
+          delivery_location: linkedDeal?.delivery_location || ai.deliveryLocation || ai.delivery_location || 'Not specified',
+          total_amount: Number(linkedDeal?.total_amount) || Number(ai.totalAmount) || Number(ai.grandTotal) || 0,
+          deal_items: linkedDeal?.deal_items || ai.lineItems || ai.line_items || [],
+          created_at: inq.created_at,
+          dateFormatted: formatDateDDMMYYYY(inq.created_at),
+          raw_text: inq.raw_text,
+        });
+        seenKeys.add(inq.id);
+        if (linkedDeal?.id) seenKeys.add(linkedDeal.id);
+      }
+    });
+
+    scopedDeals.forEach(d => {
+      if (seenKeys.has(d.id) || (d.inquiry_id && seenKeys.has(d.inquiry_id))) return;
+      if (isCustomerMatch(companyName, null, d.customer_name, d.customer_phone)) {
+        const stage = (d.stage || 'new_inquiry').toLowerCase();
+        const displayId = `INQ-${(d.inquiry_id || d.id).slice(0, 6).toUpperCase()}`;
+        matchedCandidates.push({
+          id: d.inquiry_id || d.id,
+          deal_id: d.id,
+          inquiry_id: d.inquiry_id,
+          displayId,
+          company_name: d.customer_name || companyName,
+          stage,
+          payment_terms: d.payment_terms || 'Not specified',
+          delivery_location: d.delivery_location || 'Not specified',
+          total_amount: Number(d.total_amount) || 0,
+          deal_items: d.deal_items || [],
+          created_at: d.created_at,
+          dateFormatted: formatDateDDMMYYYY(d.created_at),
+          raw_text: '',
+        });
+        seenKeys.add(d.id);
+      }
+    });
+  }
+
+  const formatStageLabel = (st) => {
+    const s = String(st || '').toLowerCase();
+    if (s.includes('won') || s.includes('order')) return 'Won';
+    if (s.includes('lost')) return 'Lost';
+    if (s.includes('quote') || s.includes('price')) return 'Price Quote';
+    if (s.includes('negot')) return 'Negotiation';
+    if (s.includes('hold')) return 'On Hold';
+    return 'New Inquiry';
+  };
+
+  const formatProductSummary = (item) => {
+    if (Array.isArray(item.deal_items) && item.deal_items.length > 0) {
+      if (item.deal_items.length === 1) {
+        const it = item.deal_items[0];
+        const name = it.sku_text || it.description || 'Metal Item';
+        const qtyStr = it.quantity ? ` (${it.quantity} ${it.unit || 'MT'})` : '';
+        const rateStr = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}/${it.unit || 'MT'}` : '';
+        return `${name}${qtyStr}${rateStr}`;
+      }
+      const totalQty = item.deal_items.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+      const names = item.deal_items.slice(0, 2).map(it => it.sku_text || it.description || 'Item').join(', ');
+      return `${item.deal_items.length} Items${totalQty > 0 ? ` (${totalQty} MT Total)` : ''} — ${names}`;
+    }
+    if (item.raw_text) {
+      const firstLine = item.raw_text.split('\n')[0].trim();
+      return firstLine.slice(0, 60);
+    }
+    return 'Products on record';
+  };
+
+  const isTerminal = (st) => ['won', 'lost', 'closed', 'completed', 'cancelled'].includes(String(st || '').toLowerCase());
+  const editable = matchedCandidates.filter(m => !isTerminal(m.stage));
+  const nonEditable = matchedCandidates.filter(m => isTerminal(m.stage));
+
+  const targetName = companyName || draft.company_name || 'Customer';
+
+  // ── Case A: 0 Editable Inquiries Found ──
+  if (editable.length === 0) {
+    if (nonEditable.length > 0) {
+      const latestNonEditable = nonEditable[0];
+      const stageLabel = formatStageLabel(latestNonEditable.stage);
+      const reply = `ℹ️ *No Editable Inquiries Found for ${latestNonEditable.company_name}*\n\n` +
+        `The inquiry found for *${latestNonEditable.company_name}* (*${latestNonEditable.displayId}*) is already marked as *${stageLabel}*. Completed / won inquiries cannot be edited.\n\n` +
+        `If you would like to log a new inquiry for *${latestNonEditable.company_name}*, please send the inquiry details (Product, Quantity, Payment Terms, Delivery Location).`;
+      return {
+        handled: true,
+        reply,
+        status: 'ONLY_TERMINAL',
+      };
+    }
+
+    const reply = `ℹ️ *No Inquiries Found for ${targetName}*\n\n` +
+      `There are no existing inquiries recorded for *${targetName}*.\n\n` +
+      `If you would like to log a new inquiry, please share the inquiry details (Product, Quantity, Payment Terms, Delivery Location).`;
+    return {
+      handled: true,
+      reply,
+      status: 'NO_INQUIRIES',
+    };
+  }
+
+  // ── Case B: Exactly 1 Editable Inquiry Found ──
+  if (editable.length === 1) {
+    const single = editable[0];
+    draft.inquiry_id = single.inquiry_id || single.id;
+    draft.company_name = single.company_name;
+    draft._inquiry_display_id = single.displayId;
+
+    const hasUpdates = (draft.updates && Object.values(draft.updates).some(v => v !== null && v !== undefined && v !== '')) ||
+      (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0);
+
+    // If user has not specified what to update yet, show current inquiry details & ask
+    if (!hasUpdates) {
+      const prodSummary = formatProductSummary(single);
+      const stageLabel = formatStageLabel(single.stage);
+      const prompt = `✏️ *Editable Inquiry Found for ${single.company_name}:*\n\n` +
+        `• *Inquiry ID:* ${single.displayId}\n` +
+        `• *Date:* ${single.dateFormatted}\n` +
+        `• *Stage:* ${stageLabel}\n` +
+        `• *Product / Requirement:* ${prodSummary}\n` +
+        `• *Payment Terms:* ${single.payment_terms}\n` +
+        `• *Delivery Location:* ${single.delivery_location}\n\n` +
+        `What details would you like to update?\n` +
+        `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
+
+      return {
+        handled: true,
+        reply: prompt,
+        status: 'SINGLE_EDITABLE_ASK_DETAILS',
+        draft,
+      };
+    }
+
+    // User already provided update values -> continue to confirmation
+    return {
+      handled: false,
+      status: 'SINGLE_EDITABLE_READY',
+      draft,
+    };
+  }
+
+  // ── Case C: Multiple Editable Inquiries Found ──
+  const candidateSummaries = editable.slice(0, 5).map((inq, idx) => {
+    return {
+      index: idx + 1,
+      id: inq.inquiry_id || inq.id,
+      displayId: inq.displayId,
+      company_name: inq.company_name,
+      date: inq.dateFormatted,
+      stage: formatStageLabel(inq.stage),
+      productSummary: formatProductSummary(inq),
+      payment_terms: inq.payment_terms,
+      delivery_location: inq.delivery_location,
+    };
+  });
+
+  const choicesText = candidateSummaries
+    .map(c => `• *${c.index}.* *${c.displayId}* (${c.date}) — ${c.productSummary} [${c.stage}]`)
+    .join('\n');
+
+  const prompt = `📋 *Multiple Editable Inquiries Found for ${targetName}:*\n\n` +
+    `Please choose which inquiry you want to edit:\n\n` +
+    `${choicesText}\n\n` +
+    `Reply with the *Inquiry ID* (e.g. "${candidateSummaries[0].displayId}") or option number (1–${candidateSummaries.length}).`;
+
+  draft._inquiry_candidates = candidateSummaries;
+
+  return {
+    handled: true,
+    reply: prompt,
+    status: 'MULTIPLE_EDITABLE',
+    draft,
+  };
+}
+
 // ── BUILD CONFIRMATION SUMMARY ───────────────────────────────────────────────
 
 function buildConfirmationSummary(action, draft) {
@@ -1255,7 +1600,11 @@ function buildConfirmationSummary(action, draft) {
     }
 
     case 'UPDATE_INQUIRY': {
-      summary += `• *Inquiry ID:* ${draft.inquiry_id}\n`;
+      const displayId = draft._inquiry_display_id || (draft.inquiry_id ? (draft.inquiry_id.startsWith('INQ-') ? draft.inquiry_id : `INQ-${draft.inquiry_id.slice(0, 6).toUpperCase()}`) : 'Inquiry');
+      summary += `• *Inquiry:* ${displayId}\n`;
+      if (draft.company_name) {
+        summary += `• *Customer:* ${draft.company_name}\n`;
+      }
       const hasHeaderUpdates = draft.updates && Object.values(draft.updates).some(v => v !== null && v !== undefined && v !== '');
       if (hasHeaderUpdates) {
         summary += `• *Updating Fields:*\n`;
@@ -1711,23 +2060,46 @@ Logged to Sales Pipeline & Inquiries! ✅`;
 
       case 'UPDATE_INQUIRY': {
         const rawId = (draft.inquiry_id || '').trim();
-        const cleanId = rawId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').trim().toUpperCase();
-
-        const { data: deals } = await supabase
-          .from('deals')
-          .select('id, inquiry_id, customer_name, stage')
-          .order('created_at', { ascending: false })
-          .limit(50);
+        const cleanId = rawId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/[^0-9A-Z]/gi, '').trim().toUpperCase();
+        const companyName = (draft.company_name || '').trim();
 
         let deal = null;
-        if (deals && deals.length > 0) {
-          deal = deals.find(d => {
-            const dId = (d.id || '').replace(/-/g, '').toUpperCase();
-            const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
-            return (cleanId && (dId.startsWith(cleanId) || inqId.startsWith(cleanId))) ||
-                   (cleanId && (dId.includes(cleanId) || inqId.includes(cleanId))) ||
-                   (d.customer_name && d.customer_name.toLowerCase().includes(rawId.toLowerCase()));
-          }) || null;
+        if (rawId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId)) {
+          const { data: dById } = await supabase
+            .from('deals')
+            .select('id, inquiry_id, customer_name, stage, total_amount, payment_terms, delivery_location')
+            .or(`id.eq.${rawId},inquiry_id.eq.${rawId}`)
+            .limit(1);
+          if (dById && dById.length > 0) {
+            deal = dById[0];
+          }
+        }
+
+        if (!deal) {
+          let dealsQuery = supabase
+            .from('deals')
+            .select('id, inquiry_id, customer_name, stage, total_amount, payment_terms, delivery_location')
+            .order('created_at', { ascending: false });
+
+          if (companyName) {
+            const cleanWord = cleanLegalSuffixes(companyName).split(' ').filter(w => w.length >= 2)[0] || companyName;
+            dealsQuery = dealsQuery.ilike('customer_name', `%${cleanWord}%`);
+          }
+          const { data: deals } = await dealsQuery.limit(100);
+
+          if (deals && deals.length > 0) {
+            if (cleanId) {
+              deal = deals.find(d => {
+                const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+                const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+                return dId.startsWith(cleanId) || inqId.startsWith(cleanId) || (cleanId.length >= 4 && (dId.includes(cleanId) || inqId.includes(cleanId)));
+              }) || null;
+            }
+            if (!deal && companyName) {
+              deal = deals.find(d => isCustomerMatch(companyName, null, d.customer_name, null) && !['won', 'lost', 'closed', 'completed', 'cancelled'].includes((d.stage || '').toLowerCase())) ||
+                     deals.find(d => isCustomerMatch(companyName, null, d.customer_name, null)) || null;
+            }
+          }
         }
 
         const updates = draft.updates || {};
@@ -1745,18 +2117,17 @@ Logged to Sales Pipeline & Inquiries! ✅`;
           else dealUpdates.stage = updates.status || updates.stage;
         }
 
+        let itemsUpdated = false;
         if (deal) {
           const { data: dItems } = await supabase.from('deal_items').select('*').eq('deal_id', deal.id);
           let totalAmount = 0;
-          let itemsUpdated = false;
 
-          // 1. Specific line item updates (e.g. MS Sheet 5MM - 20, MS Sheet 6MM - 30)
+          // 1. Specific line item updates
           if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0 && dItems && dItems.length > 0) {
             for (let i = 0; i < dItems.length; i++) {
               const currentItem = dItems[i];
               const curSku = (currentItem.sku_text || currentItem.description || '').toLowerCase();
 
-              // Find matching update in line_item_updates
               const matchedUpd = draft.line_item_updates.find((upd, uIdx) => {
                 const updSku = (upd.sku_text || upd.description || '').toLowerCase();
                 if (!updSku) return uIdx === i;
@@ -1808,50 +2179,65 @@ Logged to Sales Pipeline & Inquiries! ✅`;
             dealUpdates.total_amount = totalAmount;
           }
 
+          if (Object.keys(dealUpdates).length > 0) {
+            await supabase.from('deals').update(dealUpdates).eq('id', deal.id);
+          }
+
           // Synchronize inquiries.ai_extraction_json
-          if (deal.inquiry_id && itemsUpdated) {
-            const { data: inqRow } = await supabase.from('inquiries').select('ai_extraction_json').eq('id', deal.inquiry_id).single();
-            if (inqRow?.ai_extraction_json) {
-              const aiJson = inqRow.ai_extraction_json;
-              const { data: refreshedItems } = await supabase.from('deal_items').select('*').eq('deal_id', deal.id);
-              if (refreshedItems && refreshedItems.length > 0) {
-                aiJson.line_items = refreshedItems.map(it => ({
-                  sku_text: it.sku_text,
-                  description: it.sku_text,
-                  dimensions: it.dimensions,
-                  spec: it.dimensions,
-                  hsn_code: it.hsn_code || detectHsnCode(it.sku_text, it.dimensions) || '72083840',
-                  hsn_sac: it.hsn_code || detectHsnCode(it.sku_text, it.dimensions) || '72083840',
-                  quantity: Number(it.quantity) || 0,
-                  unit: it.unit || 'MT',
-                  rate: Number(it.rate) || 0,
-                  amount: Number(it.amount) || (Number(it.quantity) * Number(it.rate)),
-                }));
-                aiJson.lineItems = aiJson.line_items;
-                aiJson.rate = refreshedItems[0]?.rate ?? aiJson.rate;
-                aiJson.unitPrice = refreshedItems[0]?.rate ?? aiJson.unitPrice;
-                aiJson.total_amount = totalAmount;
-                aiJson.totalAmount = totalAmount;
+          if (deal.inquiry_id) {
+            const { data: inqRow } = await supabase.from('inquiries').select('ai_extraction_json, status').eq('id', deal.inquiry_id).single();
+            if (inqRow) {
+              const aiJson = inqRow.ai_extraction_json || {};
+              if (updates.payment_terms) {
+                aiJson.payment_terms = updates.payment_terms;
+                aiJson.paymentTerms = updates.payment_terms;
               }
-              await supabase.from('inquiries').update({ ai_extraction_json: aiJson }).eq('id', deal.inquiry_id);
+              if (updates.delivery_location) {
+                aiJson.delivery_location = updates.delivery_location;
+                aiJson.deliveryLocation = updates.delivery_location;
+              }
+              if (updates.preferred_make) aiJson.preferred_make = updates.preferred_make;
+              if (updates.additional_notes) aiJson.additional_notes = updates.additional_notes;
+
+              if (itemsUpdated) {
+                const { data: refreshedItems } = await supabase.from('deal_items').select('*').eq('deal_id', deal.id);
+                if (refreshedItems && refreshedItems.length > 0) {
+                  aiJson.line_items = refreshedItems.map(it => ({
+                    sku_text: it.sku_text,
+                    description: it.sku_text,
+                    dimensions: it.dimensions,
+                    spec: it.dimensions,
+                    hsn_code: it.hsn_code || detectHsnCode(it.sku_text, it.dimensions) || '72083840',
+                    hsn_sac: it.hsn_code || detectHsnCode(it.sku_text, it.dimensions) || '72083840',
+                    quantity: Number(it.quantity) || 0,
+                    unit: it.unit || 'MT',
+                    rate: Number(it.rate) || 0,
+                    amount: Number(it.amount) || (Number(it.quantity) * Number(it.rate)),
+                  }));
+                  aiJson.lineItems = aiJson.line_items;
+                  aiJson.rate = refreshedItems[0]?.rate ?? aiJson.rate;
+                  aiJson.unitPrice = refreshedItems[0]?.rate ?? aiJson.unitPrice;
+                  aiJson.total_amount = totalAmount;
+                  aiJson.totalAmount = totalAmount;
+                }
+              }
+
+              const inqUpdatePayload = { ai_extraction_json: aiJson };
+              if (dealUpdates.stage) {
+                inqUpdatePayload.status = dealUpdates.stage === 'won' ? 'confirmed' : dealUpdates.stage;
+              }
+              await supabase.from('inquiries').update(inqUpdatePayload).eq('id', deal.inquiry_id);
             }
           }
         }
 
-        if (deal && Object.keys(dealUpdates).length > 0) {
-          await supabase.from('deals').update(dealUpdates).eq('id', deal.id);
-          if (dealUpdates.stage && deal.inquiry_id) {
-            const inqStatus = dealUpdates.stage === 'won' ? 'confirmed' : dealUpdates.stage;
-            await supabase.from('inquiries').update({ status: inqStatus }).eq('id', deal.inquiry_id);
-          }
-        }
+        const displayInqId = draft._inquiry_display_id || (deal ? (deal.deal_number || `INQ-${deal.id.slice(0, 6).toUpperCase()}`) : (draft.inquiry_id || 'Inquiry'));
+        const displayCustName = deal?.customer_name || draft.company_name || 'Customer';
 
-        return `✅ *Inquiry Updated Successfully!*
-
-📋 *Inquiry ID:* ${draft.inquiry_id}
-🏢 *Customer:* ${deal ? deal.customer_name : 'Customer'}
-
-Updated details saved to Sales Pipeline & Inquiries! 📈`;
+        return `✅ *Inquiry Updated Successfully!*\n\n` +
+          `📋 *Inquiry ID:* ${displayInqId}\n` +
+          `🏢 *Customer:* ${displayCustName}\n\n` +
+          `Updated details saved to Sales Pipeline & Inquiries! 📈`;
       }
 
       case 'LOG_ORDER': {
@@ -3525,8 +3911,53 @@ async function handleCatalogFlow(rawText, senderPhone) {
       }
     }
 
+    // Check if resolving candidate inquiry selection (by ID or number)
+    let inquiryCandidateResolved = false;
+    if (existingDraft._inquiry_candidates && Array.isArray(existingDraft._inquiry_candidates)) {
+      const cleanNum = text.replace(/[.#️⃣*️⃣\s]/g, '');
+      const numIdx = parseInt(cleanNum, 10);
+      let matchedCandidate = null;
+
+      if (!isNaN(numIdx) && numIdx >= 1 && numIdx <= existingDraft._inquiry_candidates.length) {
+        matchedCandidate = existingDraft._inquiry_candidates[numIdx - 1];
+      } else {
+        const cleanText = text.replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+        matchedCandidate = existingDraft._inquiry_candidates.find(c => {
+          const cDisplay = (c.displayId || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+          const cId = (c.id || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+          return cleanText.length >= 3 && (cleanText.includes(cDisplay) || cDisplay.includes(cleanText) || cleanText.includes(cId) || cId.includes(cleanText));
+        });
+      }
+
+      if (matchedCandidate) {
+        existingDraft.inquiry_id = matchedCandidate.id;
+        existingDraft.company_name = matchedCandidate.company_name;
+        existingDraft._inquiry_display_id = matchedCandidate.displayId;
+        delete existingDraft._inquiry_candidates;
+        inquiryCandidateResolved = true;
+
+        const hasUpdates = (existingDraft.updates && Object.values(existingDraft.updates).some(v => v !== null && v !== undefined && v !== '')) ||
+          (Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0);
+
+        if (!hasUpdates) {
+          const prompt = `✏️ *Selected Inquiry ${matchedCandidate.displayId} (${matchedCandidate.company_name}):*\n\n` +
+            `• *Date:* ${matchedCandidate.date}\n` +
+            `• *Stage:* ${matchedCandidate.stage}\n` +
+            `• *Product / Requirement:* ${matchedCandidate.productSummary}\n` +
+            `• *Payment Terms:* ${matchedCandidate.payment_terms}\n` +
+            `• *Delivery Location:* ${matchedCandidate.delivery_location}\n\n` +
+            `What details would you like to update?\n` +
+            `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
+
+          await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
+          await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+          return { handled: true, reply: prompt };
+        }
+      }
+    }
+
     // Check if user wants to abort / switch (only if not resolving candidate selection)
-    if (!candidateResolved) {
+    if (!candidateResolved && !inquiryCandidateResolved) {
       let switchAction = matchActionFromInput(text);
       if (!switchAction) {
         const detected = detectOperationalAction(text);
@@ -3578,6 +4009,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
     if (existingDraft.visit_date && !updatedDraft.visit_date) {
       updatedDraft.visit_date = existingDraft.visit_date;
     }
+    if (existingDraft.inquiry_id && !updatedDraft.inquiry_id) {
+      updatedDraft.inquiry_id = existingDraft.inquiry_id;
+    }
+    if (existingDraft._inquiry_display_id && !updatedDraft._inquiry_display_id) {
+      updatedDraft._inquiry_display_id = existingDraft._inquiry_display_id;
+    }
 
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
@@ -3603,6 +4040,24 @@ async function handleCatalogFlow(rawText, senderPhone) {
       await recordSessionMessage(senderPhone, 'assistant', flowProdCheck.clarificationMessage, { action_type: action });
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
       return { handled: true, reply: flowProdCheck.clarificationMessage };
+    }
+
+    // If UPDATE_INQUIRY and no inquiry_id locked in yet, run checkInquiriesForUpdate
+    if (action === 'UPDATE_INQUIRY' && !updatedDraft.inquiry_id && updatedDraft.company_name) {
+      const inqCheck = await checkInquiriesForUpdate(action, updatedDraft, senderPhone, text);
+      if (inqCheck.handled) {
+        await recordSessionMessage(senderPhone, 'assistant', inqCheck.reply, {
+          action_type: action,
+          customer_name: updatedDraft.company_name,
+        });
+        if (inqCheck.status === 'MULTIPLE_EDITABLE' || inqCheck.status === 'SINGLE_EDITABLE_ASK_DETAILS') {
+          await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(inqCheck.draft)}`);
+        } else {
+          await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', 'general');
+        }
+        return { handled: true, reply: inqCheck.reply };
+      }
+      if (inqCheck.draft) Object.assign(updatedDraft, inqCheck.draft);
     }
 
     const missing = validateMandatoryFields(action, updatedDraft);
@@ -3697,14 +4152,18 @@ async function handleCatalogFlow(rawText, senderPhone) {
     { pattern: /\b(?:attach|link|add|set|update)\s+(?:the\s+)?po\s*(?:no|number|#)?\b/i, action: 'UPDATE_ORDER' },
     { pattern: /\b(?:attach|link)\s+(?:the\s+|a\s+)?(?:po|purchase\s+order)\b/i, action: 'UPDATE_ORDER' },
 
-    // Inquiries (Extensive phrase matching across all sales terminology)
+    // Inquiries Update (MUST BE BEFORE LOG_INQUIRY)
+    { pattern: /\b(?:update|edit|modify|change|correct|revise|amend)\s+(?:an?\s+|the\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i, action: 'UPDATE_INQUIRY' },
+    { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:edit|update|change|modify)\s+(?:an?\s+|the\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\s+(?:for|of|from|with|to)\b/i, action: 'UPDATE_INQUIRY' },
+    { pattern: /\b(?:update|edit|modify|change)\s+(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i, action: 'UPDATE_INQUIRY' },
+
+    // Inquiries Log (Extensive phrase matching across all sales terminology)
     { pattern: /^(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal|deals)\b/i, action: 'LOG_INQUIRY' },
     { pattern: /\b(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal|deals)\s+(?:from|for|by|of|regarding|with|details?|logging|creation)\b/i, action: 'LOG_INQUIRY' },
     { pattern: /\b(?:log|create|new|add|received|got|have|had|record|enter|save)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal)\b/i, action: 'LOG_INQUIRY' },
     { pattern: /\b(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal)\s*[:=-]/i, action: 'LOG_INQUIRY' },
     { pattern: /\b(?:rate|price|quote|quotation)\s+(?:manga|chahiye|bhejo|do|required|needed)\b/i, action: 'LOG_INQUIRY' },
     { pattern: /\b(?:party|client|customer)\s*[:=-]\s*.*?\b(?:material|product|requirement|qty|quantity)\s*[:=-]/i, action: 'LOG_INQUIRY' },
-    { pattern: /\b(?:update|change|modify)\s+(?:the\s+|a\s+)?inquiry\b/i, action: 'UPDATE_INQUIRY' },
   ];
 
   let detectedAction = null;
@@ -3761,6 +4220,23 @@ async function handleCatalogFlow(rawText, senderPhone) {
       await recordSessionMessage(senderPhone, 'assistant', directProdCheck.clarificationMessage, { action_type: detectedAction });
       await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(extracted)}`);
       return { handled: true, reply: directProdCheck.clarificationMessage };
+    }
+
+    if (detectedAction === 'UPDATE_INQUIRY') {
+      const inqCheck = await checkInquiriesForUpdate(detectedAction, extracted, senderPhone, text);
+      if (inqCheck.handled) {
+        await recordSessionMessage(senderPhone, 'assistant', inqCheck.reply, {
+          action_type: detectedAction,
+          customer_name: extracted.company_name,
+        });
+        if (inqCheck.status === 'MULTIPLE_EDITABLE' || inqCheck.status === 'SINGLE_EDITABLE_ASK_DETAILS') {
+          await saveActiveSession(senderPhone, extracted.company_name || 'Customer', `catalog_flow|${detectedAction}|${JSON.stringify(inqCheck.draft)}`);
+        } else {
+          await saveActiveSession(senderPhone, extracted.company_name || 'Customer', 'general');
+        }
+        return { handled: true, reply: inqCheck.reply };
+      }
+      if (inqCheck.draft) Object.assign(extracted, inqCheck.draft);
     }
 
     const hasCompany = Boolean(extracted.company_name || (Array.isArray(extracted.entries) && extracted.entries.some(e => e.company_name)));
