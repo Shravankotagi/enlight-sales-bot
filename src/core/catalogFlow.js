@@ -301,39 +301,81 @@ function matchActionFromInput(text) {
 
   // If text is a full sentence with arguments/details, let natural action detection & LLM extraction handle it
   if (clean.length > 35 || /\b(?:for|to|on|of|with|at|rate|qty|status|inq-|po-|midc|midc\s+pune|midc\s+bhosari|mt|tons|plate|sheet|coil)\b/i.test(clean)) {
-    if (!/^(?:1|2|3|4|5|6|7|8|9|10)\.?$/i.test(clean) && !/^(?:log|update|record|start_log_|start_update_)\s*(?:new\s*)?(?:inquiry|order|visit|complaint|customer|customer acquisition|field visit|customer visit|customer complaint)$/i.test(clean)) {
+    if (!/^(?:1|2|3|4|5|6|7|8|9|10)\.?$/i.test(clean) && !/^(?:\d+[\.\)\s\-]+|menu_\d+|start_log_|start_update_)?(?:log|update|record|start_log_|start_update_)?\s*(?:new\s*)?(?:inquiry|order|visit|complaint|customer|customer acquisition|field visit|customer visit|customer complaint|general query|other query)$/i.test(clean)) {
       return null;
     }
   }
 
-  if (clean === '1' || clean === '1.' || clean === 'log inquiry' || clean === 'log new inquiry' || clean === 'new inquiry' || clean === 'start_log_inquiry') {
+  const stripped = clean.replace(/^(?:menu_|\d+[\.\)\s\-]+|\*+[0-9🔟]+[️⃣\s\.\)]+)/i, '').trim();
+
+  if (
+    clean === '1' || clean === '1.' || clean === 'menu_1' ||
+    stripped === 'log inquiry' || stripped === 'log new inquiry' || stripped === 'new inquiry' || stripped === 'start_log_inquiry' ||
+    clean === '1. log new inquiry' || clean === '1. log inquiry' || clean === '1 log new inquiry'
+  ) {
     return 'LOG_INQUIRY';
   }
-  if (clean === '2' || clean === '2.' || clean === 'update inquiry' || clean === 'start_update_inquiry') {
+  if (
+    clean === '2' || clean === '2.' || clean === 'menu_2' ||
+    stripped === 'update inquiry' || stripped === 'start_update_inquiry' ||
+    clean === '2. update inquiry' || clean === '2 update inquiry'
+  ) {
     return 'UPDATE_INQUIRY';
   }
-  if (clean === '3' || clean === '3.' || clean === 'log order' || clean === 'log new order' || clean === 'record order' || clean === 'record new order' || clean === 'new order' || clean === 'start_log_order') {
+  if (
+    clean === '3' || clean === '3.' || clean === 'menu_3' ||
+    stripped === 'log order' || stripped === 'log new order' || stripped === 'record order' || stripped === 'record new order' || stripped === 'new order' || stripped === 'start_log_order' ||
+    clean === '3. log new order' || clean === '3. log order' || clean === '3 log new order'
+  ) {
     return 'LOG_ORDER';
   }
-  if (clean === '4' || clean === '4.' || clean === 'update order' || clean === 'start_update_order') {
+  if (
+    clean === '4' || clean === '4.' || clean === 'menu_4' ||
+    stripped === 'update order' || stripped === 'start_update_order' ||
+    clean === '4. update order' || clean === '4 update order'
+  ) {
     return 'UPDATE_ORDER';
   }
-  if (clean === '5' || clean === '5.' || clean === 'log visit' || clean === 'log customer field visit' || clean === 'log customer visit' || clean === 'log field visit' || clean === 'new visit' || clean === 'start_log_visit') {
+  if (
+    clean === '5' || clean === '5.' || clean === 'menu_5' ||
+    stripped === 'log visit' || stripped === 'log customer field visit' || stripped === 'log customer visit' || stripped === 'log field visit' || stripped === 'field visit' || stripped === 'new visit' || stripped === 'start_log_visit' ||
+    clean === '5. log customer field visit' || clean === '5. log field visit' || clean === '5 log customer field visit'
+  ) {
     return 'LOG_VISIT';
   }
-  if (clean === '6' || clean === '6.' || clean === 'update visit' || clean === 'update field visit' || clean === 'start_update_visit') {
+  if (
+    clean === '6' || clean === '6.' || clean === 'menu_6' ||
+    stripped === 'update visit' || stripped === 'update field visit' || stripped === 'update customer visit' || stripped === 'start_update_visit' ||
+    clean === '6. update field visit' || clean === '6. update visit' || clean === '6 update field visit'
+  ) {
     return 'UPDATE_VISIT';
   }
-  if (clean === '7' || clean === '7.' || clean === 'new customer' || clean === 'new customer acquisition' || clean === 'customer acquisition' || clean === 'add customer' || clean === 'onboard customer' || clean === 'log customer' || clean === 'start_log_customer') {
+  if (
+    clean === '7' || clean === '7.' || clean === 'menu_7' ||
+    stripped === 'new acquisition' || stripped === 'new customer' || stripped === 'new customer acquisition' || stripped === 'customer acquisition' || stripped === 'add customer' || stripped === 'onboard customer' || stripped === 'log customer' || stripped === 'start_log_customer' ||
+    clean === '7. new customer acquisition' || clean === '7. new acquisition' || clean === '7 new customer acquisition'
+  ) {
     return 'LOG_NEW_CUSTOMER';
   }
-  if (clean === '8' || clean === '8.' || clean === 'log complaint' || clean === 'log customer complaint' || clean === 'new complaint' || clean === 'start_log_complaint') {
+  if (
+    clean === '8' || clean === '8.' || clean === 'menu_8' ||
+    stripped === 'log complaint' || stripped === 'log customer complaint' || stripped === 'new complaint' || stripped === 'start_log_complaint' ||
+    clean === '8. log customer complaint' || clean === '8. log complaint' || clean === '8 log customer complaint'
+  ) {
     return 'LOG_COMPLAINT';
   }
-  if (clean === '9' || clean === '9.' || clean === 'update complaint' || clean === 'update customer complaint' || clean === 'start_update_complaint') {
+  if (
+    clean === '9' || clean === '9.' || clean === 'menu_9' ||
+    stripped === 'update complaint' || stripped === 'update customer complaint' || stripped === 'start_update_complaint' ||
+    clean === '9. update customer complaint' || clean === '9. update complaint' || clean === '9 update customer complaint'
+  ) {
     return 'UPDATE_COMPLAINT';
   }
-  if (clean === '10' || clean === '10.' || clean === 'other' || clean === 'general query' || clean === 'other query' || clean === 'general_query' || clean === 'other / general query' || text.includes('🔟') || text.includes('1️⃣0️⃣')) {
+  if (
+    clean === '10' || clean === '10.' || clean === 'menu_10' ||
+    stripped === 'other' || stripped === 'general query' || stripped === 'other query' || stripped === 'general_query' || stripped === 'other / general query' || text.includes('🔟') || text.includes('1️⃣0️⃣') ||
+    clean === '10. other / general query' || clean === '10. other' || clean === '10. general query'
+  ) {
     return 'GENERAL_QUERY';
   }
 
@@ -3887,44 +3929,69 @@ async function handleCatalogFlow(rawText, senderPhone) {
   // check if they explicitly sent a NEW operational command or switched menus
   if (lastIntent.startsWith('catalog_')) {
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
-    const isControlReply = [
-      'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure',
-      'edit', 'change', '2',
-      'cancel', 'discard', 'no', 'n', '3', 'stop', 'exit', 'quit', 'nahi', 'wrong', 'galat',
-      'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel', 'btn_cust_yes', 'btn_cust_no'
-    ].includes(cleanInput);
+    const matchedMenu = matchActionFromInput(text);
 
-    if (!isControlReply && !isOperationalQuery(text)) {
-      const parts = lastIntent.split('|');
-      const currentAction = parts[1];
-      const currentDraft = safeParseJSON(parts.slice(2).join('|'), {});
+    if (lastIntent.startsWith('catalog_implicit_cust_ask|') || lastIntent.startsWith('catalog_implicit_cust_collect|')) {
+      const isCustConfirmation = [
+        'yes', 'y', 'haan', 'ha', 'sahi hai', 'btn_cust_yes', 'confirm', 'add',
+        'no', 'n', 'nahi', 'wrong', 'galat', 'cancel', 'discard', 'stop', 'exit', 'quit', 'btn_cust_no'
+      ].includes(cleanInput);
 
-      // 1. Explicit menu selection (e.g. user sends "1", "3", "5", "menu_1")
-      const matchedMenu = matchActionFromInput(text);
-      if (matchedMenu && matchedMenu !== currentAction) {
+      if (matchedMenu) {
         await finalizeCurrentSession(senderPhone, `Switched to ${getActionFriendlyName(matchedMenu)} menu`);
+        await saveActiveSession(senderPhone, 'Unknown', 'general');
         lastIntent = '';
-      } else if (lastIntent.startsWith('catalog_confirm|')) {
-        // 2. In confirmation state: check if user starts a brand new action for another entity
+      } else if (!isCustConfirmation && !isOperationalQuery(text)) {
+        const isUpdateCmd = /^#?(?:INQ|DEAL)-[A-Z0-9]+/i.test(text.trim()) || isStageUpdatePrompt(text);
         const detectedNewAction = await detectNewOperationalIntent(text);
-        if (detectedNewAction) {
-          const isCreationCmd = /^(?:new\s+|log\s+|create\s+|record\s+|received\s+|add\s+|raise\s+|report\s+|visited\s+|went\s+to|party:)/i.test(text);
-          const hasExplicitPartyPrefix = /\b(?:for|from|to|by|party|client|customer)\s*[:=-]?\s*([A-Za-z0-9\s&.,'-]{3,})/i.test(text);
-          const mentionsDifferentCompany = currentDraft.company_name && !text.toLowerCase().includes(currentDraft.company_name.toLowerCase());
-
-          if (detectedNewAction !== currentAction || isCreationCmd || (hasExplicitPartyPrefix && mentionsDifferentCompany)) {
-            await finalizeCurrentSession(senderPhone, `Preempted by new ${getActionFriendlyName(detectedNewAction)} action`);
-            lastIntent = '';
-          }
+        if (isUpdateCmd || detectedNewAction) {
+          await finalizeCurrentSession(senderPhone, `Preempted customer onboarding by new command`);
+          await saveActiveSession(senderPhone, 'Unknown', 'general');
+          lastIntent = '';
         }
-      } else if (lastIntent.startsWith('catalog_flow|') || lastIntent.startsWith('catalog_editing|')) {
-        // 3. In data collection state: only preempt if message has an explicit creation command for a DIFFERENT action
-        const isExplicitDifferentModule = /^(?:log\s+visit|visited\b|went\s+to\s+meet|log\s+complaint|received\s+complaint|raise\s+complaint|log\s+order|received\s+(?:purchase\s+)?order|new\s+customer|onboard\s+customer)/i.test(text);
-        if (isExplicitDifferentModule) {
+      }
+    } else {
+      const isControlReply = [
+        'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure',
+        'edit', 'change', '2',
+        'cancel', 'discard', 'no', 'n', '3', 'stop', 'exit', 'quit', 'nahi', 'wrong', 'galat',
+        'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel'
+      ].includes(cleanInput);
+
+      if (!isControlReply && !isOperationalQuery(text)) {
+        const parts = lastIntent.split('|');
+        const currentAction = parts[1];
+        const currentDraft = safeParseJSON(parts.slice(2).join('|'), {});
+
+        // 1. Explicit menu selection (e.g. user sends "1", "3", "5", "menu_1", "2. Update Inquiry")
+        if (matchedMenu && matchedMenu !== currentAction) {
+          await finalizeCurrentSession(senderPhone, `Switched to ${getActionFriendlyName(matchedMenu)} menu`);
+          await saveActiveSession(senderPhone, 'Unknown', 'general');
+          lastIntent = '';
+        } else if (lastIntent.startsWith('catalog_confirm|')) {
+          // 2. In confirmation state: check if user starts a brand new action for another entity
           const detectedNewAction = await detectNewOperationalIntent(text);
-          if (detectedNewAction && detectedNewAction !== currentAction) {
-            await finalizeCurrentSession(senderPhone, `Preempted by new ${getActionFriendlyName(detectedNewAction)} action`);
-            lastIntent = '';
+          if (detectedNewAction) {
+            const isCreationCmd = /^(?:new\s+|log\s+|create\s+|record\s+|received\s+|add\s+|raise\s+|report\s+|visited\s+|went\s+to|party:)/i.test(text);
+            const hasExplicitPartyPrefix = /\b(?:for|from|to|by|party|client|customer)\s*[:=-]?\s*([A-Za-z0-9\s&.,'-]{3,})/i.test(text);
+            const mentionsDifferentCompany = currentDraft.company_name && !text.toLowerCase().includes(currentDraft.company_name.toLowerCase());
+
+            if (detectedNewAction !== currentAction || isCreationCmd || (hasExplicitPartyPrefix && mentionsDifferentCompany)) {
+              await finalizeCurrentSession(senderPhone, `Preempted by new ${getActionFriendlyName(detectedNewAction)} action`);
+              await saveActiveSession(senderPhone, 'Unknown', 'general');
+              lastIntent = '';
+            }
+          }
+        } else if (lastIntent.startsWith('catalog_flow|') || lastIntent.startsWith('catalog_editing|')) {
+          // 3. In data collection state: only preempt if message has an explicit creation command for a DIFFERENT action
+          const isExplicitDifferentModule = /^(?:log\s+visit|visited\b|went\s+to\s+meet|log\s+complaint|received\s+complaint|raise\s+complaint|log\s+order|received\s+(?:purchase\s+)?order|new\s+customer|onboard\s+customer)/i.test(text);
+          if (isExplicitDifferentModule) {
+            const detectedNewAction = await detectNewOperationalIntent(text);
+            if (detectedNewAction && detectedNewAction !== currentAction) {
+              await finalizeCurrentSession(senderPhone, `Preempted by new ${getActionFriendlyName(detectedNewAction)} action`);
+              await saveActiveSession(senderPhone, 'Unknown', 'general');
+              lastIntent = '';
+            }
           }
         }
       }
@@ -3943,7 +4010,26 @@ async function handleCatalogFlow(rawText, senderPhone) {
       return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_implicit_cust_ask', originalAction, originalDraft);
     }
 
-    await recordSessionMessage(senderPhone, 'user', text);
+    const matchedMenu = matchActionFromInput(text);
+    if (matchedMenu) {
+      await finalizeCurrentSession(senderPhone, `Switched to ${getActionFriendlyName(matchedMenu)} menu`);
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      lastIntent = '';
+    } else if (/^#?(?:INQ|DEAL)-[A-Z0-9]+/i.test(text.trim()) || isStageUpdatePrompt(text)) {
+      await finalizeCurrentSession(senderPhone, `Preempted by inquiry update`);
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      lastIntent = '';
+    } else {
+      await recordSessionMessage(senderPhone, 'user', text);
+    }
+  }
+
+  if (lastIntent.startsWith('catalog_implicit_cust_ask|')) {
+    const parts = lastIntent.split('|');
+    const originalAction = parts[1];
+    const unrecognizedName = parts[2];
+    const originalDraftJsonStr = parts.slice(3).join('|');
+    const originalDraft = safeParseJSON(originalDraftJsonStr, {});
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
 
     // User confirmed YES (This is a new customer)
