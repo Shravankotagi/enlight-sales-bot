@@ -3161,6 +3161,28 @@ Respond with ONLY "RETRIEVAL" or "OTHER".`;
 }
 
 /**
+ * Recognizes direct stage transition requests on deals / inquiries
+ * (e.g. "stage update to won", "mark deal for SS Industries as won", "deal won", etc.)
+ */
+function isStageUpdatePrompt(text) {
+  if (!text || typeof text !== 'string') return false;
+  const lower = text.toLowerCase().trim();
+
+  if (
+    /\b(?:stage\s+update|update\s+stage|change\s+stage|set\s+stage|move\s+stage)\b/i.test(lower) ||
+    /\b(?:mark|move|put|change|set|update)\s+(?:the\s+|a\s+)?(?:deal|inquiry|status|stage)?\s*(?:as\s+|to\s+)?(won|lost|negotiation|quoted|quotated|on\s+hold|hold)\b/i.test(lower) ||
+    /\b(?:deal\s+won|deal\s+lost|inquiry\s+won|inquiry\s+lost|deal\s+quoted|deal\s+negotiation|deal\s+on\s+hold)\b/i.test(lower) ||
+    /^(?:stage\s+(?:is\s+)?(?:to\s+)?(?:won|lost|negotiation|quoted|on\s+hold)|marked?\s+(?:as\s+)?(?:won|lost|negotiation|quoted|on\s+hold))\b/i.test(lower) ||
+    /^(?:mark\s+as\s+won|mark\s+as\s+lost|mark\s+as\s+negotiation|mark\s+as\s+quoted|mark\s+as\s+on\s+hold)$/i.test(lower) ||
+    /^(?:won|lost|negotiation|quoted|on\s+hold)$/i.test(lower)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Handles a read/retrieval query mid-flow without dropping or wiping the active catalog state.
  * Returns the answer along with a prompt to resume the active form.
  */
@@ -4349,10 +4371,97 @@ async function handleCatalogFlow(rawText, senderPhone) {
     return { handled: false };
   }
 
+  // ── 7b. STAGE UPDATE PROMPTS (Direct Deal / Inquiry Stage Transitions) ────────
+  // Per architecture requirement: Stage update prompts must be recognized directly
+  // (e.g. "stage update to won", "mark deal for SS Industries as won", "deal won", etc.)
+  if (isStageUpdatePrompt(text)) {
+    await recordSessionMessage(senderPhone, 'user', text);
+    const action = 'UPDATE_INQUIRY';
+    let initialDraft = {};
+
+    // Inherit customer name if recent session customer is known and not overridden
+    const activeCustomer = activeSession ? (activeSession.active_customer_name || activeSession.company_name) : null;
+    if (activeCustomer && activeCustomer !== 'Unknown' && activeCustomer !== 'Customer') {
+      initialDraft.company_name = activeCustomer;
+    }
+
+    const updatedDraft = await extractFieldsWithLLM(action, text, initialDraft);
+    if (!updatedDraft.company_name && initialDraft.company_name) {
+      updatedDraft.company_name = initialDraft.company_name;
+    }
+    if (!updatedDraft.inquiry_id && initialDraft.inquiry_id) {
+      updatedDraft.inquiry_id = initialDraft.inquiry_id;
+    }
+
+    const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
+    if (!custCheck.isValid) {
+      if (custCheck.isUnrecognizedCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: NEW_CUSTOMER_BUTTONS,
+        };
+      } else {
+        updatedDraft.company_name = null;
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: custCheck.rejectionMessage };
+      }
+    }
+
+    if (!updatedDraft.inquiry_id && updatedDraft.company_name) {
+      const inqCheck = await checkInquiriesForUpdate(action, updatedDraft, senderPhone, text);
+      if (inqCheck && inqCheck.handled) {
+        await recordSessionMessage(senderPhone, 'assistant', inqCheck.reply, {
+          action_type: action,
+          customer_name: updatedDraft.company_name,
+        });
+        if (inqCheck.status === 'MULTIPLE_EDITABLE' || inqCheck.status === 'SINGLE_EDITABLE_ASK_DETAILS') {
+          await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(inqCheck.draft)}`);
+        } else {
+          await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', 'general');
+        }
+        return { handled: true, reply: inqCheck.reply };
+      }
+      if (inqCheck && inqCheck.draft) Object.assign(updatedDraft, inqCheck.draft);
+    }
+
+    const missing = validateMandatoryFields(action, updatedDraft);
+    if (missing.length === 0) {
+      const summary = buildConfirmationSummary(action, updatedDraft);
+      await recordSessionMessage(senderPhone, 'assistant', summary, {
+        action_type: action,
+        customer_name: updatedDraft.company_name,
+      });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(updatedDraft)}`);
+      return {
+        handled: true,
+        reply: summary,
+        interactiveType: 'buttons',
+        interactiveButtons: CONFIRMATION_BUTTONS,
+      };
+    } else {
+      const missingList = missing.map((m) => `• *${m}*`).join('\n');
+      const askMissing = `Please provide the remaining details to update the deal stage:\n\n${missingList}`;
+      await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+        action_type: action,
+        customer_name: updatedDraft.company_name,
+      });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+      return {
+        handled: true,
+        reply: askMissing,
+      };
+    }
+  }
+
   // ── 8. ALL OTHER MESSAGES OUTSIDE ACTIVE SESSION -> STRICT CATALOG GATING ──
   // Per architecture requirement:
-  // "other than retrieval queries for all other queries bot should provide the catalog only,
-  // the intent classifier has to only classify the retrieval queries"
+  // "the intent classifier has to only recognize the retrieval prompts and the stage update prompts...
+  // and for other all prompts catalog should be provided"
   // Any update / create / modify / typo / command without an active session MUST show the catalog menu!
   await recordSessionMessage(senderPhone, 'user', text);
   const gatingReply = `Please select the relevant option from the menu to update a record.\n\n` + CATALOG_MENU;
@@ -4380,6 +4489,7 @@ module.exports = {
   executeAction,
   handleCatalogFlow,
   isOperationalQuery,
+  isStageUpdatePrompt,
   detectOperationalAction,
   extractFieldsWithLLM,
   mergeDraft,
