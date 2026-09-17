@@ -3097,7 +3097,7 @@ function isOperationalQuery(text) {
   const lower = text.toLowerCase().trim();
 
   // 1. Explicit greeting or navigation selections / confirmation buttons (Yes, No, Edit, Cancel, 1-10) are NOT queries
-  if (/^(?:hi|hello|hey|namaste|yes|no|y|n|1|2|3|4|5|6|7|8|9|10|confirm|edit|cancel|save|discard|stop|exit|quit)$/i.test(lower)) {
+  if (/^(?:hi|hello|hey|namaste|yes|no|y|n|1|2|3|4|5|6|7|8|9|10|confirm|edit|cancel|save|discard|stop|exit|quit|upadte|update)$/i.test(lower)) {
     return false;
   }
 
@@ -3105,26 +3105,59 @@ function isOperationalQuery(text) {
   if (/^(?:log|record|add|create|raise|onboard|acquire)\s+(?:new\s+|a\s+|an\s+)?(?:inquiry|deal|order|visit|complaint|customer|acquisition|po)\b/i.test(lower)) {
     return false;
   }
-  if (/^(?:update|change|modify|set|mark|close|resolve|reopen)\s+(?:the\s+|a\s+)?(?:inquiry|deal|order|visit|complaint|customer|rate|price|status|stage)\b/i.test(lower)) {
+  if (/^(?:update|change|modify|set|mark|close|resolve|reopen|upadte)\s+(?:the\s+|a\s+)?(?:inquiry|deal|order|visit|complaint|customer|rate|price|status|stage)\b/i.test(lower)) {
     return false;
   }
 
   // 3. Clear Read / Retrieval / Question Patterns
   if (
-    /^(?:show|list|get|check|find|filter|tell me|what|which|who|whom|whose|when|where|why|how|how many|how much|did we|is there|are there|give me|display|fetch|details? of|history of|info on|compare|rankings|leaderboard)\b/i.test(lower) ||
-    /\b(?:kya hai|batao|dikhao|dikhaye|kitne|kitna|kaun hai|kaun tha|kiska|kab hua|kahan|list karo|check karo|details batao)\b/i.test(lower) ||
-    /\b(?:what is the|what was the|what are the|how many|how much|status of|status kya hai|outcome of|last rate|rates? quoted|pending complaints|closed complaints|my visits|my inquiries|my orders|my deals)\b/i.test(lower) ||
+    /^(?:show|list|get|check|find|filter|tell me|give me|display|fetch|search|lookup|query|view|see|read|retrieve|track)\b/i.test(lower) ||
+    /^(?:what|which|who|whom|whose|when|where|why|how|how many|how much|did we|is there|are there|can you show|can you tell|can you list|can you find|could you show|could you tell|could you list|do we have|have we)\b/i.test(lower) ||
+    /\b(?:kya hai|batao|dikhao|dikhaye|kitne|kitna|kaun hai|kaun tha|kiska|kab hua|kahan|list karo|check karo|details batao|kya chal raha hai|kya rate hai|rate kya hai)\b/i.test(lower) ||
+    /\b(?:what is the|what was the|what are the|how many|how much|status of|status for|status kya hai|outcome of|last rate|rates? quoted|pending complaints|closed complaints|my visits|my inquiries|my orders|my deals|details of|details for|history of|history for|summary of|summary for|info on|info about|report on|report for)\b/i.test(lower) ||
     lower.endsWith('?')
   ) {
     return true;
   }
 
   // 4. Standalone lookup terms
-  if (/^(?:inquiry id|deal id|summary|leaderboard|pipeline|radar|360|knowledge base|sop|moq|pricing sheet)\b/i.test(lower)) {
+  if (/^(?:inquiry id|inquiry ids|deal id|deal ids|order id|order ids|complaint id|complaint ids|visit id|visit ids|summary|leaderboard|pipeline|radar|360|knowledge base|sop|moq|pricing sheet)\b/i.test(lower)) {
     return true;
   }
 
   return false;
+}
+
+/**
+ * Fast LLM Query Classifier fallback
+ * Classifies whether text is a read query / question vs operational data entry / command
+ */
+async function isOperationalQueryWithLLM(text) {
+  if (!text || typeof text !== 'string' || text.trim().length < 5) return false;
+  const clean = text.trim();
+
+  // If starts with clear action commands, not a query
+  if (/^(?:1|2|3|4|5|6|7|8|9|10|yes|no|y|n|confirm|edit|cancel|save|discard|stop|exit|quit|upadte|update)$/i.test(clean)) return false;
+  if (/^(?:log|record|add|create|new|onboard|acquire|update|modify|change|set|mark|resolve|close|upadte)\b/i.test(clean)) return false;
+
+  const prompt = `You are a strict classifier for a CRM WhatsApp Bot.
+Classify whether this user message is a DATA RETRIEVAL / READ QUERY / SEARCH QUESTION or NOT.
+
+User message: "${clean}"
+
+Options:
+- RETRIEVAL: User is asking a question to search, lookup, check status, inspect records, or read data from the database.
+- OTHER: User is giving a command to update, create, log data, a general word/typo (like 'upadte', 'update', 'inquiry', 'deal'), or greeting.
+
+Respond with ONLY "RETRIEVAL" or "OTHER".`;
+
+  try {
+    const res = await invokeWithFallback([new HumanMessage(prompt)]);
+    const result = (typeof res.content === 'string' ? res.content : '').trim().toUpperCase();
+    return result.includes('RETRIEVAL');
+  } catch (err) {
+    return false;
+  }
 }
 
 /**
@@ -4307,49 +4340,34 @@ async function handleCatalogFlow(rawText, senderPhone) {
   }
 
   // ── 7. FREE DATA RETRIEVAL QUERIES (Direct DB Lookup, No Catalog, No Flow) ──
-  if (isOperationalQuery(text)) {
+  let isQuery = isOperationalQuery(text);
+  if (!isQuery && text.length >= 8 && !/^(?:log|record|add|create|new|onboard|acquire|update|modify|change|set|mark|resolve|close|upadte|edit|cancel|save)\b/i.test(text)) {
+    isQuery = await isOperationalQueryWithLLM(text);
+  }
+
+  if (isQuery) {
     return { handled: false };
   }
 
-  // ── 8. STRICT CATALOG-GATED UPDATE/CREATE ATTEMPTS ──────────────────────────
-  // Any update / create / modify intent without an active session MUST be redirected to the catalog menu!
-  let detectedAction = null;
-  for (const { pattern, action } of DIRECT_ACTION_MAP) {
-    if (pattern.test(text)) {
-      detectedAction = action;
-      break;
-    }
-  }
-
-  if (!detectedAction) {
-    detectedAction = detectOperationalAction(text);
-  }
-
-  // Fast LLM Intent Fallback if text is long enough and not a query
-  if (!detectedAction && text.length >= 8) {
-    detectedAction = await detectOperationalActionWithLLM(text);
-    if (detectedAction === 'QUERY') detectedAction = null;
-  }
-
-  if (detectedAction) {
-    await recordSessionMessage(senderPhone, 'user', text);
-    const gatingReply = `Please select the relevant option from the menu to update a record.\n\n` + CATALOG_MENU;
-    await recordSessionMessage(senderPhone, 'assistant', gatingReply, { action_type: 'CATALOG_GATED_PROMPT' });
-    await startNewCatalogSession(senderPhone, gatingReply);
-    return {
-      handled: true,
-      reply: gatingReply,
-      interactiveType: 'list',
-      interactiveList: {
-        bodyText: `Please select the relevant option from the menu to update a record.\n\nWhat would you like to do?`,
-        buttonText: 'Choose Action',
-        sections: CATALOG_MENU_SECTIONS,
-      },
-    };
-  }
-
-  // Not intercepted by catalog flow -> let general LangGraph Orchestrator process free queries
-  return { handled: false };
+  // ── 8. ALL OTHER MESSAGES OUTSIDE ACTIVE SESSION -> STRICT CATALOG GATING ──
+  // Per architecture requirement:
+  // "other than retrieval queries for all other queries bot should provide the catalog only,
+  // the intent classifier has to only classify the retrieval queries"
+  // Any update / create / modify / typo / command without an active session MUST show the catalog menu!
+  await recordSessionMessage(senderPhone, 'user', text);
+  const gatingReply = `Please select the relevant option from the menu to update a record.\n\n` + CATALOG_MENU;
+  await recordSessionMessage(senderPhone, 'assistant', gatingReply, { action_type: 'CATALOG_GATED_PROMPT' });
+  await startNewCatalogSession(senderPhone, gatingReply);
+  return {
+    handled: true,
+    reply: gatingReply,
+    interactiveType: 'list',
+    interactiveList: {
+      bodyText: `Please select the relevant option from the menu to update a record.\n\nWhat would you like to do?`,
+      buttonText: 'Choose Action',
+      sections: CATALOG_MENU_SECTIONS,
+    },
+  };
 }
 
 module.exports = {
