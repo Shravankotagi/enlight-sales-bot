@@ -1135,54 +1135,7 @@ async function syncActivity(activityType, data) {
 // ── Cleanup Utility ───────────────────────────────────────────────────────────
 
 async function clearAllBiginData() {
-  if (process.env.ZOHO_READ_ONLY_MODE === 'true') {
-    throw new Error('Action blocked: ZOHO_READ_ONLY_MODE is enabled');
-  }
-  const results = { deleted: {}, errors: [] };
-  try {
-    const token = await getZohoToken();
-    const moduleFields = {
-      Notes:    'id,Note_Title',
-      Deals:    'id,Deal_Name',
-      Contacts: 'id,Full_Name',
-    };
-
-    for (const module of ['Notes', 'Deals', 'Contacts']) {
-      results.deleted[module] = 0;
-      let page = 1;
-      let hasMore = true;
-
-      while (hasMore) {
-        try {
-          const res = await axios.get(`${ZOHO_BIGIN_BASE}/${module}`, {
-            headers: zohoHeaders(token),
-            params: { page, per_page: 100, fields: moduleFields[module] },
-          });
-          const records = res.data?.data || [];
-          if (records.length === 0) { hasMore = false; break; }
-
-          const ids = records.map(r => r.id).filter(Boolean);
-          if (ids.length > 0) {
-            const delRes = await axios.delete(`${ZOHO_BIGIN_BASE}/${module}`, {
-              headers: zohoHeaders(token),
-              params: { ids: ids.join(',') },
-            });
-            results.deleted[module] += delRes.data?.data?.filter(r => r.status === 'success').length || ids.length;
-          }
-
-          hasMore = res.data?.info?.more_records === true;
-          page++;
-          await new Promise(r => setTimeout(r, 600));
-        } catch (err) {
-          results.errors.push(`${module}: ${err.message}`);
-          hasMore = false;
-        }
-      }
-    }
-    return results;
-  } catch (err) {
-    throw err;
-  }
+  throw new Error('Action permanently disabled: Automatic deletion of Bigin CRM records is disabled to prevent accidental data loss.');
 }
 
 async function syncAllDatabaseToBigin() {
