@@ -268,15 +268,15 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'get_visits',
-      description: `Retrieves customer site and field visit logs, visit outcomes (positive, neutral, negative), location filtering (e.g. "Mumbai", "Pune", "Nashik"), salesperson visit leaderboard, week-over-week visit comparison, duplicate visits, visits missing location or contact person, and prospective customers who have visits logged but no orders yet (mode: "visits_no_orders").`,
+      description: `Retrieves customer site and field visit logs, visit outcomes (positive, neutral, negative), unvisited customers with no visits in a timeframe (mode: "not_visited" with date_range: "last_30_days"), location filtering (e.g. "Mumbai", "Pune", "Nashik"), salesperson visit leaderboard, week-over-week visit comparison, duplicate visits, visits missing location or contact person, and prospective customers who have visits logged but no orders yet (mode: "visits_no_orders").`,
       schema: z.object({
         customer_name_search: z.string().optional().nullable().describe('Optional search term for customer name.'),
         salesperson_name: z.string().optional().nullable().describe('Optional filter by salesperson name (e.g. "Max", "Rishabh Makwana").'),
         location: z.string().optional().nullable().describe('Optional filter by visit city or destination (e.g. "Nashik", "Pune", "Mumbai").'),
         outcome_filter: z.string().optional().nullable().describe('Optional filter by visit outcome: "positive", "neutral", "negative", "all".'),
         date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
-        mode: z.string().optional().nullable().describe('Query mode: "list", "rep_leaderboard", "week_comparison", "duplicates", "missing_location", "missing_contact_person", "pending_followup", "visits_no_orders".'),
-        limit: z.number().optional().nullable().describe('Maximum number of visits to return (default: 20).'),
+        mode: z.string().optional().nullable().describe('Query mode: "list", "not_visited", "rep_leaderboard", "week_comparison", "duplicates", "missing_location", "missing_contact_person", "pending_followup", "visits_no_orders". Use "not_visited" when user asks which customers haven\'t been visited in a timeframe.'),
+        limit: z.number().optional().nullable().describe('Maximum number of records to return (default: 20).'),
       }),
     }
   );

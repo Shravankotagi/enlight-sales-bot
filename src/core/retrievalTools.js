@@ -1306,6 +1306,242 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     }
   }
 
+  const isNotVisitedMode =
+    mode === 'not_visited' ||
+    mode === 'unvisited' ||
+    mode === 'no_visits' ||
+    mode === 'unvisited_customers' ||
+    mode === 'customers_not_visited' ||
+    mode === 'not_visited_customers' ||
+    mode === "haven't_been_visited" ||
+    mode === 'havent_been_visited' ||
+    mode === 'unvisited_in_timeframe' ||
+    mode === 'not_visited_in_timeframe' ||
+    Boolean(args?.not_visited) ||
+    Boolean(args?.unvisited);
+
+  // ── Mode: Unvisited Customers (No Visits in Timeframe) ────────────────────
+  if (isNotVisitedMode) {
+    const { data: allEmployees } = await supabaseAdmin
+      .from('employees')
+      .select('id, employee_id, phone, name')
+      .eq('is_active', true);
+
+    const empMap = new Map();
+    (allEmployees || []).forEach((e) => {
+      empMap.set((e.phone || '').replace(/\D/g, '').slice(-10), e.name);
+      if (e.id) empMap.set(e.id, e.name);
+      if (e.employee_id) empMap.set(e.employee_id, e.name);
+    });
+
+    // 1. Query all active recurring customers scoped to caller
+    let custQuery = supabaseAdmin
+      .from('recurring_customers')
+      .select('*')
+      .eq('is_active', true);
+
+    if (isSalespersonRole(callerContext.role)) {
+      const rawPhone = callerContext.phone || '';
+      const cleanPhone = rawPhone.replace(/\D/g, '').slice(-10);
+      if (cleanPhone) {
+        custQuery = custQuery.ilike('assigned_salesperson_phone', `%${cleanPhone}%`);
+      } else {
+        return {
+          data: {
+            timeframe: dateRange || 'last_30_days',
+            timeframe_label: 'last 30 days',
+            total_unvisited_customers: 0,
+            summary: 'No unvisited customers found for your account.',
+            customers: [],
+          },
+          rowCount: 0,
+        };
+      }
+    } else if (isManagerRole(callerContext.role)) {
+      const { phoneSuffixes } = await getSubordinateSalespersons(callerContext, supabaseAdmin);
+      if (phoneSuffixes.length > 0) {
+        const orFilter = phoneSuffixes.map((p) => `assigned_salesperson_phone.ilike.%${p}%`).join(',');
+        custQuery = custQuery.or(orFilter);
+      } else {
+        return {
+          data: {
+            timeframe: dateRange || 'last_30_days',
+            timeframe_label: 'last 30 days',
+            total_unvisited_customers: 0,
+            summary: 'No unvisited customers found for your team.',
+            customers: [],
+          },
+          rowCount: 0,
+        };
+      }
+    }
+
+    const { data: rawCustRows, error: custErr } = await custQuery;
+    if (custErr) throw new Error(`get_visits unvisited customers error: ${custErr.message}`);
+
+    // Deduplicate customers by normalized name
+    const seenCusts = new Map();
+    for (const c of (rawCustRows || [])) {
+      const normKey = (c.customer_name || '').toLowerCase().trim();
+      if (!normKey) continue;
+      if (!seenCusts.has(normKey)) {
+        seenCusts.set(normKey, c);
+      } else {
+        const existing = seenCusts.get(normKey);
+        if (!existing.customer_phone && c.customer_phone) {
+          seenCusts.set(normKey, { ...existing, ...c });
+        }
+      }
+    }
+    const uniqueCustRows = Array.from(seenCusts.values());
+
+    // 2. Query all historical customer visits scoped to caller
+    let allVisitsQuery = supabaseAdmin
+      .from('customer_visits')
+      .select('*')
+      .order('visited_at', { ascending: false });
+
+    if (isSalespersonRole(callerContext.role)) {
+      const rawPhone = callerContext.phone || '';
+      const cleanPhone = rawPhone.replace(/\D/g, '').slice(-10);
+      const empId = callerContext.employeeId;
+      const orParts = [];
+      if (cleanPhone) orParts.push(`salesperson_phone.ilike.%${cleanPhone}%`);
+      if (empId) orParts.push(`employee_id.eq.${empId}`);
+      if (orParts.length > 0) {
+        allVisitsQuery = allVisitsQuery.or(orParts.join(','));
+      }
+    } else if (isManagerRole(callerContext.role)) {
+      const { phoneSuffixes, employeeIds } = await getSubordinateSalespersons(callerContext, supabaseAdmin);
+      const orParts = [];
+      phoneSuffixes.forEach((p) => orParts.push(`salesperson_phone.ilike.%${p}%`));
+      employeeIds.forEach((id) => orParts.push(`employee_id.eq.${id}`));
+      if (orParts.length > 0) {
+        allVisitsQuery = allVisitsQuery.or(orParts.join(','));
+      }
+    }
+
+    const { data: allVisitsData, error: allVisitsErr } = await allVisitsQuery;
+    if (allVisitsErr) throw new Error(`get_visits unvisited visits error: ${allVisitsErr.message}`);
+    const allVisits = allVisitsData || [];
+
+    // 3. Determine timeframe boundaries
+    const effectiveDateRange = dateRange || 'last_30_days';
+    const { from, to } = parseDateFilter(effectiveDateRange);
+    let fromDate = from;
+    if (!fromDate) {
+      const d = new Date();
+      d.setDate(d.getDate() - 30);
+      d.setHours(0, 0, 0, 0);
+      fromDate = d;
+    }
+    const toDate = to || new Date();
+
+    // 4. Build visited set within window and historical latest visit map
+    const visitedInWindowSet = new Set();
+    const latestVisitMap = new Map();
+
+    allVisits.forEach((v) => {
+      const rawName = (v.customer_name || '').trim();
+      if (!rawName) return;
+      const normName = rawName.toLowerCase();
+      const cleanName = cleanLegalSuffixes(rawName);
+      const visitDateStr = v.visited_at || v.created_at;
+      const visitDate = visitDateStr ? new Date(visitDateStr) : null;
+
+      if (visitDate && visitDate >= fromDate && visitDate <= toDate) {
+        visitedInWindowSet.add(normName);
+        if (cleanName) visitedInWindowSet.add(cleanName);
+      }
+
+      if (visitDate && (!latestVisitMap.has(normName) || new Date(latestVisitMap.get(normName).visit_date_raw) < visitDate)) {
+        const parsedRemarks = parseVisitRemarks(v.remarks);
+        const p = (v.salesperson_phone || '').replace(/\D/g, '').slice(-10);
+        const rep = empMap.get(p) || empMap.get(v.employee_id) || 'Salesperson';
+        const info = {
+          visit_date: visitDateStr ? visitDateStr.split('T')[0] : 'N/A',
+          visit_date_raw: visitDateStr,
+          outcome: v.outcome || parsedRemarks.outcome || 'Not recorded',
+          salesperson_name: rep,
+          location: v.customer_address || v.location || parsedRemarks.location || 'N/A',
+        };
+        latestVisitMap.set(normName, info);
+        if (cleanName) {
+          latestVisitMap.set(cleanName, info);
+        }
+      }
+    });
+
+    // 5. Filter unique customer records to find those NOT visited in the timeframe window
+    let unvisitedList = uniqueCustRows.filter((c) => {
+      const cName = (c.customer_name || '').trim();
+      if (!cName) return false;
+      const normName = cName.toLowerCase();
+      const cleanName = cleanLegalSuffixes(cName);
+
+      const isVisitedInWindow =
+        visitedInWindowSet.has(normName) ||
+        (cleanName && visitedInWindowSet.has(cleanName)) ||
+        Array.from(visitedInWindowSet).some((v) => normName === v || (v.length > 3 && cleanName === v));
+
+      return !isVisitedInWindow;
+    });
+
+    // 6. Apply secondary filters if passed
+    if (custFilter) {
+      unvisitedList = unvisitedList.filter((c) => (c.customer_name || '').toLowerCase().includes(custFilter));
+    }
+    if (repFilter) {
+      unvisitedList = unvisitedList.filter((c) => {
+        const p = (c.assigned_salesperson_phone || '').replace(/\D/g, '').slice(-10);
+        const repName = empMap.get(p) || '';
+        return repName.toLowerCase().includes(repFilter) || (c.notes || '').toLowerCase().includes(repFilter);
+      });
+    }
+    if (locFilter) {
+      unvisitedList = unvisitedList.filter((c) => (c.customer_address || '').toLowerCase().includes(locFilter));
+    }
+
+    // 7. Format output
+    const formattedUnvisited = unvisitedList.map((c) => {
+      const cName = (c.customer_name || '').trim();
+      const normName = cName.toLowerCase();
+      const cleanName = cleanLegalSuffixes(cName);
+      const lastVisit = latestVisitMap.get(normName) || (cleanName ? latestVisitMap.get(cleanName) : null);
+      const p = (c.assigned_salesperson_phone || '').replace(/\D/g, '').slice(-10);
+      const assignedRep = empMap.get(p) || (c.notes ? c.notes.match(/Account Owner:\s*([^|]+)/i)?.[1]?.trim() : 'Unassigned') || 'Salesperson';
+
+      return {
+        customer_name: cName,
+        contact_person: c.contact_person || 'N/A',
+        phone: c.customer_phone || 'N/A',
+        address: c.customer_address || 'N/A',
+        last_visited_date: lastVisit?.visit_date || 'Never visited',
+        last_visit_outcome: lastVisit?.outcome || null,
+        assigned_salesperson: assignedRep,
+      };
+    });
+
+    let timeframeLabel = 'last 30 days';
+    if (effectiveDateRange === 'last_7_days' || effectiveDateRange === 'this_week') timeframeLabel = 'last 7 days';
+    else if (effectiveDateRange === 'this_month') timeframeLabel = 'this month';
+    else if (effectiveDateRange === 'last_month') timeframeLabel = 'last month';
+    else if (effectiveDateRange === 'last_30_days') timeframeLabel = 'last 30 days';
+    else timeframeLabel = effectiveDateRange;
+
+    return {
+      data: {
+        timeframe: effectiveDateRange,
+        timeframe_label: timeframeLabel,
+        total_unvisited_customers: formattedUnvisited.length,
+        total_active_accounts: uniqueCustRows.length,
+        summary: `Found ${formattedUnvisited.length} customer accounts who have NOT been visited in the ${timeframeLabel}.`,
+        customers: formattedUnvisited.slice(0, limit),
+      },
+      rowCount: formattedUnvisited.length,
+    };
+  }
+
   let query = supabaseAdmin
     .from('customer_visits')
     .select('*')
