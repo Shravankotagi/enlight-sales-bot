@@ -2168,7 +2168,6 @@ async function checkComplaintsForUpdate(action, draft, senderPhone, originalText
 
   if (!hasUpdates) {
     const prompt = `✏️ *Active Complaint Found for ${matchedCmp.customer_name}:*\n\n` +
-      `• *Complaint ID:* #${matchedCmp.id.slice(0, 8)}\n` +
       (matchedCmp.po_number ? `• *PO Number:* ${matchedCmp.po_number}\n` : '') +
       `• *Type:* ${matchedCmp.complaint_type || 'Quality Defect'}\n` +
       `• *Status:* ${matchedCmp.status || 'Open'}\n` +

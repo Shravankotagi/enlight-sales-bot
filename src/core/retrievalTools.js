@@ -1938,7 +1938,6 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
     }
 
     return {
-      id: r.id,
       customer_name: r.customer_name || 'Unnamed Account',
       product_name: r.affected_product || r.product_name || 'General Steel Product',
       product_category: prodFam.category,
@@ -1948,7 +1947,6 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
       status: (r.status || 'open').toLowerCase(),
       resolution: r.resolution_notes || r.resolution || null,
       po_number: r.po_number || null,
-      deal_id: r.deal_id || null,
       salesperson_name: repName,
       salesperson_phone: r.reported_by || '',
       sla_met_48h: slaMet,
@@ -2036,7 +2034,6 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
         }
         matchedAccounts[cleanName].open_complaints_count += 1;
         matchedAccounts[cleanName].open_complaints.push({
-          complaint_id: c.id,
           complaint_type: c.complaint_type,
           description: c.description,
           status: c.status,
