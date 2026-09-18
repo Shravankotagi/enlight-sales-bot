@@ -319,10 +319,11 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'get_customer_360',
-      description: `Retrieves comprehensive Customer 360 overview for a specific customer (profile, pipeline deals, payments, site visits, complaints, segment, health status), OR customer count, directory, segmentation breakdown (New, Key Account, Growth), and active accounts with 0 orders (mode: "zero_orders_active").`,
+      description: `Retrieves comprehensive Customer 360 overview for a specific customer (profile, pipeline deals, payments, site visits, complaints, segment, health status), OR customer directory and segmentation breakdown (New, Key Account, Growth), segment filtering (e.g. segment_filter="new" + date_range="this_month" for new customers added this month, segment_filter="key_account", segment_filter="growth"), and active accounts with 0 orders (mode: "zero_orders_active").`,
       schema: z.object({
         customer_name: z.string().optional().nullable().describe('Optional name of customer or company (e.g. "Supreme Steel", "ABC Steel"). Omit to retrieve directory and segmentation stats.'),
         segment_filter: z.string().optional().nullable().describe('Optional segment filter: "all", "key_account", "growth", "new".'),
+        date_range: z.string().optional().nullable().describe('Optional date filter for when customers were added/created: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
         mode: z.string().optional().nullable().describe('Query mode: "directory", "segmentation", "zero_orders_active".'),
         limit: z.number().optional().nullable().describe('Maximum number of customer records (default: 50).'),
       }),

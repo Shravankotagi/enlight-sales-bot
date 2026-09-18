@@ -2031,9 +2031,10 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
 
 async function executeGetCustomer360(args, callerContext, supabaseAdmin = supabase) {
   const custName = (args?.customer_name || '').trim();
-  const segmentFilter = (args?.segment_filter || '').trim().toLowerCase();
-  const healthFilter = (args?.health_filter || '').trim().toLowerCase();
+  const segmentFilter = (args?.segment_filter || args?.segment || '').trim().toLowerCase();
+  const healthFilter = (args?.health_filter || args?.health_status || '').trim().toLowerCase();
   const mode = (args?.mode || '').trim().toLowerCase();
+  const dateRange = (args?.date_range || args?.date_filter || '').trim();
   const limit = Math.min(Math.max(Number(args?.limit) || 50, 1), 100);
 
   // If customer_name is provided -> Specific Customer 360 Profile
@@ -2087,7 +2088,15 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
     let lifetimeWonVal = wonDeals.reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
     let totalTonnage = wonDeals.reduce((sum, d) => sum + getDealTonnage(d), 0);
 
-    const segment = deriveCustomerSegment(totalTonnage, lifetimeWonVal, wonDeals.length, inquiries.length, visits.length);
+    let segment = 'new';
+    if (profile.segment) {
+      const s = String(profile.segment).toLowerCase().trim();
+      if (s.includes('key')) segment = 'key_account';
+      else if (s.includes('growth')) segment = 'growth';
+      else segment = 'new';
+    } else {
+      segment = deriveCustomerSegment(totalTonnage, lifetimeWonVal, wonDeals.length, inquiries.length, visits.length);
+    }
 
     return {
       data: {
@@ -2096,11 +2105,11 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
         contact_person: profile.contact_person || 'N/A',
         phone: profile.customer_phone || profile.phone || 'N/A',
         address: profile.customer_address || profile.address || 'N/A',
-        gst: profile.gst || 'N/A',
+        gst: profile.customer_gst || profile.gst || 'N/A',
         segment: segment === 'key_account' ? 'Key Account' : (segment === 'growth' ? 'Growth' : 'New'),
         health_status: 'Good Standing',
         order_frequency_days: profile.avg_order_frequency_days || 30,
-        last_order_date: profile.last_order_date || (wonDeals[0]?.won_at ? wonDeals[0].won_at.split('T')[0] : 'N/A'),
+        last_order_date: profile.last_order_date || (wonDeals[0]?.won_at ? wonDeals[0].won_at.split('T')[0] : (wonDeals[0]?.created_at ? wonDeals[0].created_at.split('T')[0] : 'N/A')),
         metrics: {
           lifetime_won_value_inr: lifetimeWonVal,
           total_tonnage_mt: Math.round(totalTonnage * 1000) / 1000,
@@ -2118,26 +2127,164 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
   }
 
   // Directory / Directory Segmentation Mode
-  let query = supabaseAdmin.from('recurring_customers').select('*').eq('is_active', true);
+  let custQuery = supabaseAdmin.from('recurring_customers').select('*').eq('is_active', true);
+  let dealsQuery = supabaseAdmin.from('deals').select('id, customer_name, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, quantity, unit, rate, amount)');
+  let visitsQuery = supabaseAdmin.from('customer_visits').select('id, customer_name, created_at, salesperson_phone, employee_id');
+  let inqsQuery = supabaseAdmin.from('inquiries').select('id, sender_name, created_at, salesperson_phone, sender_phone');
+  let compQuery = supabaseAdmin.from('complaints').select('id, customer_name, status, created_at, reported_by, employee_id');
 
   if (isSalespersonRole(callerContext.role)) {
     const rawPhone = callerContext.phone || '';
     const cleanPhone = rawPhone.replace(/\D/g, '').slice(-10);
-    if (cleanPhone) query = query.ilike('assigned_salesperson_phone', `%${cleanPhone}%`);
+    if (cleanPhone) {
+      custQuery = custQuery.ilike('assigned_salesperson_phone', `%${cleanPhone}%`);
+      dealsQuery = dealsQuery.ilike('salesperson_phone', `%${cleanPhone}%`);
+      visitsQuery = visitsQuery.ilike('salesperson_phone', `%${cleanPhone}%`);
+      inqsQuery = inqsQuery.or(`salesperson_phone.ilike.%${cleanPhone}%,sender_phone.ilike.%${cleanPhone}%`);
+      compQuery = compQuery.ilike('reported_by', `%${cleanPhone}%`);
+    }
   } else if (isManagerRole(callerContext.role)) {
     const { phoneSuffixes } = await getSubordinateSalespersons(callerContext, supabaseAdmin);
     if (phoneSuffixes.length > 0) {
-      query = query.or(phoneSuffixes.map((p) => `assigned_salesperson_phone.ilike.%${p}%`).join(','));
+      const orFilter = phoneSuffixes.map((p) => `assigned_salesperson_phone.ilike.%${p}%`).join(',');
+      custQuery = custQuery.or(orFilter);
+      dealsQuery = dealsQuery.or(phoneSuffixes.map((p) => `salesperson_phone.ilike.%${p}%`).join(','));
+      visitsQuery = visitsQuery.or(phoneSuffixes.map((p) => `salesperson_phone.ilike.%${p}%`).join(','));
+      inqsQuery = inqsQuery.or(phoneSuffixes.map((p) => `salesperson_phone.ilike.%${p}%`).join(','));
+      compQuery = compQuery.or(phoneSuffixes.map((p) => `reported_by.ilike.%${p}%`).join(','));
     }
   }
 
-  const { data: allCusts, error } = await query;
-  if (error) throw new Error(`get_customer_360 directory error: ${error.message}`);
+  const [
+    { data: allCusts, error: custError },
+    { data: allDeals },
+    { data: allVisits },
+    { data: allInqs },
+    { data: allComps },
+  ] = await Promise.all([
+    custQuery,
+    dealsQuery,
+    visitsQuery,
+    inqsQuery,
+    compQuery,
+  ]);
+
+  if (custError) throw new Error(`get_customer_360 directory error: ${custError.message}`);
 
   const rows = allCusts || [];
+  const deals = allDeals || [];
+  const visits = allVisits || [];
+  const inqs = allInqs || [];
+  const complaints = allComps || [];
 
-  // ── Mode: Zero Orders Active Accounts ─────────────────────────────────────
-  if (
+  // Deduplicate customers by normalized name
+  const seenCusts = new Map();
+  for (const c of rows) {
+    const normKey = (c.customer_name || '').toLowerCase().trim();
+    if (!normKey) continue;
+    if (!seenCusts.has(normKey)) {
+      seenCusts.set(normKey, c);
+    } else {
+      const existing = seenCusts.get(normKey);
+      if (!existing.customer_phone && c.customer_phone) {
+        seenCusts.set(normKey, { ...existing, ...c });
+      }
+    }
+  }
+  const uniqueCustRows = Array.from(seenCusts.values());
+
+  // Enrich each customer with derived metrics & segment
+  const enrichedCustomers = uniqueCustRows.map((c) => {
+    const cName = (c.customer_name || '').toLowerCase().trim();
+    const cClean = cleanLegalSuffixes(c.customer_name);
+
+    const custDeals = deals.filter((d) => {
+      const dName = (d.customer_name || '').toLowerCase().trim();
+      return dName === cName || (cClean && cleanLegalSuffixes(d.customer_name) === cClean);
+    });
+
+    const wonDeals = custDeals.filter((d) => d.stage === 'won' || Boolean(d.po_number));
+    const openDeals = custDeals.filter((d) => d.stage !== 'won' && d.stage !== 'lost');
+
+    const custVisits = visits.filter((v) => {
+      const vName = (v.customer_name || '').toLowerCase().trim();
+      return vName === cName || (cClean && cleanLegalSuffixes(v.customer_name) === cClean);
+    });
+
+    const custInqs = inqs.filter((i) => {
+      const iName = (i.sender_name || '').toLowerCase().trim();
+      return iName === cName || (cClean && cleanLegalSuffixes(i.sender_name) === cClean);
+    });
+
+    const custComps = complaints.filter((comp) => {
+      const compName = (comp.customer_name || '').toLowerCase().trim();
+      return compName === cName || (cClean && cleanLegalSuffixes(comp.customer_name) === cClean);
+    });
+
+    const ltv = wonDeals.reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
+    const tonnage = wonDeals.reduce((sum, d) => sum + getDealTonnage(d), 0);
+    const totalOrders = wonDeals.length;
+
+    let segRaw = 'new';
+    if (c.segment) {
+      const s = String(c.segment).toLowerCase().trim();
+      if (s.includes('key')) segRaw = 'key_account';
+      else if (s.includes('growth')) segRaw = 'growth';
+      else segRaw = 'new';
+    } else {
+      segRaw = deriveCustomerSegment(tonnage, ltv, totalOrders, custInqs.length, custVisits.length);
+    }
+
+    const segLabel = segRaw === 'key_account' ? 'Key Account' : (segRaw === 'growth' ? 'Growth' : 'New');
+    const lastOrder = c.last_order_date || (wonDeals[0]?.won_at ? wonDeals[0].won_at.split('T')[0] : (wonDeals[0]?.created_at ? wonDeals[0].created_at.split('T')[0] : 'N/A'));
+
+    return {
+      customer_name: c.customer_name,
+      contact_person: c.contact_person || 'N/A',
+      phone: c.customer_phone || c.phone || 'N/A',
+      address: c.customer_address || c.address || 'N/A',
+      gst: c.customer_gst || c.gst || 'N/A',
+      segment: segLabel,
+      _segRaw: segRaw,
+      total_orders: totalOrders,
+      total_tonnage_mt: Math.round(tonnage * 1000) / 1000,
+      lifetime_value_inr: ltv,
+      active_inquiries_count: openDeals.length,
+      visits_count: custVisits.length,
+      complaints_count: custComps.length,
+      last_order_date: lastOrder,
+      created_at: c.created_at ? c.created_at.split('T')[0] : 'N/A',
+      _created_at_raw: c.created_at,
+      is_active: Boolean(c.is_active),
+    };
+  });
+
+  // Apply date range filter (e.g. "this_month", "today", "last_7_days")
+  let dateFiltered = enrichedCustomers;
+  if (dateRange) {
+    const dateWindow = parseDateFilter(dateRange);
+    if (dateWindow.from || dateWindow.to) {
+      dateFiltered = enrichedCustomers.filter((c) => {
+        if (!c._created_at_raw) return false;
+        const d = new Date(c._created_at_raw);
+        if (dateWindow.from && d < dateWindow.from) return false;
+        if (dateWindow.to && d > dateWindow.to) return false;
+        return true;
+      });
+    }
+  }
+
+  // Compute summary stats across in-scope timeframe
+  const keyCount = dateFiltered.filter((c) => c._segRaw === 'key_account').length;
+  const growthCount = dateFiltered.filter((c) => c._segRaw === 'growth').length;
+  const newCount = dateFiltered.filter((c) => c._segRaw === 'new').length;
+
+  const largestSegName = (keyCount >= growthCount && keyCount >= newCount)
+    ? `Key Account (${keyCount} customers)`
+    : (growthCount >= newCount ? `Growth (${growthCount} customers)` : `New (${newCount} customers)`);
+
+  // Handle Mode: Zero Orders Active Accounts
+  const isZeroOrdersMode =
     mode === 'zero_orders_active' ||
     mode === 'zero_orders' ||
     mode === '0_orders' ||
@@ -2147,60 +2294,48 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
     mode === 'no_orders' ||
     mode === 'zero_order_active' ||
     args?.has_zero_orders ||
-    args?.zero_orders
-  ) {
-    const zeroOrders = rows.filter((c) => (c.total_orders === 0 || !c.total_orders) && c.is_active);
+    args?.zero_orders;
+
+  if (isZeroOrdersMode) {
+    const zeroOrders = dateFiltered.filter((c) => c.total_orders === 0 && c.is_active);
     return {
       data: {
         total_customers_with_zero_orders_active: zeroOrders.length,
         summary: `Found ${zeroOrders.length} active customer account${zeroOrders.length === 1 ? '' : 's'} with 0 recorded orders.`,
-        customers: zeroOrders.slice(0, limit).map((c) => ({
-          customer_name: c.customer_name,
-          contact_person: c.contact_person || 'N/A',
-          phone: c.customer_phone || c.phone || 'N/A',
-          segment: 'New',
+        customers: zeroOrders.slice(0, limit).map(({ _segRaw, _created_at_raw, ...cleanCust }) => ({
+          ...cleanCust,
           health_status: 'Active (0 Orders)',
-          is_active: c.is_active,
-          total_orders: 0,
         })),
       },
       rowCount: zeroOrders.length,
     };
   }
 
-  let newCount = 0;
-  let growthCount = 0;
-  let keyCount = 0;
-
-  const directory = rows.map((c) => {
-    // Standard segmentation
-    let seg = 'new';
-    if (c.total_tonnage >= 100 || c.lifetime_value >= 5000000) seg = 'key_account';
-    else if (c.total_orders >= 2 || c.total_tonnage >= 25) seg = 'growth';
-
-    if (seg === 'key_account') keyCount++;
-    else if (seg === 'growth') growthCount++;
-    else newCount++;
-
-    return {
-      customer_name: c.customer_name,
-      contact_person: c.contact_person || 'N/A',
-      phone: c.customer_phone || c.phone || 'N/A',
-      segment: seg === 'key_account' ? 'Key Account' : (seg === 'growth' ? 'Growth' : 'New'),
-      health_status: 'Good Standing',
-      order_frequency_days: c.avg_order_frequency_days || 30,
-      last_order_date: c.last_order_date || 'N/A',
-    };
-  });
-
-  const largestSegName = (keyCount >= growthCount && keyCount >= newCount)
-    ? `Key Account (${keyCount} customers)`
-    : (growthCount >= newCount ? `Growth (${growthCount} customers)` : `New (${newCount} customers)`);
+  // Apply segment filter
+  let finalCustomers = dateFiltered;
+  const segClean = segmentFilter.replace(/[-_ ]+/g, '');
+  if (segClean && segClean !== 'all') {
+    if (segClean.includes('key')) {
+      finalCustomers = dateFiltered.filter((c) => c._segRaw === 'key_account');
+    } else if (segClean.includes('growth')) {
+      finalCustomers = dateFiltered.filter((c) => c._segRaw === 'growth');
+    } else if (segClean.includes('new')) {
+      finalCustomers = dateFiltered.filter((c) => c._segRaw === 'new');
+    }
+  }
 
   return {
     data: {
       summary: {
-        total_customers: directory.length,
+        total_customers: finalCustomers.length,
+        total_in_scope: dateFiltered.length,
+        date_range_applied: dateRange || 'all',
+        segment_filter_applied: segmentFilter || 'all',
+        by_segment: {
+          key_account: keyCount,
+          growth: growthCount,
+          new: newCount,
+        },
         new_segment_count: newCount,
         key_account_segment_count: keyCount,
         growth_segment_count: growthCount,
@@ -2208,9 +2343,9 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
         at_risk_count: 0,
         churning_count: 0,
       },
-      customers: directory.slice(0, limit),
+      customers: finalCustomers.slice(0, limit).map(({ _segRaw, _created_at_raw, ...cleanCust }) => cleanCust),
     },
-    rowCount: directory.length,
+    rowCount: finalCustomers.length,
   };
 }
 
