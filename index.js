@@ -6,7 +6,7 @@ dotenv.config({ path: path.resolve(__dirname, '.env') });
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const webhookRouter = require('./src/webhook');
-const { syncAllDatabaseToBigin, clearAllBiginData, pullBiginToDatabase } = require('./src/agents/biginSyncAgent');
+const { syncAllDatabaseToBigin, pullBiginToDatabase } = require('./src/agents/biginSyncAgent');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
