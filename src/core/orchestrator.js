@@ -174,15 +174,15 @@ Always interpret the underlying business intent and map seamlessly to the approp
   - Open Complaints with Recent Orders: "Which customers have both an open complaint and a recent order?" -> call get_complaints with mode: "open_complaints_with_orders".
 - **CUSTOMER HEALTH & SEGMENTATION**:
   - Total Customers: "How many total customers do we have?" -> call get_customer_360 without customer_name.
-  - New Segment Customers: "Show all new customers", "List new customers added this month", "Show new customers added this week", "New accounts added this month", "Show new customers" -> call get_customer_360 with segment_filter: "new" (and date_range: "this_month" / "this_week" if time qualifier is present). ONLY report customers whose segment is "New".
-  - Key Accounts: "Show all Key Accounts", "Key customers", "List key account customers" -> call get_customer_360 with segment_filter: "key_account" (and date_range if time qualifier is present).
-  - Growth Customers: "Show all Growth customers", "Growth accounts" -> call get_customer_360 with segment_filter: "growth" (and date_range if time qualifier is present).
+  - New Segment Customers: "Show all new customers", "List new customers added this month", "Show new customers added this week", "New accounts added this month", "Show new customers" -> call get_customer_360 with segment_filter: "new" (and date_range: "this_month" / "this_week" if time qualifier is present). In your summary and list, ONLY report customers and counts for the "New" segment. Do NOT include counts or lists for Key Accounts or Growth accounts when the user specifically requested New customers.
+  - Key Accounts: "Show all Key Accounts", "Key customers", "List key account customers" -> call get_customer_360 with segment_filter: "key_account" (and date_range if time qualifier is present). Report only Key Account customers and metrics.
+  - Growth Customers: "Show all Growth customers", "Growth accounts" -> call get_customer_360 with segment_filter: "growth" (and date_range if time qualifier is present). Report only Growth customers and metrics.
   - Segment Breakdown / Group by Segment: "Show all customers by segment", "Segment breakdown", "Group customers by segment" -> call get_customer_360 without segment_filter. Report counts and customer lists grouped under Key Account, Growth, and New.
   - At Risk / Churning Counts: "How many customers are At Risk?" / "How many customers are Churning?" -> call get_churn_radar or get_customer_360. Report 0 at-risk and 0 churning accounts accurately.
   - Customer Health Status: "What's the health status of [Customer]?" -> call get_customer_360 with customer_name: "[Customer]".
   - Segment Comparison: "Which segment has the most customers?" -> call get_customer_360 without customer_name. Report the largest segment from the tool output.
   - Zero Orders Active: "Show me customers with 0 orders but marked Active" -> call get_customer_360 with mode: "zero_orders_active". Report the count and customer accounts.
-  - Segment Purity Rule: When listing customers, ALWAYS display their actual segment (Key Account, Growth, or New) as returned by the tool. NEVER treat or label all customers added in a timeframe as "New" unless their segment is actually "New".
+  - Segment Purity Rule: When listing customers, ALWAYS display their actual segment (Key Account, Growth, or New) as returned by the tool. NEVER treat or label all customers added in a timeframe as "New" unless their segment is actually "New". When a specific segment is queried, report ONLY that segment.
   - Contact Person & Details Lookup (Zero Fabrication Rule): When asked "who is the contact person for [customer]?" or for customer contact details:
     1. Call get_customer_360 with customer_name: "[customer]".
     2. Check the contact_person field returned by the tool.
