@@ -536,7 +536,11 @@ async function saveCompletedVisit(visitState, senderPhone) {
   if (city) metaTags.push(`[Location: ${city}]`);
   if (material_requirement)
     metaTags.push(`[Requirement: ${material_requirement}]`);
-  if (follow_up_action) metaTags.push(`[FollowUp: ${follow_up_action}]`);
+  const { extractFollowUpDate } = require('../core/catalogFlow');
+  const parsedFuDate = follow_up_action ? extractFollowUpDate(follow_up_action, new Date(visit_date_iso || Date.now())) : null;
+  if (parsedFuDate) metaTags.push(`[FollowUpDate: ${parsedFuDate}]`);
+  if (follow_up_action) metaTags.push(`[FollowUpStatus: pending]`);
+
   if (product_interests) metaTags.push(`[Interests: ${product_interests}]`);
 
   const fullRemarks =
@@ -546,8 +550,20 @@ async function saveCompletedVisit(visitState, senderPhone) {
         : metaTags.join(' ')
       : remarks || null;
 
+  let employeeId = null;
+  try {
+    const cleanP = String(senderPhone).replace(/\D/g, '');
+    const last10 = cleanP.slice(-10);
+    const { data: empData } = await supabase
+      .from('employees')
+      .select('id')
+      .or(`phone.eq.${cleanP},phone.eq.${last10},phone.eq.91${last10},phone.eq.+91${last10}`)
+      .limit(1);
+    if (empData && empData.length > 0) employeeId = empData[0].id;
+  } catch (e) {}
+
   // Insert into customer_visits
-  const { error: visitErr } = await supabase.from('customer_visits').insert({
+  const visitInsertPayload = {
     customer_name: finalCustomerName,
     salesperson_phone: senderPhone,
     customer_address: city,
@@ -555,12 +571,20 @@ async function saveCompletedVisit(visitState, senderPhone) {
     contact_no: contact_no,
     remarks: fullRemarks,
     visited_at: visit_date_iso || new Date().toISOString(),
-  });
+    employee_id: employeeId,
+    follow_up_action: follow_up_action || null,
+    follow_up_date: parsedFuDate || null,
+    follow_up_status: follow_up_action ? 'pending' : null,
+  };
+
+  const { error: visitErr } = await supabase.from('customer_visits').insert(visitInsertPayload);
   if (visitErr) {
-    console.error(
-      '[VisitAgent] customer_visits insert error:',
-      visitErr.message,
-    );
+    console.error('[VisitAgent] customer_visits insert error, retrying base fallback:', visitErr.message);
+    delete visitInsertPayload.follow_up_action;
+    delete visitInsertPayload.follow_up_date;
+    delete visitInsertPayload.follow_up_status;
+    delete visitInsertPayload.employee_id;
+    await supabase.from('customer_visits').insert(visitInsertPayload);
   }
 
   // Update customer master profile in recurring_customers

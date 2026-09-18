@@ -521,6 +521,64 @@ function parseDDMMYYYYtoISO(dStr) {
   return now.toISOString();
 }
 
+function extractFollowUpDate(followupText, baseDate = new Date()) {
+  if (!followupText || typeof followupText !== 'string') return null;
+  const lower = followupText.toLowerCase();
+
+  // 1. Explicit DD-MM-YYYY or YYYY-MM-DD
+  const dmyMatch = lower.match(/\b(\d{1,2})[-/](\d{1,2})[-/](\d{4})\b/);
+  if (dmyMatch) {
+    const day = String(dmyMatch[1]).padStart(2, '0');
+    const month = String(dmyMatch[2]).padStart(2, '0');
+    const year = dmyMatch[3];
+    return `${year}-${month}-${day}`;
+  }
+  const ymdMatch = lower.match(/\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b/);
+  if (ymdMatch) {
+    const year = ymdMatch[1];
+    const month = String(ymdMatch[2]).padStart(2, '0');
+    const day = String(ymdMatch[3]).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  const base = new Date(baseDate.getTime());
+
+  // 2. Relative "in X days" / "after X days" / "X days"
+  const daysMatch = lower.match(/(?:in|after|within)?\s*(\d+)\s*(?:days?|din)/i);
+  if (daysMatch) {
+    const days = parseInt(daysMatch[1], 10);
+    const target = new Date(base.getTime() + days * 24 * 3600 * 1000);
+    return target.toISOString().split('T')[0];
+  }
+
+  // 3. "tomorrow" / "kal"
+  if (/\b(?:tomorrow|kal)\b/i.test(lower)) {
+    const target = new Date(base.getTime() + 1 * 24 * 3600 * 1000);
+    return target.toISOString().split('T')[0];
+  }
+
+  // 4. "next week" / "agle hafte"
+  if (/\b(?:next\s+week|agle\s+hafte)\b/i.test(lower)) {
+    const target = new Date(base.getTime() + 7 * 24 * 3600 * 1000);
+    return target.toISOString().split('T')[0];
+  }
+
+  // 5. Day of week (e.g. "on monday", "next tuesday")
+  const daysOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  for (let i = 0; i < daysOfWeek.length; i++) {
+    const dayName = daysOfWeek[i];
+    if (new RegExp(`\\b(?:on\\s+|next\\s+)?${dayName}\\b`, 'i').test(lower)) {
+      const currentDay = base.getDay();
+      let diff = i - currentDay;
+      if (diff <= 0) diff += 7;
+      const target = new Date(base.getTime() + diff * 24 * 3600 * 1000);
+      return target.toISOString().split('T')[0];
+    }
+  }
+
+  return null;
+}
+
 // ── LLM FIELD EXTRACTION ENGINE ──────────────────────────────────────────────
 
 async function extractFieldsWithLLM(action, userInput, existingDraft = {}) {
@@ -2485,7 +2543,10 @@ async function executeAction(action, draft, senderPhone) {
     switch (action) {
       case 'LOG_INQUIRY': {
         const companyName = (draft.company_name || 'Customer').trim();
-        await ensureCustomerRecord(companyName, senderPhone);
+        await ensureCustomerRecord(companyName, senderPhone, {
+          allowCreate: true,
+          city: draft.delivery_location || null,
+        });
 
         let totalAmount = 0;
         const globalRate = Number(String(draft.rate || 0).replace(/[^\d.]/g, '')) || 0;
@@ -2941,7 +3002,10 @@ Logged to Sales Pipeline & Inquiries! ✅`;
 
       case 'LOG_ORDER': {
         const companyName = (draft.company_name || 'Customer').trim();
-        await ensureCustomerRecord(companyName, senderPhone);
+        await ensureCustomerRecord(companyName, senderPhone, {
+          allowCreate: true,
+          city: draft.delivery_location || null,
+        });
 
         let totalAmount = 0;
         const structuredLineItems = (Array.isArray(draft.line_items) && draft.line_items.length > 0)
@@ -3333,25 +3397,59 @@ Updated Sales Achievement Card! 🏆`;
 
       case 'LOG_VISIT': {
         const companyName = (draft.company_name || 'Customer').trim();
-        await ensureCustomerRecord(companyName, senderPhone);
-
-        const visitDateIso = parseDDMMYYYYtoISO(draft.visit_date);
-        const outcomeTag = draft.visit_outcome ? `[Outcome: ${draft.visit_outcome}] ` : '';
-        const followupTag = draft.followup_action ? ` | Follow-up: ${draft.followup_action}` : '';
-        const formattedRemarks = `${outcomeTag}${draft.meeting_remarks || ''}${followupTag}`.trim();
-
-        // 1. Insert into customer_visits
-        const { error: visErr } = await supabase.from('customer_visits').insert({
-          salesperson_phone: senderPhone,
-          customer_name: companyName,
-          customer_address: draft.city_location,
-          person_met: draft.person_met,
-          contact_no: draft.contact_phone,
-          remarks: formattedRemarks,
-          visited_at: visitDateIso,
+        await ensureCustomerRecord(companyName, senderPhone, {
+          allowCreate: true,
+          contact_person: draft.person_met,
+          customer_phone: draft.contact_phone,
+          city: draft.city_location,
         });
 
-        if (visErr) console.error('[CatalogFlow] Visit insert error:', visErr);
+        const visitDateIso = parseDDMMYYYYtoISO(draft.visit_date);
+        const parsedFollowUpDate = draft.followup_action ? extractFollowUpDate(draft.followup_action, new Date(visitDateIso)) : null;
+
+        const outcomeTag = draft.visit_outcome ? `[Outcome: ${draft.visit_outcome}] ` : '';
+        const locTag = draft.city_location ? `[Location: ${draft.city_location}] ` : '';
+        const followupTag = draft.followup_action ? `[FollowUp: ${draft.followup_action}] ` : '';
+        const fuDateTag = parsedFollowUpDate ? `[FollowUpDate: ${parsedFollowUpDate}] ` : '';
+        const fuStatusTag = draft.followup_action ? `[FollowUpStatus: pending] ` : '';
+        const formattedRemarks = `${outcomeTag}${locTag}${followupTag}${fuDateTag}${fuStatusTag}${draft.meeting_remarks || ''}`.trim();
+
+        let employeeId = null;
+        try {
+          const cleanP = cleanPhone(senderPhone);
+          const last10 = cleanP.slice(-10);
+          const { data: empData } = await supabase
+            .from('employees')
+            .select('id')
+            .or(`phone.eq.${cleanP},phone.eq.${last10},phone.eq.91${last10},phone.eq.+91${last10}`)
+            .limit(1);
+          if (empData && empData.length > 0) employeeId = empData[0].id;
+        } catch (e) {}
+
+        // 1. Insert into customer_visits
+        const visitPayload = {
+          salesperson_phone: senderPhone,
+          customer_name: companyName,
+          customer_address: draft.city_location || null,
+          person_met: draft.person_met || null,
+          contact_no: draft.contact_phone || null,
+          remarks: formattedRemarks,
+          visited_at: visitDateIso,
+          employee_id: employeeId,
+          follow_up_action: draft.followup_action || null,
+          follow_up_date: parsedFollowUpDate || null,
+          follow_up_status: draft.followup_action ? 'pending' : null,
+        };
+
+        const { error: visErr } = await supabase.from('customer_visits').insert(visitPayload);
+        if (visErr) {
+          console.error('[CatalogFlow] Visit insert error with dedicated columns, retrying fallback:', visErr.message);
+          delete visitPayload.follow_up_action;
+          delete visitPayload.follow_up_date;
+          delete visitPayload.follow_up_status;
+          delete visitPayload.employee_id;
+          await supabase.from('customer_visits').insert(visitPayload);
+        }
 
         // 2. Log KRA 9 (Site Visit)
         await supabase.from('kra_logs').insert({
@@ -3446,6 +3544,15 @@ Logged to Customer Visits Card! ✅`;
         if (updates.person_met) visitUpdates.person_met = updates.person_met;
         if (updates.contact_phone) visitUpdates.contact_no = cleanPhone(updates.contact_phone) || updates.contact_phone;
         if (updates.city_location) visitUpdates.customer_address = updates.city_location;
+        if (updates.followup_action) {
+          visitUpdates.follow_up_action = updates.followup_action;
+          visitUpdates.follow_up_status = 'pending';
+          const parsedFuDate = extractFollowUpDate(updates.followup_action, new Date(targetVisit.visited_at || Date.now()));
+          if (parsedFuDate) visitUpdates.follow_up_date = parsedFuDate;
+        }
+        if (updates.visit_date) {
+          visitUpdates.visited_at = parseDDMMYYYYtoISO(updates.visit_date);
+        }
         if (updates.meeting_remarks || updates.visit_outcome || updates.followup_action) {
           const outcomeTag = updates.visit_outcome ? `[Outcome: ${updates.visit_outcome}] ` : '';
           const followupTag = updates.followup_action ? ` | Follow-up: ${updates.followup_action}` : '';
@@ -3567,7 +3674,7 @@ Customer record created & added to your portfolio! ✅`;
 
       case 'LOG_COMPLAINT': {
         const companyName = (draft.company_name || 'Customer').trim();
-        await ensureCustomerRecord(companyName, senderPhone);
+        await ensureCustomerRecord(companyName, senderPhone, { allowCreate: true });
 
         const nowIso = new Date().toISOString();
         const slaDueAt = new Date(Date.now() + 48 * 3600 * 1000).toISOString();
@@ -5426,4 +5533,7 @@ module.exports = {
   checkComplaintsForUpdate,
   isCustomerMatch,
   cleanLegalSuffixes,
+  extractFollowUpDate,
+  parseDDMMYYYYtoISO,
+  formatDateDDMMYYYY,
 };
