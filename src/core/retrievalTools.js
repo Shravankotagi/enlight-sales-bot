@@ -1955,6 +1955,78 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
     };
   });
 
+  // ── Mode: Longest Open Complaint ─────────────────────────────────────────
+  if (
+    mode === 'longest_open' ||
+    mode === 'oldest_open' ||
+    mode === 'longest' ||
+    mode === 'oldest' ||
+    mode === 'longest_unresolved' ||
+    mode === 'longest_pending' ||
+    mode === 'longest_open_complaint' ||
+    mode === 'oldest_complaint' ||
+    Boolean(args?.longest_open) ||
+    Boolean(args?.oldest_open)
+  ) {
+    let openComplaints = materialized.filter((c) => c.status !== 'resolved' && c.status !== 'closed');
+    if (custFilter) openComplaints = openComplaints.filter((c) => c.customer_name.toLowerCase().includes(custFilter));
+    if (repFilter) openComplaints = openComplaints.filter((c) => c.salesperson_name.toLowerCase().includes(repFilter));
+    if (typeFilter) {
+      openComplaints = openComplaints.filter((c) => {
+        const ct = (c.complaint_type || '').toLowerCase();
+        return ct.includes(typeFilter);
+      });
+    }
+
+    // Sort by reported_at / created_at ASCENDING (oldest date first)
+    const sortedOpen = [...openComplaints].sort((a, b) => {
+      const tA = new Date(a.reported_at || 0).getTime();
+      const tB = new Date(b.reported_at || 0).getTime();
+      return tA - tB;
+    });
+
+    if (sortedOpen.length === 0) {
+      return {
+        data: {
+          total_open_complaints: 0,
+          summary: 'No open complaints found in your portfolio.',
+          longest_open_complaint: null,
+          complaints: [],
+        },
+        rowCount: 0,
+      };
+    }
+
+    const longest = sortedOpen[0];
+    const repDate = new Date(longest.reported_at);
+    const daysOpen = Math.max(0, Math.floor((Date.now() - repDate.getTime()) / (24 * 60 * 60 * 1000)));
+    const dateFormatted = isNaN(repDate.getTime())
+      ? 'N/A'
+      : repDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+    return {
+      data: {
+        total_open_complaints: sortedOpen.length,
+        longest_open_complaint: {
+          customer_name: longest.customer_name,
+          po_number: longest.po_number || 'N/A',
+          product: longest.product_name,
+          complaint_type: longest.complaint_type,
+          description: longest.description,
+          status: longest.status === 'pending' ? 'Pending' : 'Open',
+          severity: longest.severity || 'Medium',
+          reported_date: dateFormatted,
+          reported_at: longest.reported_at,
+          days_open: daysOpen,
+          assigned_salesperson: longest.salesperson_name,
+        },
+        summary: `The complaint that has been open the longest in your portfolio is from ${longest.customer_name} on PO ${longest.po_number || 'N/A'} (${longest.product_name}), reported on ${dateFormatted} (open for ${daysOpen} days).`,
+        all_open_complaints_by_age: sortedOpen.slice(0, limit),
+      },
+      rowCount: sortedOpen.length,
+    };
+  }
+
   // ── Mode: Complaints by Type Breakdown ────────────────────────────────────
   if (
     mode === 'type_breakdown' ||

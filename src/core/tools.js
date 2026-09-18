@@ -293,7 +293,7 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'get_complaints',
-      description: `Retrieves customer quality and delivery complaints, 48-hour SLA performance, open vs resolved tracking, specific PO number lookups (e.g. po_number="1212"), complaint type filtering (e.g. complaint_type="Quality Defect" or "Billing"), complaints grouped by type (mode: "type_breakdown"), pending/reopened status filtering, sales rep complaints leaderboard, product category breakdown, and customers with both open complaints and recent orders (mode: "open_complaints_with_orders").`,
+      description: `Retrieves customer quality and delivery complaints, 48-hour SLA performance, open vs resolved tracking, specific PO number lookups (e.g. po_number="1212"), complaint type filtering (e.g. complaint_type="Quality Defect" or "Billing"), longest open complaint (mode: "longest_open"), complaints grouped by type (mode: "type_breakdown"), pending/reopened status filtering, sales rep complaints leaderboard, product category breakdown, and customers with both open complaints and recent orders (mode: "open_complaints_with_orders").`,
       schema: z.object({
         customer_name: z.string().optional().nullable().describe('Optional filter by customer or company name.'),
         salesperson_name: z.string().optional().nullable().describe('Optional filter by salesperson name.'),
@@ -301,7 +301,7 @@ function createTools(senderPhone, rawUserText = '') {
         complaint_type: z.string().optional().nullable().describe('Optional filter by complaint type: "Quality Defect", "quality", "physical damage", "billing", "delivery", "commercial".'),
         status_filter: z.string().optional().nullable().describe('Optional status filter: "open", "pending", "resolved", "reopened", "closed", "all".'),
         date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
-        mode: z.string().optional().nullable().describe('Query mode: "list", "type_breakdown", "open_complaints_with_orders", "rep_complaints", "product_category_breakdown", "visit_correlation".'),
+        mode: z.string().optional().nullable().describe('Query mode: "list", "longest_open", "type_breakdown", "open_complaints_with_orders", "rep_complaints", "product_category_breakdown", "visit_correlation". Use "longest_open" when the user asks which complaint is open the longest or for the oldest unresolved complaint.'),
         limit: z.number().optional().nullable().describe('Maximum number of complaints to return (default: 20).'),
       }),
     }
