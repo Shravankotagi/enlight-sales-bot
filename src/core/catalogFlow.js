@@ -22,6 +22,9 @@ const {
   verifyAndGetCustomerName,
   getAssignedCustomersList,
   normalizeCoreCompanyName,
+  getAccessibleSalespersonPhonesForBot,
+  expandPhoneVariants,
+  isPhoneInScope,
 } = require('../supabase');
 const {
   detectHsnCode,
@@ -1092,13 +1095,33 @@ async function validateDraftComplaintReference(draft, senderPhone) {
   const rawRef = (draft.linked_inquiry_or_po || draft.po_number || '').trim();
   if (!rawRef) return { isValid: true };
 
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+
   const isExplicitInquiry = /^#?(?:INQ|DEAL)-/i.test(rawRef);
   if (isExplicitInquiry) {
     const cleanInqCode = rawRef.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/^#+/, '').trim().toUpperCase();
-    const { data: customerDeals } = await supabase
+    let dQuery = supabase
       .from('deals')
-      .select('id, inquiry_id, customer_name, po_number, stage')
+      .select('id, inquiry_id, customer_name, po_number, stage, salesperson_phone')
       .ilike('customer_name', `%${companyName}%`);
+
+    let iQuery = supabase
+      .from('inquiries')
+      .select('id, sender_name, salesperson_phone, status')
+      .ilike('sender_name', `%${companyName}%`);
+
+    if (scope.phones !== null) {
+      const targetPhones = expandPhoneVariants(scope.phones);
+      if (targetPhones.length > 0) {
+        dQuery = dQuery.in('salesperson_phone', targetPhones);
+        iQuery = iQuery.in('salesperson_phone', targetPhones);
+      } else {
+        dQuery = null;
+        iQuery = null;
+      }
+    }
+
+    const { data: customerDeals } = dQuery ? await dQuery : { data: [] };
 
     const matchedDeal = (customerDeals || []).find(d => {
       const dId = (d.id || '').replace(/-/g, '').toUpperCase();
@@ -1107,10 +1130,7 @@ async function validateDraftComplaintReference(draft, senderPhone) {
     });
 
     if (!matchedDeal) {
-      const { data: customerInqs } = await supabase
-        .from('inquiries')
-        .select('id, customer_name, status')
-        .ilike('customer_name', `%${companyName}%`);
+      const { data: customerInqs } = iQuery ? await iQuery : { data: [] };
 
       const matchedInq = (customerInqs || []).find(i => {
         const iId = (i.id || '').replace(/-/g, '').toUpperCase();
@@ -1121,17 +1141,28 @@ async function validateDraftComplaintReference(draft, senderPhone) {
         const displayInq = cleanInqCode.startsWith('INQ-') ? cleanInqCode : `INQ-${cleanInqCode}`;
         return {
           isValid: false,
-          rejectionMessage: `Inquiry #${displayInq} was not found for ${companyName}. A complaint can only be raised against an existing PO or inquiry. Please verify the inquiry ID and try again.`,
+          rejectionMessage: `Inquiry #${displayInq} was not found for ${companyName}. A complaint can only be raised against an existing PO or inquiry in your portfolio. Please verify the inquiry ID and try again.`,
         };
       }
     }
   } else {
     // PO Number validation
     const cleanPo = rawRef.replace(/^(?:PO|Purchase\s*Order)[\s#:-]*/i, '').replace(/^#+/, '').trim();
-    const { data: customerDeals } = await supabase
+    let dQuery = supabase
       .from('deals')
-      .select('id, inquiry_id, customer_name, po_number, stage')
+      .select('id, inquiry_id, customer_name, po_number, stage, salesperson_phone')
       .ilike('customer_name', `%${companyName}%`);
+
+    if (scope.phones !== null) {
+      const targetPhones = expandPhoneVariants(scope.phones);
+      if (targetPhones.length > 0) {
+        dQuery = dQuery.in('salesperson_phone', targetPhones);
+      } else {
+        dQuery = null;
+      }
+    }
+
+    const { data: customerDeals } = dQuery ? await dQuery : { data: [] };
 
     const matchedDeal = (customerDeals || []).find(d => {
       if (!d.po_number) return false;
@@ -1145,7 +1176,7 @@ async function validateDraftComplaintReference(draft, senderPhone) {
       const displayPo = cleanPo.startsWith('PO') || cleanPo.startsWith('#') ? cleanPo : `#${cleanPo}`;
       return {
         isValid: false,
-        rejectionMessage: `PO ${displayPo} was not found in the Orders records for ${companyName}. A complaint can only be raised against an existing PO or inquiry. Please verify the PO number and try again.`,
+        rejectionMessage: `PO ${displayPo} was not found in the Orders records for ${companyName}. A complaint can only be raised against an existing PO or inquiry in your portfolio. Please verify the PO number and try again.`,
       };
     }
   }
@@ -1221,32 +1252,34 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
   if (draft.visit_id || draft.visit_date || draft.updates?.visit_date) return { needsDisambiguation: false };
   if (!draft.company_name) return { needsDisambiguation: false };
 
-  const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+  const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants, isPhoneInScope } = require('../supabase');
   const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
 
-  const { data: allVisits } = await supabase
+  let query = supabase
     .from('customer_visits')
     .select('id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, salesperson_phone')
     .ilike('customer_name', `%${draft.company_name.trim()}%`)
-    .order('visited_at', { ascending: false })
-    .limit(20);
+    .order('visited_at', { ascending: false });
+
+  if (scope.phones !== null) {
+    const targetPhones = expandPhoneVariants(scope.phones);
+    if (targetPhones.length > 0) {
+      query = query.in('salesperson_phone', targetPhones);
+    } else {
+      return { needsDisambiguation: false };
+    }
+  }
+
+  const { data: allVisits } = await query.limit(20);
 
   if (!allVisits || allVisits.length <= 1) return { needsDisambiguation: false };
 
   // 1. Accessibility filtering by salesperson phone
   let candidateVisits = allVisits.filter(v => {
-    if (!v.salesperson_phone) return true;
     if (scope.isAdmin || scope.phones === null) return true;
-    const vPhones = getPhoneVariants(v.salesperson_phone);
-    const accessibleSet = new Set();
-    if (Array.isArray(scope.phones)) scope.phones.forEach(p => getPhoneVariants(p).forEach(pv => accessibleSet.add(pv)));
-    if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => accessibleSet.add(pv));
-    return vPhones.some(vp => accessibleSet.has(vp));
+    if (!v.salesperson_phone) return false;
+    return isPhoneInScope(v.salesperson_phone, scope.phones);
   });
-
-  if (candidateVisits.length === 0 && allVisits.length > 0) {
-    candidateVisits = allVisits;
-  }
 
   // 2. Filter out synthetic Bigin sync logs
   const realVisits = candidateVisits.filter(v => !(v.remarks && v.remarks.startsWith('Contact Synced from Zoho Bigin')));
@@ -1295,15 +1328,27 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
   if (!draft || !draft.company_name) return { handled: false, needsDisambiguation: false };
 
   const companyName = String(draft.company_name).trim();
+  const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants } = require('../supabase');
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
 
-  // Query confirmed won orders from Orders module (deals table with stage = 'won')
-  const { data: deals } = await supabase
+  // Query confirmed won orders from Orders module (deals table with stage = 'won') strictly scoped by role
+  let dealsQuery = supabase
     .from('deals')
-    .select('id, inquiry_id, customer_name, po_number, stage, total_amount, delivery_location, created_at')
+    .select('id, inquiry_id, customer_name, po_number, stage, total_amount, delivery_location, created_at, salesperson_phone')
     .ilike('customer_name', `%${companyName}%`)
     .eq('stage', 'won')
     .order('created_at', { ascending: false });
 
+  if (scope.phones !== null) {
+    const targetPhones = expandPhoneVariants(scope.phones);
+    if (targetPhones.length > 0) {
+      dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+    } else {
+      dealsQuery = null;
+    }
+  }
+
+  const { data: deals } = dealsQuery ? await dealsQuery : { data: [] };
   const wonDeals = deals || [];
 
   if (wonDeals.length === 0) {
@@ -1505,28 +1550,35 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, inquiry_type, created_at, salesperson_phone')
     .order('created_at', { ascending: false });
 
-  if (!scope.isAdmin && accessibleList.length > 0 && !cleanInqId) {
-    dealsQuery = dealsQuery.in('salesperson_phone', accessibleList);
-    inqsQuery = inqsQuery.in('salesperson_phone', accessibleList);
+  if (!scope.isAdmin) {
+    if (accessibleList.length > 0) {
+      dealsQuery = dealsQuery.in('salesperson_phone', accessibleList);
+      inqsQuery = inqsQuery.in('salesperson_phone', accessibleList);
+    } else {
+      dealsQuery = null;
+      inqsQuery = null;
+    }
   }
 
   if (companyName) {
     const cleanWord = cleanLegalSuffixes(companyName).split(' ').filter(w => w.length >= 2)[0] || companyName;
-    dealsQuery = dealsQuery.ilike('customer_name', `%${cleanWord}%`);
+    if (dealsQuery) dealsQuery = dealsQuery.ilike('customer_name', `%${cleanWord}%`);
   }
 
-  dealsQuery = dealsQuery.limit(200);
-  inqsQuery = inqsQuery.limit(200);
+  if (dealsQuery) dealsQuery = dealsQuery.limit(200);
+  if (inqsQuery) inqsQuery = inqsQuery.limit(200);
 
-  const [{ data: allDeals }, { data: allInqs }] = await Promise.all([dealsQuery, inqsQuery]);
+  const [{ data: allDeals }, { data: allInqs }] = await Promise.all([
+    dealsQuery ? dealsQuery : Promise.resolve({ data: [] }),
+    inqsQuery ? inqsQuery : Promise.resolve({ data: [] }),
+  ]);
 
   // Apply RBAC phone filtering
   const filterByScope = (items) => {
-    if (scope.isAdmin || scope.phones === null || cleanInqId) return items || [];
+    if (scope.isAdmin || scope.phones === null) return items || [];
     return (items || []).filter(item => {
-      if (!item.salesperson_phone) return true;
-      const itemPhones = getPhoneVariants(item.salesperson_phone);
-      return itemPhones.some(ip => accessibleSet.has(ip));
+      if (!item.salesperson_phone) return false;
+      return isPhoneInScope(item.salesperson_phone, scope.phones);
     });
   };
 
@@ -1804,6 +1856,9 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
 async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '') {
   if (action !== 'UPDATE_ORDER') return { handled: false };
 
+  const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants } = require('../supabase');
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+
   const rawInqId = (draft.inquiry_id || '').trim();
   const cleanInqId = rawInqId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
   const rawPo = (draft.updates?.po_number || draft.po_number || '').trim();
@@ -1814,12 +1869,22 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
     return { handled: false };
   }
 
-  // 1. Fetch recent deals
-  const { data: deals } = await supabase
+  // 1. Fetch recent deals strictly scoped by role
+  let dealsQuery = supabase
     .from('deals')
-    .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at')
-    .order('created_at', { ascending: false })
-    .limit(100);
+    .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone')
+    .order('created_at', { ascending: false });
+
+  if (scope.phones !== null) {
+    const targetPhones = expandPhoneVariants(scope.phones);
+    if (targetPhones.length > 0) {
+      dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+    } else {
+      dealsQuery = null;
+    }
+  }
+
+  const { data: deals } = dealsQuery ? await dealsQuery.limit(100) : { data: [] };
 
   let deal = null;
   if (deals && deals.length > 0) {
@@ -1844,11 +1909,21 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
 
   // 2. Check inquiries table if cleanInqId was given and not yet found in deals
   if (!deal && cleanInqId) {
-    const { data: inqRows } = await supabase
+    let inqsQuery = supabase
       .from('inquiries')
       .select('id, company_name, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
-      .order('created_at', { ascending: false })
-      .limit(50);
+      .order('created_at', { ascending: false });
+
+    if (scope.phones !== null) {
+      const targetPhones = expandPhoneVariants(scope.phones);
+      if (targetPhones.length > 0) {
+        inqsQuery = inqsQuery.in('salesperson_phone', targetPhones);
+      } else {
+        inqsQuery = null;
+      }
+    }
+
+    const { data: inqRows } = inqsQuery ? await inqsQuery.limit(50) : { data: [] };
     if (inqRows) {
       for (const inq of inqRows) {
         const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
@@ -1951,7 +2026,7 @@ async function checkComplaintsForUpdate(action, draft, senderPhone, originalText
     return { handled: false };
   }
 
-  const matchedCmp = await findAndMatchComplaint(draft);
+  const matchedCmp = await findAndMatchComplaint(draft, senderPhone);
 
   if (!matchedCmp) {
     const refDisplay = targetRef ? `"${targetRef}"` : (companyName ? `"${companyName}"` : 'the specified reference');
@@ -2256,15 +2331,23 @@ function extractProductFromText(text) {
   return null;
 }
 
-async function findAndMatchComplaint(draft) {
+async function findAndMatchComplaint(draft, senderPhone) {
   const targetRef = (draft.linked_inquiry_or_po || draft.target_ref || draft.complaint_id || '').trim();
   const companyName = (draft.company_name || '').trim();
 
-  const { data: allComplaints } = await supabase
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+  const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
+  let complaintsQuery = supabase
     .from('complaints')
     .select('*')
-    .order('created_at', { ascending: false })
-    .limit(100);
+    .order('created_at', { ascending: false });
+
+  if (!scope.isAdmin && targetPhones.length > 0) {
+    complaintsQuery = complaintsQuery.in('reported_by', targetPhones);
+  }
+
+  const { data: allComplaints } = await complaintsQuery.limit(100);
 
   if (!allComplaints || allComplaints.length === 0) return null;
 
@@ -2291,10 +2374,15 @@ async function findAndMatchComplaint(draft) {
 
     // Lookup deals table if cleanRef matches a deal ID or PO
     try {
-      const { data: deals } = await supabase
+      let dealsQuery = supabase
         .from('deals')
-        .select('id, po_number, customer_name')
-        .limit(100);
+        .select('id, po_number, customer_name, salesperson_phone');
+
+      if (!scope.isAdmin && targetPhones.length > 0) {
+        dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+      }
+
+      const { data: deals } = await dealsQuery.limit(100);
 
       const matchedDeal = deals?.find(d => {
         const dId = (d.id || '').replace(/-/g, '').toLowerCase();
@@ -2521,13 +2609,19 @@ Logged to Sales Pipeline & Inquiries! ✅`;
         const cleanId = rawId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/[^0-9A-Z]/gi, '').trim().toUpperCase();
         const companyName = (draft.company_name || '').trim();
 
+        const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+        const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
         let deal = null;
         if (rawId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId)) {
-          const { data: dById } = await supabase
+          let dByIdQuery = supabase
             .from('deals')
-            .select('id, inquiry_id, customer_name, stage, total_amount, payment_terms, delivery_location')
-            .or(`id.eq.${rawId},inquiry_id.eq.${rawId}`)
-            .limit(1);
+            .select('id, inquiry_id, customer_name, stage, total_amount, payment_terms, delivery_location, salesperson_phone')
+            .or(`id.eq.${rawId},inquiry_id.eq.${rawId}`);
+          if (!scope.isAdmin && targetPhones.length > 0) {
+            dByIdQuery = dByIdQuery.in('salesperson_phone', targetPhones);
+          }
+          const { data: dById } = await dByIdQuery.limit(1);
           if (dById && dById.length > 0) {
             deal = dById[0];
           }
@@ -2536,9 +2630,12 @@ Logged to Sales Pipeline & Inquiries! ✅`;
         if (!deal) {
           let dealsQuery = supabase
             .from('deals')
-            .select('id, inquiry_id, customer_name, stage, total_amount, payment_terms, delivery_location')
+            .select('id, inquiry_id, customer_name, stage, total_amount, payment_terms, delivery_location, salesperson_phone')
             .order('created_at', { ascending: false });
 
+          if (!scope.isAdmin && targetPhones.length > 0) {
+            dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+          }
           if (companyName) {
             const cleanWord = cleanLegalSuffixes(companyName).split(' ').filter(w => w.length >= 2)[0] || companyName;
             dealsQuery = dealsQuery.ilike('customer_name', `%${cleanWord}%`);
@@ -2562,11 +2659,15 @@ Logged to Sales Pipeline & Inquiries! ✅`;
 
         // Check inquiries table if not found in deals yet
         if (!deal && cleanId) {
-          const { data: inqRows } = await supabase
+          let inqQuery = supabase
             .from('inquiries')
             .select('id, sender_name, salesperson_phone, status, raw_text, ai_extraction_json, deals(*)')
-            .order('created_at', { ascending: false })
-            .limit(50);
+            .order('created_at', { ascending: false });
+
+          if (!scope.isAdmin && targetPhones.length > 0) {
+            inqQuery = inqQuery.in('salesperson_phone', targetPhones);
+          }
+          const { data: inqRows } = await inqQuery.limit(50);
           if (inqRows) {
             for (const inq of inqRows) {
               const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
@@ -2930,12 +3031,20 @@ Updated Sales Achievement Card! 🏆`;
         const cleanPo = rawPo.replace(/^(?:PO[-_:#\s]*)/i, '').trim();
         const rawCompany = (draft.company_name || '').trim();
 
+        const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+        const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
         // 1. Fetch recent deals to match
-        const { data: deals } = await supabase
+        let dealsQuery = supabase
           .from('deals')
-          .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at')
-          .order('created_at', { ascending: false })
-          .limit(100);
+          .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone')
+          .order('created_at', { ascending: false });
+
+        if (!scope.isAdmin && targetPhones.length > 0) {
+          dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+        }
+
+        const { data: deals } = await dealsQuery.limit(100);
 
         let deal = null;
         if (deals && deals.length > 0) {
@@ -2966,11 +3075,15 @@ Updated Sales Achievement Card! 🏆`;
 
         // 2. If not found in deals and cleanInqId was supplied, check inquiries table
         if (!deal && cleanInqId) {
-          const { data: inqRows } = await supabase
+          let inqQuery = supabase
             .from('inquiries')
             .select('id, company_name, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
-            .order('created_at', { ascending: false })
-            .limit(50);
+            .order('created_at', { ascending: false });
+
+          if (!scope.isAdmin && targetPhones.length > 0) {
+            inqQuery = inqQuery.in('salesperson_phone', targetPhones);
+          }
+          const { data: inqRows } = await inqQuery.limit(50);
           if (inqRows) {
             for (const inq of inqRows) {
               const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
@@ -3227,8 +3340,12 @@ Logged to Customer Visits Card! ✅`;
 
         const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
         const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+        const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
 
         let visitQuery = supabase.from('customer_visits').select('*').order('visited_at', { ascending: false });
+        if (!scope.isAdmin && targetPhones.length > 0) {
+          visitQuery = visitQuery.in('salesperson_phone', targetPhones);
+        }
         const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(visitId);
         if (visitId && isUUID) {
           visitQuery = visitQuery.eq('id', visitId);
@@ -3239,18 +3356,9 @@ Logged to Customer Visits Card! ✅`;
 
         // 1. Accessibility filtering by salesperson phone
         let candidateVisits = (allVisits || []).filter(v => {
-          if (!v.salesperson_phone) return true;
           if (scope.isAdmin || scope.phones === null) return true;
-          const vPhones = getPhoneVariants(v.salesperson_phone);
-          const accessibleSet = new Set();
-          if (Array.isArray(scope.phones)) scope.phones.forEach(p => getPhoneVariants(p).forEach(pv => accessibleSet.add(pv)));
-          if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => accessibleSet.add(pv));
-          return vPhones.some(vp => accessibleSet.has(vp));
+          return isPhoneInScope(v.salesperson_phone, targetPhones);
         });
-
-        if (candidateVisits.length === 0 && allVisits && allVisits.length > 0) {
-          candidateVisits = allVisits;
-        }
 
         // 2. Separate real site visits from Bigin sync placeholder visits
         const realVisits = candidateVisits.filter(v => !(v.remarks && v.remarks.startsWith('Contact Synced from Zoho Bigin')));
@@ -3510,7 +3618,7 @@ Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
       }
 
       case 'UPDATE_COMPLAINT': {
-        const matchedCmp = await findAndMatchComplaint(draft);
+        const matchedCmp = await findAndMatchComplaint(draft, senderPhone);
 
         if (!matchedCmp) {
           const refDisplay = draft.company_name || draft.linked_inquiry_or_po || 'specified reference';

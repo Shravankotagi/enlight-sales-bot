@@ -14,7 +14,7 @@
  * 3. Exact Timestamps & Mandatory Resolution Notes.
  */
 
-const { supabase } = require('../supabase');
+const { supabase, getAccessibleSalespersonPhonesForBot, expandPhoneVariants } = require('../supabase');
 const { syncActivity } = require('./biginSyncAgent');
 const { logBotActivity } = require('../utils/activityLogger');
 
@@ -69,17 +69,32 @@ function normalizeComplaintType(typeStr) {
 }
 
 /**
- * Fetch won deals (orders) with PO for a customer from the Orders module.
+ * Fetch won deals (orders) with PO for a customer from the Orders module, strictly scoped by role.
  */
-async function getCustomerActiveDeals(customerName) {
+async function getCustomerActiveDeals(customerName, senderPhone) {
   if (!customerName) return [];
-  const { data: deals } = await supabase
+  const cleanCust = customerName.replace(/[.,'"]/g, '').trim();
+  const scope = senderPhone
+    ? await getAccessibleSalespersonPhonesForBot(senderPhone)
+    : { phones: null, isAdmin: true };
+
+  let query = supabase
     .from('deals')
-    .select('id, inquiry_id, stage, po_number, customer_name, total_amount, delivery_location, created_at')
-    .ilike('customer_name', `%${customerName.trim()}%`)
+    .select('id, inquiry_id, stage, po_number, customer_name, total_amount, delivery_location, created_at, salesperson_phone')
+    .ilike('customer_name', `%${cleanCust}%`)
     .eq('stage', 'won')
-    .order('created_at', { ascending: false })
-    .limit(10);
+    .order('created_at', { ascending: false });
+
+  if (scope.phones !== null) {
+    const targetPhones = expandPhoneVariants(scope.phones);
+    if (targetPhones.length > 0) {
+      query = query.in('salesperson_phone', targetPhones);
+    } else {
+      return [];
+    }
+  }
+
+  const { data: deals } = await query.limit(10);
 
   if (!deals || deals.length === 0) return [];
 
@@ -122,18 +137,33 @@ async function getCustomerActiveDeals(customerName) {
 }
 
 /**
- * Fetch active open inquiries (pre-won pipeline deals) for a customer.
+ * Fetch active open inquiries (pre-won pipeline deals) for a customer, strictly scoped by role.
  */
-async function getCustomerOpenInquiries(customerName) {
+async function getCustomerOpenInquiries(customerName, senderPhone) {
   if (!customerName) return [];
-  const { data: deals } = await supabase
+  const cleanCust = customerName.replace(/[.,'"]/g, '').trim();
+  const scope = senderPhone
+    ? await getAccessibleSalespersonPhonesForBot(senderPhone)
+    : { phones: null, isAdmin: true };
+
+  let query = supabase
     .from('deals')
-    .select('id, stage, po_number, customer_name, total_amount, created_at')
-    .ilike('customer_name', `%${customerName.trim()}%`)
+    .select('id, stage, po_number, customer_name, total_amount, created_at, salesperson_phone')
+    .ilike('customer_name', `%${cleanCust}%`)
     .neq('stage', 'won')
     .neq('stage', 'lost')
-    .order('created_at', { ascending: false })
-    .limit(6);
+    .order('created_at', { ascending: false });
+
+  if (scope.phones !== null) {
+    const targetPhones = expandPhoneVariants(scope.phones);
+    if (targetPhones.length > 0) {
+      query = query.in('salesperson_phone', targetPhones);
+    } else {
+      return [];
+    }
+  }
+
+  const { data: deals } = await query.limit(6);
 
   if (!deals || deals.length === 0) return [];
 
@@ -158,9 +188,13 @@ async function getCustomerOpenInquiries(customerName) {
 }
 
 /**
- * Find the most recent OPEN complaint for a customer or specific deal.
+ * Find the most recent OPEN complaint for a customer or specific deal, scoped by role.
  */
 async function getOpenComplaint(customerName, senderPhone, dealId = null) {
+  const scope = senderPhone
+    ? await getAccessibleSalespersonPhonesForBot(senderPhone)
+    : { phones: null, isAdmin: true };
+
   let query = supabase
     .from('complaints')
     .select('*')
@@ -172,8 +206,13 @@ async function getOpenComplaint(customerName, senderPhone, dealId = null) {
     query = query.ilike('customer_name', `%${customerName.trim()}%`);
   }
 
-  if (senderPhone) {
-    query = query.eq('reported_by', senderPhone);
+  if (scope.phones !== null) {
+    const targetPhones = expandPhoneVariants(scope.phones);
+    if (targetPhones.length > 0) {
+      query = query.in('reported_by', targetPhones);
+    } else {
+      return null;
+    }
   }
 
   const { data } = await query
@@ -214,7 +253,7 @@ function extractProductFromText(text) {
 /**
  * Resolve the real product name from explicit input, linked deal items, text, or fallback
  */
-async function resolveProductFromContext(dealId, poNumber, customerName, affectedProduct, text) {
+async function resolveProductFromContext(dealId, poNumber, customerName, affectedProduct, text, senderPhone = null) {
   // 1. If explicit affectedProduct is provided and NOT generic, use it
   if (affectedProduct && typeof affectedProduct === 'string') {
     const clean = affectedProduct.trim();
@@ -243,12 +282,19 @@ async function resolveProductFromContext(dealId, poNumber, customerName, affecte
   // 3. Lookup from linked deal_items via dealId
   if (dealId) {
     try {
+      const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null };
       const cleanDeal = String(dealId).replace(/^#?(?:DEAL|INQ)-?/i, '').trim().toUpperCase();
-      const { data: dealRows } = await supabase
+      let dealQuery = supabase
         .from('deals')
-        .select('id, deal_items(sku_text, dimensions, quantity, unit)')
-        .order('created_at', { ascending: false })
-        .limit(100);
+        .select('id, salesperson_phone, deal_items(sku_text, dimensions, quantity, unit)')
+        .order('created_at', { ascending: false });
+
+      if (scope.phones !== null) {
+        const targetPhones = expandPhoneVariants(scope.phones);
+        if (targetPhones.length > 0) dealQuery = dealQuery.in('salesperson_phone', targetPhones);
+      }
+
+      const { data: dealRows } = await dealQuery.limit(100);
 
       const foundDeal = (dealRows || []).find(
         (d) =>
@@ -276,11 +322,18 @@ async function resolveProductFromContext(dealId, poNumber, customerName, affecte
   // 4. Lookup from linked deal_items via poNumber
   if (poNumber) {
     try {
-      const { data: poDeals } = await supabase
+      const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null };
+      let poQuery = supabase
         .from('deals')
-        .select('id, deal_items(sku_text, dimensions, quantity, unit)')
-        .ilike('po_number', `%${poNumber.trim()}%`)
-        .limit(1);
+        .select('id, salesperson_phone, deal_items(sku_text, dimensions, quantity, unit)')
+        .ilike('po_number', `%${poNumber.trim()}%`);
+
+      if (scope.phones !== null) {
+        const targetPhones = expandPhoneVariants(scope.phones);
+        if (targetPhones.length > 0) poQuery = poQuery.in('salesperson_phone', targetPhones);
+      }
+
+      const { data: poDeals } = await poQuery.limit(1);
 
       if (poDeals && poDeals.length > 0 && poDeals[0].deal_items && poDeals[0].deal_items.length > 0) {
         const items = poDeals[0].deal_items;
@@ -302,7 +355,7 @@ async function resolveProductFromContext(dealId, poNumber, customerName, affecte
   // 5. Lookup from customer's latest won deal
   if (customerName) {
     try {
-      const activeDeals = await getCustomerActiveDeals(customerName);
+      const activeDeals = await getCustomerActiveDeals(customerName, senderPhone);
       if (activeDeals && activeDeals.length > 0 && activeDeals[0].items && activeDeals[0].items.length > 0) {
         const items = activeDeals[0].items;
         const itemSummaries = items.map(it => {
@@ -410,15 +463,29 @@ async function processSingleComplaint(data, originalText, senderPhone) {
     const dealIdMatch = originalText.match(/#?DEAL-([A-F0-9]{6})/i);
     if (dealIdMatch) {
       const shortCode = dealIdMatch[1].toLowerCase();
-      const { data: matchedDeals } = await supabase
+      const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+      let matchQuery = supabase
         .from('deals')
-        .select('id, customer_name, po_number')
+        .select('id, customer_name, po_number, salesperson_phone')
         .limit(100);
-      const found = (matchedDeals || []).find(d => d.id.toLowerCase().startsWith(shortCode));
-      if (found) {
-        data.customer_name = found.customer_name;
-        data.deal_id = found.id;
-        if (found.po_number && !data.po_number) data.po_number = found.po_number;
+
+      if (scope.phones !== null) {
+        const targetPhones = expandPhoneVariants(scope.phones);
+        if (targetPhones.length > 0) {
+          matchQuery = matchQuery.in('salesperson_phone', targetPhones);
+        } else {
+          matchQuery = null;
+        }
+      }
+
+      if (matchQuery) {
+        const { data: matchedDeals } = await matchQuery;
+        const found = (matchedDeals || []).find(d => d.id.toLowerCase().startsWith(shortCode));
+        if (found) {
+          data.customer_name = found.customer_name;
+          data.deal_id = found.id;
+          if (found.po_number && !data.po_number) data.po_number = found.po_number;
+        }
       }
     }
   }
@@ -478,7 +545,8 @@ async function processSingleComplaint(data, originalText, senderPhone) {
           openComplaint.po_number || data.po_number,
           finalCustomerName,
           affectedProduct,
-          openComplaint.description || cleanDescription || resolutionNotes
+          openComplaint.description || cleanDescription || resolutionNotes,
+          senderPhone
         );
       }
 
@@ -568,7 +636,8 @@ async function processSingleComplaint(data, originalText, senderPhone) {
         data.po_number,
         finalCustomerName,
         affectedProduct,
-        cleanDescription || originalText || resolutionNotes
+        cleanDescription || originalText || resolutionNotes,
+        senderPhone
       );
 
       await supabase.from('complaints').insert({
@@ -634,8 +703,8 @@ async function processSingleComplaint(data, originalText, senderPhone) {
   let targetDealId = data.deal_id || null;
   let targetPoNumber = data.po_number || null;
 
-  // Step 2: Fetch confirmed won orders from Orders module (deals table with stage = 'won')
-  const activeWonDeals = await getCustomerActiveDeals(finalCustomerName);
+  // Step 2: Fetch confirmed won orders from Orders module (deals table with stage = 'won') strictly scoped by role
+  const activeWonDeals = await getCustomerActiveDeals(finalCustomerName, senderPhone);
 
   // Case A: PO Number or Inquiry ID explicitly provided by user
   if (cleanPo || rawInquiryCandidate) {
@@ -664,12 +733,27 @@ async function processSingleComplaint(data, originalText, senderPhone) {
       }
     } else {
       // Check if it exists as an open inquiry in non-won stage
-      const { data: nonWonDeals } = await supabase
+      const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+      let nonWonQuery = supabase
         .from('deals')
-        .select('id, inquiry_id, customer_name, stage')
+        .select('id, inquiry_id, customer_name, stage, salesperson_phone')
         .ilike('customer_name', `%${finalCustomerName.trim()}%`)
-        .neq('stage', 'won')
-        .limit(20);
+        .neq('stage', 'won');
+
+      if (scope.phones !== null) {
+        const targetPhones = expandPhoneVariants(scope.phones);
+        if (targetPhones.length > 0) {
+          nonWonQuery = nonWonQuery.in('salesperson_phone', targetPhones);
+        } else {
+          nonWonQuery = null;
+        }
+      }
+
+      let nonWonDeals = [];
+      if (nonWonQuery) {
+        const { data: nwd } = await nonWonQuery.limit(20);
+        nonWonDeals = nwd || [];
+      }
 
       const nonWonMatch = (nonWonDeals || []).find(d => {
         const dId = (d.id || '').replace(/-/g, '').toUpperCase();
@@ -784,7 +868,8 @@ async function processSingleComplaint(data, originalText, senderPhone) {
     targetPoNumber,
     finalCustomerName,
     affectedProduct,
-    cleanDescription || originalText
+    cleanDescription || originalText,
+    senderPhone
   );
 
   // Sanitize description to remove any custom status prefix

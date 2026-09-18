@@ -41,6 +41,59 @@ function normalizePhone(phone) {
 }
 
 /**
+ * Generates all database-matchable phone number variations (10-digit, 12-digit 91-, +91-, 0-).
+ * @param {string|number} phone
+ * @returns {string[]}
+ */
+function getPhoneVariants(phone) {
+  if (!phone) return [];
+  const raw = String(phone).trim();
+  const digits = raw.replace(/\D/g, '');
+  const variants = new Set();
+  if (raw) variants.add(raw);
+  if (digits) variants.add(digits);
+  if (digits.length >= 10) {
+    const last10 = digits.slice(-10);
+    variants.add(last10);
+    variants.add(`91${last10}`);
+    variants.add(`+91${last10}`);
+    variants.add(`+91 ${last10}`);
+    variants.add(`0${last10}`);
+  }
+  return Array.from(variants);
+}
+
+/**
+ * Expands an array or single phone number into all matchable variants.
+ * @param {string|string[]} phones
+ * @returns {string[]}
+ */
+function expandPhoneVariants(phones) {
+  if (!phones) return [];
+  const list = Array.isArray(phones) ? phones : [phones];
+  const set = new Set();
+  for (const p of list) {
+    getPhoneVariants(p).forEach((v) => set.add(v));
+  }
+  return Array.from(set);
+}
+
+/**
+ * Checks if a target phone belongs to the caller's accessible phone scope.
+ * Returns true if scopePhones is null (Admin / company-wide access).
+ * @param {string|number} itemPhone
+ * @param {string[]|null} scopePhones
+ * @returns {boolean}
+ */
+function isPhoneInScope(itemPhone, scopePhones) {
+  if (scopePhones === null || scopePhones === undefined) return true;
+  if (!itemPhone) return false;
+  const itemVariants = getPhoneVariants(itemPhone);
+  const scopeSet = new Set(expandPhoneVariants(scopePhones));
+  return itemVariants.some((v) => scopeSet.has(v));
+}
+
+/**
  * Looks up an employee record by their phone number.
  * @param {string} phone - The sender phone number (e.g. '919876543210')
  * @returns {{ id, employee_id, name, role, phone, manager_id, manager_phone } | null}
@@ -321,10 +374,11 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
       .limit(1);
 
     if (scope.phones !== null) {
-      if (scope.phones.length === 1) {
-        query = query.eq('assigned_salesperson_phone', scope.phones[0]);
-      } else if (scope.phones.length > 1) {
-        query = query.in('assigned_salesperson_phone', scope.phones);
+      const targetPhones = expandPhoneVariants(scope.phones);
+      if (targetPhones.length > 0) {
+        query = query.in('assigned_salesperson_phone', targetPhones);
+      } else {
+        return null;
       }
     }
 
@@ -413,15 +467,11 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
         .limit(1);
 
       if (scope.phones !== null) {
-        if (scope.phones.length === 1) {
-          fallbackQuery = fallbackQuery.eq(
-            'assigned_salesperson_phone',
-            scope.phones[0],
-          );
-        } else if (scope.phones.length > 1) {
+        const targetPhones = expandPhoneVariants(scope.phones);
+        if (targetPhones.length > 0) {
           fallbackQuery = fallbackQuery.in(
             'assigned_salesperson_phone',
-            scope.phones,
+            targetPhones,
           );
         } else {
           return null;
@@ -864,10 +914,9 @@ async function updateCustomerProfileRecord(
       .limit(15);
 
     if (scope.phones !== null) {
-      if (scope.phones.length === 1) {
-        query = query.eq('assigned_salesperson_phone', scope.phones[0]);
-      } else if (scope.phones.length > 1) {
-        query = query.in('assigned_salesperson_phone', scope.phones);
+      const targetPhones = expandPhoneVariants(scope.phones);
+      if (targetPhones.length > 0) {
+        query = query.in('assigned_salesperson_phone', targetPhones);
       } else {
         return {
           success: false,
@@ -918,15 +967,11 @@ async function updateCustomerProfileRecord(
           .limit(20);
 
         if (scope.phones !== null) {
-          if (scope.phones.length === 1) {
-            wordQuery = wordQuery.eq(
-              'assigned_salesperson_phone',
-              scope.phones[0],
-            );
-          } else if (scope.phones.length > 1) {
+          const targetPhones = expandPhoneVariants(scope.phones);
+          if (targetPhones.length > 0) {
             wordQuery = wordQuery.in(
               'assigned_salesperson_phone',
-              scope.phones,
+              targetPhones,
             );
           }
         }
@@ -1118,10 +1163,9 @@ async function getCustomerMissingInfoPrompt(customerName, senderPhone) {
       .limit(1);
 
     if (scope.phones !== null) {
-      if (scope.phones.length === 1) {
-        query = query.eq('assigned_salesperson_phone', scope.phones[0]);
-      } else if (scope.phones.length > 1) {
-        query = query.in('assigned_salesperson_phone', scope.phones);
+      const targetPhones = expandPhoneVariants(scope.phones);
+      if (targetPhones.length > 0) {
+        query = query.in('assigned_salesperson_phone', targetPhones);
       } else {
         return '';
       }
@@ -1153,76 +1197,61 @@ async function getCustomerMissingInfoPrompt(customerName, senderPhone) {
 
 /**
  * Saves or updates the active customer context session for a salesperson.
+ * Keeps conversation state persistent across messages.
  */
-async function saveActiveSession(
-  salespersonPhone,
-  customerName,
-  intent = 'general',
-) {
-  if (!salespersonPhone || !customerName) return;
+async function saveActiveSession(senderPhone, customerName, intent = 'general') {
   try {
-    const clean = String(salespersonPhone).replace(/\D/g, '');
-    const p10 = clean.slice(-10);
-    const variants = p10
-      ? Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean]))
-      : [clean];
+    if (!senderPhone || !customerName) return false;
+    const cleanPhone = String(senderPhone).replace(/\D/g, '');
+    const last10 = cleanPhone.slice(-10);
+    const variants = Array.from(new Set([senderPhone, cleanPhone, last10, `91${last10}`, `+91${last10}`]));
 
+    // Check if session already exists for this salesperson
     const { data: existing } = await supabase
       .from('conversation_sessions')
-      .select('salesperson_phone')
+      .select('id')
       .in('salesperson_phone', variants)
       .limit(1);
 
-    const primaryPhone = `91${p10 || clean}`;
+    const payload = {
+      salesperson_phone: senderPhone,
+      active_customer_name: customerName,
+      last_intent: intent,
+      updated_at: new Date().toISOString(),
+    };
 
     if (existing && existing.length > 0) {
       await supabase
         .from('conversation_sessions')
-        .update({
-          active_customer_name: customerName,
-          last_intent: intent,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('salesperson_phone', existing[0].salesperson_phone);
+        .update(payload)
+        .eq('id', existing[0].id);
     } else {
-      await supabase.from('conversation_sessions').insert({
-        salesperson_phone: primaryPhone,
-        active_customer_name: customerName,
-        last_intent: intent,
-        updated_at: new Date().toISOString(),
-      });
+      await supabase
+        .from('conversation_sessions')
+        .insert(payload);
     }
+    return true;
   } catch (err) {
-    console.error('saveActiveSession catch:', err.message);
+    console.error('saveActiveSession error:', err.message);
+    return false;
   }
 }
 
-function getStartOfTodayISO() {
-  const now = new Date();
-  const startOfToday = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
-    0,
-    0,
-    0,
-    0,
-  );
-  return startOfToday.toISOString();
-}
-
 /**
- * Retrieves the active customer context for a salesperson (persists for the day, resets at 12:00 AM midnight).
+ * Gets the active customer context for a salesperson from their ongoing session.
+ * @param {string} senderPhone
+ * @returns {string|null} customerName or null
  */
-async function getActiveSession(salespersonPhone) {
-  if (!salespersonPhone) return null;
+async function getActiveSession(senderPhone) {
   try {
-    const clean = String(salespersonPhone).replace(/\D/g, '');
-    const p10 = clean.slice(-10);
-    const variants = p10
-      ? Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean]))
-      : [clean];
-    const startOfToday = getStartOfTodayISO();
+    if (!senderPhone) return null;
+    const cleanPhone = String(senderPhone).replace(/\D/g, '');
+    const last10 = cleanPhone.slice(-10);
+    const variants = Array.from(new Set([senderPhone, cleanPhone, last10, `91${last10}`, `+91${last10}`]));
+
+    // 24 hours expiry
+    const startOfToday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
     const { data, error } = await supabase
       .from('conversation_sessions')
       .select('active_customer_name')
@@ -1235,7 +1264,7 @@ async function getActiveSession(salespersonPhone) {
       console.error('getActiveSession error:', error.message);
       return null;
     }
-    if (data && data.length > 0) {
+    if (data && data.length > 0 && data[0].active_customer_name) {
       return data[0].active_customer_name;
     }
   } catch (err) {
@@ -1245,17 +1274,20 @@ async function getActiveSession(salespersonPhone) {
 }
 
 /**
- * Retrieves the full active session object for a salesperson (persists for the day, resets at 12:00 AM midnight).
+ * Gets the FULL active session object including last_intent for a salesperson.
+ * @param {string} senderPhone
+ * @returns {{ id, salesperson_phone, active_customer_name, last_intent, updated_at } | null}
  */
-async function getFullActiveSession(salespersonPhone) {
-  if (!salespersonPhone) return null;
+async function getFullActiveSession(senderPhone) {
   try {
-    const clean = String(salespersonPhone).replace(/\D/g, '');
-    const p10 = clean.slice(-10);
-    const variants = p10
-      ? Array.from(new Set([p10, `91${p10}`, `+91${p10}`, clean]))
-      : [clean];
-    const startOfToday = getStartOfTodayISO();
+    if (!senderPhone) return null;
+    const cleanPhone = String(senderPhone).replace(/\D/g, '');
+    const last10 = cleanPhone.slice(-10);
+    const variants = Array.from(new Set([senderPhone, cleanPhone, last10, `91${last10}`, `+91${last10}`]));
+
+    // 24 hours expiry
+    const startOfToday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
     const { data, error } = await supabase
       .from('conversation_sessions')
       .select('*')
@@ -1285,6 +1317,9 @@ module.exports = {
   saveDeal,
   getEmployeeByPhone,
   normalizePhone,
+  getPhoneVariants,
+  expandPhoneVariants,
+  isPhoneInScope,
   getAccessibleSalespersonPhonesForBot,
   getAssignedCustomersList,
   ensureCustomerRecord,

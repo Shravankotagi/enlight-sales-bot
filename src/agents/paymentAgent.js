@@ -7,7 +7,12 @@
  */
 
 const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
-const { supabase, verifyAndGetCustomerName } = require('../supabase');
+const {
+  supabase,
+  verifyAndGetCustomerName,
+  getAccessibleSalespersonPhonesForBot,
+  expandPhoneVariants,
+} = require('../supabase');
 const { getChatHistory } = require('../core/memory');
 const { syncActivity } = require('./biginSyncAgent');
 
@@ -49,7 +54,11 @@ async function getExistingPaymentRecord(customerName, senderPhone) {
     .ilike('customer_name', `%${customerName}%`);
 
   if (senderPhone) {
-    query = query.eq('salesperson_phone', senderPhone);
+    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+    const targetPhones = expandPhoneVariants(scope.phones || [senderPhone]);
+    if (!scope.isAdmin && targetPhones.length > 0) {
+      query = query.in('salesperson_phone', targetPhones);
+    }
   }
 
   const { data, error } = await query
@@ -66,11 +75,15 @@ async function getExistingPaymentRecord(customerName, senderPhone) {
 async function getDealTotal(customerName, senderPhone) {
   let query = supabase
     .from('deals')
-    .select('total_amount, stage')
+    .select('total_amount, stage, salesperson_phone')
     .ilike('customer_name', `%${customerName}%`);
 
   if (senderPhone) {
-    query = query.eq('salesperson_phone', senderPhone);
+    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+    const targetPhones = expandPhoneVariants(scope.phones || [senderPhone]);
+    if (!scope.isAdmin && targetPhones.length > 0) {
+      query = query.in('salesperson_phone', targetPhones);
+    }
   }
 
   const { data } = await query
@@ -89,17 +102,16 @@ async function getDealTotal(customerName, senderPhone) {
 async function getActiveDealForCustomer(customerName, senderPhone) {
   let query = supabase
     .from('deals')
-    .select('id, stage, total_amount, customer_name')
+    .select('id, stage, total_amount, customer_name, salesperson_phone')
     .ilike('customer_name', `%${customerName}%`)
     .not('stage', 'in', '("won","lost")');
 
   if (senderPhone) {
-    const cleanDigits = senderPhone.replace(/\D/g, '');
-    const p10 = cleanDigits.slice(-10);
-    const p12 = '91' + p10;
-    query = query.or(
-      `salesperson_phone.eq.${p10},salesperson_phone.eq.${p12}`,
-    );
+    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+    const targetPhones = expandPhoneVariants(scope.phones || [senderPhone]);
+    if (!scope.isAdmin && targetPhones.length > 0) {
+      query = query.in('salesperson_phone', targetPhones);
+    }
   }
 
   const { data } = await query
@@ -167,26 +179,37 @@ function checkAmountDiscrepancy(amountPaid, explicitPending, dealTotal) {
  * Get recent deal customer name for context memory.
  */
 async function getLastCustomerForSalesperson(senderPhone) {
-  const { data } = await supabase
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+  const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
+  let dealsQuery = supabase
     .from('deals')
-    .select('customer_name')
-    .eq('salesperson_phone', senderPhone)
+    .select('customer_name, salesperson_phone')
     .not('customer_name', 'is', null)
-    .order('created_at', { ascending: false })
-    .limit(1);
+    .order('created_at', { ascending: false });
+
+  if (!scope.isAdmin && targetPhones.length > 0) {
+    dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+  }
+
+  const { data } = await dealsQuery.limit(1);
 
   if (data && data.length > 0 && data[0].customer_name) {
     return data[0].customer_name;
   }
 
-  const { data: logs } = await supabase
+  let kraQuery = supabase
     .from('kra_logs')
-    .select('customer_name')
-    .eq('salesperson_phone', senderPhone)
+    .select('customer_name, salesperson_phone')
     .eq('kra_number', 5)
     .not('customer_name', 'is', null)
-    .order('created_at', { ascending: false })
-    .limit(1);
+    .order('created_at', { ascending: false });
+
+  if (!scope.isAdmin && targetPhones.length > 0) {
+    kraQuery = kraQuery.in('salesperson_phone', targetPhones);
+  }
+
+  const { data: logs } = await kraQuery.limit(1);
 
   if (logs && logs.length > 0 && logs[0].customer_name) {
     return logs[0].customer_name;
