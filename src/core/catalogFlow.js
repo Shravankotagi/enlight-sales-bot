@@ -284,6 +284,62 @@ function getActionFriendlyName(action) {
   }
 }
 
+function getModuleFamily(action) {
+  if (!action) return 'OTHER';
+  const act = String(action).toUpperCase().trim();
+  if (act === 'LOG_INQUIRY' || act === 'UPDATE_INQUIRY') return 'INQUIRY';
+  if (act === 'LOG_ORDER' || act === 'UPDATE_ORDER') return 'ORDER';
+  if (act === 'LOG_VISIT' || act === 'UPDATE_VISIT') return 'VISIT';
+  if (act === 'LOG_COMPLAINT' || act === 'UPDATE_COMPLAINT') return 'COMPLAINT';
+  if (act === 'LOG_NEW_CUSTOMER') return 'CUSTOMER';
+  return 'OTHER';
+}
+
+function getModuleDisplayName(action) {
+  const family = getModuleFamily(action);
+  switch (family) {
+    case 'INQUIRY': return 'Inquiry';
+    case 'ORDER': return 'Order';
+    case 'VISIT': return 'Customer Field Visit';
+    case 'COMPLAINT': return 'Customer Complaint';
+    case 'CUSTOMER': return 'New Customer Acquisition';
+    default: return getActionFriendlyName(action);
+  }
+}
+
+function getTargetActionVerb(action) {
+  switch (action) {
+    case 'LOG_INQUIRY': return 'log an inquiry';
+    case 'UPDATE_INQUIRY': return 'update an inquiry';
+    case 'LOG_ORDER': return 'log an order';
+    case 'UPDATE_ORDER': return 'update an order';
+    case 'LOG_VISIT': return 'log a visit';
+    case 'UPDATE_VISIT': return 'update a visit';
+    case 'LOG_NEW_CUSTOMER': return 'onboard a new customer';
+    case 'LOG_COMPLAINT': return 'log a complaint';
+    case 'UPDATE_COMPLAINT': return 'update a complaint';
+    default: return `start ${getActionFriendlyName(action)}`;
+  }
+}
+
+function buildOutOfScopeActivityResponse(currentAction, detectedAction) {
+  const currentModuleName = getModuleDisplayName(currentAction);
+  const targetVerb = getTargetActionVerb(detectedAction);
+
+  const replyText = `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete or cancel the current activity first.\n\nHere is the menu to start a new activity:\n\n${CATALOG_MENU}`;
+
+  return {
+    handled: true,
+    reply: replyText,
+    interactiveType: 'list',
+    interactiveList: {
+      bodyText: `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete or cancel the current activity first.\n\nHere is the menu to start a new activity:`,
+      buttonText: 'Choose Action',
+      sections: CATALOG_MENU_SECTIONS,
+    },
+  };
+}
+
 // ── GREETING & ROUTING MATCHERS ──────────────────────────────────────────────
 
 function isGreeting(text) {
@@ -4203,102 +4259,47 @@ async function handleCatalogFlow(rawText, senderPhone) {
     return { handled: false };
   }
 
-  // ── 2a. STALE / INACTIVE CONFIRMATION BUTTON PROTECTION ──────────────────────
-  const cleanInput = text.toLowerCase().replace(/[^a-z0-9\s_/]/g, ' ').replace(/\s+/g, ' ').trim();
-  const isConfirmButtonInput = [
-    'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel',
-    'save / yes', 'save/yes', 'save yes', 'edit details'
-  ].includes(cleanInput);
-
-  const isCustButtonInput = [
-    'btn_cust_yes', 'btn_cust_no',
-    'yes add customer', 'yes, add customer', 'no / cancel', 'no/cancel', 'no cancel'
-  ].includes(cleanInput);
-
-  // If user clicks a confirmation button but session is NOT in confirmation or editing flow
-  if (isConfirmButtonInput && !lastIntent.startsWith('catalog_confirm|') && !lastIntent.startsWith('catalog_editing|')) {
-    const disabledMsg = `⚠️ *Option Already Selected*\n\nThis action has already been processed and the confirmation buttons are now disabled.\n\nSend *Hi* or choose an action from the menu to start a new activity.`;
-    return {
-      handled: true,
-      reply: disabledMsg,
-    };
-  }
-
-  // If user clicks a customer onboarding button but session is NOT in implicit customer onboarding flow
-  if (isCustButtonInput && !lastIntent.startsWith('catalog_implicit_cust_ask|') && !lastIntent.startsWith('catalog_implicit_cust_collect|')) {
-    const disabledMsg = `⚠️ *Option Already Selected*\n\nThis customer onboarding option has already been processed and the buttons are now disabled.\n\nSend *Hi* or choose an action from the menu to start a new activity.`;
-    return {
-      handled: true,
-      reply: disabledMsg,
-    };
-  }
-
-  // ── 2b. ACTIVE SESSION PREEMPTION CHECK ─────────────────────────────────────
-  // If the user was in an active state (confirm, flow, editing, customer onboarding),
-  // check if they explicitly sent a NEW operational command or switched menus
+  // ── 2a. ACTIVE SESSION SCOPE GUARD & PREEMPTION CHECK ───────────────────────
   if (lastIntent.startsWith('catalog_')) {
-    const matchedMenu = matchActionFromInput(text);
+    const cleanInput = text.toLowerCase().replace(/[^a-z0-9\s_/]/g, ' ').replace(/\s+/g, ' ').trim();
+    const parts = lastIntent.split('|');
+    const currentAction = parts[1];
+    const currentDraft = safeParseJSON(parts.slice(2).join('|'), {});
 
-    if (lastIntent.startsWith('catalog_implicit_cust_ask|') || lastIntent.startsWith('catalog_implicit_cust_collect|')) {
-      const isCustConfirmation = [
-        'yes', 'y', 'haan', 'ha', 'sahi hai', 'btn_cust_yes', 'yes add customer', 'yes, add customer', 'confirm', 'add',
-        'no', 'n', 'nahi', 'wrong', 'galat', 'cancel', 'discard', 'stop', 'exit', 'quit', 'btn_cust_no', 'no / cancel', 'no/cancel', 'no cancel'
-      ].includes(cleanInput);
+    const isCustAskState = lastIntent.startsWith('catalog_implicit_cust_ask|') || lastIntent.startsWith('catalog_implicit_cust_collect|');
 
-      if (matchedMenu) {
-        await finalizeCurrentSession(senderPhone, `Switched to ${getActionFriendlyName(matchedMenu)} menu`);
-        await saveActiveSession(senderPhone, 'Unknown', 'general');
-        lastIntent = '';
-      } else if (!isCustConfirmation && !isOperationalQuery(text)) {
-        const isUpdateCmd = /^#?(?:INQ|DEAL)-[A-Z0-9]+/i.test(text.trim()) || isStageUpdatePrompt(text);
-        const detectedNewAction = await detectNewOperationalIntent(text);
-        if (isUpdateCmd || detectedNewAction) {
-          await finalizeCurrentSession(senderPhone, `Preempted customer onboarding by new command`);
-          await saveActiveSession(senderPhone, 'Unknown', 'general');
-          lastIntent = '';
-        }
-      }
-    } else {
-      const isControlReply = [
-        'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure', 'save / yes', 'save/yes', 'save yes',
-        'edit', 'change', '2', 'edit details',
-        'cancel', 'discard', 'no', 'n', '3', 'stop', 'exit', 'quit', 'nahi', 'wrong', 'galat',
-        'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel'
-      ].includes(cleanInput);
+    const isControlReply = isCustAskState
+      ? [
+          'yes', 'y', 'haan', 'ha', 'sahi hai', 'btn_cust_yes', 'yes add customer', 'yes, add customer', 'confirm', 'add',
+          'no', 'n', 'nahi', 'wrong', 'galat', 'cancel', 'discard', 'stop', 'exit', 'quit', 'btn_cust_no', 'no / cancel', 'no/cancel', 'no cancel'
+        ].includes(cleanInput)
+      : [
+          'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure', 'save / yes', 'save/yes', 'save yes',
+          'edit', 'change', '2', 'edit details',
+          'cancel', 'discard', 'no', 'n', '3', 'stop', 'exit', 'quit', 'nahi', 'wrong', 'galat',
+          'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel'
+        ].includes(cleanInput);
 
-      if (!isControlReply && !isOperationalQuery(text)) {
-        const parts = lastIntent.split('|');
-        const currentAction = parts[1];
-        const currentDraft = safeParseJSON(parts.slice(2).join('|'), {});
+    // If it's not a control reply and not a retrieval query
+    if (!isControlReply && !isOperationalQuery(text)) {
+      const isLLMQuery = await isOperationalQueryWithLLM(text);
+      if (!isLLMQuery) {
+        const matchedMenu = matchActionFromInput(text);
 
-        // 1. Explicit menu selection (e.g. user sends "1", "3", "5", "menu_1", "2. Update Inquiry")
+        // 1. Explicit menu selection from catalog (e.g. user sends "1", "3", "5", "menu_5")
         if (matchedMenu && matchedMenu !== currentAction) {
           await finalizeCurrentSession(senderPhone, `Switched to ${getActionFriendlyName(matchedMenu)} menu`);
           await saveActiveSession(senderPhone, 'Unknown', 'general');
           lastIntent = '';
-        } else if (lastIntent.startsWith('catalog_confirm|')) {
-          // 2. In confirmation state: check if user starts a brand new action for another entity
+        } else if (!matchedMenu) {
+          // 2. Strict Activity Scope Guard: Check if input belongs to a DIFFERENT module
           const detectedNewAction = await detectNewOperationalIntent(text);
           if (detectedNewAction) {
-            const isCreationCmd = /^(?:new\s+|log\s+|create\s+|record\s+|received\s+|add\s+|raise\s+|report\s+|visited\s+|went\s+to|party:)/i.test(text);
-            const hasExplicitPartyPrefix = /\b(?:for|from|to|by|party|client|customer)\s*[:=-]?\s*([A-Za-z0-9\s&.,'-]{3,})/i.test(text);
-            const mentionsDifferentCompany = currentDraft.company_name && !text.toLowerCase().includes(currentDraft.company_name.toLowerCase());
-
-            if (detectedNewAction !== currentAction || isCreationCmd || (hasExplicitPartyPrefix && mentionsDifferentCompany)) {
-              await finalizeCurrentSession(senderPhone, `Preempted by new ${getActionFriendlyName(detectedNewAction)} action`);
-              await saveActiveSession(senderPhone, 'Unknown', 'general');
-              lastIntent = '';
-            }
-          }
-        } else if (lastIntent.startsWith('catalog_flow|') || lastIntent.startsWith('catalog_editing|')) {
-          // 3. In data collection state: only preempt if message has an explicit creation command for a DIFFERENT action
-          const isExplicitDifferentModule = /^(?:log\s+visit|visited\b|went\s+to\s+meet|log\s+complaint|received\s+complaint|raise\s+complaint|log\s+order|received\s+(?:purchase\s+)?order|new\s+customer|onboard\s+customer)/i.test(text);
-          if (isExplicitDifferentModule) {
-            const detectedNewAction = await detectNewOperationalIntent(text);
-            if (detectedNewAction && detectedNewAction !== currentAction) {
-              await finalizeCurrentSession(senderPhone, `Preempted by new ${getActionFriendlyName(detectedNewAction)} action`);
-              await saveActiveSession(senderPhone, 'Unknown', 'general');
-              lastIntent = '';
+            const currentFamily = getModuleFamily(currentAction);
+            const newFamily = getModuleFamily(detectedNewAction);
+            if (newFamily !== 'OTHER' && newFamily !== currentFamily) {
+              console.log(`[CatalogFlow] Strict activity scope guard: active=${currentAction} (${currentFamily}), incoming=${detectedNewAction} (${newFamily})`);
+              return buildOutOfScopeActivityResponse(currentAction, detectedNewAction);
             }
           }
         }
@@ -4307,31 +4308,6 @@ async function handleCatalogFlow(rawText, senderPhone) {
   }
 
   // ── 3a. HANDLE IMPLICIT CUSTOMER CONFIRMATION ASK (catalog_implicit_cust_ask|...) ──
-  if (lastIntent.startsWith('catalog_implicit_cust_ask|')) {
-    const parts = lastIntent.split('|');
-    const originalAction = parts[1];
-    const unrecognizedName = parts[2];
-    const originalDraftJsonStr = parts.slice(3).join('|');
-    const originalDraft = safeParseJSON(originalDraftJsonStr, {});
-
-    if (isOperationalQuery(text)) {
-      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_implicit_cust_ask', originalAction, originalDraft);
-    }
-
-    const matchedMenu = matchActionFromInput(text);
-    if (matchedMenu) {
-      await finalizeCurrentSession(senderPhone, `Switched to ${getActionFriendlyName(matchedMenu)} menu`);
-      await saveActiveSession(senderPhone, 'Unknown', 'general');
-      lastIntent = '';
-    } else if (/^#?(?:INQ|DEAL)-[A-Z0-9]+/i.test(text.trim()) || isStageUpdatePrompt(text)) {
-      await finalizeCurrentSession(senderPhone, `Preempted by inquiry update`);
-      await saveActiveSession(senderPhone, 'Unknown', 'general');
-      lastIntent = '';
-    } else {
-      await recordSessionMessage(senderPhone, 'user', text);
-    }
-  }
-
   if (lastIntent.startsWith('catalog_implicit_cust_ask|')) {
     const parts = lastIntent.split('|');
     const originalAction = parts[1];

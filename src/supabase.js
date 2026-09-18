@@ -1206,13 +1206,6 @@ async function saveActiveSession(senderPhone, customerName, intent = 'general') 
     const last10 = cleanPhone.slice(-10);
     const variants = Array.from(new Set([senderPhone, cleanPhone, last10, `91${last10}`, `+91${last10}`]));
 
-    // Check if session already exists for this salesperson
-    const { data: existing } = await supabase
-      .from('conversation_sessions')
-      .select('id')
-      .in('salesperson_phone', variants)
-      .limit(1);
-
     const payload = {
       salesperson_phone: senderPhone,
       active_customer_name: customerName,
@@ -1220,15 +1213,16 @@ async function saveActiveSession(senderPhone, customerName, intent = 'general') 
       updated_at: new Date().toISOString(),
     };
 
-    if (existing && existing.length > 0) {
+    const { data: updated } = await supabase
+      .from('conversation_sessions')
+      .update(payload)
+      .in('salesperson_phone', variants)
+      .select('salesperson_phone');
+
+    if (!updated || updated.length === 0) {
       await supabase
         .from('conversation_sessions')
-        .update(payload)
-        .eq('id', existing[0].id);
-    } else {
-      await supabase
-        .from('conversation_sessions')
-        .insert(payload);
+        .upsert(payload, { onConflict: 'salesperson_phone' });
     }
     return true;
   } catch (err) {
