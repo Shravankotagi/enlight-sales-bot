@@ -144,7 +144,15 @@ async function verifyCustomerAccountAccess(customerName, callerContext, supabase
 
   // Admin has global access to all customers
   if (isAdminRole(callerContext.role)) {
-    return { allowed: true, isAssignedToCaller: true, existsInSystem: true };
+    return {
+      allowed: true,
+      isAssignedToCaller: true,
+      existsInSystem: true,
+      isPhoneAuth: () => true,
+      isEmpAuth: () => true,
+      authorizedPhoneSuffixes: [],
+      authorizedEmployeeIds: [],
+    };
   }
 
   const rawPhone = callerContext.phone || '';
@@ -255,7 +263,15 @@ async function verifyCustomerAccountAccess(customerName, callerContext, supabase
         message: `You do not have any company like "${customerName}" in your assigned accounts.`,
       };
     }
-    return { allowed: true, isAssignedToCaller: true, existsInSystem: true };
+    return {
+      allowed: true,
+      isAssignedToCaller: true,
+      existsInSystem: true,
+      isPhoneAuth,
+      isEmpAuth,
+      authorizedPhoneSuffixes,
+      authorizedEmployeeIds,
+    };
   }
 
   if (allMatches.length > 0) {
@@ -271,7 +287,15 @@ async function verifyCustomerAccountAccess(customerName, callerContext, supabase
         message: `You do not have any company like "${customerName}" in your assigned accounts.`,
       };
     }
-    return { allowed: true, isAssignedToCaller: true, existsInSystem: true };
+    return {
+      allowed: true,
+      isAssignedToCaller: true,
+      existsInSystem: true,
+      isPhoneAuth,
+      isEmpAuth,
+      authorizedPhoneSuffixes,
+      authorizedEmployeeIds,
+    };
   }
 
   return {
@@ -2035,17 +2059,26 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
       { data: inqRows },
     ] = await Promise.all([
       supabaseAdmin.from('recurring_customers').select('*').ilike('customer_name', `%${cleanTarget}%`).limit(1),
-      supabaseAdmin.from('deals').select('id, stage, total_amount, po_number, created_at, won_at, deal_items(sku_text, quantity, unit, rate, amount)').ilike('customer_name', `%${cleanTarget}%`),
-      supabaseAdmin.from('customer_visits').select('*').ilike('customer_name', `%${cleanTarget}%`).order('created_at', { ascending: false }),
-      supabaseAdmin.from('complaints').select('*').ilike('customer_name', `%${cleanTarget}%`).order('created_at', { ascending: false }),
-      supabaseAdmin.from('inquiries').select('id, status, created_at').ilike('sender_name', `%${cleanTarget}%`),
+      supabaseAdmin.from('deals').select('id, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, quantity, unit, rate, amount)').ilike('customer_name', `%${cleanTarget}%`),
+      supabaseAdmin.from('customer_visits').select('*, salesperson_phone, employee_id').ilike('customer_name', `%${cleanTarget}%`).order('created_at', { ascending: false }),
+      supabaseAdmin.from('complaints').select('*, reported_by, employee_id').ilike('customer_name', `%${cleanTarget}%`).order('created_at', { ascending: false }),
+      supabaseAdmin.from('inquiries').select('id, status, created_at, salesperson_phone, sender_phone').ilike('sender_name', `%${cleanTarget}%`),
     ]);
 
     const profile = custRows?.[0] || {};
-    const deals = dealRows || [];
-    const visits = visitRows || [];
-    const complaints = compRows || [];
-    const inquiries = inqRows || [];
+    let deals = dealRows || [];
+    let visits = visitRows || [];
+    let complaints = compRows || [];
+    let inquiries = inqRows || [];
+
+    if (!isAdminRole(callerContext.role)) {
+      if (access.isPhoneAuth && access.isEmpAuth) {
+        deals = deals.filter((d) => access.isPhoneAuth(d.salesperson_phone) || access.isEmpAuth(d.employee_id));
+        visits = visits.filter((v) => access.isPhoneAuth(v.salesperson_phone) || access.isEmpAuth(v.employee_id));
+        complaints = complaints.filter((c) => access.isPhoneAuth(c.reported_by) || access.isEmpAuth(c.employee_id));
+        inquiries = inquiries.filter((i) => access.isPhoneAuth(i.salesperson_phone) || access.isPhoneAuth(i.sender_phone));
+      }
+    }
 
     const wonDeals = deals.filter((d) => d.stage === 'won' || Boolean(d.po_number));
     const openDeals = deals.filter((d) => d.stage !== 'won' && d.stage !== 'lost');

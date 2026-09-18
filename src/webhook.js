@@ -191,15 +191,7 @@ router.post('/', async (req, res) => {
               if (message.interactive.type === 'button_reply' && message.interactive.button_reply) {
                 const btnId = message.interactive.button_reply.id || '';
                 const btnTitle = message.interactive.button_reply.title || '';
-                if (btnId === 'btn_confirm_yes' || btnId === 'btn_cust_yes') {
-                  raw_text = 'yes';
-                } else if (btnId === 'btn_confirm_edit') {
-                  raw_text = 'edit';
-                } else if (btnId === 'btn_confirm_cancel' || btnId === 'btn_cust_no') {
-                  raw_text = 'cancel';
-                } else {
-                  raw_text = btnId || btnTitle;
-                }
+                raw_text = btnId || btnTitle;
               } else if (message.interactive.type === 'list_reply' && message.interactive.list_reply) {
                 const listId = message.interactive.list_reply.id || '';
                 const listTitle = message.interactive.list_reply.title || '';

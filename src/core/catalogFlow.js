@@ -22,6 +22,9 @@ const {
   verifyAndGetCustomerName,
   getAssignedCustomersList,
   normalizeCoreCompanyName,
+  getAccessibleSalespersonPhonesForBot,
+  expandPhoneVariants,
+  isPhoneInScope,
 } = require('../supabase');
 const {
   detectHsnCode,
@@ -1092,13 +1095,33 @@ async function validateDraftComplaintReference(draft, senderPhone) {
   const rawRef = (draft.linked_inquiry_or_po || draft.po_number || '').trim();
   if (!rawRef) return { isValid: true };
 
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+
   const isExplicitInquiry = /^#?(?:INQ|DEAL)-/i.test(rawRef);
   if (isExplicitInquiry) {
     const cleanInqCode = rawRef.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/^#+/, '').trim().toUpperCase();
-    const { data: customerDeals } = await supabase
+    let dQuery = supabase
       .from('deals')
-      .select('id, inquiry_id, customer_name, po_number, stage')
+      .select('id, inquiry_id, customer_name, po_number, stage, salesperson_phone')
       .ilike('customer_name', `%${companyName}%`);
+
+    let iQuery = supabase
+      .from('inquiries')
+      .select('id, sender_name, salesperson_phone, status')
+      .ilike('sender_name', `%${companyName}%`);
+
+    if (scope.phones !== null) {
+      const targetPhones = expandPhoneVariants(scope.phones);
+      if (targetPhones.length > 0) {
+        dQuery = dQuery.in('salesperson_phone', targetPhones);
+        iQuery = iQuery.in('salesperson_phone', targetPhones);
+      } else {
+        dQuery = null;
+        iQuery = null;
+      }
+    }
+
+    const { data: customerDeals } = dQuery ? await dQuery : { data: [] };
 
     const matchedDeal = (customerDeals || []).find(d => {
       const dId = (d.id || '').replace(/-/g, '').toUpperCase();
@@ -1107,10 +1130,7 @@ async function validateDraftComplaintReference(draft, senderPhone) {
     });
 
     if (!matchedDeal) {
-      const { data: customerInqs } = await supabase
-        .from('inquiries')
-        .select('id, customer_name, status')
-        .ilike('customer_name', `%${companyName}%`);
+      const { data: customerInqs } = iQuery ? await iQuery : { data: [] };
 
       const matchedInq = (customerInqs || []).find(i => {
         const iId = (i.id || '').replace(/-/g, '').toUpperCase();
@@ -1121,17 +1141,28 @@ async function validateDraftComplaintReference(draft, senderPhone) {
         const displayInq = cleanInqCode.startsWith('INQ-') ? cleanInqCode : `INQ-${cleanInqCode}`;
         return {
           isValid: false,
-          rejectionMessage: `Inquiry #${displayInq} was not found for ${companyName}. A complaint can only be raised against an existing PO or inquiry. Please verify the inquiry ID and try again.`,
+          rejectionMessage: `Inquiry #${displayInq} was not found for ${companyName}. A complaint can only be raised against an existing PO or inquiry in your portfolio. Please verify the inquiry ID and try again.`,
         };
       }
     }
   } else {
     // PO Number validation
     const cleanPo = rawRef.replace(/^(?:PO|Purchase\s*Order)[\s#:-]*/i, '').replace(/^#+/, '').trim();
-    const { data: customerDeals } = await supabase
+    let dQuery = supabase
       .from('deals')
-      .select('id, inquiry_id, customer_name, po_number, stage')
+      .select('id, inquiry_id, customer_name, po_number, stage, salesperson_phone')
       .ilike('customer_name', `%${companyName}%`);
+
+    if (scope.phones !== null) {
+      const targetPhones = expandPhoneVariants(scope.phones);
+      if (targetPhones.length > 0) {
+        dQuery = dQuery.in('salesperson_phone', targetPhones);
+      } else {
+        dQuery = null;
+      }
+    }
+
+    const { data: customerDeals } = dQuery ? await dQuery : { data: [] };
 
     const matchedDeal = (customerDeals || []).find(d => {
       if (!d.po_number) return false;
@@ -1145,7 +1176,7 @@ async function validateDraftComplaintReference(draft, senderPhone) {
       const displayPo = cleanPo.startsWith('PO') || cleanPo.startsWith('#') ? cleanPo : `#${cleanPo}`;
       return {
         isValid: false,
-        rejectionMessage: `PO ${displayPo} was not found in the Orders records for ${companyName}. A complaint can only be raised against an existing PO or inquiry. Please verify the PO number and try again.`,
+        rejectionMessage: `PO ${displayPo} was not found in the Orders records for ${companyName}. A complaint can only be raised against an existing PO or inquiry in your portfolio. Please verify the PO number and try again.`,
       };
     }
   }
@@ -1221,32 +1252,34 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
   if (draft.visit_id || draft.visit_date || draft.updates?.visit_date) return { needsDisambiguation: false };
   if (!draft.company_name) return { needsDisambiguation: false };
 
-  const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+  const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants, isPhoneInScope } = require('../supabase');
   const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
 
-  const { data: allVisits } = await supabase
+  let query = supabase
     .from('customer_visits')
     .select('id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, salesperson_phone')
     .ilike('customer_name', `%${draft.company_name.trim()}%`)
-    .order('visited_at', { ascending: false })
-    .limit(20);
+    .order('visited_at', { ascending: false });
+
+  if (scope.phones !== null) {
+    const targetPhones = expandPhoneVariants(scope.phones);
+    if (targetPhones.length > 0) {
+      query = query.in('salesperson_phone', targetPhones);
+    } else {
+      return { needsDisambiguation: false };
+    }
+  }
+
+  const { data: allVisits } = await query.limit(20);
 
   if (!allVisits || allVisits.length <= 1) return { needsDisambiguation: false };
 
   // 1. Accessibility filtering by salesperson phone
   let candidateVisits = allVisits.filter(v => {
-    if (!v.salesperson_phone) return true;
     if (scope.isAdmin || scope.phones === null) return true;
-    const vPhones = getPhoneVariants(v.salesperson_phone);
-    const accessibleSet = new Set();
-    if (Array.isArray(scope.phones)) scope.phones.forEach(p => getPhoneVariants(p).forEach(pv => accessibleSet.add(pv)));
-    if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => accessibleSet.add(pv));
-    return vPhones.some(vp => accessibleSet.has(vp));
+    if (!v.salesperson_phone) return false;
+    return isPhoneInScope(v.salesperson_phone, scope.phones);
   });
-
-  if (candidateVisits.length === 0 && allVisits.length > 0) {
-    candidateVisits = allVisits;
-  }
 
   // 2. Filter out synthetic Bigin sync logs
   const realVisits = candidateVisits.filter(v => !(v.remarks && v.remarks.startsWith('Contact Synced from Zoho Bigin')));
@@ -1295,15 +1328,27 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
   if (!draft || !draft.company_name) return { handled: false, needsDisambiguation: false };
 
   const companyName = String(draft.company_name).trim();
+  const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants } = require('../supabase');
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
 
-  // Query confirmed won orders from Orders module (deals table with stage = 'won')
-  const { data: deals } = await supabase
+  // Query confirmed won orders from Orders module (deals table with stage = 'won') strictly scoped by role
+  let dealsQuery = supabase
     .from('deals')
-    .select('id, inquiry_id, customer_name, po_number, stage, total_amount, delivery_location, created_at')
+    .select('id, inquiry_id, customer_name, po_number, stage, total_amount, delivery_location, created_at, salesperson_phone')
     .ilike('customer_name', `%${companyName}%`)
     .eq('stage', 'won')
     .order('created_at', { ascending: false });
 
+  if (scope.phones !== null) {
+    const targetPhones = expandPhoneVariants(scope.phones);
+    if (targetPhones.length > 0) {
+      dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+    } else {
+      dealsQuery = null;
+    }
+  }
+
+  const { data: deals } = dealsQuery ? await dealsQuery : { data: [] };
   const wonDeals = deals || [];
 
   if (wonDeals.length === 0) {
@@ -1505,28 +1550,35 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, inquiry_type, created_at, salesperson_phone')
     .order('created_at', { ascending: false });
 
-  if (!scope.isAdmin && accessibleList.length > 0 && !cleanInqId) {
-    dealsQuery = dealsQuery.in('salesperson_phone', accessibleList);
-    inqsQuery = inqsQuery.in('salesperson_phone', accessibleList);
+  if (!scope.isAdmin) {
+    if (accessibleList.length > 0) {
+      dealsQuery = dealsQuery.in('salesperson_phone', accessibleList);
+      inqsQuery = inqsQuery.in('salesperson_phone', accessibleList);
+    } else {
+      dealsQuery = null;
+      inqsQuery = null;
+    }
   }
 
   if (companyName) {
     const cleanWord = cleanLegalSuffixes(companyName).split(' ').filter(w => w.length >= 2)[0] || companyName;
-    dealsQuery = dealsQuery.ilike('customer_name', `%${cleanWord}%`);
+    if (dealsQuery) dealsQuery = dealsQuery.ilike('customer_name', `%${cleanWord}%`);
   }
 
-  dealsQuery = dealsQuery.limit(200);
-  inqsQuery = inqsQuery.limit(200);
+  if (dealsQuery) dealsQuery = dealsQuery.limit(200);
+  if (inqsQuery) inqsQuery = inqsQuery.limit(200);
 
-  const [{ data: allDeals }, { data: allInqs }] = await Promise.all([dealsQuery, inqsQuery]);
+  const [{ data: allDeals }, { data: allInqs }] = await Promise.all([
+    dealsQuery ? dealsQuery : Promise.resolve({ data: [] }),
+    inqsQuery ? inqsQuery : Promise.resolve({ data: [] }),
+  ]);
 
   // Apply RBAC phone filtering
   const filterByScope = (items) => {
-    if (scope.isAdmin || scope.phones === null || cleanInqId) return items || [];
+    if (scope.isAdmin || scope.phones === null) return items || [];
     return (items || []).filter(item => {
-      if (!item.salesperson_phone) return true;
-      const itemPhones = getPhoneVariants(item.salesperson_phone);
-      return itemPhones.some(ip => accessibleSet.has(ip));
+      if (!item.salesperson_phone) return false;
+      return isPhoneInScope(item.salesperson_phone, scope.phones);
     });
   };
 
@@ -1804,6 +1856,9 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
 async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '') {
   if (action !== 'UPDATE_ORDER') return { handled: false };
 
+  const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants } = require('../supabase');
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+
   const rawInqId = (draft.inquiry_id || '').trim();
   const cleanInqId = rawInqId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
   const rawPo = (draft.updates?.po_number || draft.po_number || '').trim();
@@ -1814,12 +1869,22 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
     return { handled: false };
   }
 
-  // 1. Fetch recent deals
-  const { data: deals } = await supabase
+  // 1. Fetch recent deals strictly scoped by role
+  let dealsQuery = supabase
     .from('deals')
-    .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at')
-    .order('created_at', { ascending: false })
-    .limit(100);
+    .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone')
+    .order('created_at', { ascending: false });
+
+  if (scope.phones !== null) {
+    const targetPhones = expandPhoneVariants(scope.phones);
+    if (targetPhones.length > 0) {
+      dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+    } else {
+      dealsQuery = null;
+    }
+  }
+
+  const { data: deals } = dealsQuery ? await dealsQuery.limit(100) : { data: [] };
 
   let deal = null;
   if (deals && deals.length > 0) {
@@ -1844,11 +1909,21 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
 
   // 2. Check inquiries table if cleanInqId was given and not yet found in deals
   if (!deal && cleanInqId) {
-    const { data: inqRows } = await supabase
+    let inqsQuery = supabase
       .from('inquiries')
       .select('id, company_name, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
-      .order('created_at', { ascending: false })
-      .limit(50);
+      .order('created_at', { ascending: false });
+
+    if (scope.phones !== null) {
+      const targetPhones = expandPhoneVariants(scope.phones);
+      if (targetPhones.length > 0) {
+        inqsQuery = inqsQuery.in('salesperson_phone', targetPhones);
+      } else {
+        inqsQuery = null;
+      }
+    }
+
+    const { data: inqRows } = inqsQuery ? await inqsQuery.limit(50) : { data: [] };
     if (inqRows) {
       for (const inq of inqRows) {
         const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
@@ -1951,7 +2026,7 @@ async function checkComplaintsForUpdate(action, draft, senderPhone, originalText
     return { handled: false };
   }
 
-  const matchedCmp = await findAndMatchComplaint(draft);
+  const matchedCmp = await findAndMatchComplaint(draft, senderPhone);
 
   if (!matchedCmp) {
     const refDisplay = targetRef ? `"${targetRef}"` : (companyName ? `"${companyName}"` : 'the specified reference');
@@ -2256,15 +2331,23 @@ function extractProductFromText(text) {
   return null;
 }
 
-async function findAndMatchComplaint(draft) {
+async function findAndMatchComplaint(draft, senderPhone) {
   const targetRef = (draft.linked_inquiry_or_po || draft.target_ref || draft.complaint_id || '').trim();
   const companyName = (draft.company_name || '').trim();
 
-  const { data: allComplaints } = await supabase
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+  const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
+  let complaintsQuery = supabase
     .from('complaints')
     .select('*')
-    .order('created_at', { ascending: false })
-    .limit(100);
+    .order('created_at', { ascending: false });
+
+  if (!scope.isAdmin && targetPhones.length > 0) {
+    complaintsQuery = complaintsQuery.in('reported_by', targetPhones);
+  }
+
+  const { data: allComplaints } = await complaintsQuery.limit(100);
 
   if (!allComplaints || allComplaints.length === 0) return null;
 
@@ -2291,10 +2374,15 @@ async function findAndMatchComplaint(draft) {
 
     // Lookup deals table if cleanRef matches a deal ID or PO
     try {
-      const { data: deals } = await supabase
+      let dealsQuery = supabase
         .from('deals')
-        .select('id, po_number, customer_name')
-        .limit(100);
+        .select('id, po_number, customer_name, salesperson_phone');
+
+      if (!scope.isAdmin && targetPhones.length > 0) {
+        dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+      }
+
+      const { data: deals } = await dealsQuery.limit(100);
 
       const matchedDeal = deals?.find(d => {
         const dId = (d.id || '').replace(/-/g, '').toLowerCase();
@@ -2521,13 +2609,19 @@ Logged to Sales Pipeline & Inquiries! ✅`;
         const cleanId = rawId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/[^0-9A-Z]/gi, '').trim().toUpperCase();
         const companyName = (draft.company_name || '').trim();
 
+        const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+        const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
         let deal = null;
         if (rawId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId)) {
-          const { data: dById } = await supabase
+          let dByIdQuery = supabase
             .from('deals')
-            .select('id, inquiry_id, customer_name, stage, total_amount, payment_terms, delivery_location')
-            .or(`id.eq.${rawId},inquiry_id.eq.${rawId}`)
-            .limit(1);
+            .select('id, inquiry_id, customer_name, stage, total_amount, payment_terms, delivery_location, salesperson_phone')
+            .or(`id.eq.${rawId},inquiry_id.eq.${rawId}`);
+          if (!scope.isAdmin && targetPhones.length > 0) {
+            dByIdQuery = dByIdQuery.in('salesperson_phone', targetPhones);
+          }
+          const { data: dById } = await dByIdQuery.limit(1);
           if (dById && dById.length > 0) {
             deal = dById[0];
           }
@@ -2536,9 +2630,12 @@ Logged to Sales Pipeline & Inquiries! ✅`;
         if (!deal) {
           let dealsQuery = supabase
             .from('deals')
-            .select('id, inquiry_id, customer_name, stage, total_amount, payment_terms, delivery_location')
+            .select('id, inquiry_id, customer_name, stage, total_amount, payment_terms, delivery_location, salesperson_phone')
             .order('created_at', { ascending: false });
 
+          if (!scope.isAdmin && targetPhones.length > 0) {
+            dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+          }
           if (companyName) {
             const cleanWord = cleanLegalSuffixes(companyName).split(' ').filter(w => w.length >= 2)[0] || companyName;
             dealsQuery = dealsQuery.ilike('customer_name', `%${cleanWord}%`);
@@ -2562,11 +2659,15 @@ Logged to Sales Pipeline & Inquiries! ✅`;
 
         // Check inquiries table if not found in deals yet
         if (!deal && cleanId) {
-          const { data: inqRows } = await supabase
+          let inqQuery = supabase
             .from('inquiries')
             .select('id, sender_name, salesperson_phone, status, raw_text, ai_extraction_json, deals(*)')
-            .order('created_at', { ascending: false })
-            .limit(50);
+            .order('created_at', { ascending: false });
+
+          if (!scope.isAdmin && targetPhones.length > 0) {
+            inqQuery = inqQuery.in('salesperson_phone', targetPhones);
+          }
+          const { data: inqRows } = await inqQuery.limit(50);
           if (inqRows) {
             for (const inq of inqRows) {
               const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
@@ -2930,12 +3031,20 @@ Updated Sales Achievement Card! 🏆`;
         const cleanPo = rawPo.replace(/^(?:PO[-_:#\s]*)/i, '').trim();
         const rawCompany = (draft.company_name || '').trim();
 
+        const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+        const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
         // 1. Fetch recent deals to match
-        const { data: deals } = await supabase
+        let dealsQuery = supabase
           .from('deals')
-          .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at')
-          .order('created_at', { ascending: false })
-          .limit(100);
+          .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone')
+          .order('created_at', { ascending: false });
+
+        if (!scope.isAdmin && targetPhones.length > 0) {
+          dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+        }
+
+        const { data: deals } = await dealsQuery.limit(100);
 
         let deal = null;
         if (deals && deals.length > 0) {
@@ -2966,11 +3075,15 @@ Updated Sales Achievement Card! 🏆`;
 
         // 2. If not found in deals and cleanInqId was supplied, check inquiries table
         if (!deal && cleanInqId) {
-          const { data: inqRows } = await supabase
+          let inqQuery = supabase
             .from('inquiries')
             .select('id, company_name, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
-            .order('created_at', { ascending: false })
-            .limit(50);
+            .order('created_at', { ascending: false });
+
+          if (!scope.isAdmin && targetPhones.length > 0) {
+            inqQuery = inqQuery.in('salesperson_phone', targetPhones);
+          }
+          const { data: inqRows } = await inqQuery.limit(50);
           if (inqRows) {
             for (const inq of inqRows) {
               const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
@@ -3227,8 +3340,12 @@ Logged to Customer Visits Card! ✅`;
 
         const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
         const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+        const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
 
         let visitQuery = supabase.from('customer_visits').select('*').order('visited_at', { ascending: false });
+        if (!scope.isAdmin && targetPhones.length > 0) {
+          visitQuery = visitQuery.in('salesperson_phone', targetPhones);
+        }
         const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(visitId);
         if (visitId && isUUID) {
           visitQuery = visitQuery.eq('id', visitId);
@@ -3239,18 +3356,9 @@ Logged to Customer Visits Card! ✅`;
 
         // 1. Accessibility filtering by salesperson phone
         let candidateVisits = (allVisits || []).filter(v => {
-          if (!v.salesperson_phone) return true;
           if (scope.isAdmin || scope.phones === null) return true;
-          const vPhones = getPhoneVariants(v.salesperson_phone);
-          const accessibleSet = new Set();
-          if (Array.isArray(scope.phones)) scope.phones.forEach(p => getPhoneVariants(p).forEach(pv => accessibleSet.add(pv)));
-          if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => accessibleSet.add(pv));
-          return vPhones.some(vp => accessibleSet.has(vp));
+          return isPhoneInScope(v.salesperson_phone, targetPhones);
         });
-
-        if (candidateVisits.length === 0 && allVisits && allVisits.length > 0) {
-          candidateVisits = allVisits;
-        }
 
         // 2. Separate real site visits from Bigin sync placeholder visits
         const realVisits = candidateVisits.filter(v => !(v.remarks && v.remarks.startsWith('Contact Synced from Zoho Bigin')));
@@ -3510,7 +3618,7 @@ Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
       }
 
       case 'UPDATE_COMPLAINT': {
-        const matchedCmp = await findAndMatchComplaint(draft);
+        const matchedCmp = await findAndMatchComplaint(draft, senderPhone);
 
         if (!matchedCmp) {
           const refDisplay = draft.company_name || draft.linked_inquiry_or_po || 'specified reference';
@@ -3590,6 +3698,63 @@ Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
 }
 
 // ── OPERATIONAL ACTION & QUERY DETECTION HELPERS ─────────────────────────────
+
+/**
+ * Detects queries asking for delivery tracking, dispatch status, vehicle tracking,
+ * shipment in transit, or pending orders that haven't been delivered yet.
+ * These are currently out of scope for the WhatsApp bot.
+ */
+function isOutOfScopeDeliveryQuery(text) {
+  if (!text || typeof text !== 'string') return false;
+  const lower = text.toLowerCase().trim();
+
+  // Guard: If it's pure data entry like "Delivery Location: Mumbai" or "Delivery: Pune" during form filling, NOT out of scope.
+  if (/^(?:delivery\s*location|delivery\s*address|delivery\s*city|destination|target\s*delivery\s*date)\s*[:=-]/i.test(lower)) {
+    return false;
+  }
+  // Guard: If it's asking "what is the delivery location on PO 123" -> in scope (delivery_location field)
+  if (/\b(?:delivery\s+location|delivery\s+address|site\s+location)\b/i.test(lower) && 
+      !/\b(?:deliver(?:ed|ing|y)?\s+(?:status|tracking|update|time|delay|kya|kab|pending)|undelivered|un-delivered|dispatch|transit|tracking|shipped|shipment|consignment|transporter|truck|vehicle|eway|e-way|lr\s*no|lorry)\b/i.test(lower)) {
+    return false;
+  }
+
+  // Comprehensive Out-of-Scope Patterns for Delivery, Dispatch & Logistics Tracking
+  const outOfScopePatterns = [
+    // 1. Delivery status / tracking / progress / ETA
+    /\b(?:delivery\s+status|delivery\s+tracking|track\s+(?:my\s+|the\s+)?delivery|track\s+(?:my\s+|the\s+)?order\s+delivery|live\s+delivery|delivery\s+update|delivery\s+progress|delivery\s+eta|delivery\s+timeline)\b/i,
+    
+    // 2. Undelivered / Pending delivery / Not delivered / Yet to be delivered
+    /\b(?:haven'?t\s+been\s+delivered|hasn'?t\s+been\s+delivered|have\s+not\s+been\s+delivered|has\s+not\s+been\s+delivered|not\s+(?:yet\s+|been\s+|ever\s+)*delivered)\b/i,
+    /\b(?:pending\s+deliver(?:y|ies)|undelivered|un-delivered|non-delivered|non\s+delivered|yet\s+to\s+be\s+delivered|waiting\s+(?:for\s+)?delivery|awaiting\s+delivery)\b/i,
+    /\b(?:orders?\s+(?:that\s+)?(?:are\s+|have\s+)?(?:not\s+delivered|pending\s+delivery|in\s+transit|undelivered))\b/i,
+    /\b(?:orders?\s+not\s+delivered|pending\s+orders?\s+not\s+delivered|orders?\s+pending\s+delivery|undelivered\s+(?:orders?|pos?|deals?|materials?|goods?))\b/i,
+    
+    // 3. Questions asking if delivered or when delivered
+    /\b(?:has|have|is|was|will|got)\b.*\bdelivered\b/i,
+    /\b(?:when\s+will\b.*\bdelivered)\b/i,
+    
+    // 4. Dispatch status / tracking / date / update
+    /\b(?:dispatch\s+status|dispatched\s+status|dispatch\s+tracking|track\s+dispatch|dispatch\s+update|dispatch\s+details|dispatch\s+date|dispatched\s+date)\b/i,
+    /\b(?:has|have|is|was|will|got)\b.*\bdispatched\b/i,
+    /\b(?:when\s+will\b.*\bdispatched)\b/i,
+    /\b(?:dispatched\s+yet|dispatched\s+kya|material\s+dispatched|order\s+dispatched)\b/i,
+    
+    // 5. In-transit, vehicle, truck & logistics tracking
+    /\b(?:in\s+transit|material\s+in\s+transit|goods\s+in\s+transit|orders?\s+in\s+transit)\b/i,
+    /\b(?:truck\s+status|truck\s+tracking|vehicle\s+tracking|vehicle\s+status|track\s+truck|track\s+vehicle|where\s+is\s+(?:the\s+|my\s+)?truck)\b/i,
+    /\b(?:shipment\s+tracking|track\s+shipment|where\s+is\s+(?:the\s+|my\s+)?shipment|shipment\s+status|where\s+is\s+(?:the\s+|my\s+)?consignment)\b/i,
+    /\b(?:logistics\s+status|logistics\s+tracking|transporter\s+details|transporter\s+status|lr\s+(?:no|number)|lorry\s+receipt|eway\s+bill|e-way\s+bill)\b/i,
+    /\b(?:where\s+is\s+(?:my\s+|the\s+)?(?:order|delivery|material|consignment)\s*(?:currently|now|reached)?)\b/i,
+
+    // 6. Hinglish delivery / dispatch / truck tracking questions
+    /\b(?:deliver\s+(?:hua|ho\s+gaya|kab|nahi|ho\s+chuka))\b/i,
+    /\b(?:delivery\s+(?:hui|kab|kahan|pending|nahi))\b/i,
+    /\b(?:dispatch\s+(?:hua|ho\s+gaya|kab|nahi|kahan))\b/i,
+    /\b(?:gaadi|truck|driver|vehicle)\b.*\b(?:nikli|nikla|kahan|kab|pahunch|aayeg|aaya)\b/i,
+  ];
+
+  return outOfScopePatterns.some((pattern) => pattern.test(lower));
+}
 
 function isOperationalQuery(text) {
   if (!text || typeof text !== 'string') return false;
@@ -4019,6 +4184,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
     };
   }
 
+  // ── 1b. OUT-OF-SCOPE DELIVERY / DISPATCH QUERY CHECK ─────────────────────────
+  if (isOutOfScopeDeliveryQuery(text)) {
+    const outOfScopeMsg = `ℹ️ *Delivery & Dispatch Tracking is Out of Scope*\n\nOrder delivery, shipment, and dispatch tracking are not currently within my scope.\n\nPlease ask questions related to Inquiries, Won Orders, Customer Visits, Complaints, Payments, or Customer Master records.`;
+    await recordSessionMessage(senderPhone, 'assistant', outOfScopeMsg);
+    return {
+      handled: true,
+      reply: outOfScopeMsg,
+    };
+  }
+
   // ── 2. FETCH ACTIVE SESSION STATE ──────────────────────────────────────────
   const activeSession = await getFullActiveSession(senderPhone);
   let lastIntent = activeSession ? (activeSession.last_intent || '') : '';
@@ -4028,17 +4203,46 @@ async function handleCatalogFlow(rawText, senderPhone) {
     return { handled: false };
   }
 
+  // ── 2a. STALE / INACTIVE CONFIRMATION BUTTON PROTECTION ──────────────────────
+  const cleanInput = text.toLowerCase().replace(/[^a-z0-9\s_/]/g, ' ').replace(/\s+/g, ' ').trim();
+  const isConfirmButtonInput = [
+    'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel',
+    'save / yes', 'save/yes', 'save yes', 'edit details'
+  ].includes(cleanInput);
+
+  const isCustButtonInput = [
+    'btn_cust_yes', 'btn_cust_no',
+    'yes add customer', 'yes, add customer', 'no / cancel', 'no/cancel', 'no cancel'
+  ].includes(cleanInput);
+
+  // If user clicks a confirmation button but session is NOT in confirmation or editing flow
+  if (isConfirmButtonInput && !lastIntent.startsWith('catalog_confirm|') && !lastIntent.startsWith('catalog_editing|')) {
+    const disabledMsg = `⚠️ *Option Already Selected*\n\nThis action has already been processed and the confirmation buttons are now disabled.\n\nSend *Hi* or choose an action from the menu to start a new activity.`;
+    return {
+      handled: true,
+      reply: disabledMsg,
+    };
+  }
+
+  // If user clicks a customer onboarding button but session is NOT in implicit customer onboarding flow
+  if (isCustButtonInput && !lastIntent.startsWith('catalog_implicit_cust_ask|') && !lastIntent.startsWith('catalog_implicit_cust_collect|')) {
+    const disabledMsg = `⚠️ *Option Already Selected*\n\nThis customer onboarding option has already been processed and the buttons are now disabled.\n\nSend *Hi* or choose an action from the menu to start a new activity.`;
+    return {
+      handled: true,
+      reply: disabledMsg,
+    };
+  }
+
   // ── 2b. ACTIVE SESSION PREEMPTION CHECK ─────────────────────────────────────
   // If the user was in an active state (confirm, flow, editing, customer onboarding),
   // check if they explicitly sent a NEW operational command or switched menus
   if (lastIntent.startsWith('catalog_')) {
-    const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
     const matchedMenu = matchActionFromInput(text);
 
     if (lastIntent.startsWith('catalog_implicit_cust_ask|') || lastIntent.startsWith('catalog_implicit_cust_collect|')) {
       const isCustConfirmation = [
-        'yes', 'y', 'haan', 'ha', 'sahi hai', 'btn_cust_yes', 'confirm', 'add',
-        'no', 'n', 'nahi', 'wrong', 'galat', 'cancel', 'discard', 'stop', 'exit', 'quit', 'btn_cust_no'
+        'yes', 'y', 'haan', 'ha', 'sahi hai', 'btn_cust_yes', 'yes add customer', 'yes, add customer', 'confirm', 'add',
+        'no', 'n', 'nahi', 'wrong', 'galat', 'cancel', 'discard', 'stop', 'exit', 'quit', 'btn_cust_no', 'no / cancel', 'no/cancel', 'no cancel'
       ].includes(cleanInput);
 
       if (matchedMenu) {
@@ -4056,8 +4260,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
       }
     } else {
       const isControlReply = [
-        'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure',
-        'edit', 'change', '2',
+        'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure', 'save / yes', 'save/yes', 'save yes',
+        'edit', 'change', '2', 'edit details',
         'cancel', 'discard', 'no', 'n', '3', 'stop', 'exit', 'quit', 'nahi', 'wrong', 'galat',
         'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel'
       ].includes(cleanInput);
@@ -4138,6 +4342,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // User confirmed YES (This is a new customer)
     if (
+      cleanInput === 'btn_cust_yes' ||
+      cleanInput === 'yes, add customer' ||
       cleanInput === 'yes' ||
       cleanInput === 'y' ||
       cleanInput === '1' ||
@@ -4226,6 +4432,9 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // User confirmed NO (Not a new customer -> re-enter correct name)
     if (
+      cleanInput === 'btn_cust_no' ||
+      cleanInput === 'no / cancel' ||
+      cleanInput === 'no/cancel' ||
       cleanInput === 'no' ||
       cleanInput === 'n' ||
       cleanInput === 'nahi' ||
@@ -4393,6 +4602,9 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // Confirm YES
     if (
+      cleanInput === 'btn_confirm_yes' ||
+      cleanInput === 'save / yes' ||
+      cleanInput === 'save/yes' ||
       cleanInput === 'yes' ||
       cleanInput === 'y' ||
       cleanInput === '1' ||
@@ -4477,6 +4689,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // Request EDIT
     if (
+      cleanInput === 'btn_confirm_edit' ||
+      cleanInput === 'edit details' ||
       cleanInput === 'edit' ||
       cleanInput === 'change' ||
       cleanInput === 'modify' ||
@@ -4495,11 +4709,14 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // CANCEL
     if (
+      cleanInput === 'btn_confirm_cancel' ||
       cleanInput === 'cancel' ||
       cleanInput === 'discard' ||
       cleanInput === 'no' ||
       cleanInput === '3' ||
-      cleanInput === 'stop'
+      cleanInput === 'stop' ||
+      cleanInput === 'exit' ||
+      cleanInput === 'quit'
     ) {
       await recordSessionMessage(senderPhone, 'user', text);
       const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
@@ -4576,6 +4793,24 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     if (isOperationalQuery(text)) {
       return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_editing', action, draft);
+    }
+
+    const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
+
+    // Cancel during edit
+    if (cleanInput === 'btn_confirm_cancel' || /^(?:cancel|stop|discard|exit|quit)$/i.test(cleanInput)) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
+      await recordSessionMessage(senderPhone, 'assistant', cancelReply);
+      await finalizeCurrentSession(senderPhone, `Cancelled ${getActionFriendlyName(action)} draft during edit`);
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return { handled: true, reply: cancelReply };
+    }
+
+    // Edit button tapped again while already in edit mode
+    if (cleanInput === 'btn_confirm_edit' || cleanInput === 'edit details') {
+      const alreadyEditMsg = `You are currently editing this draft. Which field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")`;
+      return { handled: true, reply: alreadyEditMsg };
     }
 
     await recordSessionMessage(senderPhone, 'user', text);

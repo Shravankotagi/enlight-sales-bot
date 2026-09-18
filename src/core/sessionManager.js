@@ -9,7 +9,7 @@
  * 5. Intelligent Cross-Database Retrieval for Option 10: Query-driven multi-table search (deals, visits, complaints, customers, session logs) replacing the rigid 7-session text dump.
  */
 
-const { supabase, getAccessibleSalespersonPhonesForBot } = require('../supabase');
+const { supabase, getAccessibleSalespersonPhonesForBot, expandPhoneVariants } = require('../supabase');
 
 // Fast in-memory cache: phoneKey -> { current_session, last_completed_activity, rolling_messages, saved_sessions }
 const sessionCache = new Map();
@@ -557,20 +557,21 @@ async function searchDatabaseForOption10(senderPhone, queryText) {
       }
     }
 
+    const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
     // 1. Query Deals & Inquiries (matching customer, ID, or recent dates)
     let dealsQuery = supabase
       .from('deals')
-      .select('deal_code, customer_name, stage, total_amount, po_number, inquiry_type, created_at, updated_at, deal_items(product_name, specification, quantity, unit, rate, amount)')
+      .select('id, inquiry_id, customer_name, stage, total_amount, po_number, inquiry_type, created_at, updated_at, salesperson_phone, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
       .order('created_at', { ascending: false })
       .limit(10);
 
-    if (scope.phones !== null) {
-      if (scope.phones.length === 1) dealsQuery = dealsQuery.eq('salesperson_phone', scope.phones[0]);
-      else if (scope.phones.length > 1) dealsQuery = dealsQuery.in('salesperson_phone', scope.phones);
+    if (!scope.isAdmin && targetPhones.length > 0) {
+      dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
     }
 
     if (dealIdFilter) {
-      dealsQuery = dealsQuery.ilike('deal_code', `%${dealIdFilter}%`);
+      dealsQuery = dealsQuery.or(`id.ilike.%${dealIdFilter}%,inquiry_id.ilike.%${dealIdFilter}%`);
     } else if (poFilter) {
       dealsQuery = dealsQuery.ilike('po_number', `%${poFilter}%`);
     } else if (customerFilter) {
@@ -584,14 +585,13 @@ async function searchDatabaseForOption10(senderPhone, queryText) {
 
     // 2. Query Complaints (if query asks about complaints or quality or resolution)
     let complaintsQuery = supabase
-      .from('customer_complaints')
-      .select('complaint_code, customer_name, complaint_type, issue_description, resolution_status, root_cause, resolved_at, created_at, po_number')
+      .from('complaints')
+      .select('id, customer_name, complaint_type, description, status, corrective_action, resolved_at, created_at, po_number, reported_by')
       .order('created_at', { ascending: false })
       .limit(5);
 
-    if (scope.phones !== null) {
-      if (scope.phones.length === 1) complaintsQuery = complaintsQuery.eq('salesperson_phone', scope.phones[0]);
-      else if (scope.phones.length > 1) complaintsQuery = complaintsQuery.in('salesperson_phone', scope.phones);
+    if (!scope.isAdmin && targetPhones.length > 0) {
+      complaintsQuery = complaintsQuery.in('reported_by', targetPhones);
     }
 
     if (customerFilter) complaintsQuery = complaintsQuery.ilike('customer_name', `%${customerFilter}%`);
@@ -602,13 +602,12 @@ async function searchDatabaseForOption10(senderPhone, queryText) {
     // 3. Query Site Visits (if query asks about visits or meetings)
     let visitsQuery = supabase
       .from('customer_visits')
-      .select('visited_at, customer_name, person_met, customer_address, outcome, remarks, follow_up_action')
+      .select('visited_at, customer_name, person_met, customer_address, remarks, salesperson_phone')
       .order('visited_at', { ascending: false })
       .limit(5);
 
-    if (scope.phones !== null) {
-      if (scope.phones.length === 1) visitsQuery = visitsQuery.eq('salesperson_phone', scope.phones[0]);
-      else if (scope.phones.length > 1) visitsQuery = visitsQuery.in('salesperson_phone', scope.phones);
+    if (!scope.isAdmin && targetPhones.length > 0) {
+      visitsQuery = visitsQuery.in('salesperson_phone', targetPhones);
     }
 
     if (customerFilter) visitsQuery = visitsQuery.ilike('customer_name', `%${customerFilter}%`);
@@ -621,7 +620,7 @@ async function searchDatabaseForOption10(senderPhone, queryText) {
     if (matchedCustomers.length > 0) {
       contextBlock += `### Matched Customer Profiles:\n`;
       matchedCustomers.forEach(c => {
-        contextBlock += `- ${c.customer_name} | Contact: ${c.contact_person || 'N/A'} (${c.customer_phone || 'N/A'}) | Location: ${c.customer_address || 'N/A'} | Tier: ${c.tier || 'Standard'}\n`;
+        contextBlock += `- ${c.customer_name} | Contact: ${c.contact_person || 'N/A'} (${c.customer_phone || 'N/A'}) | Location: ${c.customer_address || 'N/A'}\n`;
       });
       contextBlock += '\n';
     }
@@ -629,8 +628,9 @@ async function searchDatabaseForOption10(senderPhone, queryText) {
     if (matchedDeals && matchedDeals.length > 0) {
       contextBlock += `### Matched Inquiries & Orders:\n`;
       matchedDeals.forEach(d => {
-        const cleanCode = (d.deal_code || 'INQ').replace(/^#?(?:DEAL|INQ)-?/i, 'INQ-');
-        const items = (d.deal_items || []).map(i => `${i.product_name || 'Product'}${i.specification ? ` (${i.specification})` : ''} - ${i.quantity || 0} ${i.unit || 'MT'}${i.rate ? ` @ ₹${i.rate}/MT` : ''}`).join('; ');
+        const hex = (d.id || d.inquiry_id || '').replace(/-/g, '').slice(0, 6).toUpperCase();
+        const cleanCode = hex ? `INQ-${hex}` : 'INQ';
+        const items = (d.deal_items || []).map(i => `${i.sku_text || 'Product'}${i.dimensions ? ` (${i.dimensions})` : ''} - ${i.quantity || 0} ${i.unit || 'MT'}${i.rate ? ` @ ₹${i.rate}/MT` : ''}`).join('; ');
         const dateStr = d.created_at ? d.created_at.slice(0, 10) : 'Recent';
         contextBlock += `- #${cleanCode} | Customer: ${d.customer_name} | Stage: ${d.stage} | Items: [${items || 'No line items'}] | Date: ${dateStr}${d.po_number ? ` | PO: ${d.po_number}` : ''}\n`;
       });
@@ -640,7 +640,8 @@ async function searchDatabaseForOption10(senderPhone, queryText) {
     if (matchedComplaints && matchedComplaints.length > 0) {
       contextBlock += `### Matched Customer Complaints:\n`;
       matchedComplaints.forEach(c => {
-        contextBlock += `- Complaint #${c.complaint_code || 'ID'} | Customer: ${c.customer_name} | Status: ${c.resolution_status} | Type: ${c.complaint_type} | Issue: "${c.issue_description || 'N/A'}"${c.resolved_at ? ` | Resolved: ${c.resolved_at.slice(0, 10)}` : ''}\n`;
+        const shortId = (c.id || '').replace(/-/g, '').slice(0, 6).toUpperCase();
+        contextBlock += `- Complaint #${shortId} | Customer: ${c.customer_name} | Status: ${c.status} | Type: ${c.complaint_type} | Issue: "${c.description || 'N/A'}"${c.resolved_at ? ` | Resolved: ${c.resolved_at.slice(0, 10)}` : ''}\n`;
       });
       contextBlock += '\n';
     }
@@ -649,7 +650,7 @@ async function searchDatabaseForOption10(senderPhone, queryText) {
       contextBlock += `### Matched Customer Visits:\n`;
       matchedVisits.forEach(v => {
         const dateStr = v.visited_at ? v.visited_at.slice(0, 10) : 'Recent';
-        contextBlock += `- Visit (${dateStr}) | Customer: ${v.customer_name} | Met: ${v.person_met || 'N/A'} | Location: ${v.customer_address || 'N/A'} | Outcome: ${v.outcome || 'N/A'} | Notes: "${v.remarks || 'N/A'}"\n`;
+        contextBlock += `- Visit (${dateStr}) | Customer: ${v.customer_name} | Met: ${v.person_met || 'N/A'} | Location: ${v.customer_address || 'N/A'} | Notes: "${v.remarks || 'N/A'}"\n`;
       });
       contextBlock += '\n';
     }
