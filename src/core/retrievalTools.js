@@ -575,7 +575,7 @@ function deriveCustomerSegment(totalTonnage, ltv, totalOrders, inquiriesCount = 
     (totalOrders >= 2 && (ltv >= 500000 || totalTonnage >= 10)) ||
     totalTonnage >= 25 ||
     ltv >= 1500000 ||
-    (totalOrders >= 1 && (ltv >= 500000 || totalTonnage >= 10 || inquiriesCount >= 3 || visitsCount >= 2))
+    (totalOrders >= 1 && (inquiriesCount >= 3 || visitsCount >= 2))
   ) {
     return 'growth';
   }
