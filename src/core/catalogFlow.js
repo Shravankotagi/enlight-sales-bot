@@ -3699,6 +3699,39 @@ Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
 
 // ── OPERATIONAL ACTION & QUERY DETECTION HELPERS ─────────────────────────────
 
+/**
+ * Detects queries asking for delivery tracking, dispatch status, vehicle tracking,
+ * shipment in transit, or pending orders that haven't been delivered yet.
+ * These are currently out of scope for the WhatsApp bot.
+ */
+function isOutOfScopeDeliveryQuery(text) {
+  if (!text || typeof text !== 'string') return false;
+  const lower = text.toLowerCase().trim();
+
+  // Guard: If it's pure data entry like "Delivery Location: Mumbai" or "Delivery: Pune" during form filling, NOT out of scope.
+  if (/^(?:delivery\s*location|delivery\s*address|delivery\s*city|destination|target\s*delivery\s*date)\s*[:=-]/i.test(lower)) {
+    return false;
+  }
+  // Guard: If it's asking "what is the delivery location on PO 123" -> in scope (delivery_location field)
+  if (/\b(?:delivery\s+location|delivery\s+address|site\s+location)\b/i.test(lower) && !/\b(?:delivered|undelivered|pending\s+delivery|dispatch|transit|tracking|shipped|shipment)\b/i.test(lower)) {
+    return false;
+  }
+
+  // Delivery / dispatch / transit / logistics tracking questions
+  const outOfScopePatterns = [
+    /\b(?:haven'?t\s+been\s+delivered|not\s+(?:yet\s+)?delivered|pending\s+deliver(?:y|ies)|undelivered|yet\s+to\s+be\s+delivered)\b/i,
+    /\b(?:delivery\s+status|delivery\s+tracking|track\s+(?:my\s+|the\s+)?delivery|track\s+(?:my\s+|the\s+)?order\s+delivery)\b/i,
+    /\b(?:order(?:s)?\s+(?:that\s+)?(?:are\s+|have\s+)?(?:not\s+delivered|pending\s+delivery|in\s+transit|undelivered))\b/i,
+    /\b(?:dispatch\s+status|dispatched\s+status|when\s+will\s+(?:it|the\s+order|order|po|goods|material)\s+be\s+dispatched|has\s+(?:it|the\s+order|order|po|material|shipment)\s+been\s+dispatched|is\s+(?:it|the\s+order|order|po)\s+dispatched)\b/i,
+    /\b(?:dispatched\s+yet|dispatched\s+kya|material\s+dispatched)\b/i,
+    /\b(?:in\s+transit|truck\s+status|vehicle\s+tracking|shipment\s+tracking|track\s+shipment|track\s+truck|where\s+is\s+(?:the\s+)?truck|where\s+is\s+(?:the\s+)?shipment|where\s+is\s+(?:my\s+)?delivery)\b/i,
+    /\b(?:has\s+(?:the\s+)?order\s+been\s+delivered|is\s+(?:the\s+)?order\s+delivered|delivery\s+update)\b/i,
+    /\b(?:orders?\s+not\s+delivered|pending\s+orders?\s+not\s+delivered|orders?\s+pending\s+delivery)\b/i,
+  ];
+
+  return outOfScopePatterns.some((pattern) => pattern.test(lower));
+}
+
 function isOperationalQuery(text) {
   if (!text || typeof text !== 'string') return false;
   const lower = text.toLowerCase().trim();
@@ -4127,6 +4160,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
     };
   }
 
+  // ── 1b. OUT-OF-SCOPE DELIVERY / DISPATCH QUERY CHECK ─────────────────────────
+  if (isOutOfScopeDeliveryQuery(text)) {
+    const outOfScopeMsg = `ℹ️ *Delivery & Dispatch Tracking is Out of Scope*\n\nOrder delivery, shipment, and dispatch tracking are not currently within my scope.\n\nPlease ask questions related to Inquiries, Won Orders, Customer Visits, Complaints, Payments, or Customer Master records.`;
+    await recordSessionMessage(senderPhone, 'assistant', outOfScopeMsg);
+    return {
+      handled: true,
+      reply: outOfScopeMsg,
+    };
+  }
+
   // ── 2. FETCH ACTIVE SESSION STATE ──────────────────────────────────────────
   const activeSession = await getFullActiveSession(senderPhone);
   let lastIntent = activeSession ? (activeSession.last_intent || '') : '';
@@ -4136,17 +4179,46 @@ async function handleCatalogFlow(rawText, senderPhone) {
     return { handled: false };
   }
 
+  // ── 2a. STALE / INACTIVE CONFIRMATION BUTTON PROTECTION ──────────────────────
+  const cleanInput = text.toLowerCase().replace(/[^a-z0-9\s_/]/g, ' ').replace(/\s+/g, ' ').trim();
+  const isConfirmButtonInput = [
+    'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel',
+    'save / yes', 'save/yes', 'save yes', 'edit details'
+  ].includes(cleanInput);
+
+  const isCustButtonInput = [
+    'btn_cust_yes', 'btn_cust_no',
+    'yes add customer', 'yes, add customer', 'no / cancel', 'no/cancel', 'no cancel'
+  ].includes(cleanInput);
+
+  // If user clicks a confirmation button but session is NOT in confirmation or editing flow
+  if (isConfirmButtonInput && !lastIntent.startsWith('catalog_confirm|') && !lastIntent.startsWith('catalog_editing|')) {
+    const disabledMsg = `⚠️ *Option Already Selected*\n\nThis action has already been processed and the confirmation buttons are now disabled.\n\nSend *Hi* or choose an action from the menu to start a new activity.`;
+    return {
+      handled: true,
+      reply: disabledMsg,
+    };
+  }
+
+  // If user clicks a customer onboarding button but session is NOT in implicit customer onboarding flow
+  if (isCustButtonInput && !lastIntent.startsWith('catalog_implicit_cust_ask|') && !lastIntent.startsWith('catalog_implicit_cust_collect|')) {
+    const disabledMsg = `⚠️ *Option Already Selected*\n\nThis customer onboarding option has already been processed and the buttons are now disabled.\n\nSend *Hi* or choose an action from the menu to start a new activity.`;
+    return {
+      handled: true,
+      reply: disabledMsg,
+    };
+  }
+
   // ── 2b. ACTIVE SESSION PREEMPTION CHECK ─────────────────────────────────────
   // If the user was in an active state (confirm, flow, editing, customer onboarding),
   // check if they explicitly sent a NEW operational command or switched menus
   if (lastIntent.startsWith('catalog_')) {
-    const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
     const matchedMenu = matchActionFromInput(text);
 
     if (lastIntent.startsWith('catalog_implicit_cust_ask|') || lastIntent.startsWith('catalog_implicit_cust_collect|')) {
       const isCustConfirmation = [
-        'yes', 'y', 'haan', 'ha', 'sahi hai', 'btn_cust_yes', 'confirm', 'add',
-        'no', 'n', 'nahi', 'wrong', 'galat', 'cancel', 'discard', 'stop', 'exit', 'quit', 'btn_cust_no'
+        'yes', 'y', 'haan', 'ha', 'sahi hai', 'btn_cust_yes', 'yes add customer', 'yes, add customer', 'confirm', 'add',
+        'no', 'n', 'nahi', 'wrong', 'galat', 'cancel', 'discard', 'stop', 'exit', 'quit', 'btn_cust_no', 'no / cancel', 'no/cancel', 'no cancel'
       ].includes(cleanInput);
 
       if (matchedMenu) {
@@ -4164,8 +4236,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
       }
     } else {
       const isControlReply = [
-        'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure',
-        'edit', 'change', '2',
+        'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure', 'save / yes', 'save/yes', 'save yes',
+        'edit', 'change', '2', 'edit details',
         'cancel', 'discard', 'no', 'n', '3', 'stop', 'exit', 'quit', 'nahi', 'wrong', 'galat',
         'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel'
       ].includes(cleanInput);
@@ -4246,6 +4318,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // User confirmed YES (This is a new customer)
     if (
+      cleanInput === 'btn_cust_yes' ||
+      cleanInput === 'yes, add customer' ||
       cleanInput === 'yes' ||
       cleanInput === 'y' ||
       cleanInput === '1' ||
@@ -4334,6 +4408,9 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // User confirmed NO (Not a new customer -> re-enter correct name)
     if (
+      cleanInput === 'btn_cust_no' ||
+      cleanInput === 'no / cancel' ||
+      cleanInput === 'no/cancel' ||
       cleanInput === 'no' ||
       cleanInput === 'n' ||
       cleanInput === 'nahi' ||
@@ -4501,6 +4578,9 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // Confirm YES
     if (
+      cleanInput === 'btn_confirm_yes' ||
+      cleanInput === 'save / yes' ||
+      cleanInput === 'save/yes' ||
       cleanInput === 'yes' ||
       cleanInput === 'y' ||
       cleanInput === '1' ||
@@ -4585,6 +4665,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // Request EDIT
     if (
+      cleanInput === 'btn_confirm_edit' ||
+      cleanInput === 'edit details' ||
       cleanInput === 'edit' ||
       cleanInput === 'change' ||
       cleanInput === 'modify' ||
@@ -4603,11 +4685,14 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // CANCEL
     if (
+      cleanInput === 'btn_confirm_cancel' ||
       cleanInput === 'cancel' ||
       cleanInput === 'discard' ||
       cleanInput === 'no' ||
       cleanInput === '3' ||
-      cleanInput === 'stop'
+      cleanInput === 'stop' ||
+      cleanInput === 'exit' ||
+      cleanInput === 'quit'
     ) {
       await recordSessionMessage(senderPhone, 'user', text);
       const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
@@ -4684,6 +4769,24 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     if (isOperationalQuery(text)) {
       return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_editing', action, draft);
+    }
+
+    const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
+
+    // Cancel during edit
+    if (cleanInput === 'btn_confirm_cancel' || /^(?:cancel|stop|discard|exit|quit)$/i.test(cleanInput)) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
+      await recordSessionMessage(senderPhone, 'assistant', cancelReply);
+      await finalizeCurrentSession(senderPhone, `Cancelled ${getActionFriendlyName(action)} draft during edit`);
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return { handled: true, reply: cancelReply };
+    }
+
+    // Edit button tapped again while already in edit mode
+    if (cleanInput === 'btn_confirm_edit' || cleanInput === 'edit details') {
+      const alreadyEditMsg = `You are currently editing this draft. Which field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")`;
+      return { handled: true, reply: alreadyEditMsg };
     }
 
     await recordSessionMessage(senderPhone, 'user', text);
