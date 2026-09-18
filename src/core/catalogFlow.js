@@ -3713,20 +3713,44 @@ function isOutOfScopeDeliveryQuery(text) {
     return false;
   }
   // Guard: If it's asking "what is the delivery location on PO 123" -> in scope (delivery_location field)
-  if (/\b(?:delivery\s+location|delivery\s+address|site\s+location)\b/i.test(lower) && !/\b(?:delivered|undelivered|pending\s+delivery|dispatch|transit|tracking|shipped|shipment)\b/i.test(lower)) {
+  if (/\b(?:delivery\s+location|delivery\s+address|site\s+location)\b/i.test(lower) && 
+      !/\b(?:deliver(?:ed|ing|y)?\s+(?:status|tracking|update|time|delay|kya|kab|pending)|undelivered|un-delivered|dispatch|transit|tracking|shipped|shipment|consignment|transporter|truck|vehicle|eway|e-way|lr\s*no|lorry)\b/i.test(lower)) {
     return false;
   }
 
-  // Delivery / dispatch / transit / logistics tracking questions
+  // Comprehensive Out-of-Scope Patterns for Delivery, Dispatch & Logistics Tracking
   const outOfScopePatterns = [
-    /\b(?:haven'?t\s+been\s+delivered|not\s+(?:yet\s+)?delivered|pending\s+deliver(?:y|ies)|undelivered|yet\s+to\s+be\s+delivered)\b/i,
-    /\b(?:delivery\s+status|delivery\s+tracking|track\s+(?:my\s+|the\s+)?delivery|track\s+(?:my\s+|the\s+)?order\s+delivery)\b/i,
-    /\b(?:order(?:s)?\s+(?:that\s+)?(?:are\s+|have\s+)?(?:not\s+delivered|pending\s+delivery|in\s+transit|undelivered))\b/i,
-    /\b(?:dispatch\s+status|dispatched\s+status|when\s+will\s+(?:it|the\s+order|order|po|goods|material)\s+be\s+dispatched|has\s+(?:it|the\s+order|order|po|material|shipment)\s+been\s+dispatched|is\s+(?:it|the\s+order|order|po)\s+dispatched)\b/i,
-    /\b(?:dispatched\s+yet|dispatched\s+kya|material\s+dispatched)\b/i,
-    /\b(?:in\s+transit|truck\s+status|vehicle\s+tracking|shipment\s+tracking|track\s+shipment|track\s+truck|where\s+is\s+(?:the\s+)?truck|where\s+is\s+(?:the\s+)?shipment|where\s+is\s+(?:my\s+)?delivery)\b/i,
-    /\b(?:has\s+(?:the\s+)?order\s+been\s+delivered|is\s+(?:the\s+)?order\s+delivered|delivery\s+update)\b/i,
-    /\b(?:orders?\s+not\s+delivered|pending\s+orders?\s+not\s+delivered|orders?\s+pending\s+delivery)\b/i,
+    // 1. Delivery status / tracking / progress / ETA
+    /\b(?:delivery\s+status|delivery\s+tracking|track\s+(?:my\s+|the\s+)?delivery|track\s+(?:my\s+|the\s+)?order\s+delivery|live\s+delivery|delivery\s+update|delivery\s+progress|delivery\s+eta|delivery\s+timeline)\b/i,
+    
+    // 2. Undelivered / Pending delivery / Not delivered / Yet to be delivered
+    /\b(?:haven'?t\s+been\s+delivered|hasn'?t\s+been\s+delivered|have\s+not\s+been\s+delivered|has\s+not\s+been\s+delivered|not\s+(?:yet\s+|been\s+|ever\s+)*delivered)\b/i,
+    /\b(?:pending\s+deliver(?:y|ies)|undelivered|un-delivered|non-delivered|non\s+delivered|yet\s+to\s+be\s+delivered|waiting\s+(?:for\s+)?delivery|awaiting\s+delivery)\b/i,
+    /\b(?:orders?\s+(?:that\s+)?(?:are\s+|have\s+)?(?:not\s+delivered|pending\s+delivery|in\s+transit|undelivered))\b/i,
+    /\b(?:orders?\s+not\s+delivered|pending\s+orders?\s+not\s+delivered|orders?\s+pending\s+delivery|undelivered\s+(?:orders?|pos?|deals?|materials?|goods?))\b/i,
+    
+    // 3. Questions asking if delivered or when delivered
+    /\b(?:has|have|is|was|will|got)\b.*\bdelivered\b/i,
+    /\b(?:when\s+will\b.*\bdelivered)\b/i,
+    
+    // 4. Dispatch status / tracking / date / update
+    /\b(?:dispatch\s+status|dispatched\s+status|dispatch\s+tracking|track\s+dispatch|dispatch\s+update|dispatch\s+details|dispatch\s+date|dispatched\s+date)\b/i,
+    /\b(?:has|have|is|was|will|got)\b.*\bdispatched\b/i,
+    /\b(?:when\s+will\b.*\bdispatched)\b/i,
+    /\b(?:dispatched\s+yet|dispatched\s+kya|material\s+dispatched|order\s+dispatched)\b/i,
+    
+    // 5. In-transit, vehicle, truck & logistics tracking
+    /\b(?:in\s+transit|material\s+in\s+transit|goods\s+in\s+transit|orders?\s+in\s+transit)\b/i,
+    /\b(?:truck\s+status|truck\s+tracking|vehicle\s+tracking|vehicle\s+status|track\s+truck|track\s+vehicle|where\s+is\s+(?:the\s+|my\s+)?truck)\b/i,
+    /\b(?:shipment\s+tracking|track\s+shipment|where\s+is\s+(?:the\s+|my\s+)?shipment|shipment\s+status|where\s+is\s+(?:the\s+|my\s+)?consignment)\b/i,
+    /\b(?:logistics\s+status|logistics\s+tracking|transporter\s+details|transporter\s+status|lr\s+(?:no|number)|lorry\s+receipt|eway\s+bill|e-way\s+bill)\b/i,
+    /\b(?:where\s+is\s+(?:my\s+|the\s+)?(?:order|delivery|material|consignment)\s*(?:currently|now|reached)?)\b/i,
+
+    // 6. Hinglish delivery / dispatch / truck tracking questions
+    /\b(?:deliver\s+(?:hua|ho\s+gaya|kab|nahi|ho\s+chuka))\b/i,
+    /\b(?:delivery\s+(?:hui|kab|kahan|pending|nahi))\b/i,
+    /\b(?:dispatch\s+(?:hua|ho\s+gaya|kab|nahi|kahan))\b/i,
+    /\b(?:gaadi|truck|driver|vehicle)\b.*\b(?:nikli|nikla|kahan|kab|pahunch|aayeg|aaya)\b/i,
   ];
 
   return outOfScopePatterns.some((pattern) => pattern.test(lower));
