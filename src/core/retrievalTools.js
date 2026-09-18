@@ -2338,10 +2338,10 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
       data: {
         found: true,
         customer_name: profile.customer_name || custName,
-        contact_person: profile.contact_person || 'N/A',
+        contact_person: profile.contact_person || 'Not registered',
         phone: profile.customer_phone || profile.phone || 'N/A',
         address: profile.customer_address || profile.address || 'N/A',
-        gst: profile.customer_gst || profile.gst || 'N/A',
+        gst: profile.customer_gst || profile.gst || 'Not registered',
         segment: segment === 'key_account' ? 'Key Account' : (segment === 'growth' ? 'Growth' : 'New'),
         health_status: 'Good Standing',
         order_frequency_days: profile.avg_order_frequency_days || 30,
