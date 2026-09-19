@@ -160,7 +160,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         const axios = require('axios');
         const backendUrl = process.env.BACKEND_URL ||
           process.env.BACKEND_SERVICE_URL ||
-          'https://enlight-sales-backend-production.up.railway.app';
+          'http://localhost:3000';
 
         const backendPayload = {
           customer_name: finalCustomerName,
