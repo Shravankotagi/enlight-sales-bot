@@ -290,11 +290,67 @@ async function runTests() {
   const pass12 = pass12a && pass12b && pass12c && pass12d;
   console.log('Test 12 Passed:', pass12, `(12a: ${pass12a}, 12b: ${pass12b}, 12c: ${pass12c}, 12d: ${pass12d})`);
 
+  // TEST 13: Multi-Entity Queue Discard (Log 1 company, Discard remaining)
+  console.log('\n[TEST 13] Multi-Entity Queue Discard: Confirm Company 1, Discard Company 2');
+  const multiComplaintDraft = {
+    action: 'LOG_COMPLAINT',
+    company_name: 'Alpha Forgings Ltd',
+    issue_description: 'Surface crack on coil edges',
+    severity: 'Medium',
+    resolution_requested: 'Credit Note',
+    _totalCount: 2,
+    _currentIndex: 1,
+    _queue: [
+      {
+        action: 'LOG_COMPLAINT',
+        company_name: 'Beta Precision Pipes',
+        issue_description: 'Dimension mismatch on pipe diameter',
+        severity: 'High',
+        resolution_requested: 'Replacement',
+      }
+    ]
+  };
+
+  await saveActiveSession(testPhone, 'Alpha Forgings Ltd', `catalog_confirm|LOG_COMPLAINT|${JSON.stringify(multiComplaintDraft)}`);
+  
+  // 13a: Confirm 1st complaint
+  const queueStep1Res = await handleCatalogFlow('yes', testPhone);
+  console.log('Queue Step 1 Response:\n', queueStep1Res.reply);
+  const pass13a = queueStep1Res.handled === true &&
+                  queueStep1Res.reply.includes('Beta Precision Pipes') &&
+                  queueStep1Res.reply.includes('2 of 2') &&
+                  queueStep1Res.reply.includes('💡 _Tip: To skip or finish without logging for Beta Precision Pipes, reply "cancel" or "discard"._');
+
+  // 13b: Discard 2nd complaint
+  const queueStep2Res = await handleCatalogFlow('discard activity', testPhone);
+  console.log('Queue Step 2 Discard Response:\n', queueStep2Res.reply);
+  const sess13 = await getFullActiveSession(testPhone);
+  const pass13b = queueStep2Res.handled === true &&
+                  queueStep2Res.reply.includes('Discarded') &&
+                  sess13?.last_intent === 'general';
+
+  const pass13 = pass13a && pass13b;
+  console.log('Test 13 Passed:', pass13);
+
+  // Clean up any test complaints created
+  await supabase.from('complaints').delete().eq('created_by_phone', testPhone).eq('customer_name', 'Alpha Forgings Ltd');
+
+  // TEST 14: WhatsApp Interactive List Multi-line Menu Selection During Active Flow
+  console.log('\n[TEST 14] Multi-line Menu Selection During Active Complaint Flow');
+  await saveActiveSession(testPhone, 'Active Flow Corp', 'catalog_flow|LOG_COMPLAINT|{"company_name":"Active Flow Corp"}');
+  const multiLineMenuRes = await handleCatalogFlow('3. Log New Order\nRecord new confirmed PO', testPhone);
+  console.log('Multi-line Menu Switch Response:\n', multiLineMenuRes.reply);
+  const sess14 = await getFullActiveSession(testPhone);
+  const pass14 = multiLineMenuRes.handled === true &&
+                 multiLineMenuRes.reply.includes('Record New Order') &&
+                 multiLineMenuRes.reply.includes('Inquiry ID') &&
+                 sess14?.last_intent?.startsWith('catalog_flow|LOG_ORDER');
+  console.log('Test 14 Passed:', pass14);
+
   await saveActiveSession(testPhone, 'Unknown', 'general');
-  await saveActiveSession(menonOwnerPhone, 'Unknown', 'general');
 
   // Summary
-  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12;
+  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14;
   console.log('\n========================================');
   console.log('FINAL RESULT: ' + (allPassed ? 'ALL TESTS PASSED ✅' : 'SOME TESTS FAILED ❌'));
   console.log('========================================');
@@ -308,3 +364,4 @@ runTests().catch((err) => {
   console.error('Test execution error:', err);
   process.exit(1);
 });
+

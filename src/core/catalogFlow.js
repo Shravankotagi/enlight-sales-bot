@@ -106,11 +106,27 @@ function isDiscardOrCancelIntent(text) {
     clean === 'btn_flow_discard' ||
     clean === 'cancel' ||
     clean === 'discard' ||
+    clean === 'discard activity' ||
+    clean === 'cancel activity' ||
+    clean === 'discard complaint' ||
+    clean === 'cancel complaint' ||
+    clean === 'discard order' ||
+    clean === 'cancel order' ||
+    clean === 'discard inquiry' ||
+    clean === 'cancel inquiry' ||
+    clean === 'discard visit' ||
+    clean === 'cancel visit' ||
     clean === 'stop' ||
     clean === 'exit' ||
     clean === 'quit' ||
     clean === 'abort' ||
     clean === 'drop' ||
+    clean === 'skip' ||
+    clean === 'skip remaining' ||
+    clean === 'discard remaining' ||
+    clean === 'cancel remaining' ||
+    clean === 'finish' ||
+    clean === 'done' ||
     clean === 'nahi' ||
     clean === 'galat' ||
     clean === 'no' ||
@@ -121,9 +137,9 @@ function isDiscardOrCancelIntent(text) {
     return true;
   }
   if (
-    /\b(?:cancel|discard|stop|abort|drop|quit|clear)\b.*?\b(?:inquiry|logging|order|draft|visit|complaint|flow|session|process|this|task|entry|creation|form|record|customer|acquisition)\b/i.test(clean) ||
-    /\b(?:cancel|discard|stop|abort|drop|quit|clear)\s+(?:it|this|that|all|now|please|logging)\b/i.test(clean) ||
-    /^(?:cancel|discard|stop|abort|quit|drop)\s+/i.test(clean) ||
+    /\b(?:cancel|discard|stop|abort|drop|quit|clear|skip)\b.*?\b(?:inquiry|logging|order|draft|visit|complaint|flow|session|process|this|task|entry|activity|remaining|creation|form|record|customer|acquisition)\b/i.test(clean) ||
+    /\b(?:cancel|discard|stop|abort|drop|quit|clear|skip)\s+(?:it|this|that|all|now|please|logging|activity|remaining)\b/i.test(clean) ||
+    /^(?:cancel|discard|stop|abort|quit|drop|skip)\s+/i.test(clean) ||
     /\b(?:don'?t\s+want|do\s+not\s+want|never\s+mind|mat\s+karo|nahi\s+chahiye|cancel\s+kar\s+do|discard\s+kar\s+do|cancel\s+karo|discard\s+karo)\b/i.test(clean)
   ) {
     return true;
@@ -396,7 +412,11 @@ function isGreeting(text) {
 
 function matchActionFromInput(text) {
   if (!text || typeof text !== 'string') return null;
-  const clean = text.trim().toLowerCase().replace(/[🔟*️⃣\uFE0F\u20E3]/g, '').trim();
+
+  // Extract first line in case of multi-line interactive list replies (e.g. "3. Log New Order\nRecord new confirmed PO")
+  const firstLine = text.split(/[\r\n]+/)[0].trim();
+  const clean = firstLine.toLowerCase().replace(/[🔟*️⃣\uFE0F\u20E3]/g, '').trim();
+  const fullClean = text.toLowerCase().replace(/[🔟*️⃣\uFE0F\u20E3]/g, '').trim();
 
   // If text is a full sentence with arguments/details, let natural action detection & LLM extraction handle it
   if (clean.length > 35 || /\b(?:for|to|on|of|with|at|rate|qty|status|inq-|po-|midc|midc\s+pune|midc\s+bhosari|mt|tons|plate|sheet|coil)\b/i.test(clean)) {
@@ -410,70 +430,80 @@ function matchActionFromInput(text) {
   if (
     clean === '1' || clean === '1.' || clean === 'menu_1' ||
     stripped === 'log inquiry' || stripped === 'log new inquiry' || stripped === 'new inquiry' || stripped === 'start_log_inquiry' ||
-    clean === '1. log new inquiry' || clean === '1. log inquiry' || clean === '1 log new inquiry'
+    clean === '1. log new inquiry' || clean === '1. log inquiry' || clean === '1 log new inquiry' ||
+    fullClean.includes('capture customer requirements')
   ) {
     return 'LOG_INQUIRY';
   }
   if (
     clean === '2' || clean === '2.' || clean === 'menu_2' ||
     stripped === 'update inquiry' || stripped === 'start_update_inquiry' ||
-    clean === '2. update inquiry' || clean === '2 update inquiry'
+    clean === '2. update inquiry' || clean === '2 update inquiry' ||
+    fullClean.includes('update rates, specs or stage')
   ) {
     return 'UPDATE_INQUIRY';
   }
   if (
     clean === '3' || clean === '3.' || clean === 'menu_3' ||
     stripped === 'log order' || stripped === 'log new order' || stripped === 'record order' || stripped === 'record new order' || stripped === 'new order' || stripped === 'start_log_order' ||
-    clean === '3. log new order' || clean === '3. log order' || clean === '3 log new order'
+    clean === '3. log new order' || clean === '3. log order' || clean === '3 log new order' ||
+    fullClean.includes('record new confirmed po')
   ) {
     return 'LOG_ORDER';
   }
   if (
     clean === '4' || clean === '4.' || clean === 'menu_4' ||
     stripped === 'update order' || stripped === 'start_update_order' ||
-    clean === '4. update order' || clean === '4 update order'
+    clean === '4. update order' || clean === '4 update order' ||
+    fullClean.includes('update po date, items or stage')
   ) {
     return 'UPDATE_ORDER';
   }
   if (
     clean === '5' || clean === '5.' || clean === 'menu_5' ||
     stripped === 'log visit' || stripped === 'log customer field visit' || stripped === 'log customer visit' || stripped === 'log field visit' || stripped === 'field visit' || stripped === 'new visit' || stripped === 'start_log_visit' ||
-    clean === '5. log customer field visit' || clean === '5. log field visit' || clean === '5 log customer field visit'
+    clean === '5. log customer field visit' || clean === '5. log field visit' || clean === '5 log customer field visit' ||
+    fullClean.includes('log rep on-site client visit')
   ) {
     return 'LOG_VISIT';
   }
   if (
     clean === '6' || clean === '6.' || clean === 'menu_6' ||
     stripped === 'update visit' || stripped === 'update field visit' || stripped === 'update customer visit' || stripped === 'start_update_visit' ||
-    clean === '6. update field visit' || clean === '6. update visit' || clean === '6 update field visit'
+    clean === '6. update field visit' || clean === '6. update visit' || clean === '6 update field visit' ||
+    fullClean.includes('update outcome or remarks')
   ) {
     return 'UPDATE_VISIT';
   }
   if (
     clean === '7' || clean === '7.' || clean === 'menu_7' ||
     stripped === 'new acquisition' || stripped === 'new customer' || stripped === 'new customer acquisition' || stripped === 'customer acquisition' || stripped === 'add customer' || stripped === 'onboard customer' || stripped === 'log customer' || stripped === 'start_log_customer' ||
-    clean === '7. new customer acquisition' || clean === '7. new acquisition' || clean === '7 new customer acquisition'
+    clean === '7. new customer acquisition' || clean === '7. new acquisition' || clean === '7 new customer acquisition' ||
+    fullClean.includes('onboard new client profile')
   ) {
     return 'LOG_NEW_CUSTOMER';
   }
   if (
     clean === '8' || clean === '8.' || clean === 'menu_8' ||
     stripped === 'log complaint' || stripped === 'log customer complaint' || stripped === 'new complaint' || stripped === 'start_log_complaint' ||
-    clean === '8. log customer complaint' || clean === '8. log complaint' || clean === '8 log customer complaint'
+    clean === '8. log customer complaint' || clean === '8. log complaint' || clean === '8 log customer complaint' ||
+    fullClean.includes('log quality/service issue')
   ) {
     return 'LOG_COMPLAINT';
   }
   if (
     clean === '9' || clean === '9.' || clean === 'menu_9' ||
     stripped === 'update complaint' || stripped === 'update customer complaint' || stripped === 'start_update_complaint' ||
-    clean === '9. update customer complaint' || clean === '9. update complaint' || clean === '9 update customer complaint'
+    clean === '9. update customer complaint' || clean === '9. update complaint' || clean === '9 update customer complaint' ||
+    fullClean.includes('update resolution or status')
   ) {
     return 'UPDATE_COMPLAINT';
   }
   if (
     clean === '10' || clean === '10.' || clean === 'menu_10' ||
     stripped === 'other' || stripped === 'general query' || stripped === 'other query' || stripped === 'general_query' || stripped === 'other / general query' || text.includes('🔟') || text.includes('1️⃣0️⃣') ||
-    clean === '10. other / general query' || clean === '10. other' || clean === '10. general query'
+    clean === '10. other / general query' || clean === '10. other' || clean === '10. general query' ||
+    fullClean.includes('general search or intelligence')
   ) {
     return 'GENERAL_QUERY';
   }
@@ -4731,8 +4761,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
       if (!isLLMQuery) {
         const matchedMenu = matchActionFromInput(text);
 
-        // 1. Explicit menu selection from catalog (e.g. user sends "1", "3", "5", "menu_5")
-        if (matchedMenu && matchedMenu !== currentAction) {
+        // 1. Explicit menu selection from catalog (e.g. user sends "1", "3", "5", "menu_5", "3. Log New Order")
+        if (matchedMenu) {
           await finalizeCurrentSession(senderPhone, `Switched to ${getActionFriendlyName(matchedMenu)} menu`);
           await saveActiveSession(senderPhone, 'Unknown', 'general');
           lastIntent = '';
@@ -5072,7 +5102,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
         if (missing.length === 0) {
           const summary = buildConfirmationSummary(nextAction, nextEntry);
-          const nextPrompt = `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's confirm the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\n${summary}`;
+          const nextPrompt = `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's confirm the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\n${summary}\n\n💡 _Tip: To skip or finish without logging for ${nextEntry.company_name}, reply "cancel" or "discard"._`;
           await recordSessionMessage(senderPhone, 'assistant', nextPrompt, {
             action_type: nextAction,
             customer_name: nextEntry.company_name,
@@ -5081,10 +5111,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
           return {
             handled: true,
             reply: nextPrompt,
+            interactiveType: 'buttons',
+            interactiveButtons: CONFIRMATION_BUTTONS,
           };
         } else {
           const missingList = missing.map((m) => `• *${m}*`).join('\n');
-          const nextPrompt = `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's complete the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\nPlease provide the remaining mandatory details:\n\n${missingList}`;
+          const nextPrompt = `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's complete the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\nPlease provide the remaining mandatory details:\n\n${missingList}\n\n💡 _Tip: To skip or finish without logging for ${nextEntry.company_name}, reply "cancel" or "discard"._`;
           await recordSessionMessage(senderPhone, 'assistant', nextPrompt, {
             action_type: nextAction,
             customer_name: nextEntry.company_name,
@@ -5435,6 +5467,19 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
 
     // Check if user wants to abort / switch (only if not resolving candidate selection)
+    if (isDiscardOrCancelIntent(text)) {
+      const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
+      await recordSessionMessage(senderPhone, 'user', text);
+      await recordSessionMessage(senderPhone, 'assistant', cancelReply);
+      await finalizeCurrentSession(senderPhone, `Discarded ${getActionFriendlyName(action)} flow`);
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return {
+        handled: true,
+        reply: cancelReply,
+      };
+    }
+
+    // Check if user wants to abort / switch (only if not resolving candidate selection)
     if (!candidateResolved && !inquiryCandidateResolved && !orderCandidateResolved) {
       if (text.trim().toLowerCase() === 'general query' || text.trim() === '10' || text.trim() === '10.' || text.trim() === 'menu_10') {
         const queryReply = `🔍 *SalesOS Search & Intelligence*\n\nAsk any question about your inquiries, quotations, customer profiles, site visits, or complaints!\n\n_Example: "What was the last rate quoted to Horizon Sheet Metal?" or "Show pending complaints"_`;
@@ -5451,18 +5496,6 @@ async function handleCatalogFlow(rawText, senderPhone) {
         console.log(`[CatalogFlow] Strict activity scope guard in catalog_flow: active=${action} (${getModuleFamily(action)}), incoming=${outOfScopeAction} (${getModuleFamily(outOfScopeAction)})`);
         return buildOutOfScopeActivityResponse(action, outOfScopeAction);
       }
-    }
-
-    if (isDiscardOrCancelIntent(text)) {
-      const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
-      await recordSessionMessage(senderPhone, 'user', text);
-      await recordSessionMessage(senderPhone, 'assistant', cancelReply);
-      await finalizeCurrentSession(senderPhone, `Discarded ${getActionFriendlyName(action)} flow`);
-      await saveActiveSession(senderPhone, 'Unknown', 'general');
-      return {
-        handled: true,
-        reply: cancelReply,
-      };
     }
 
     // Extract fields from user message
