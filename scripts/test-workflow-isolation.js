@@ -132,7 +132,7 @@ async function runTests() {
       console.log('Order Confirmation response:\n', confirmRes.reply);
       const passConfirm = confirmRes.handled === true &&
                           confirmRes.reply.includes('Order Recorded & Deal Marked as WON!') &&
-                          confirmRes.reply.includes(`Inquiry ID:* #INQ-${testInqCode}`) &&
+                          confirmRes.reply.includes(`Inquiry ID:* INQ-${testInqCode}`) &&
                           confirmRes.reply.includes('Total Tonnage:* 50 MT') &&
                           confirmRes.reply.includes('GST (18%):') &&
                           confirmRes.reply.includes('Super Quoted Industries');
@@ -255,8 +255,8 @@ async function runTests() {
   const pass11 = cmpRes.handled === true &&
                  cmpRes.reply.includes('Menon Industries') &&
                  cmpRes.reply.includes('PO-20260921-9974') &&
-                 cmpRes.reply.includes('#INQ-1151E4') &&
-                 !cmpRes.reply.includes('#INQ-2DEA6A');
+                 cmpRes.reply.includes('INQ-1151E4') &&
+                 !cmpRes.reply.includes('INQ-2DEA6A');
   console.log('Test 11 Passed:', pass11);
 
   // TEST 12: Direct Write Logging Blocked in Idle State (Enforce Catalog Flow Only)

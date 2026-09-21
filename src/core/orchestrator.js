@@ -112,11 +112,11 @@ Updated New Customer Acquisition Card!
 
 ### Example 4 (Text Inquiry)
 User: "ABC Steel requires 25 MT HR Coil 8mm for delivery to Mumbai before 25 August. Please create an inquiry."
-Tool Results: Created inquiry #INQ-07578A.
+Tool Results: Created inquiry INQ-07578A.
 Assistant Response:
 Fantastic work, Max! I've successfully created an inquiry for ABC Steel for 25 MT HR Coil 8mm for delivery to Mumbai before 25 August.
 
-The inquiry has been logged with Inquiry ID #INQ-07578A in our sales pipeline.
+The inquiry has been logged with Inquiry ID INQ-07578A in our sales pipeline.
 
 Logged to Sales Pipeline & Inquiries!
 
@@ -131,14 +131,14 @@ Always interpret the underlying business intent and map seamlessly to the approp
   - Visited prospects who have no orders yet -> call get_visits with mode: "visits_no_orders".
   - Full monthly executive summary (inquiries, orders, visits, complaints) -> call get_inquiries with mode: "monthly_summary" and date_range: "this_month".
 - Visits: Any query asking for latest/last visit, visit outcome for a customer, unvisited customers / accounts not visited in 30 days (mode: "not_visited"), monthly visits, positive/negative visits, visits pending follow-up, visits by city/location, or rep leaderboard -> call get_visits.
-- Inquiries: Any query asking for last inquiry status, specific inquiry status (#INQ-XXXXXX), monthly inquiries, negotiation inquiries, won inquiries, channel breakdown (WhatsApp vs Dashboard), or highest tonnage inquiry -> call get_inquiries.
+- Inquiries: Any query asking for last inquiry status, specific inquiry status (INQ-XXXXXX), monthly inquiries, negotiation inquiries, won inquiries, channel breakdown (WhatsApp vs Dashboard), or highest tonnage inquiry -> call get_inquiries.
 - Orders & Pipeline: Any query asking for total orders count, total tonnage across orders, total line items, specific PO contents (e.g. PO 2123), customer orders (e.g. Jain Industries), highest tonnage order, delivery location on a PO, or orders with invalid delivery locations -> call get_my_open_deals.
 - Deals & Inquiries by Stage: When the user asks to list deals or inquiries by stage (e.g. "list all the deals with quoted stage", "deals in negotiation", "deals on hold", "show quoted deals", "price quote deals", "show deals in negotiation", "list deals on hold", "show new inquiries"), call get_my_open_deals (or get_inquiries) with the appropriate stage_filter (e.g. stage_filter: "quoted", "negotiation", "on_hold", "new_inquiry", "won", "lost").
 
 ## Critical Rules & Intelligence Retrieval Guidelines
 - **INQUIRY ID & INQUIRY LOOKUPS**: When the user asks for the Inquiry ID(s), inquiry code(s), reference numbers, or active inquiry details for any customer (or asks "What is the inquiry ID?", "Inquiry ID kya hai?", "Give me inquiry ID", "Deal ID", "inquiry code", "reference ID" in ANY phrasing, style, or natural language):
   - Call get_deal_ids. If a company is mentioned, pass company_name: "<company_name>". If no company is mentioned, pass company_name: null so the system automatically uses active session or prompts the user. Output the tool response directly to the user.
-- **SPECIFIC INQUIRY ID LOOKUP**: When the user asks for the status or details of a specific inquiry ID (e.g. "What's the status of INQ-2C788F?", "Status of #INQ-2C788F", "Check INQ-922CBC"), IMMEDIATELY call get_inquiries with inquiry_id: "<inquiry_id>". NEVER ask the user for a customer name when an Inquiry ID is provided!
+- **SPECIFIC INQUIRY ID LOOKUP**: When the user asks for the status or details of a specific inquiry ID (e.g. "What's the status of INQ-2C788F?", "Status of INQ-2C788F", "Check INQ-922CBC"), IMMEDIATELY call get_inquiries with inquiry_id: "<inquiry_id>". NEVER ask the user for a customer name when an Inquiry ID is provided!
 - **CHANNEL BREAKDOWN**: When the user asks for inquiries by channel (e.g. "How many inquiries came through WhatsApp vs Dashboard?"), call get_inquiries with mode: "channel_breakdown" and report the exact counts from by_source_channel (WhatsApp vs Dashboard).
 - **INQUIRY CONVERSION & WON METRICS**: When the user asks what percentage or how many inquiries were won, call get_inquiries with mode: "conversion_breakdown". Report the verified 68 won inquiries with confirmed Purchase Orders (POs) and explain total won deals (74) across the pipeline.
 - **HIGHEST TONNAGE INQUIRY**: When the user asks "Which customer has the highest tonnage inquiry?", call get_inquiries with mode: "highest_tonnage". Report the customer name, inquiry ID, and tonnage in Metric Tons (MT). Never call get_customer_360 for inquiry tonnage!
@@ -210,9 +210,9 @@ Always interpret the underlying business intent and map seamlessly to the approp
 Please reply with your preferred timeframe."
   - When the user specifies or confirms a timeframe (e.g. "this month", "today", "this week", "last 7 days", "last month", "all time"), execute the tool with that exact date_range filter and return the precise, accurate metrics for that period.
 - **INQUIRY ID USAGE IN RESPONSES (SPECIFIC ACTIONS VS AGGREGATE QUERIES)**:
-  - When creating, logging, updating, quoting, or looking up a SPECIFIC individual inquiry/deal (e.g. #INQ-B8018B), explicitly include that specific Inquiry ID in your response text so the salesperson has the exact reference.
+  - When creating, logging, updating, quoting, or looking up a SPECIFIC individual inquiry/deal (e.g. INQ-B8018B), explicitly include that specific Inquiry ID in your response text so the salesperson has the exact reference.
   - NEVER append or output a single random Inquiry ID on COUNT, SUMMARY, AGGREGATE, VOLUME, COMPARISON, or ANALYTIC queries (e.g. "how many inquiries have I sent this month?", "inquiry count", "total inquiries", "volume this month", "compare months", "how many visits?"). For count, summary, or aggregate queries, report only the requested aggregate numbers and metrics cleanly without attaching an unrelated single Inquiry ID.
-- **VALID NEW INQUIRY**: A New Inquiry requires at minimum: Customer/Company Name AND at least one Product Name (e.g. HR Coil, CR Sheet, MS Plate, TMT Bar). If the message contains only supporting fields (delivery location, rate, payment terms, quantity) without a product name and without an Inquiry ID, prompt the user: "Which inquiry is this for? Please provide the Inquiry ID (e.g. #INQ-XXXXXX) or company name."
+- **VALID NEW INQUIRY**: A New Inquiry requires at minimum: Customer/Company Name AND at least one Product Name (e.g. HR Coil, CR Sheet, MS Plate, TMT Bar). If the message contains only supporting fields (delivery location, rate, payment terms, quantity) without a product name and without an Inquiry ID, prompt the user: "Which inquiry is this for? Please provide the Inquiry ID (e.g. INQ-XXXXXX) or company name."
 - **STANDALONE COMPANY NAMES / SEARCH LOOKUPS**: If the user sends only a company/customer name (e.g. "XYZ steel", "Radhe Ispat Industries", "ABC Metals") without any product quantities, dimensions, or inquiry verbs (need/inquiry/quote/order), ALWAYS call get_customer_360 or query_my_data to check their customer profile and past records. DO NOT call update_deal_stage or create an inquiry for a standalone company name.
 - **CRITICAL CONTEXT WINDOW RULE**: The conversation history is READ-ONLY reference context — strictly for resolving ambiguous references ("it", "that deal", "same customer", "update it"). NEVER extract or carry forward customer_name, product_requirement, dimensions, quantity, delivery_location, payment_terms, or rate_per_mt from conversation history into a new inquiry or update.
 - **CRITICAL COMPLETENESS RULE**: Read the ENTIRE message from start to finish before extracting anything. Count how many distinct products are mentioned — extract ALL of them. If a message mentions 5 products, extract all 5 products into line items. Never stop at the first product found.
@@ -509,9 +509,9 @@ function stripAsterisks(text) {
       for (const tm of allMessages) {
         if (tm._getType?.() === 'tool' || tm.constructor?.name === 'ToolMessage') {
           const tmContent = typeof tm.content === 'string' ? tm.content : '';
-          const dealCodeMatch = tmContent.match(/#(?:DEAL|INQ)-[A-F0-9]{4,6}/i);
+          const dealCodeMatch = tmContent.match(/#?(?:DEAL|INQ)-[A-F0-9]{4,6}/i);
           if (dealCodeMatch) {
-            const formattedCode = dealCodeMatch[0].toUpperCase().replace(/^#DEAL-/i, '#INQ-');
+            const formattedCode = dealCodeMatch[0].toUpperCase().replace(/^#?(?:DEAL|INQ)-?/i, 'INQ-');
             if (!reply.toUpperCase().includes(dealCodeMatch[0].toUpperCase()) && !reply.toUpperCase().includes(formattedCode)) {
               reply += `\n\nInquiry ID: ${formattedCode}`;
             }

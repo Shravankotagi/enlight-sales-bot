@@ -9,7 +9,7 @@
  *    - If a salesperson reports multiple complaints in one message (different companies or different items),
  *      each is extracted and created as an independent row in the database.
  * 2. PO Priority for Won Deals:
- *    - Won deals reference PO number as primary (e.g. "PO: DEW/RFQ/2026/089 (#INQ-1BBB57)").
+ *    - Won deals reference PO number as primary (e.g. "PO: DEW/RFQ/2026/089 (INQ-1BBB57)").
  *    - Deals without PO or non-won deals reference Inquiry ID as primary.
  * 3. Exact Timestamps & Mandatory Resolution Notes.
  */
@@ -48,7 +48,7 @@ Rules:
 - "action": "resolve" -> issue settled, sorted, material replaced, customer accepted, resolved.
 - If multiple companies or separate complaint sentences exist, CREATE A SEPARATE ENTRY IN THE "complaints" ARRAY FOR EACH ONE!
 - "affected_product": Extract specific steel category, dimensions, or product form for that specific complaint.
-- "deal_id": Extract any #INQ-XXXXXX or #DEAL-XXXXXX mentioned (do NOT put PO numbers here).
+- "deal_id": Extract any INQ-XXXXXX or DEAL-XXXXXX mentioned (do NOT put PO numbers here).
 - "po_number": Extract any PO number (PO #6712, PO-XXXX, Purchase Order #) mentioned (do NOT put Inquiry IDs here).
 - Status at creation is ALWAYS "open". Ignore any user-supplied initial status such as "Status: In Progress".
 
@@ -114,7 +114,7 @@ async function getCustomerActiveDeals(customerName, senderPhone) {
   return deals.map(d => {
     const rawInq = d.id;
     const cleanCode = rawInq.replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase();
-    const dealCode = `#INQ-${cleanCode}`;
+    const dealCode = `INQ-${cleanCode}`;
     const itms = itemMap.get(d.id) || [];
     const prodSummary = itms.length > 0
       ? itms.map(it => `${it.sku_text || 'Steel'} ${it.dimensions || ''} ${it.quantity ? `(${it.quantity} ${it.unit || 'MT'})` : ''}`.trim()).join(', ')
@@ -182,7 +182,7 @@ async function getCustomerOpenInquiries(customerName, senderPhone) {
 
   return deals.map(d => ({
     ...d,
-    deal_code: `#INQ-${d.id.substring(0, 6).toUpperCase()}`,
+    deal_code: `INQ-${d.id.substring(0, 6).toUpperCase()}`,
     items: itemMap.get(d.id) || [],
   }));
 }
@@ -607,8 +607,8 @@ async function processSingleComplaint(data, originalText, senderPhone) {
       }
 
       const orderRef = openComplaint.po_number
-        ? `PO: *${openComplaint.po_number}* (#INQ-${(openComplaint.deal_id || '').substring(0, 6).toUpperCase()})`
-        : openComplaint.deal_id ? `Inquiry: *#INQ-${openComplaint.deal_id.substring(0, 6).toUpperCase()}*` : '';
+        ? `PO: *${openComplaint.po_number}* (INQ-${(openComplaint.deal_id || '').substring(0, 6).toUpperCase()})`
+        : openComplaint.deal_id ? `Inquiry: *INQ-${openComplaint.deal_id.substring(0, 6).toUpperCase()}*` : '';
 
       await saveActiveSession(senderPhone, finalCustomerName, 'complaint_resolved');
 
@@ -763,7 +763,7 @@ async function processSingleComplaint(data, originalText, senderPhone) {
 
       if (nonWonMatch) {
         const stageName = (nonWonMatch.stage || 'inquiry').toUpperCase();
-        const displayCode = `#INQ-${(nonWonMatch.id || nonWonMatch.inquiry_id).replace(/-/g, '').substring(0, 6).toUpperCase()}`;
+        const displayCode = `INQ-${(nonWonMatch.id || nonWonMatch.inquiry_id).replace(/-/g, '').substring(0, 6).toUpperCase()}`;
         return `❌ *Cannot Log Complaint - Not an Order in Orders Module*\n\n` +
           `Inquiry *${displayCode}* is currently in *${stageName}* stage.\n\n` +
           `Complaints can only be logged for confirmed purchase orders (won deals) in the Orders module.`;
@@ -920,7 +920,7 @@ async function processSingleComplaint(data, originalText, senderPhone) {
     const cleanCodeForLog = targetDealId ? (targetDealId.startsWith('DEAL-') || targetDealId.startsWith('INQ-') ? targetDealId.replace(/^(?:DEAL|INQ)-/, '') : targetDealId.substring(0, 6).toUpperCase()) : '';
     logBotActivity({
       salesperson_phone: senderPhone,
-      description: `New complaint logged for ${finalCustomerName}${targetPoNumber ? ` (PO: ${targetPoNumber})` : targetDealId ? ` (Inquiry: #INQ-${cleanCodeForLog})` : ''}`,
+      description: `New complaint logged for ${finalCustomerName}${targetPoNumber ? ` (PO: ${targetPoNumber})` : targetDealId ? ` (Inquiry: INQ-${cleanCodeForLog})` : ''}`,
       module: 'Complaints',
       customer_name: finalCustomerName,
     });
@@ -938,8 +938,8 @@ async function processSingleComplaint(data, originalText, senderPhone) {
 
   const cleanCode = targetDealId ? (targetDealId.startsWith('DEAL-') || targetDealId.startsWith('INQ-') ? targetDealId.replace(/^(?:DEAL|INQ)-/, '') : targetDealId.replace(/-/g, '').substring(0, 6).toUpperCase()) : '';
   const orderRef = targetPoNumber
-    ? `PO: *${targetPoNumber}* ${cleanCode ? `(#INQ-${cleanCode})` : ''}`
-    : cleanCode ? `Inquiry *#INQ-${cleanCode}*` : 'Unlinked';
+    ? `PO: *${targetPoNumber}* ${cleanCode ? `(INQ-${cleanCode})` : ''}`
+    : cleanCode ? `Inquiry *INQ-${cleanCode}*` : 'Unlinked';
 
   return `🚨 *Customer Complaint Logged*\n\n` +
     `Customer: *${finalCustomerName}*\n` +

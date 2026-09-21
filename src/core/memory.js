@@ -361,7 +361,7 @@ async function getCustomerFactSheet(customerName, senderPhone) {
       factSheet += '\n\n- Active Pipeline Inquiries:';
       openDeals.forEach((d) => {
         const cleanCode = (d.deal_code || 'ID').replace(/^#?(?:DEAL|INQ)-?/i, '');
-        factSheet += '\n  • Inquiry #INQ-' + cleanCode + ' [Stage: ' + d.stage + ']';
+        factSheet += '\n  • Inquiry INQ-' + cleanCode + ' [Stage: ' + d.stage + ']';
       });
     }
 

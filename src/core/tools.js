@@ -79,7 +79,7 @@ function createTools(senderPhone, rawUserText = '') {
         text: z.string().describe('The full original message from the salesperson'),
         email: z.string().optional().nullable().describe('The email address if mentioned e.g. client@gmail.com, else null'),
         customer_name: z.string().optional().nullable().describe('Customer or company name if mentioned, else null'),
-        deal_id: z.string().optional().nullable().describe('Inquiry ID if mentioned e.g. #INQ-A983FC, else null'),
+        deal_id: z.string().optional().nullable().describe('Inquiry ID if mentioned e.g. INQ-A983FC, else null'),
       }),
     }
   );
@@ -242,9 +242,9 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'get_inquiries',
-      description: `Retrieves customer inquiries, raw WhatsApp messages, and resulting deal status. Supports direct inquiry ID lookups (#INQ-XXXXXX), channel breakdown (WhatsApp vs Dashboard), conversion breakdown, highest tonnage inquiry, salesperson conversion rankings, open inquiries from dormant buyers, month-over-month comparison, and monthly summary.`,
+      description: `Retrieves customer inquiries, raw WhatsApp messages, and resulting deal status. Supports direct inquiry ID lookups (INQ-XXXXXX), channel breakdown (WhatsApp vs Dashboard), conversion breakdown, highest tonnage inquiry, salesperson conversion rankings, open inquiries from dormant buyers, month-over-month comparison, and monthly summary.`,
       schema: z.object({
-        inquiry_id: z.string().optional().nullable().describe('Optional specific Inquiry ID or Deal ID (e.g. "#INQ-2C788F", "INQ-2C788F", or UUID) to fetch status and details for that exact inquiry.'),
+        inquiry_id: z.string().optional().nullable().describe('Optional specific Inquiry ID or Deal ID (e.g. "INQ-2C788F" or UUID) to fetch status and details for that exact inquiry.'),
         status_filter: z.string().optional().nullable().describe('Optional filter by inquiry status or deal outcome: "all", "won" / "orders", "lost", "review", "pending", "quoted" (includes price quote, proposal, qualified), "negotiation", "on_hold".'),
         source_channel: z.string().optional().nullable().describe('Optional filter by incoming channel: "all", "whatsapp", "dashboard", "whatsapp_text", "web_dashboard".'),
         source_type: z.string().optional().nullable().describe('Optional filter by inquiry format: "all", "ocr_document" (documents/PDFs/images), "text".'),

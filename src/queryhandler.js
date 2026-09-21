@@ -807,7 +807,7 @@ Return ONLY the company name or "NONE":`;
     const dealCards = deals.map((d, i) => {
       const rawInq = d.id || d.inquiry_id || 'UNKNOWN';
       const cleanNum = rawInq.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').substring(0, 6).toUpperCase();
-      const dealCode = `#INQ-${cleanNum}`;
+      const dealCode = `INQ-${cleanNum}`;
       const stageStr = (d.stage || 'new_inquiry').toUpperCase();
       const items = d.deal_items || [];
       let itemStr = '';
@@ -834,7 +834,7 @@ Return ONLY the company name or "NONE":`;
 
     const displayCustName = deals[0].customer_name || customerName;
     const firstRawInq = deals[0].id || deals[0].inquiry_id || 'XXXXXX';
-    const sampleInqCode = `#INQ-${firstRawInq.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').substring(0, 6).toUpperCase()}`;
+    const sampleInqCode = `INQ-${firstRawInq.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').substring(0, 6).toUpperCase()}`;
 
     return `📋 *Active Inquiries & Deals - ${displayCustName}* (${deals.length} found)\n\n` +
            dealCards.join('\n\n') +
@@ -2604,8 +2604,8 @@ async function getCustomer360(senderPhone, text, extractedName = null) {
             )
             .filter(Boolean)
             .join(', ');
-          const code = d.deal_number ? d.deal_number.replace(/^#?(?:DEAL|INQ)-?/i, '') : d.id.substring(0, 8);
-          return `• *Inquiry #${code}* (${d.stage || 'inquiry'})\n  Value: ${amt}${items ? `\n  Items: ${items}` : ''}`;
+          const code = d.deal_number ? d.deal_number.replace(/^#?(?:DEAL|INQ)-?/i, '') : d.id.substring(0, 6).toUpperCase();
+          return `• *Inquiry INQ-${code}* (${d.stage || 'inquiry'})\n  Value: ${amt}${items ? `\n  Items: ${items}` : ''}`;
         })
         .join('\n\n');
     }
@@ -3395,12 +3395,12 @@ async function getInquiryOrDealByCode(scopeOrPhone, text, explicitCode = null) {
     );
 
     if (!matchedDeal && !matchedInq) {
-      return `Inquiry #${code} was not found in the database. Please check the Inquiry ID.`;
+      return `Inquiry ${code} was not found in the database. Please check the Inquiry ID.`;
     }
 
     const custName = matchedDeal?.customer_name || matchedInq?.sender_name || 'Customer';
     const rawMatchId = matchedDeal ? (matchedDeal.id || matchedDeal.inquiry_id || '') : (matchedInq?.id || '');
-    const displayId = `#INQ-${rawMatchId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').substring(0, 6).toUpperCase()}`;
+    const displayId = `INQ-${rawMatchId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').substring(0, 6).toUpperCase()}`;
 
     const stageStr = (matchedDeal?.stage || matchedInq?.status || 'NEW INQUIRY').toUpperCase();
     const dateStr = (matchedDeal?.created_at || matchedInq?.created_at)

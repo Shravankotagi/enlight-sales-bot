@@ -93,7 +93,7 @@ Input message can be English, Hindi, or Hinglish.
 Extract into ONLY a JSON object (no markdown, no prose, no backticks):
 {
   "action": "inquiry|stage_update|purchase_order|deal_update", // Use "stage_update" whenever moving stage, updating status, or marking as won/lost/negotiation/quoted/on_hold. Use "inquiry" for ALL new customer requirements, notes, RFQs, quotes. Use "purchase_order" ONLY if text explicitly contains "PO", "PO-...", "Purchase order", "Order confirmed", "Order placed", or "Won".
-  "deal_id": "<exact alphanumeric inquiry/deal ID code if mentioned e.g. INQ-B76516, DEAL-B76516, #INQ-B76516, or B76516. Must NEVER be words like 'uiry', 'inquiry', 'deal', or 'null'>",
+  "deal_id": "<exact alphanumeric inquiry/deal ID code if mentioned e.g. INQ-B76516, DEAL-B76516, or B76516. Must NEVER be words like 'uiry', 'inquiry', 'deal', or 'null'>",
   "customer_name": "<exact company/customer name requesting material or placing order, else null>",
   "contact_person": "<full name of customer contact person/owner/proprietor if mentioned e.g. Rajesh Mehta, else null>",
   "target_stage": "new_inquiry|quoted|negotiation|on_hold|won|lost", // Stage if explicitly requested to update e.g. "update to negotiation", "mark as negotiation", "mark as won", "deal lost", "put on hold", "is on hold", else null
@@ -1385,13 +1385,13 @@ function isInvalidCustomerName(name) {
 }
 
 function getDealCode(deal) {
-  if (!deal) return '#INQ-UNKNOWN';
+  if (!deal) return 'INQ-UNKNOWN';
   if (deal.deal_number) {
     const cleanNum = deal.deal_number.replace(/^#?(?:DEAL|INQ)-?/i, '');
-    return `#INQ-${cleanNum}`;
+    return `INQ-${cleanNum}`;
   }
   const code = (deal.id || '').substring(0, 6).toUpperCase();
-  return `#INQ-${code}`;
+  return `INQ-${code}`;
 }
 
 /**
@@ -3182,7 +3182,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
       }
 
       if (!dealToUpdate) {
-        return `Which inquiry would you like to mark as ${dbStage.toUpperCase()}? Please provide the Inquiry ID (e.g. #INQ-XXXXXX) or customer name.`;
+        return `Which inquiry would you like to mark as ${dbStage.toUpperCase()}? Please provide the Inquiry ID (e.g. INQ-XXXXXX) or customer name.`;
       }
 
       const currentStage = (dealToUpdate.stage || 'new_inquiry').toLowerCase().trim();
@@ -3435,10 +3435,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
         } else if (openDeals.length > 1) {
           return formatOpenDealsListPrompt(customerName, openDeals);
         } else {
-          return `Which inquiry is this update for? Please provide the Inquiry ID (e.g. #INQ-XXXXXX) or company name.`;
+          return `Which inquiry is this update for? Please provide the Inquiry ID (e.g. INQ-XXXXXX) or company name.`;
         }
       } else {
-        return `Which inquiry is this for? Please provide the Inquiry ID (e.g. #INQ-XXXXXX).`;
+        return `Which inquiry is this for? Please provide the Inquiry ID (e.g. INQ-XXXXXX).`;
       }
     }
 
@@ -4067,7 +4067,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
       } else {
         const pendingPayload = {
           dealId,
-          dealCode: dealId ? `#INQ-${dealId.substring(0, 6).toUpperCase()}` : null,
+          dealCode: dealId ? `INQ-${dealId.substring(0, 6).toUpperCase()}` : null,
           customerName: finalCustomerName,
           totalAmount: dealAmount,
         };

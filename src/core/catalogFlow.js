@@ -215,7 +215,7 @@ Please provide the *Inquiry ID* (e.g. INQ-F4D982) linked to this order:
   UPDATE_ORDER: `✏️ *Update Order*
 
 To identify the order, please provide ONE of the following:
-• *Inquiry ID:* * (e.g. INQ-936C7B or #INQ-3C86DE)
+• *Inquiry ID:* * (e.g. INQ-936C7B or INQ-3C86DE)
 • *PO Number:* * (e.g. PO-2026-0042)
 
 What would you like to update?
@@ -291,7 +291,7 @@ Example:
   UPDATE_COMPLAINT: `✏️ *Update Complaint*
 
 To identify the complaint, provide ONE of the following:
-• *Linked PO Number or Inquiry ID:* * (e.g. PO-2026-TI-101 or #INQ-8971B1)
+• *Linked PO Number or Inquiry ID:* * (e.g. PO-2026-TI-101 or INQ-8971B1)
 • *Customer Name:* (e.g. Tech Industries)
 
 What would you like to update?
@@ -686,7 +686,7 @@ LOG_INQUIRY:
 UPDATE_INQUIRY:
 {
   "action": "UPDATE_INQUIRY",
-  "inquiry_id": "<Inquiry ID e.g. INQ-2026-0042, INQ-1BB6F1, INQ-B76516, #INQ-0042, else null>",
+  "inquiry_id": "<Inquiry ID e.g. INQ-2026-0042, INQ-1BB6F1, INQ-B76516, INQ-0042, else null>",
   "company_name": "<Customer / Company Name e.g. 'SS Industries', else null>",
   "updates": {
     "product_description": "<if user requested general product text update, else null>",
@@ -716,7 +716,7 @@ IMPORTANT RULES FOR INQUIRIES:
 LOG_ORDER:
 {
   "action": "LOG_ORDER",
-  "inquiry_id": "<Inquiry ID e.g. INQ-F4D982, INQ-2026-0042, #INQ-F4D982, else null>",
+  "inquiry_id": "<Inquiry ID e.g. INQ-F4D982, INQ-2026-0042, else null>",
   "company_name": "<Company Name, else null>",
   "po_number": "<PO Number e.g. PO-2026-0042, else null>",
   "po_date": "<PO Date in DD-MM-YYYY format, else null>",
@@ -751,7 +751,7 @@ LOG_ORDER:
 UPDATE_ORDER:
 {
   "action": "UPDATE_ORDER",
-  "inquiry_id": "<Inquiry ID if mentioned e.g. INQ-936C7B, #INQ-3C86DE, INQ-2026-0042, else null>",
+  "inquiry_id": "<Inquiry ID if mentioned e.g. INQ-936C7B, INQ-3C86DE, INQ-2026-0042, else null>",
   "po_number": "<PO Number to lookup or attach e.g. PO-2026-0042, else null>",
   "company_name": "<Customer / Company Name if mentioned, else null>",
   "updates": {
@@ -845,7 +845,7 @@ LOG_COMPLAINT:
   "action": "LOG_COMPLAINT",
   "company_name": "<Company / Customer Name, else null>",
   "affected_product": "<specific product/material affected e.g. '12 MT MS angle', 'CR Sheet 1.20mm coils', 'MS Angle Bars' - else null>",
-  "linked_inquiry_or_po": "<Linked Inquiry ID e.g. #INQ-8971B1 or PO Number e.g. 6712, PO-2026-TI-101 if mentioned, else null>",
+  "linked_inquiry_or_po": "<Linked Inquiry ID e.g. INQ-8971B1 or PO Number e.g. 6712, PO-2026-TI-101 if mentioned, else null>",
   "complaint_type": "<Quality Defect | Physical Damage | Quantity Shortage | Delivery Delay | Billing Mismatch | Specification Mismatch | Other, if mentioned or inferred from issue, else null>",
   "complaint_description": "<Detailed complaint description, else null>",
   "corrective_action": "<Corrective action taken if mentioned, else null>",
@@ -866,7 +866,7 @@ UPDATE_COMPLAINT:
 {
   "action": "UPDATE_COMPLAINT",
   "company_name": "<Customer / Company Name if mentioned, else null>",
-  "linked_inquiry_or_po": "<Linked PO Number or Inquiry ID e.g. #INQ-8971B1, PO-2026-TI-101 if mentioned, else null>",
+  "linked_inquiry_or_po": "<Linked PO Number or Inquiry ID e.g. INQ-8971B1, PO-2026-TI-101 if mentioned, else null>",
   "updates": {
     "complaint_type": "<Quality Defect | Physical Damage | Quantity Shortage | Delivery Delay | Billing Mismatch | Specification Mismatch | Other if updated, else null>",
     "complaint_description": "<if updated, else null>",
@@ -886,8 +886,8 @@ CRITICAL RULES:
 7. MULTIPLE ENTITIES / COMPANIES (CRITICAL): If and only if the user message itself introduces multiple distinct companies/records (e.g. 'Visited two customers today: ABC Steel in Mumbai (positive) and Sharma Construction in Pune (neutral)' or 'Inquiry from ABC for 10 MT and XYZ for 20 MT'):
 Output an 'entries' array containing a separate object for EACH individual customer/visit/inquiry/complaint!
 If only a single company is mentioned or if filling missing fields for an existing draft, return the top-level fields (e.g. company_name, person_met, contact_phone, etc.) and do NOT output an entries array.
-8. In LOG_ORDER: If the user provides an Inquiry ID (e.g. INQ-F4D982, #INQ-F4D982, or 'regarding inquiry INQ-F4D982'), extract the inquiry ID into 'inquiry_id'.
-9. In UPDATE_ORDER: If the user provides an Inquiry ID (e.g. INQ-936C7B, #INQ-3C86DE) and asks to attach/set/update a PO number (e.g. 'attach PO-2026-8899 to INQ-936C7B' or 'INQ-936C7B PO is PO-2026-8899'), extract the inquiry ID into 'inquiry_id' and the PO number into 'po_number' and 'updates.po_number'.
+8. In LOG_ORDER: If the user provides an Inquiry ID (e.g. INQ-F4D982 or 'regarding inquiry INQ-F4D982'), extract the inquiry ID into 'inquiry_id'.
+9. In UPDATE_ORDER: If the user provides an Inquiry ID (e.g. INQ-936C7B, INQ-3C86DE) and asks to attach/set/update a PO number (e.g. 'attach PO-2026-8899 to INQ-936C7B' or 'INQ-936C7B PO is PO-2026-8899'), extract the inquiry ID into 'inquiry_id' and the PO number into 'po_number' and 'updates.po_number'.
 10. PRODUCT CATALOG RULES:
 The official Enlight Metals product catalog consists of:
 • Flat Steel: HR Coil, HR Sheet, HR Plate, HRPO Coil, HRPO Sheet, CR Coil, CR Sheet, GP Coil, GP Sheet, Galvalume Coil, Galvalume Sheet, Chequered Coil, Chequered Sheet
@@ -1314,7 +1314,7 @@ async function validateDraftComplaintReference(draft, senderPhone) {
         const displayInq = cleanInqCode.startsWith('INQ-') ? cleanInqCode : `INQ-${cleanInqCode}`;
         return {
           isValid: false,
-          rejectionMessage: `Inquiry #${displayInq} was not found for ${companyName}. A complaint can only be raised against an existing PO or inquiry in your portfolio. Please verify the inquiry ID and try again.`,
+          rejectionMessage: `Inquiry ${displayInq} was not found for ${companyName}. A complaint can only be raised against an existing PO or inquiry in your portfolio. Please verify the inquiry ID and try again.`,
         };
       }
     }
@@ -1365,7 +1365,7 @@ async function validateDraftComplaintReference(draft, senderPhone) {
  * - Salesperson provides an Inquiry ID → bot queries Inquiries/deals table → checks current stage
  * - If stage is Quoted / Price Quote → proceed with order creation flow ✅
  * - If stage is New Inquiry, Negotiation, On Hold, or any pre-quote stage → block:
- *   "Order cannot be created. Inquiry #INQ-XXXXX is currently in [stage] stage. A quotation must be sent and the inquiry must be in Quoted stage before an order can be recorded."
+ *   "Order cannot be created. Inquiry INQ-XXXXX is currently in [stage] stage. A quotation must be sent and the inquiry must be in Quoted stage before an order can be recorded."
  * - If Inquiry ID does not exist → block:
  *   "Inquiry ID not found. Please verify and try again."
  */
@@ -1450,7 +1450,7 @@ async function validateOrderInquiryStage(draft, senderPhone) {
 
     return {
       isValid: false,
-      reply: `Order cannot be created. Inquiry #${formattedCode} is currently in New Inquiry stage. A quotation must be sent before an order can be recorded.`,
+      reply: `Order cannot be created. Inquiry ${formattedCode} is currently in New Inquiry stage. A quotation must be sent before an order can be recorded.`,
     };
   }
 
@@ -1461,7 +1461,7 @@ async function validateOrderInquiryStage(draft, senderPhone) {
 
     return {
       isValid: false,
-      reply: `Order cannot be created. Inquiry #${formattedCode} is marked as Lost. Please reopen or update the inquiry before recording an order.`,
+      reply: `Order cannot be created. Inquiry ${formattedCode} is marked as Lost. Please reopen or update the inquiry before recording an order.`,
     };
   }
 
@@ -1738,7 +1738,7 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
   const enrichedDeals = wonDeals.map(d => {
     const rawInq = d.id;
     const cleanCode = rawInq.replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase();
-    const dealCode = `#INQ-${cleanCode}`;
+    const dealCode = `INQ-${cleanCode}`;
     const itms = itemMap.get(d.id) || [];
     const prodSummary = itms.length > 0
       ? itms.map(it => `${it.sku_text || 'Steel'} ${it.dimensions || ''} ${it.quantity ? `(${it.quantity} ${it.unit || 'MT'})` : ''}`.trim()).join(', ')
@@ -2347,7 +2347,7 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
                      (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0);
 
   if (!hasUpdates) {
-    const displayInq = deal.inquiry_id ? `#INQ-${deal.inquiry_id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : `#INQ-${deal.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    const displayInq = deal.inquiry_id ? `INQ-${deal.inquiry_id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : `INQ-${deal.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     const prompt = `✏️ *Order / Inquiry Found for ${deal.customer_name}:*\n\n` +
       `• *Inquiry ID:* ${displayInq}\n` +
       `• *PO Number:* ${deal.po_number || 'Not Attached Yet'}\n` +
@@ -2515,7 +2515,7 @@ function buildConfirmationSummary(action, draft) {
     case 'LOG_ORDER': {
       if (draft.inquiry_id) {
         const cleanDisplayInq = draft.inquiry_id.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
-        summary += `• *Inquiry ID:* #INQ-${cleanDisplayInq}\n`;
+        summary += `• *Inquiry ID:* INQ-${cleanDisplayInq}\n`;
       }
       summary += `• *Customer / Company:* ${draft.company_name}\n`;
       summary += `• *PO Number:* ${draft.po_number}\n`;
@@ -2563,7 +2563,7 @@ function buildConfirmationSummary(action, draft) {
     case 'UPDATE_ORDER': {
       if (draft.inquiry_id) {
         const cleanDisplayInq = draft.inquiry_id.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
-        summary += `• *Inquiry ID:* #INQ-${cleanDisplayInq}\n`;
+        summary += `• *Inquiry ID:* INQ-${cleanDisplayInq}\n`;
       }
       const poToDisplay = draft.updates?.po_number || draft.po_number;
       if (poToDisplay) {
@@ -2960,7 +2960,7 @@ async function executeAction(action, draft, senderPhone) {
           kra_number: 6,
           kra_type: 'new_inquiry',
           customer_name: companyName,
-          description: `Logged New Inquiry #${inquiryCode} for ${companyName}`,
+          description: `Logged New Inquiry ${inquiryCode} for ${companyName}`,
           month: new Date().getMonth() + 1,
           year: new Date().getFullYear(),
           created_at: new Date().toISOString(),
@@ -2972,7 +2972,7 @@ async function executeAction(action, draft, senderPhone) {
 
         return `🎉 *Inquiry Successfully Created!*
 
-📋 *Inquiry ID:* #${inquiryCode}
+📋 *Inquiry ID:* ${inquiryCode}
 🏢 *Customer:* ${companyName}
 📦 *Product:* ${productSummaryStr}
 📍 *Delivery Location:* ${draft.delivery_location}
@@ -3419,7 +3419,7 @@ Logged to Sales Pipeline & Inquiries! ✅`;
 
         const inqRaw = (draft.inquiry_id || draft.deal_id || '').trim();
         const cleanInqCode = inqRaw.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
-        const inqDisplay = cleanInqCode ? `\n📋 *Inquiry ID:* #INQ-${cleanInqCode}` : '';
+        const inqDisplay = cleanInqCode ? `\n📋 *Inquiry ID:* INQ-${cleanInqCode}` : '';
 
         const totalTonnage = structuredLineItems.reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);
         const mainUnit = structuredLineItems[0]?.unit || 'MT';
@@ -3674,7 +3674,7 @@ Updated Sales Achievement Card! 🏆`;
         }
 
         const displayPo = dealUpdates.po_number || deal.po_number || rawPo || 'N/A';
-        const displayInq = `#INQ-${(deal.id || deal.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+        const displayInq = `INQ-${(deal.id || deal.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
         const displayCust = deal.customer_name || draft.company_name || 'Customer';
         const displayTotal = dealUpdates.total_amount || deal.total_amount || 0;
         const displayLoc = dealUpdates.delivery_location || deal.delivery_location || 'Not specified';
@@ -4041,7 +4041,7 @@ Customer record created & added to your portfolio! ✅`;
           const cleanCode = targetDealId ? (targetDealId.startsWith('DEAL-') || targetDealId.startsWith('INQ-') ? targetDealId.replace(/^(?:DEAL|INQ)-/, '') : targetDealId.replace(/-/g, '').substring(0, 6).toUpperCase()) : '';
           logBotActivity({
             salesperson_phone: senderPhone,
-            description: `New complaint logged for ${companyName}${targetPoNumber ? ` (PO: ${targetPoNumber})` : cleanCode ? ` (Inquiry: #INQ-${cleanCode})` : ''}`,
+            description: `New complaint logged for ${companyName}${targetPoNumber ? ` (PO: ${targetPoNumber})` : cleanCode ? ` (Inquiry: INQ-${cleanCode})` : ''}`,
             module: 'Complaints',
             customer_name: companyName,
           });
@@ -4060,9 +4060,9 @@ Customer record created & added to your portfolio! ✅`;
         let linkedDisplay = '';
         const cleanCode = targetDealId ? (targetDealId.startsWith('DEAL-') || targetDealId.startsWith('INQ-') ? targetDealId.replace(/^(?:DEAL|INQ)-/, '') : targetDealId.replace(/-/g, '').substring(0, 6).toUpperCase()) : '';
         if (targetPoNumber) {
-          linkedDisplay = `\n🔗 *Linked Order:* PO: *${targetPoNumber}*${cleanCode ? ` (#INQ-${cleanCode})` : ''}`;
+          linkedDisplay = `\n🔗 *Linked Order:* PO: *${targetPoNumber}*${cleanCode ? ` (INQ-${cleanCode})` : ''}`;
         } else if (targetDealId) {
-          linkedDisplay = `\n🔗 *Linked Order:* Inquiry *#INQ-${cleanCode}*`;
+          linkedDisplay = `\n🔗 *Linked Order:* Inquiry *INQ-${cleanCode}*`;
         }
 
         return `⚠️ *Customer Complaint Logged Successfully!*
@@ -4128,7 +4128,7 @@ Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
         const linkedOrderRef = matchedCmp.po_number
           ? `PO: *${matchedCmp.po_number}*`
           : matchedCmp.deal_id
-          ? `Inquiry: *#INQ-${matchedCmp.deal_id.replace(/^#?(?:INQ|DEAL)-?/i, '').substring(0, 6).toUpperCase()}*`
+          ? `Inquiry: *INQ-${matchedCmp.deal_id.replace(/^#?(?:INQ|DEAL)-?/i, '').substring(0, 6).toUpperCase()}*`
           : '';
 
         let fieldsSummary = '';
