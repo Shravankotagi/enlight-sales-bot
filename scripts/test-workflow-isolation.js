@@ -227,8 +227,35 @@ async function runTests() {
   }
   console.log('Test 9 Passed:', pass9);
 
+  // TEST 10: Block Complaint write command during active Order workflow
+  console.log('\n[TEST 10] Workflow Isolation: Block Complaint write command during active Order flow');
+  await saveActiveSession(testPhone, 'Menon Industries', 'catalog_flow|LOG_ORDER|{"company_name":"Menon Industries"}');
+  const crossOrderToCmpRes = await handleCatalogFlow('i want log complaint for this latest order, delivered product was defective', testPhone);
+  console.log('Cross-module Order->Complaint response:\n', crossOrderToCmpRes.reply);
+  const pass10 = crossOrderToCmpRes.handled === true &&
+                 crossOrderToCmpRes.reply.includes('You are currently in the *Order* flow') &&
+                 crossOrderToCmpRes.reply.includes('log a complaint') &&
+                 crossOrderToCmpRes.reply.includes('complete or cancel the current activity first');
+  console.log('Test 10 Passed:', pass10);
+
+  // TEST 11: Correct Inquiry ID Linkage on Complaint (Must match deal.id / dashboard INQ-1151E4)
+  console.log('\n[TEST 11] Correct Inquiry ID Linkage on Complaint for Menon Industries');
+  const menonOwnerPhone = '918262937458';
+  await saveActiveSession(menonOwnerPhone, 'Unknown', 'catalog_flow|LOG_COMPLAINT|{}');
+  const cmpRes = await handleCatalogFlow('Menon Industries ,PO Number: PO-20260921-9974, delivered product was defective', menonOwnerPhone);
+  console.log('Complaint Capture response:\n', cmpRes.reply);
+  const pass11 = cmpRes.handled === true &&
+                 cmpRes.reply.includes('Menon Industries') &&
+                 cmpRes.reply.includes('PO-20260921-9974') &&
+                 cmpRes.reply.includes('#INQ-1151E4') &&
+                 !cmpRes.reply.includes('#INQ-2DEA6A');
+  console.log('Test 11 Passed:', pass11);
+
+  await saveActiveSession(testPhone, 'Unknown', 'general');
+  await saveActiveSession(menonOwnerPhone, 'Unknown', 'general');
+
   // Summary
-  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9;
+  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11;
   console.log('\n========================================');
   console.log('FINAL RESULT: ' + (allPassed ? 'ALL TESTS PASSED ✅' : 'SOME TESTS FAILED ❌'));
   console.log('========================================');

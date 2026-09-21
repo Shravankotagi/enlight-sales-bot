@@ -112,7 +112,7 @@ async function getCustomerActiveDeals(customerName, senderPhone) {
   });
 
   return deals.map(d => {
-    const rawInq = d.inquiry_id || d.id;
+    const rawInq = d.id;
     const cleanCode = rawInq.replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase();
     const dealCode = `#INQ-${cleanCode}`;
     const itms = itemMap.get(d.id) || [];
@@ -126,7 +126,7 @@ async function getCustomerActiveDeals(customerName, senderPhone) {
       ...d,
       deal_code: dealCode,
       clean_code: cleanCode,
-      effective_deal_id: rawInq,
+      effective_deal_id: d.id,
       effective_po: d.po_number && d.po_number.trim() !== '' ? d.po_number.trim() : dealCode,
       items: itms,
       product_summary: prodSummary,
@@ -726,7 +726,7 @@ async function processSingleComplaint(data, originalText, senderPhone) {
     });
 
     if (matchedDeal) {
-      targetDealId = matchedDeal.effective_deal_id || matchedDeal.inquiry_id || matchedDeal.id;
+      targetDealId = matchedDeal.id;
       targetPoNumber = matchedDeal.po_number || null;
       if (!data.affected_product && matchedDeal.product_summary) {
         data.affected_product = matchedDeal.product_summary;
@@ -763,9 +763,7 @@ async function processSingleComplaint(data, originalText, senderPhone) {
 
       if (nonWonMatch) {
         const stageName = (nonWonMatch.stage || 'inquiry').toUpperCase();
-        const displayCode = nonWonMatch.inquiry_id
-          ? `#INQ-${nonWonMatch.inquiry_id.replace(/-/g, '').substring(0, 6).toUpperCase()}`
-          : `#INQ-${nonWonMatch.id.replace(/-/g, '').substring(0, 6).toUpperCase()}`;
+        const displayCode = `#INQ-${(nonWonMatch.id || nonWonMatch.inquiry_id).replace(/-/g, '').substring(0, 6).toUpperCase()}`;
         return `❌ *Cannot Log Complaint - Not an Order in Orders Module*\n\n` +
           `Inquiry *${displayCode}* is currently in *${stageName}* stage.\n\n` +
           `Complaints can only be logged for confirmed purchase orders (won deals) in the Orders module.`;

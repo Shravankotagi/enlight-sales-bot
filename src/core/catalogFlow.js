@@ -366,14 +366,14 @@ function buildOutOfScopeActivityResponse(currentAction, detectedAction) {
   const currentModuleName = getModuleDisplayName(currentAction);
   const targetVerb = getTargetActionVerb(detectedAction);
 
-  const replyText = `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete or cancel the current activity first.\n\nHere is the menu to start a new activity:\n\n${CATALOG_MENU}`;
+  const replyText = `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete or cancel the current activity first and select the relevant option from the menu.\n\nHere is the menu to start a new activity:\n\n${CATALOG_MENU}`;
 
   return {
     handled: true,
     reply: replyText,
     interactiveType: 'list',
     interactiveList: {
-      bodyText: `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete or cancel the current activity first.\n\nHere is the menu to start a new activity:`,
+      bodyText: `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete or cancel the current activity first and select the relevant option from the menu.\n\nHere is the menu to start a new activity:`,
       buttonText: 'Choose Action',
       sections: CATALOG_MENU_SECTIONS,
     },
@@ -1232,6 +1232,7 @@ async function verifyDraftCustomer(action, draft, senderPhone) {
     action === 'UPDATE_INQUIRY' ||
     action === 'UPDATE_ORDER' ||
     action === 'UPDATE_COMPLAINT' ||
+    action === 'LOG_COMPLAINT' ||
     (action === 'LOG_ORDER' && draft.deal_id)
   ) return { isValid: true };
 
@@ -1444,7 +1445,7 @@ async function validateOrderInquiryStage(draft, senderPhone) {
 
   if (isNewInquiryStage) {
     const formattedCode = matchedDeal
-      ? (matchedDeal.inquiry_id ? `INQ-${matchedDeal.inquiry_id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : `INQ-${matchedDeal.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`)
+      ? `INQ-${(matchedDeal.id || matchedDeal.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`
       : `INQ-${matchedInq.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
 
     return {
@@ -1455,7 +1456,7 @@ async function validateOrderInquiryStage(draft, senderPhone) {
 
   if (stageLower === 'lost' || stageLower === 'closed lost' || stageLower === 'closed_lost') {
     const formattedCode = matchedDeal
-      ? (matchedDeal.inquiry_id ? `INQ-${matchedDeal.inquiry_id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : `INQ-${matchedDeal.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`)
+      ? `INQ-${(matchedDeal.id || matchedDeal.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`
       : `INQ-${matchedInq.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
 
     return {
@@ -1467,7 +1468,7 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   // If Quoted stage -> Auto populate customer name, delivery location, payment terms, line items, PO details
   if (matchedDeal) {
     draft.deal_id = matchedDeal.id;
-    draft.inquiry_id = matchedDeal.inquiry_id || matchedDeal.id;
+    draft.inquiry_id = matchedDeal.id || matchedDeal.inquiry_id;
     if (!draft.company_name && matchedDeal.customer_name) {
       draft.company_name = matchedDeal.customer_name;
     }
@@ -1735,7 +1736,7 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
   });
 
   const enrichedDeals = wonDeals.map(d => {
-    const rawInq = d.inquiry_id || d.id;
+    const rawInq = d.id;
     const cleanCode = rawInq.replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase();
     const dealCode = `#INQ-${cleanCode}`;
     const itms = itemMap.get(d.id) || [];
@@ -1749,7 +1750,7 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
       ...d,
       deal_code: dealCode,
       clean_code: cleanCode,
-      effective_deal_id: rawInq,
+      effective_deal_id: d.id,
       items: itms,
       product_summary: prodSummary,
       date_formatted: dateFormatted,
@@ -1779,7 +1780,7 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
     });
 
     if (matched) {
-      draft.deal_id = matched.effective_deal_id || matched.inquiry_id || matched.id;
+      draft.deal_id = matched.id;
       draft.po_number = matched.po_number || null;
       draft.linked_inquiry_or_po = matched.po_number ? `PO: ${matched.po_number} (${matched.deal_code})` : matched.deal_code;
       if (!draft.affected_product && matched.product_summary) {
@@ -1958,9 +1959,9 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
       if (dId.startsWith(cleanInqId) || inqId.startsWith(cleanInqId) || (cleanInqId.length >= 4 && (dId.includes(cleanInqId) || inqId.includes(cleanInqId)))) {
         const stage = (d.stage || 'new_inquiry').toLowerCase();
-        const displayId = `INQ-${(d.inquiry_id || d.id).slice(0, 6).toUpperCase()}`;
+        const displayId = `INQ-${(d.id || d.inquiry_id).slice(0, 6).toUpperCase()}`;
         matchedCandidates.push({
-          id: d.inquiry_id || d.id,
+          id: d.id || d.inquiry_id,
           deal_id: d.id,
           inquiry_id: d.inquiry_id,
           displayId,
@@ -2039,9 +2040,9 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       if (seenKeys.has(d.id) || (d.inquiry_id && seenKeys.has(d.inquiry_id))) return;
       if (isCustomerMatch(companyName, null, d.customer_name, d.customer_phone)) {
         const stage = (d.stage || 'new_inquiry').toLowerCase();
-        const displayId = `INQ-${(d.inquiry_id || d.id).slice(0, 6).toUpperCase()}`;
+        const displayId = `INQ-${(d.id || d.inquiry_id).slice(0, 6).toUpperCase()}`;
         matchedCandidates.push({
-          id: d.inquiry_id || d.id,
+          id: d.id || d.inquiry_id,
           deal_id: d.id,
           inquiry_id: d.inquiry_id,
           displayId,
@@ -3663,7 +3664,7 @@ Updated Sales Achievement Card! 🏆`;
         }
 
         const displayPo = dealUpdates.po_number || deal.po_number || rawPo || 'N/A';
-        const displayInq = deal.inquiry_id ? `#INQ-${deal.inquiry_id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : (draft.inquiry_id || `#INQ-${deal.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`);
+        const displayInq = `#INQ-${(deal.id || deal.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
         const displayCust = deal.customer_name || draft.company_name || 'Customer';
         const displayTotal = dealUpdates.total_amount || deal.total_amount || 0;
         const displayLoc = dealUpdates.delivery_location || deal.delivery_location || 'Not specified';
@@ -4529,37 +4530,38 @@ Respond ONLY with the single exact action name (e.g. LOG_INQUIRY) or NONE. No fo
 
 const DIRECT_ACTION_MAP = [
   // 1. Customer Acquisition
-  { pattern: /\b(?:log|record|add|create|onboard|acquire)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?customer\b/i, action: 'LOG_NEW_CUSTOMER' },
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|record|add|create|onboard|acquire)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?customer\b/i, action: 'LOG_NEW_CUSTOMER' },
   { pattern: /\b(?:new\s+customer\s+acquisition|customer\s+acquisition|new\s+customer\s+onboarding|new\s+customer)\b/i, action: 'LOG_NEW_CUSTOMER' },
 
   // 2. Complaints Update (MUST BE BEFORE LOG_COMPLAINT)
-  { pattern: /\b(?:update|resolve|change|modify|close|reopen|set|mark)\s+(?:the\s+|a\s+)?(?:customer\s+)?complaint\b/i, action: 'UPDATE_COMPLAINT' },
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:update|resolve|change|modify|close|reopen|set|mark)\s+(?:the\s+|a\s+)?(?:customer\s+)?complaint\b/i, action: 'UPDATE_COMPLAINT' },
   { pattern: /\b(?:change|update|modify|set)\s+(?:the\s+)?complaint\s+(?:type|status|description|action|notes)\b/i, action: 'UPDATE_COMPLAINT' },
   { pattern: /\b(?:mark|set)\s+(?:the\s+)?complaint\s+(?:as\s+)?(?:resolved|closed|pending|in progress|reopened)\b/i, action: 'UPDATE_COMPLAINT' },
   { pattern: /\b(?:resolve|close|reopen)\s+complaint\b/i, action: 'UPDATE_COMPLAINT' },
 
   // 3. Complaints Log
-  { pattern: /\b(?:log|record|raise|report|create|add|received|got|have|had)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?complaint\b/i, action: 'LOG_COMPLAINT' },
-  { pattern: /\b(?:complaint\s+(?:from|for|by|of|regarding|about))\b/i, action: 'LOG_COMPLAINT' },
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|record|raise|report|register|create|add|received|got|have|had)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?complaint\b/i, action: 'LOG_COMPLAINT' },
+  { pattern: /\b(?:complaint\s+(?:from|for|by|of|regarding|about|on|against|regarding\s+this))\b/i, action: 'LOG_COMPLAINT' },
 
   // 4. Visits Update (MUST BE BEFORE LOG_VISIT)
-  { pattern: /\b(?:update|change|modify|set|correct|fix|edit|amend|revise)\s+(?:the\s+|a\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'UPDATE_VISIT' },
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:update|change|modify|set|correct|fix|edit|amend|revise)\s+(?:the\s+|a\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'UPDATE_VISIT' },
   { pattern: /\b(?:correct|fix|change|update|edit|modify)\s+(?:the\s+)?(?:contact\s+person|person\s+met|location|address|remarks|outcome|date)\s+for\b/i, action: 'UPDATE_VISIT' },
 
   // 5. Visits Log
-  { pattern: /\b(?:log|record|add|create|had)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'LOG_VISIT' },
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|record|add|create|had)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'LOG_VISIT' },
   { pattern: /\b(?:visited|went\s+to\s+meet|had\s+a\s+meeting|had\s+a\s+visit|meeting\s+with)\b/i, action: 'LOG_VISIT' },
 
   // 6. Orders Update (MUST BE BEFORE LOG_ORDER)
-  { pattern: /\b(?:update|change|modify)\s+(?:the\s+|a\s+)?(?:purchase\s+)?order\b/i, action: 'UPDATE_ORDER' },
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:update|change|modify)\s+(?:the\s+|a\s+)?(?:purchase\s+)?order\b/i, action: 'UPDATE_ORDER' },
   { pattern: /\b(?:attach|link|add|set|update)\s+(?:the\s+)?po\s*(?:no|number|#)?\b/i, action: 'UPDATE_ORDER' },
   { pattern: /\b(?:attach|link)\s+(?:the\s+|a\s+)?(?:po|purchase\s+order)\b/i, action: 'UPDATE_ORDER' },
 
   // 7. Orders Log
-  { pattern: /\b(?:record|log|create|add|received)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:purchase\s+)?order\b/i, action: 'LOG_ORDER' },
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:record|log|create|add|received|place|enter)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:purchase\s+)?order\b/i, action: 'LOG_ORDER' },
+  { pattern: /\b(?:order\s+(?:from|for|by|of|regarding|with|creation|logging))\b/i, action: 'LOG_ORDER' },
 
   // 8. Inquiries Update (MUST BE BEFORE LOG_INQUIRY)
-  { pattern: /\b(?:update|edit|modify|change|correct|revise|amend)\s+(?:an?\s+|the\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i, action: 'UPDATE_INQUIRY' },
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:update|edit|modify|change|correct|revise|amend)\s+(?:an?\s+|the\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i, action: 'UPDATE_INQUIRY' },
   { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:edit|update|change|modify)\s+(?:an?\s+|the\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\s+(?:for|of|from|with|to)\b/i, action: 'UPDATE_INQUIRY' },
   { pattern: /\b(?:update|edit|modify|change)\s+(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i, action: 'UPDATE_INQUIRY' },
   { pattern: /\b(?:mark|move|put)\s+(?:the\s+|a\s+)?(?:deal|inquiry)?\s*(?:as\s+|to\s+)?(?:won|lost|negotiation|quoted|on\s+hold|hold)\b/i, action: 'UPDATE_INQUIRY' },
@@ -4569,11 +4571,46 @@ const DIRECT_ACTION_MAP = [
   // 9. Inquiries Log (Extensive phrase matching across all sales terminology)
   { pattern: /^(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal|deals)\b/i, action: 'LOG_INQUIRY' },
   { pattern: /\b(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal|deals)\s+(?:from|for|by|of|regarding|with|details?|logging|creation)\b/i, action: 'LOG_INQUIRY' },
-  { pattern: /\b(?:log|create|new|add|received|got|have|had|record|enter|save)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal)\b/i, action: 'LOG_INQUIRY' },
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|create|new|add|received|got|have|had|record|enter|save)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal)\b/i, action: 'LOG_INQUIRY' },
   { pattern: /\b(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal)\s*[:=-]/i, action: 'LOG_INQUIRY' },
   { pattern: /\b(?:rate|price|quote|quotation)\s+(?:manga|chahiye|bhejo|do|required|needed)\b/i, action: 'LOG_INQUIRY' },
   { pattern: /\b(?:party|client|customer)\s*[:=-]\s*.*?\b(?:material|product|requirement|qty|quantity)\s*[:=-]/i, action: 'LOG_INQUIRY' },
 ];
+
+function detectOutOfScopeActionAttempt(currentAction, text) {
+  if (!text || typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  const currentFamily = getModuleFamily(currentAction);
+
+  // 1. If user sent an explicit menu command (1-10 or menu_X)
+  const menuAction = matchActionFromInput(trimmed);
+  if (menuAction && menuAction !== currentAction) {
+    const menuFamily = getModuleFamily(menuAction);
+    if (menuFamily !== 'OTHER' && menuFamily !== currentFamily) {
+      return menuAction;
+    }
+  }
+
+  // 2. If the input is primarily a reference ID (INQ-*, PO-*, VIS-*, CMP-*, or hex code),
+  // it is data for the active draft (e.g. inquiry_id for LOG_ORDER, po_number for LOG_COMPLAINT).
+  // Do NOT treat reference IDs as a switch action!
+  const isPureRefId = /^#?(?:INQ|DEAL|PO|VIS|CMP)-[A-Z0-9-]+$/i.test(trimmed) ||
+    /^[A-F0-9]{6,36}$/i.test(trimmed) ||
+    /^#?[A-F0-9]{6,8}$/i.test(trimmed);
+  if (isPureRefId) return null;
+
+  // 3. Check DIRECT_ACTION_MAP for explicit cross-module action intents
+  for (const entry of DIRECT_ACTION_MAP) {
+    if (entry.pattern.test(trimmed) && entry.action !== currentAction) {
+      const targetFamily = getModuleFamily(entry.action);
+      if (targetFamily !== 'OTHER' && targetFamily !== currentFamily) {
+        return entry.action;
+      }
+    }
+  }
+
+  return null;
+}
 
 async function detectNewOperationalIntent(text) {
   if (!text || typeof text !== 'string') return null;
@@ -5098,6 +5135,13 @@ async function handleCatalogFlow(rawText, senderPhone) {
       };
     }
 
+    // Check if user is attempting a write operation for a different module
+    const outOfScopeAction = detectOutOfScopeActionAttempt(action, text);
+    if (outOfScopeAction) {
+      console.log(`[CatalogFlow] Strict activity scope guard in catalog_confirm: active=${action} (${getModuleFamily(action)}), incoming=${outOfScopeAction} (${getModuleFamily(outOfScopeAction)})`);
+      return buildOutOfScopeActivityResponse(action, outOfScopeAction);
+    }
+
     // Direct inline edit attempt during confirmation
     await recordSessionMessage(senderPhone, 'user', text);
     const updatedDraft = await extractFieldsWithLLM(action, text, draft);
@@ -5184,6 +5228,13 @@ async function handleCatalogFlow(rawText, senderPhone) {
     if (cleanInput === 'btn_confirm_edit' || cleanInput === 'edit details') {
       const alreadyEditMsg = `You are currently editing this draft. Which field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")`;
       return { handled: true, reply: alreadyEditMsg };
+    }
+
+    // Check if user is attempting a write operation for a different module
+    const outOfScopeAction = detectOutOfScopeActionAttempt(action, text);
+    if (outOfScopeAction) {
+      console.log(`[CatalogFlow] Strict activity scope guard in catalog_editing: active=${action} (${getModuleFamily(action)}), incoming=${outOfScopeAction} (${getModuleFamily(outOfScopeAction)})`);
+      return buildOutOfScopeActivityResponse(action, outOfScopeAction);
     }
 
     await recordSessionMessage(senderPhone, 'user', text);
@@ -5374,36 +5425,21 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
 
     // Check if user wants to abort / switch (only if not resolving candidate selection)
-    // Check if user wants to abort / switch (only if not resolving candidate selection)
     if (!candidateResolved && !inquiryCandidateResolved && !orderCandidateResolved) {
-      let switchAction = matchActionFromInput(text);
-      if (!switchAction) {
-        const isExplicitDifferentModule = /^(?:log\s+visit|visited\b|went\s+to\s+meet|log\s+complaint|received\s+complaint|raise\s+complaint|log\s+order|received\s+(?:purchase\s+)?order|new\s+customer|onboard\s+customer)/i.test(text);
-        if (isExplicitDifferentModule) {
-          const detected = detectOperationalAction(text);
-          if (detected && detected !== action) {
-            switchAction = detected;
-          }
-        }
+      if (text.trim().toLowerCase() === 'general query' || text.trim() === '10' || text.trim() === '10.' || text.trim() === 'menu_10') {
+        const queryReply = `🔍 *SalesOS Search & Intelligence*\n\nAsk any question about your inquiries, quotations, customer profiles, site visits, or complaints!\n\n_Example: "What was the last rate quoted to Horizon Sheet Metal?" or "Show pending complaints"_`;
+        await recordSessionMessage(senderPhone, 'assistant', queryReply, { action_type: 'GENERAL_QUERY' });
+        await saveActiveSession(senderPhone, 'Unknown', 'general');
+        return {
+          handled: true,
+          reply: queryReply,
+        };
       }
 
-      if (switchAction && switchAction !== action) {
-        if (switchAction === 'GENERAL_QUERY') {
-          const queryReply = `🔍 *SalesOS Search & Intelligence*\n\nAsk any question about your inquiries, quotations, customer profiles, site visits, or complaints!\n\n_Example: "What was the last rate quoted to Horizon Sheet Metal?" or "Show pending complaints"_`;
-          await recordSessionMessage(senderPhone, 'assistant', queryReply, { action_type: 'GENERAL_QUERY' });
-          await saveActiveSession(senderPhone, 'Unknown', 'general');
-          return {
-            handled: true,
-            reply: queryReply,
-          };
-        }
-
-        const currentFamily = getModuleFamily(action);
-        const switchFamily = getModuleFamily(switchAction);
-        if (switchFamily !== 'OTHER' && switchFamily !== currentFamily) {
-          console.log(`[CatalogFlow] Strict activity scope guard in catalog_flow: active=${action} (${currentFamily}), incoming=${switchAction} (${switchFamily})`);
-          return buildOutOfScopeActivityResponse(action, switchAction);
-        }
+      const outOfScopeAction = detectOutOfScopeActionAttempt(action, text);
+      if (outOfScopeAction) {
+        console.log(`[CatalogFlow] Strict activity scope guard in catalog_flow: active=${action} (${getModuleFamily(action)}), incoming=${outOfScopeAction} (${getModuleFamily(outOfScopeAction)})`);
+        return buildOutOfScopeActivityResponse(action, outOfScopeAction);
       }
     }
 
