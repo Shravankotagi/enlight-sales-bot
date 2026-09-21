@@ -259,11 +259,42 @@ async function runTests() {
                  !cmpRes.reply.includes('#INQ-2DEA6A');
   console.log('Test 11 Passed:', pass11);
 
+  // TEST 12: Direct Write Logging Blocked in Idle State (Enforce Catalog Flow Only)
+  console.log('\n[TEST 12] Direct Write Logging Blocked in Idle State (Enforce Catalog Flow Only)');
+  await saveActiveSession(testPhone, 'Unknown', 'general');
+
+  // 12a: Direct Order creation command in idle state -> must return catalog gating menu
+  const directOrderRes = await handleCatalogFlow('create an order regarding this inquiry INQ-F4D982', testPhone);
+  console.log('Direct Order Response:\n', directOrderRes.reply);
+  const pass12a = directOrderRes.handled === true &&
+                  directOrderRes.reply.includes('To perform an activity') &&
+                  directOrderRes.reply.includes('Log New Order');
+
+  // 12b: Direct Complaint command in idle state -> must return catalog gating menu
+  const directCmpRes = await handleCatalogFlow('i want to log complaint for this latest order, material was defective', testPhone);
+  console.log('Direct Complaint Response:\n', directCmpRes.reply);
+  const pass12b = directCmpRes.handled === true &&
+                  directCmpRes.reply.includes('To perform an activity') &&
+                  directCmpRes.reply.includes('Log Customer Complaint');
+
+  // 12c: Read-only data retrieval query in idle state -> must return handled: false (unobstructed for query handler)
+  const readQueryRes = await handleCatalogFlow('What was the last rate quoted to Horizon Sheet Metal?', testPhone);
+  console.log('Read Query Response handled status:', readQueryRes.handled);
+  const pass12c = readQueryRes.handled === false;
+
+  // 12d: Selecting option 3 from Catalog Menu -> starts LOG_ORDER flow
+  const menuSelectRes = await handleCatalogFlow('3', testPhone);
+  console.log('Catalog Menu Select "3" Response:\n', menuSelectRes.reply);
+  const pass12d = menuSelectRes.handled === true && menuSelectRes.reply.includes('Record New Order');
+
+  const pass12 = pass12a && pass12b && pass12c && pass12d;
+  console.log('Test 12 Passed:', pass12, `(12a: ${pass12a}, 12b: ${pass12b}, 12c: ${pass12c}, 12d: ${pass12d})`);
+
   await saveActiveSession(testPhone, 'Unknown', 'general');
   await saveActiveSession(menonOwnerPhone, 'Unknown', 'general');
 
   // Summary
-  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11;
+  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12;
   console.log('\n========================================');
   console.log('FINAL RESULT: ' + (allPassed ? 'ALL TESTS PASSED ✅' : 'SOME TESTS FAILED ❌'));
   console.log('========================================');

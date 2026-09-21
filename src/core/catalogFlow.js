@@ -5668,192 +5668,14 @@ async function handleCatalogFlow(rawText, senderPhone) {
     return { handled: false };
   }
 
-  // ── 7b. DIRECT OPERATIONAL ACTIONS, ID UPDATES & STAGE PROMPTS ────────────
-  const isDirectInqId = /^#?(?:INQ|DEAL)-[A-Z0-9]+/i.test(text.trim());
-  const isDirectPoId = /^#?PO-[A-Z0-9]+/i.test(text.trim());
-  const isDirectVisId = /^#?VIS-[A-Z0-9]+/i.test(text.trim());
-
-  let detectedAction = null;
-  if (isDirectInqId) {
-    detectedAction = 'UPDATE_INQUIRY';
-  } else if (isDirectPoId) {
-    detectedAction = 'UPDATE_ORDER';
-  } else if (isDirectVisId) {
-    detectedAction = 'UPDATE_VISIT';
-  } else if (isStageUpdatePrompt(text)) {
-    detectedAction = 'UPDATE_INQUIRY';
-  } else {
-    detectedAction = await detectNewOperationalIntent(text);
-  }
-
-  if (detectedAction && detectedAction !== 'GENERAL_QUERY') {
-    await recordSessionMessage(senderPhone, 'user', text);
-    const action = detectedAction;
-    let initialDraft = {};
-
-    const updatedDraft = await extractFieldsWithLLM(action, text, initialDraft);
-
-    // 0. LOG_ORDER Inquiry Quoted Stage Gate check
-    if (action === 'LOG_ORDER') {
-      const stageCheck = await validateOrderInquiryStage(updatedDraft, senderPhone);
-      if (!stageCheck.isValid) {
-        await recordSessionMessage(senderPhone, 'assistant', stageCheck.reply, { action_type: action });
-        await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
-        return { handled: true, reply: stageCheck.reply };
-      }
-    }
-
-    // 1. Customer Verification (for new creations)
-    if (['LOG_INQUIRY', 'LOG_ORDER', 'LOG_VISIT', 'LOG_COMPLAINT', 'LOG_NEW_CUSTOMER'].includes(action)) {
-      const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
-      if (!custCheck.isValid) {
-        if (custCheck.isUnrecognizedCustomer) {
-          await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
-          await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
-          return {
-            handled: true,
-            reply: custCheck.prompt,
-            interactiveType: 'buttons',
-            interactiveButtons: NEW_CUSTOMER_BUTTONS,
-          };
-        } else {
-          updatedDraft.company_name = null;
-          await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
-          await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
-          return { handled: true, reply: custCheck.rejectionMessage };
-        }
-      }
-
-      const prodCheck = validateDraftProducts(action, updatedDraft);
-      if (!prodCheck.isValid) {
-        await recordSessionMessage(senderPhone, 'assistant', prodCheck.clarificationMessage, { action_type: action });
-        await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
-        return { handled: true, reply: prodCheck.clarificationMessage };
-      }
-    }
-
-    // 2. UPDATE_INQUIRY checks
-    if (action === 'UPDATE_INQUIRY' && (updatedDraft.inquiry_id || updatedDraft.company_name)) {
-      const inqCheck = await checkInquiriesForUpdate(action, updatedDraft, senderPhone, text);
-      if (inqCheck && inqCheck.handled) {
-        await recordSessionMessage(senderPhone, 'assistant', inqCheck.reply, {
-          action_type: action,
-          customer_name: updatedDraft.company_name,
-        });
-        if (inqCheck.status === 'MULTIPLE_EDITABLE' || inqCheck.status === 'SINGLE_EDITABLE_ASK_DETAILS' || inqCheck.status === 'ID_NOT_FOUND') {
-          await saveActiveSession(senderPhone, (inqCheck.draft?.company_name || updatedDraft.company_name || 'Customer'), `catalog_flow|${action}|${JSON.stringify(inqCheck.draft || updatedDraft)}`);
-        } else {
-          await saveActiveSession(senderPhone, 'Unknown', 'general');
-        }
-        return { handled: true, reply: inqCheck.reply };
-      }
-      if (inqCheck && inqCheck.draft) Object.assign(updatedDraft, inqCheck.draft);
-    }
-
-    // 3. UPDATE_ORDER checks
-    if (action === 'UPDATE_ORDER' && (updatedDraft.inquiry_id || updatedDraft.po_number || updatedDraft.company_name)) {
-      const ordCheck = await checkOrdersForUpdate(action, updatedDraft, senderPhone, text);
-      if (ordCheck && ordCheck.handled) {
-        await recordSessionMessage(senderPhone, 'assistant', ordCheck.reply, {
-          action_type: action,
-          customer_name: updatedDraft.company_name,
-        });
-        if (ordCheck.status === 'ASK_DETAILS' || ordCheck.status === 'ID_NOT_FOUND') {
-          await saveActiveSession(senderPhone, (ordCheck.draft?.company_name || updatedDraft.company_name || 'Customer'), `catalog_flow|${action}|${JSON.stringify(ordCheck.draft || updatedDraft)}`);
-        } else {
-          await saveActiveSession(senderPhone, 'Unknown', 'general');
-        }
-        return { handled: true, reply: ordCheck.reply };
-      }
-      if (ordCheck && ordCheck.draft) Object.assign(updatedDraft, ordCheck.draft);
-    }
-
-    // 4. UPDATE_VISIT checks
-    if (action === 'UPDATE_VISIT') {
-      const disambig = await checkMultipleVisitsForUpdate(action, updatedDraft, senderPhone);
-      if (disambig.needsDisambiguation) {
-        await recordSessionMessage(senderPhone, 'assistant', disambig.prompt, {
-          action_type: action,
-          customer_name: updatedDraft.company_name,
-        });
-        await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(disambig.draft)}`);
-        return { handled: true, reply: disambig.prompt };
-      }
-    }
-
-    // 5. UPDATE_COMPLAINT checks
-    if (action === 'UPDATE_COMPLAINT' && (updatedDraft.linked_inquiry_or_po || updatedDraft.company_name || updatedDraft.complaint_id)) {
-      const cmpCheck = await checkComplaintsForUpdate(action, updatedDraft, senderPhone, text);
-      if (cmpCheck && cmpCheck.handled) {
-        await recordSessionMessage(senderPhone, 'assistant', cmpCheck.reply, {
-          action_type: action,
-          customer_name: updatedDraft.company_name,
-        });
-        if (cmpCheck.status === 'ASK_DETAILS' || cmpCheck.status === 'NOT_FOUND') {
-          await saveActiveSession(senderPhone, (cmpCheck.draft?.company_name || updatedDraft.company_name || 'Customer'), `catalog_flow|${action}|${JSON.stringify(cmpCheck.draft || updatedDraft)}`);
-        } else {
-          await saveActiveSession(senderPhone, 'Unknown', 'general');
-        }
-        return { handled: true, reply: cmpCheck.reply };
-      }
-      if (cmpCheck && cmpCheck.draft) Object.assign(updatedDraft, cmpCheck.draft);
-    }
-
-    // 6. LOG_COMPLAINT checks (Orders module verification & Multi-Order Disambiguation)
-    if (action === 'LOG_COMPLAINT') {
-      const ordCheck = await checkOrdersForComplaint(action, updatedDraft, senderPhone, text);
-      if (ordCheck && ordCheck.handled) {
-        await recordSessionMessage(senderPhone, 'assistant', ordCheck.reply, {
-          action_type: action,
-          customer_name: updatedDraft.company_name,
-        });
-        if (ordCheck.status === 'MULTIPLE_ORDERS' || ordCheck.status === 'ORDER_NOT_FOUND') {
-          await saveActiveSession(senderPhone, (ordCheck.draft?.company_name || updatedDraft.company_name || 'Customer'), `catalog_flow|${action}|${JSON.stringify(ordCheck.draft || updatedDraft)}`);
-        } else {
-          await saveActiveSession(senderPhone, 'Unknown', 'general');
-        }
-        return { handled: true, reply: ordCheck.reply };
-      }
-      if (ordCheck && ordCheck.draft) Object.assign(updatedDraft, ordCheck.draft);
-    }
-
-    const missing = validateMandatoryFields(action, updatedDraft);
-    if (missing.length === 0) {
-      const summary = buildConfirmationSummary(action, updatedDraft);
-      await recordSessionMessage(senderPhone, 'assistant', summary, {
-        action_type: action,
-        customer_name: updatedDraft.company_name,
-      });
-      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(updatedDraft)}`);
-      return {
-        handled: true,
-        reply: summary,
-        interactiveType: 'buttons',
-        interactiveButtons: CONFIRMATION_BUTTONS,
-      };
-    } else {
-      const missingList = missing.map((m) => `• *${m}*`).join('\n');
-      const actionName = getActionFriendlyName(action);
-      const askMissing = `Please provide the remaining mandatory details for this ${actionName}:\n\n${missingList}`;
-      await recordSessionMessage(senderPhone, 'assistant', askMissing, {
-        action_type: action,
-        customer_name: updatedDraft.company_name,
-      });
-      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
-      return {
-        handled: true,
-        reply: askMissing,
-      };
-    }
-  }
-
   // ── 8. ALL OTHER MESSAGES OUTSIDE ACTIVE SESSION -> STRICT CATALOG GATING ──
   // Per architecture requirement:
-  // "the intent classifier has to only recognize the retrieval prompts and the stage update prompts...
-  // and for other all prompts catalog should be provided"
-  // Any update / create / modify / typo / command without an active session MUST show the catalog menu!
+  // Direct write logging outside an active catalog flow is disabled.
+  // All write activities (Log/Update Inquiry, Order, Field Visit, Customer Acquisition, Complaint)
+  // MUST strictly be initiated via Catalog Menu selection (1–10 / buttons).
+  // Direct free-text input in idle state is reserved exclusively for read-only data queries.
   await recordSessionMessage(senderPhone, 'user', text);
-  const gatingReply = `Please select the relevant option from the menu to update a record.\n\n` + CATALOG_MENU;
+  const gatingReply = `To perform an activity (Log Inquiry, Order, Field Visit, Customer Acquisition, or Complaint), please select the relevant option from the menu below:\n\n` + CATALOG_MENU;
   await recordSessionMessage(senderPhone, 'assistant', gatingReply, { action_type: 'CATALOG_GATED_PROMPT' });
   await startNewCatalogSession(senderPhone, gatingReply);
   return {
@@ -5861,7 +5683,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     reply: gatingReply,
     interactiveType: 'list',
     interactiveList: {
-      bodyText: `Please select the relevant option from the menu to update a record.\n\nWhat would you like to do?`,
+      bodyText: `To perform an activity (Log Inquiry, Order, Field Visit, Customer Acquisition, or Complaint), please select the relevant option from the menu below:\n\nWhat would you like to do?`,
       buttonText: 'Choose Action',
       sections: CATALOG_MENU_SECTIONS,
     },
