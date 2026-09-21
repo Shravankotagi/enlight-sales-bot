@@ -6225,4 +6225,7 @@ module.exports = {
   extractFollowUpDate,
   parseDDMMYYYYtoISO,
   formatDateDDMMYYYY,
+  getPostActivityButtons,
+  RESUME_QUERY_BUTTONS,
+  restoreInterruptedFlow,
 };
