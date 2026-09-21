@@ -787,16 +787,12 @@ async function getAssignedCustomersList(senderPhone) {
 
     if (scope.phones !== null) {
       if (scope.phones.length === 0) return [];
-      const phoneSet = new Set();
-      for (const p of scope.phones) {
-        if (!p) continue;
-        const raw = String(p).replace(/\D/g, '');
-        phoneSet.add(raw);
-        if (raw.length === 10) phoneSet.add(`91${raw}`);
-        if (raw.length === 12 && raw.startsWith('91')) phoneSet.add(raw.slice(2));
+      const targetPhones = expandPhoneVariants(scope.phones);
+      if (targetPhones.length > 0) {
+        query = query.in('assigned_salesperson_phone', targetPhones);
+      } else {
+        return [];
       }
-      const targetPhones = Array.from(phoneSet);
-      query = query.in('assigned_salesperson_phone', targetPhones);
     }
 
     const { data: customers, error } = await query;

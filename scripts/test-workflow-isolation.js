@@ -377,11 +377,24 @@ async function runTests() {
                   visitStep3Res.reply.includes('Mr shah') &&
                   !visitStep3Res.reply.includes('Please provide the remaining mandatory details');
 
-  const pass15 = pass15a && pass15b && pass15c;
-  console.log('Test 15 Passed:', pass15);
+  // 15d: User confirms "Save / Yes" -> Visit logged successfully without asking about the customer again
+  const visitStep4Res = await handleCatalogFlow('save / yes', testVisitPhone);
+  console.log('Visit Step 4 (Confirm & Save Visit):\n', visitStep4Res.reply);
+  const sess15 = await getFullActiveSession(testVisitPhone);
+  const pass15d = visitStep4Res.handled === true &&
+                  visitStep4Res.reply.includes('Customer Field Visit Logged Successfully!') &&
+                  visitStep4Res.reply.includes('Mahendra Motors') &&
+                  visitStep4Res.reply.includes('Satara') &&
+                  !visitStep4Res.reply.includes('is not in your customer list') &&
+                  sess15?.last_intent === 'general';
+
+  const pass15 = pass15a && pass15b && pass15c && pass15d;
+  console.log('Test 15 Passed:', pass15, `(15a:${pass15a}, 15b:${pass15b}, 15c:${pass15c}, 15d:${pass15d})`);
 
   // Clean up test customer & visit session
-  await supabase.from('customer_accounts').delete().ilike('company_name', '%Mahendra Motors%');
+  await supabase.from('customer_visits').delete().ilike('customer_name', '%Mahendra Motors%');
+  await supabase.from('recurring_customers').delete().ilike('customer_name', '%Mahendra Motors%');
+  await supabase.from('kra_logs').delete().ilike('customer_name', '%Mahendra Motors%');
   await saveActiveSession(testVisitPhone, 'Unknown', 'general');
 
   // Summary

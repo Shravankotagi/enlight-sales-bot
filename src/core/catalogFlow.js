@@ -1166,6 +1166,10 @@ function forwardCustomerDetailsToParentDraft(originalAction, originalDraft, cust
     if (!originalDraft.contact_person) originalDraft.contact_person = personVal;
   }
 
+  // Mark customer as verified and created
+  originalDraft._customer_verified = true;
+  originalDraft._new_customer_created = true;
+
   return originalDraft;
 }
 
@@ -1319,6 +1323,9 @@ function validateMandatoryFields(action, draft) {
 
 async function verifyDraftCustomer(action, draft, senderPhone) {
   if (!draft || !draft.company_name) return { isValid: true };
+  if (draft._customer_verified === true || draft._new_customer_created === true) {
+    return { isValid: true, officialName: draft.company_name };
+  }
   if (
     action === 'LOG_NEW_CUSTOMER' ||
     action === 'UPDATE_INQUIRY' ||
@@ -1338,6 +1345,7 @@ async function verifyDraftCustomer(action, draft, senderPhone) {
   const officialName = await verifyAndGetCustomerName(rawName, senderPhone);
   if (officialName) {
     draft.company_name = officialName;
+    draft._customer_verified = true;
     return { isValid: true, officialName };
   }
 
