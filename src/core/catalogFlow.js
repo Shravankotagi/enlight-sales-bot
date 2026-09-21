@@ -1247,6 +1247,9 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.visit_outcome && !merged.updates.visit_outcome) merged.updates.visit_outcome = newExtracted.visit_outcome;
     if (newExtracted.visit_date && !merged.updates.visit_date) merged.updates.visit_date = normalizeDateToDDMMYYYY(newExtracted.visit_date);
     if (newExtracted.meeting_remarks && !merged.updates.meeting_remarks) merged.updates.meeting_remarks = newExtracted.meeting_remarks;
+    if (newExtracted.followup_action && !merged.updates.followup_action) merged.updates.followup_action = newExtracted.followup_action;
+    if (newExtracted.follow_up_action && !merged.updates.followup_action) merged.updates.followup_action = newExtracted.follow_up_action;
+    if (newExtracted.status && !merged.updates.status) merged.updates.status = newExtracted.status;
   } else if (action === 'UPDATE_COMPLAINT') {
     if (!merged.updates) merged.updates = {};
     if (newExtracted.status && !merged.updates.status) merged.updates.status = newExtracted.status;
@@ -4152,26 +4155,78 @@ async function executeAction(action, draft, senderPhone) {
         const updates = draft.updates || {};
         const visitUpdates = {};
 
-        if (updates.person_met) visitUpdates.person_met = updates.person_met;
-        if (updates.contact_phone) visitUpdates.contact_no = cleanPhone(updates.contact_phone) || updates.contact_phone;
-        if (updates.city_location) visitUpdates.customer_address = updates.city_location;
-        if (updates.followup_action) {
-          visitUpdates.follow_up_action = updates.followup_action;
-          visitUpdates.follow_up_status = 'pending';
+        // 1. Extract existing metadata from targetVisit to preserve unedited tags
+        const existingOutcome = targetVisit.outcome || targetVisit.remarks?.match(/\[Outcome:\s*([^\]]+)\]/i)?.[1] || null;
+        const existingLoc = targetVisit.customer_address || targetVisit.location || targetVisit.remarks?.match(/\[Location:\s*([^\]]+)\]/i)?.[1] || null;
+        const existingFollowup = targetVisit.follow_up_action || targetVisit.remarks?.match(/\[(?:Follow-?Up|Follow-?up\s*Action):\s*([^\]]+)\]/i)?.[1] || targetVisit.remarks?.match(/(?:^|\||\n)\s*Follow-?up(?:\s*Action)?:\s*([^|\]\n]+)/i)?.[1] || null;
+        const existingFollowupDate = targetVisit.follow_up_date || targetVisit.remarks?.match(/\[Follow-?UpDate:\s*([^\]]+)\]/i)?.[1] || null;
+        const existingFollowupStatus = targetVisit.follow_up_status || targetVisit.remarks?.match(/\[Follow-?UpStatus:\s*([^\]]+)\]/i)?.[1] || (existingFollowup ? 'pending' : null);
+
+        const cleanExistingRemarks = (targetVisit.remarks || '')
+          .replace(/\[(?:Outcome|Location|Follow-?Up|Follow-?up\s*Action|Follow-?UpDate|Follow-?UpStatus|Requirement|Requirements|Interests?):[^\]]*\]\s*/gi, '')
+          .replace(/(?:^|\||\n)\s*Follow-?up(?:\s*Action)?:\s*[^|\n]+/gi, '')
+          .replace(/^[\s|]+|[\s|]+$/g, '')
+          .trim();
+
+        // 2. Compute updated values
+        const newOutcome = updates.visit_outcome || existingOutcome || 'Positive';
+        const newLocation = updates.city_location || existingLoc || null;
+
+        let newFollowup = existingFollowup;
+        let newFollowupDate = existingFollowupDate;
+        let newFollowupStatus = existingFollowupStatus;
+
+        if (updates.followup_action !== undefined && updates.followup_action !== null && updates.followup_action !== '') {
+          newFollowup = updates.followup_action;
+          newFollowupStatus = 'pending';
           const parsedFuDate = extractFollowUpDate(updates.followup_action, new Date(targetVisit.visited_at || Date.now()));
-          if (parsedFuDate) visitUpdates.follow_up_date = parsedFuDate;
-        }
-        if (updates.visit_date) {
-          visitUpdates.visited_at = parseDDMMYYYYtoISO(updates.visit_date);
-        }
-        if (updates.meeting_remarks || updates.visit_outcome || updates.followup_action) {
-          const outcomeTag = updates.visit_outcome ? `[Outcome: ${updates.visit_outcome}] ` : '';
-          const followupTag = updates.followup_action ? ` | Follow-up: ${updates.followup_action}` : '';
-          visitUpdates.remarks = `${outcomeTag}${updates.meeting_remarks || ''}${followupTag}`.trim();
+          if (parsedFuDate) {
+            newFollowupDate = parsedFuDate;
+          }
         }
 
+        // Completion detection
+        const isExplicitCompleted = updates.status && /^(?:completed|done|resolved|closed)$/i.test(String(updates.status).trim());
+        const isRemarksCompleted = updates.meeting_remarks && /\b(?:quote sent|quotation sent|sent quote|sent official price quotation|po received|order placed|resolved|done|completed)\b/i.test(updates.meeting_remarks) && !updates.followup_action;
+
+        if (isExplicitCompleted || isRemarksCompleted) {
+          newFollowupStatus = 'completed';
+          visitUpdates.follow_up_completed_at = new Date().toISOString();
+        }
+
+        let newRemarksText = cleanExistingRemarks;
+        if (updates.meeting_remarks !== undefined && updates.meeting_remarks !== null && updates.meeting_remarks !== '') {
+          newRemarksText = updates.meeting_remarks.trim();
+        }
+
+        // 3. Construct structured remarks string matching LOG_VISIT
+        const outcomeTag = newOutcome ? `[Outcome: ${newOutcome}] ` : '';
+        const locTag = newLocation ? `[Location: ${newLocation}] ` : '';
+        const followupTag = newFollowup ? `[FollowUp: ${newFollowup}] ` : '';
+        const fuDateTag = newFollowupDate ? `[FollowUpDate: ${newFollowupDate}] ` : '';
+        const fuStatusTag = newFollowupStatus ? `[FollowUpStatus: ${newFollowupStatus}] ` : '';
+
+        visitUpdates.remarks = `${outcomeTag}${locTag}${followupTag}${fuDateTag}${fuStatusTag}${newRemarksText}`.trim();
+
+        if (newFollowup !== null && newFollowup !== undefined) visitUpdates.follow_up_action = newFollowup;
+        if (newFollowupDate !== null && newFollowupDate !== undefined) visitUpdates.follow_up_date = newFollowupDate;
+        if (newFollowupStatus !== null && newFollowupStatus !== undefined) visitUpdates.follow_up_status = newFollowupStatus;
+
+        if (updates.person_met) visitUpdates.person_met = updates.person_met;
+        if (updates.contact_phone) visitUpdates.contact_no = cleanPhone(updates.contact_phone) || updates.contact_phone;
+        if (newLocation) visitUpdates.customer_address = newLocation;
+        if (updates.visit_date) visitUpdates.visited_at = parseDDMMYYYYtoISO(updates.visit_date);
+
         if (Object.keys(visitUpdates).length > 0) {
-          await supabase.from('customer_visits').update(visitUpdates).eq('id', targetVisit.id);
+          const { error: updErr } = await supabase.from('customer_visits').update(visitUpdates).eq('id', targetVisit.id);
+          if (updErr) {
+            console.error('[CatalogFlow] Visit update error with dedicated columns, retrying fallback:', updErr.message);
+            delete visitUpdates.follow_up_action;
+            delete visitUpdates.follow_up_date;
+            delete visitUpdates.follow_up_status;
+            delete visitUpdates.follow_up_completed_at;
+            await supabase.from('customer_visits').update(visitUpdates).eq('id', targetVisit.id);
+          }
 
           // Sync customer master profile if contact details changed
           if (updates.person_met || updates.contact_phone || updates.city_location) {
@@ -4191,11 +4246,12 @@ async function executeAction(action, draft, senderPhone) {
         let updatesSummary = '';
         if (visitUpdates.person_met) updatesSummary += `• *Person Met:* ${visitUpdates.person_met}\n`;
         if (visitUpdates.contact_no) updatesSummary += `• *Contact Phone:* ${visitUpdates.contact_no}\n`;
-        if (visitUpdates.customer_address) updatesSummary += `• *City / Location:* ${visitUpdates.customer_address}\n`;
-        if (visitUpdates.visited_at) updatesSummary += `• *Visit Date:* ${formatDateDDMMYYYY(visitUpdates.visited_at)}\n`;
-        if (draft.updates?.visit_outcome) updatesSummary += `• *Visit Outcome:* ${draft.updates.visit_outcome}\n`;
-        if (visitUpdates.follow_up_action) updatesSummary += `• *Follow-up Action:* ${visitUpdates.follow_up_action}\n`;
-        if (draft.updates?.meeting_remarks) updatesSummary += `• *Meeting Remarks:* ${draft.updates.meeting_remarks}\n`;
+        if (visitUpdates.customer_address && updates.city_location) updatesSummary += `• *City / Location:* ${visitUpdates.customer_address}\n`;
+        if (visitUpdates.visited_at && updates.visit_date) updatesSummary += `• *Visit Date:* ${formatDateDDMMYYYY(visitUpdates.visited_at)}\n`;
+        if (updates.visit_outcome) updatesSummary += `• *Visit Outcome:* ${newOutcome}\n`;
+        if (updates.followup_action) updatesSummary += `• *Follow-up Action:* ${visitUpdates.follow_up_action}\n`;
+        if (newFollowupStatus && (isExplicitCompleted || isRemarksCompleted)) updatesSummary += `• *Follow-up Status:* Completed ✅\n`;
+        if (updates.meeting_remarks) updatesSummary += `• *Meeting Remarks:* ${updates.meeting_remarks}\n`;
 
         return `✅ *Field Visit Updated Successfully!*\n\n` +
           `• *Customer / Company:* ${resolvedCust}\n` +
