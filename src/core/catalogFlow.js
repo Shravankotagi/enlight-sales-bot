@@ -180,9 +180,9 @@ const CATALOG_MENU_SECTIONS = [
 const MODULE_PROMPTS = {
   LOG_INQUIRY: `📋 *Log New Inquiry*
 
-Please provide the following details :
+Please provide the following details:
 
-• *Company Name:* *
+• *Customer / Company:* *
 • *Product Description / Quantity:* *
 • *Rate:* (optional)
 • *Preferred Make:* (optional)
@@ -245,21 +245,21 @@ What would you like to update?
 
   LOG_VISIT: `📍 *Log Customer Field Visit*
 
-Please provide the following details :
+Please provide the following details:
 
-• *Customer / Company Name:* *
+• *Customer / Company:* *
 • *Person Met:* *
 • *Contact Phone:* *
 • *City / Location:* *
 • *Visit Date:* *
 • *Visit Outcome:* * (Positive / Negative / Neutral / Follow-up Required)
 • *Follow-up Action:* (optional)
-• *Meeting Remarks & Requirements:* *`,
+• *Meeting Remarks:* *`,
 
   UPDATE_VISIT: `✏️ *Update Field Visit*
 
-• *Customer / Company Name:* * (e.g. Vanguard Industrial Automation Systems)
-• *Date:* (e.g. VIS-2026-0015 or 10-09-2026)
+• *Customer / Company:* * (e.g. Vanguard Industrial Automation Systems)
+• *Visit Date:* (optional e.g. 10-09-2026)
 
 Which fields do you want to update? Mention the field name and new value.
 
@@ -267,17 +267,18 @@ Which fields do you want to update? Mention the field name and new value.
 • Person Met
 • Contact Phone
 • City / Location
+• Visit Date
 • Visit Outcome (Positive / Negative / Neutral / Follow-up Required)
 • Follow-up Action
-• Meeting Remarks & Requirements
+• Meeting Remarks
 • Status (Completed / Follow-up Pending / Cancelled)
 
 Example:
-"Vanguard Industrial Automation Systems, update person met to Amit Sharma, outcome to Positive"`,
+"Vanguard Industrial Automation Systems, update Person Met to Amit Sharma, Visit Outcome to Positive"`,
 
   LOG_NEW_CUSTOMER: `👤 *New Customer Acquisition*
 
-Please provide the following details :
+Please provide the following details:
 
 • *Company Name:* *
 • *Contact Person:* *
@@ -293,13 +294,14 @@ Example:
 
   LOG_COMPLAINT: `⚠️ *Log Customer Complaint*
 
-Please provide the following details :
+Please provide the following details:
 
-• *Company / Customer Name:* *
-• *Complaint Description & Affected Material:* * (e.g. 12 MT MS angle with bending damage)
+• *Customer / Company:* *
+• *Linked Order / Ref:* (optional, auto-linked if customer has active orders)
+• *Product / Material:* (e.g. 12 MT MS angle)
 • *Complaint Type:* (optional: Quality Defect / Physical Damage / Quantity Shortage / Delivery Delay / Billing Mismatch / Specification Mismatch / Other)
-• *Linked PO Number or Inquiry ID:* (optional, auto-linked if customer has active orders)
-• *Corrective Action Needed:* (optional)
+• *Description:* * (e.g. 12 MT MS angle with bending damage and edge cuts)
+• *Corrective Action:* (optional)
 
 Example:
 "Shree Balaji Pre-Engineered Buildings received 12 MT MS angle with bending damage and edge cuts during truck unloading"`,
@@ -307,14 +309,14 @@ Example:
   UPDATE_COMPLAINT: `✏️ *Update Complaint*
 
 To identify the complaint, provide ONE of the following:
-• *Linked PO Number or Inquiry ID:* * (e.g. PO-2026-TI-101 or INQ-8971B1)
-• *Customer Name:* (e.g. Tech Industries)
+• *Linked Order / Ref:* * (e.g. PO-2026-TI-101 or INQ-8971B1)
+• *Customer / Company:* (e.g. Tech Industries)
 
 What would you like to update?
 
 *Updatable Fields:*
 • Complaint Type (Quality Defect / Physical Damage / Quantity Shortage / Delivery Delay / Billing Mismatch / Specification Mismatch / Other)
-• Complaint Description
+• Description
 • Corrective Action Taken
 • Resolution Notes
 • Status (Pending / In Progress / Resolved / Closed)
@@ -2538,8 +2540,8 @@ async function checkComplaintsForUpdate(action, draft, senderPhone, originalText
 
   if (!hasUpdates) {
     const prompt = `✏️ *Active Complaint Found for ${matchedCmp.customer_name}:*\n\n` +
-      (matchedCmp.po_number ? `• *PO Number:* ${matchedCmp.po_number}\n` : '') +
-      `• *Type:* ${matchedCmp.complaint_type || 'Quality Defect'}\n` +
+      (matchedCmp.po_number ? `• *Linked Order / Ref:* PO: ${matchedCmp.po_number}\n` : '') +
+      `• *Complaint Type:* ${matchedCmp.complaint_type || 'Quality Defect'}\n` +
       `• *Status:* ${matchedCmp.status || 'Open'}\n` +
       `• *Description:* ${matchedCmp.description || 'N/A'}\n\n` +
       `What details would you like to update?\n` +
@@ -2609,9 +2611,9 @@ function buildConfirmationSummary(action, draft) {
 
     case 'UPDATE_INQUIRY': {
       const displayId = draft._inquiry_display_id || (draft.inquiry_id ? (draft.inquiry_id.startsWith('INQ-') ? draft.inquiry_id : `INQ-${draft.inquiry_id.slice(0, 6).toUpperCase()}`) : 'Inquiry');
-      summary += `• *Inquiry:* ${displayId}\n`;
+      summary += `• *Inquiry ID:* ${displayId}\n`;
       if (draft.company_name) {
-        summary += `• *Customer:* ${draft.company_name}\n`;
+        summary += `• *Customer / Company:* ${draft.company_name}\n`;
       }
       const hasHeaderUpdates = draft.updates && Object.values(draft.updates).some(v => v !== null && v !== undefined && v !== '');
       if (hasHeaderUpdates) {
@@ -2690,12 +2692,12 @@ function buildConfirmationSummary(action, draft) {
         const cleanDisplayInq = draft.inquiry_id.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
         summary += `• *Inquiry ID:* INQ-${cleanDisplayInq}\n`;
       }
+      if (draft.company_name) {
+        summary += `• *Customer / Company:* ${draft.company_name}\n`;
+      }
       const poToDisplay = draft.updates?.po_number || draft.po_number;
       if (poToDisplay) {
-        summary += `• *${draft.inquiry_id ? 'Attached PO Number' : 'PO Number'}:* ${poToDisplay}\n`;
-      }
-      if (draft.company_name) {
-        summary += `• *Customer:* ${draft.company_name}\n`;
+        summary += `• *PO Number:* ${poToDisplay}\n`;
       }
       if (draft.updates && Object.keys(draft.updates).length > 0) {
         const headerEntries = Object.entries(draft.updates).filter(([k, v]) => v && k !== 'po_number');
@@ -2730,7 +2732,7 @@ function buildConfirmationSummary(action, draft) {
 
     case 'UPDATE_VISIT': {
       const targetVis = draft.visit_id ? `${draft.company_name ? `${draft.company_name} ` : ''}(#${draft.visit_id.slice(0, 8)})` : `${draft.company_name}${draft.visit_date ? ` (Visit Date: ${draft.visit_date})` : ''}`;
-      summary += `• *Customer / Target Visit:* ${targetVis}\n`;
+      summary += `• *Customer / Company:* ${targetVis}\n`;
       summary += `• *Updating Fields:*\n`;
       for (const [k, v] of Object.entries(draft.updates || {})) {
         if (v) {
@@ -2756,11 +2758,11 @@ function buildConfirmationSummary(action, draft) {
 
     case 'LOG_COMPLAINT': {
       summary += `• *Customer / Company:* ${draft.company_name}\n`;
-      if (draft.affected_product || draft.product_name) {
-        summary += `• *Product / Material:* ${draft.affected_product || draft.product_name}\n`;
-      }
       if (draft.linked_inquiry_or_po) {
         summary += `• *Linked Order / Ref:* ${draft.linked_inquiry_or_po}\n`;
+      }
+      if (draft.affected_product || draft.product_name) {
+        summary += `• *Product / Material:* ${draft.affected_product || draft.product_name}\n`;
       }
       summary += `• *Complaint Type:* ${draft.complaint_type || 'Quality Defect'}\n`;
       summary += `• *Description:* ${draft.complaint_description || draft.affected_product}\n`;
@@ -2770,10 +2772,12 @@ function buildConfirmationSummary(action, draft) {
     }
 
     case 'UPDATE_COMPLAINT': {
-      const targetCmp = draft.linked_inquiry_or_po || draft.company_name || draft.complaint_id || 'Active Complaint';
-      summary += `• *Target Complaint:* ${targetCmp}\n`;
-      if (draft.company_name && draft.linked_inquiry_or_po && draft.company_name !== draft.linked_inquiry_or_po) {
-        summary += `• *Customer:* ${draft.company_name}\n`;
+      const targetCmp = draft.linked_inquiry_or_po || draft.complaint_id || 'Active Complaint';
+      if (draft.company_name) {
+        summary += `• *Customer / Company:* ${draft.company_name}\n`;
+      }
+      if (draft.linked_inquiry_or_po) {
+        summary += `• *Linked Order / Ref:* ${targetCmp}\n`;
       }
       summary += `• *Updating Fields:*\n`;
       for (const [k, v] of Object.entries(draft.updates || {})) {
@@ -2786,7 +2790,6 @@ function buildConfirmationSummary(action, draft) {
     }
   }
 
-  // summary += `\n*Reply:*\n• *Yes* — to save\n• *Edit* — to change something\n• *Cancel* — to discard`;
   return summary;
 }
 
@@ -3091,19 +3094,47 @@ async function executeAction(action, draft, senderPhone) {
           created_at: new Date().toISOString(),
         });
 
-        const productSummaryStr = structuredLineItems.length > 0
-          ? structuredLineItems.map(it => `${it.sku_text || it.description}${it.quantity ? ` - ${it.quantity} ${it.unit || 'MT'}` : ''}${it.rate ? ` (₹${Number(it.rate).toLocaleString('en-IN')})` : ''}`).join(', ')
-          : (draft.product_description || 'Steel Material');
+        let productSummaryLines = '';
+        if (structuredLineItems.length > 0) {
+          if (structuredLineItems.length === 1) {
+            const it = structuredLineItems[0];
+            const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
+            const qtyStr = it.quantity ? ` — ${it.quantity} ${it.unit || 'MT'}` : '';
+            const rateStr = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}/${it.unit || 'MT'}` : '';
+            const amtStr = it.amount ? ` (₹${Number(it.amount).toLocaleString('en-IN')})` : '';
+            productSummaryLines = `• *Product:* ${it.sku_text || it.description}${specStr}${qtyStr}${rateStr}${amtStr}\n`;
+          } else {
+            productSummaryLines = `• *Products:*\n`;
+            structuredLineItems.forEach((it) => {
+              const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
+              const qtyStr = it.quantity ? ` — ${it.quantity} ${it.unit || 'MT'}` : '';
+              const rateStr = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}/${it.unit || 'MT'}` : '';
+              const amtStr = it.amount ? ` (₹${Number(it.amount).toLocaleString('en-IN')})` : '';
+              productSummaryLines += `  • ${it.sku_text || it.description}${specStr}${qtyStr}${rateStr}${amtStr}\n`;
+            });
+          }
+        } else {
+          const rateStr = globalRate ? ` @ ₹${Number(globalRate).toLocaleString('en-IN')}/MT` : '';
+          productSummaryLines = `• *Product:* ${draft.product_description || 'Steel Material'}${rateStr}\n`;
+        }
 
-        return `🎉 *Inquiry Successfully Created!*
+        let quoteTotalLines = '';
+        if (totalAmount > 0) {
+          const gstAmt = Math.round(totalAmount * 0.18);
+          const grandTot = totalAmount + gstAmt;
+          quoteTotalLines = `• *Quotation Total:* ₹${Number(totalAmount).toLocaleString('en-IN')} + 18% GST (₹${Number(gstAmt).toLocaleString('en-IN')}) = *₹${Number(grandTot).toLocaleString('en-IN')}*\n`;
+        }
 
-📋 *Inquiry ID:* ${inquiryCode}
-🏢 *Customer:* ${companyName}
-📦 *Product:* ${productSummaryStr}
-📍 *Delivery Location:* ${draft.delivery_location}
-💳 *Payment Terms:* ${draft.payment_terms}${draft.preferred_make ? `\n🏷️ *Preferred Make:* ${draft.preferred_make}` : ''}
-
-Logged to Sales Pipeline & Inquiries! ✅`;
+        return `🎉 *Inquiry Successfully Created!*\n\n` +
+          `• *Inquiry ID:* ${inquiryCode}\n` +
+          `• *Customer / Company:* ${companyName}\n` +
+          productSummaryLines +
+          (draft.preferred_make ? `• *Preferred Make:* ${draft.preferred_make}\n` : '') +
+          (draft.payment_terms ? `• *Payment Terms:* ${draft.payment_terms}\n` : '') +
+          (draft.delivery_location ? `• *Delivery Location:* ${draft.delivery_location}\n` : '') +
+          (draft.additional_notes ? `• *Additional Notes:* ${draft.additional_notes}\n` : '') +
+          quoteTotalLines +
+          `\nLogged to Sales Pipeline & Inquiries! ✅`;
       }
 
       case 'UPDATE_INQUIRY': {
@@ -3376,12 +3407,12 @@ Logged to Sales Pipeline & Inquiries! ✅`;
         if (updates.stage || updates.status) fieldsSummary += `• *Stage / Status:* ${dealUpdates.stage}\n`;
         if (itemsUpdated && totalAmount > 0) fieldsSummary += `• *Quotation Total:* ₹${totalAmount.toLocaleString('en-IN')}\n`;
         if (updates.preferred_make) fieldsSummary += `• *Preferred Make:* ${updates.preferred_make}\n`;
-        if (updates.additional_notes) fieldsSummary += `• *Notes:* ${updates.additional_notes}\n`;
+        if (updates.additional_notes) fieldsSummary += `• *Additional Notes:* ${updates.additional_notes}\n`;
 
         return `✅ *Inquiry Updated Successfully!*\n\n` +
-          `📋 *Inquiry ID:* ${displayInqId}\n` +
-          `🏢 *Customer:* ${displayCustName}\n` +
-          (fieldsSummary ? `\n*Updated Details:*\n${fieldsSummary}` : '') +
+          `• *Inquiry ID:* ${displayInqId}\n` +
+          `• *Customer / Company:* ${displayCustName}\n` +
+          (fieldsSummary ? `${fieldsSummary}` : '') +
           `\nUpdated details saved to Sales Pipeline & Inquiries! 📈`;
       }
 
@@ -3568,24 +3599,40 @@ Logged to Sales Pipeline & Inquiries! ✅`;
 
         const inqRaw = (draft.inquiry_id || draft.deal_id || '').trim();
         const cleanInqCode = inqRaw.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
-        const inqDisplay = cleanInqCode ? `\n📋 *Inquiry ID:* INQ-${cleanInqCode}` : '';
+        const inqDisplay = cleanInqCode ? `• *Inquiry ID:* INQ-${cleanInqCode}\n` : '';
+
+        let itemsSummaryStr = '';
+        if (structuredLineItems.length === 1) {
+          const it = structuredLineItems[0];
+          const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
+          const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
+          itemsSummaryStr = `• *Product:* ${it.sku_text || it.description}${specStr}${hsnStr} — ${it.quantity} ${it.unit || 'MT'} @ ₹${Number(it.rate || 0).toLocaleString('en-IN')}/${it.unit || 'MT'}\n`;
+        } else if (structuredLineItems.length > 1) {
+          itemsSummaryStr = `• *Line Items:*\n`;
+          structuredLineItems.forEach((it) => {
+            const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
+            const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
+            itemsSummaryStr += `  • ${it.sku_text || it.description}${specStr}${hsnStr} — ${it.quantity} ${it.unit || 'MT'} @ ₹${Number(it.rate || 0).toLocaleString('en-IN')}/${it.unit || 'MT'} (₹${Number(it.amount || 0).toLocaleString('en-IN')})\n`;
+          });
+        }
 
         const totalTonnage = structuredLineItems.reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);
         const mainUnit = structuredLineItems[0]?.unit || 'MT';
-        const tonnageDisplay = totalTonnage > 0 ? `\n⚖️ *Total Tonnage:* ${totalTonnage.toLocaleString('en-IN')} ${mainUnit}` : '';
+        const tonnageDisplay = totalTonnage > 0 ? `• *Total Tonnage:* ${totalTonnage.toLocaleString('en-IN')} ${mainUnit}\n` : '';
 
-        return `🎉 *Order Recorded & Deal Marked as WON!*
-${inqDisplay}
-🛒 *PO Number:* ${draft.po_number}
-🏢 *Customer:* ${companyName}
-📅 *PO Date:* ${draft.po_date}
-📍 *Delivery Location:* ${draft.delivery_location}
-💳 *Payment Terms:* ${draft.payment_terms}${tonnageDisplay}
-💰 *Sub Total:* ₹${breakdown.formattedSubtotal}
-📋 *GST (18%):* ₹${breakdown.formattedGST}
-💵 *Total Order Value:* ${breakdown.formattedGrandTotal}
-
-Updated Sales Achievement Card! 🏆`;
+        return `🎉 *Order Recorded & Deal Marked as WON!*\n\n` +
+          inqDisplay +
+          `• *Customer / Company:* ${companyName}\n` +
+          `• *PO Number:* ${draft.po_number}\n` +
+          `• *PO Date:* ${draft.po_date}\n` +
+          `• *Delivery Location:* ${draft.delivery_location}\n` +
+          `• *Payment Terms:* ${draft.payment_terms}\n` +
+          itemsSummaryStr +
+          tonnageDisplay +
+          `• *Sub Total:* ₹${breakdown.formattedSubtotal}\n` +
+          `• *GST (18%):* ₹${breakdown.formattedGST}\n` +
+          `• *Total Order Value:* ${breakdown.formattedGrandTotal}\n\n` +
+          `Updated Sales Achievement Card! 🏆`;
       }
 
       case 'UPDATE_ORDER': {
@@ -3826,17 +3873,19 @@ Updated Sales Achievement Card! 🏆`;
         const displayInq = `INQ-${(deal.id || deal.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
         const displayCust = deal.customer_name || draft.company_name || 'Customer';
         const displayTotal = dealUpdates.total_amount || deal.total_amount || 0;
-        const displayLoc = dealUpdates.delivery_location || deal.delivery_location || 'Not specified';
-        const displayPayment = dealUpdates.payment_terms || deal.payment_terms || 'Not specified';
+        const displayLoc = dealUpdates.delivery_location || deal.delivery_location;
+        const displayPayment = dealUpdates.payment_terms || deal.payment_terms;
+        const displayPoDate = dealUpdates.po_date || deal.po_date;
 
         return `✅ *Order Updated Successfully!*\n\n` +
-          `📋 *Inquiry ID:* ${displayInq}\n` +
-          `🛒 *Official PO Number:* ${displayPo}\n` +
-          `🏢 *Customer:* ${displayCust}\n` +
-          `💰 *Total Value:* ₹${Number(displayTotal).toLocaleString('en-IN')}${displayTotal > 0 ? ' + GST' : ''}\n` +
-          `📍 *Delivery Location:* ${displayLoc}\n` +
-          `💳 *Payment Terms:* ${displayPayment}\n\n` +
-          `Attached PO number to won order and logged in Orders module! 🏆`;
+          `• *Inquiry ID:* ${displayInq}\n` +
+          `• *Customer / Company:* ${displayCust}\n` +
+          `• *PO Number:* ${displayPo}\n` +
+          (displayPoDate ? `• *PO Date:* ${displayPoDate}\n` : '') +
+          (displayLoc ? `• *Delivery Location:* ${displayLoc}\n` : '') +
+          (displayPayment ? `• *Payment Terms:* ${displayPayment}\n` : '') +
+          (displayTotal > 0 ? `• *Total Order Value:* ₹${Number(displayTotal).toLocaleString('en-IN')}\n` : '') +
+          `\nAttached PO number to won order and logged in Orders module! 🏆`;
       }
 
       case 'LOG_VISIT': {
@@ -3919,16 +3968,16 @@ Updated Sales Achievement Card! 🏆`;
           created_at: new Date().toISOString(),
         });
 
-        return `📍 *Customer Field Visit Logged Successfully!*
-
-🏢 *Customer:* ${companyName}
-👤 *Person Met:* ${draft.person_met} (${draft.contact_phone})
-📍 *Location:* ${draft.city_location}
-📅 *Date:* ${draft.visit_date}
-📊 *Outcome:* ${draft.visit_outcome}${draft.followup_action ? `\n🎯 *Follow-up:* ${draft.followup_action}` : ''}
-📝 *Remarks:* ${draft.meeting_remarks}
-
-Logged to Customer Visits Card! ✅`;
+        return `📍 *Customer Field Visit Logged Successfully!*\n\n` +
+          `• *Customer / Company:* ${companyName}\n` +
+          `• *Person Met:* ${draft.person_met}\n` +
+          `• *Contact Phone:* ${draft.contact_phone}\n` +
+          `• *City / Location:* ${draft.city_location}\n` +
+          `• *Visit Date:* ${draft.visit_date}\n` +
+          `• *Visit Outcome:* ${draft.visit_outcome}\n` +
+          (draft.followup_action ? `• *Follow-up Action:* ${draft.followup_action}\n` : '') +
+          `• *Meeting Remarks:* ${draft.meeting_remarks}\n\n` +
+          `Logged to Customer Visits Card! ✅`;
       }
 
       case 'UPDATE_VISIT': {
@@ -4021,11 +4070,18 @@ Logged to Customer Visits Card! ✅`;
 
         const resolvedCust = targetVisit ? targetVisit.customer_name : (draft.company_name || 'Customer');
 
+        let updatesSummary = '';
+        if (visitUpdates.person_met) updatesSummary += `• *Person Met:* ${visitUpdates.person_met}\n`;
+        if (visitUpdates.contact_no) updatesSummary += `• *Contact Phone:* ${visitUpdates.contact_no}\n`;
+        if (visitUpdates.customer_address) updatesSummary += `• *City / Location:* ${visitUpdates.customer_address}\n`;
+        if (visitUpdates.visited_at) updatesSummary += `• *Visit Date:* ${formatDateDDMMYYYY(visitUpdates.visited_at)}\n`;
+        if (draft.updates?.visit_outcome) updatesSummary += `• *Visit Outcome:* ${draft.updates.visit_outcome}\n`;
+        if (visitUpdates.follow_up_action) updatesSummary += `• *Follow-up Action:* ${visitUpdates.follow_up_action}\n`;
+        if (draft.updates?.meeting_remarks) updatesSummary += `• *Meeting Remarks:* ${draft.updates.meeting_remarks}\n`;
+
         return `✅ *Field Visit Updated Successfully!*\n\n` +
-          `🏢 *Customer:* ${resolvedCust}\n` +
-          (visitUpdates.person_met ? `👤 *Person Met:* ${visitUpdates.person_met}\n` : '') +
-          (visitUpdates.contact_no ? `📞 *Contact Phone:* ${visitUpdates.contact_no}\n` : '') +
-          (visitUpdates.customer_address ? `📍 *Location:* ${visitUpdates.customer_address}\n` : '') +
+          `• *Customer / Company:* ${resolvedCust}\n` +
+          updatesSummary +
           `\nVisit details updated in Customer Visits Card! ✅`;
       }
 
@@ -4106,14 +4162,14 @@ Logged to Customer Visits Card! ✅`;
 
         const custId = newCust ? newCust.id : '';
 
-        return `🎉 *New Customer Successfully Added!*
-
-🏢 *Company Name:* ${companyName}
-👤 *Contact Person:* ${contactPerson || 'N/A'}
-📱 *Mobile Number:* ${mobileNumber || 'N/A'}
-📍 *Delivery Location:* ${deliveryLoc || 'N/A'}${email ? `\n📧 *Email:* ${email}` : ''}${gstNum ? `\n🧾 *GST Number:* ${gstNum}` : ''}
-
-Customer record created & added to your portfolio! ✅`;
+        return `🎉 *New Customer Successfully Added!*\n\n` +
+          `• *Company Name:* ${companyName}\n` +
+          `• *Contact Person:* ${contactPerson || 'N/A'}\n` +
+          `• *Mobile Number:* ${mobileNumber || 'N/A'}\n` +
+          `• *Delivery Location:* ${deliveryLoc || 'N/A'}\n` +
+          (email ? `• *Email:* ${email}\n` : '') +
+          (gstNum ? `• *GST Number:* ${gstNum}\n` : '') +
+          `\nCustomer record created & added to your portfolio! ✅`;
       }
 
       case 'LOG_COMPLAINT': {
@@ -4209,19 +4265,22 @@ Customer record created & added to your portfolio! ✅`;
         let linkedDisplay = '';
         const cleanCode = targetDealId ? (targetDealId.startsWith('DEAL-') || targetDealId.startsWith('INQ-') ? targetDealId.replace(/^(?:DEAL|INQ)-/, '') : targetDealId.replace(/-/g, '').substring(0, 6).toUpperCase()) : '';
         if (targetPoNumber) {
-          linkedDisplay = `\n🔗 *Linked Order:* PO: *${targetPoNumber}*${cleanCode ? ` (INQ-${cleanCode})` : ''}`;
+          linkedDisplay = `• *Linked Order / Ref:* PO: ${targetPoNumber}${cleanCode ? ` (INQ-${cleanCode})` : ''}\n`;
         } else if (targetDealId) {
-          linkedDisplay = `\n🔗 *Linked Order:* Inquiry *INQ-${cleanCode}*`;
+          linkedDisplay = `• *Linked Order / Ref:* INQ-${cleanCode}\n`;
+        } else if (draft.linked_inquiry_or_po) {
+          linkedDisplay = `• *Linked Order / Ref:* ${draft.linked_inquiry_or_po}\n`;
         }
 
-        return `⚠️ *Customer Complaint Logged Successfully!*
-
-🏢 *Customer:* ${companyName}${linkedDisplay}${product ? `\n📦 *Product Affected:* ${product}` : ''}
-📋 *Complaint Type:* ${normalizedType}
-📝 *Description:* ${sanitizedDesc}
-🚦 *Status:* Open${draft.corrective_action ? `\n🛠️ *Corrective Action:* ${draft.corrective_action}` : ''}
-
-Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
+        return `⚠️ *Customer Complaint Logged Successfully!*\n\n` +
+          `• *Customer / Company:* ${companyName}\n` +
+          linkedDisplay +
+          (product ? `• *Product / Material:* ${product}\n` : '') +
+          `• *Complaint Type:* ${normalizedType}\n` +
+          `• *Description:* ${sanitizedDesc}\n` +
+          (draft.corrective_action ? `• *Corrective Action:* ${draft.corrective_action}\n` : '') +
+          `• *Status:* Open (48-Hour SLA Clock Started)\n\n` +
+          `Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
       }
 
       case 'UPDATE_COMPLAINT': {
@@ -4274,10 +4333,11 @@ Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
           console.warn('[CatalogFlow] Activity log notice:', actErr?.message);
         }
 
+        const cleanCmpCode = matchedCmp.deal_id ? matchedCmp.deal_id.replace(/^#?(?:INQ|DEAL)-?/i, '').substring(0, 6).toUpperCase() : '';
         const linkedOrderRef = matchedCmp.po_number
-          ? `PO: *${matchedCmp.po_number}*`
+          ? `PO: ${matchedCmp.po_number}${cleanCmpCode ? ` (INQ-${cleanCmpCode})` : ''}`
           : matchedCmp.deal_id
-          ? `Inquiry: *INQ-${matchedCmp.deal_id.replace(/^#?(?:INQ|DEAL)-?/i, '').substring(0, 6).toUpperCase()}*`
+          ? `INQ-${cleanCmpCode}`
           : '';
 
         let fieldsSummary = '';
@@ -4288,9 +4348,8 @@ Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
         if (cmpUpdates.resolution_notes) fieldsSummary += `• *Resolution Notes:* ${cmpUpdates.resolution_notes}\n`;
 
         return `✅ *Customer Complaint Updated Successfully!*\n\n` +
-          `🏢 *Customer:* *${matchedCmp.customer_name}*\n` +
-          (linkedOrderRef ? `🔗 *Linked Order:* ${linkedOrderRef}\n` : '') +
-          `\n*Updated Fields:*\n` +
+          `• *Customer / Company:* ${matchedCmp.customer_name}\n` +
+          (linkedOrderRef ? `• *Linked Order / Ref:* ${linkedOrderRef}\n` : '') +
           fieldsSummary +
           `\nUpdated details saved to Customer Complaints Card! ✅`;
       }
