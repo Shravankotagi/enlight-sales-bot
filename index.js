@@ -6,6 +6,7 @@ dotenv.config({ path: path.resolve(__dirname, '.env') });
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const webhookRouter = require('./src/webhook');
+const webChatRouter = require('./src/api/webChat');
 const { syncAllDatabaseToBigin, pullBiginToDatabase } = require('./src/agents/biginSyncAgent');
 
 const app = express();
@@ -14,8 +15,9 @@ const PORT = process.env.PORT || 3001;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Mount webhook router
+// Mount routers
 app.use('/webhook', webhookRouter);
+app.use('/chat/web', webChatRouter);
 
 // Sync Handler Helper
 const renderSyncResult = (res, title, subtitle, results, error) => {
