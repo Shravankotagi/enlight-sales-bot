@@ -378,6 +378,31 @@ function getTargetActionVerb(action) {
   }
 }
 
+function getEditPromptForAction(action) {
+  switch (action) {
+    case 'LOG_INQUIRY':
+      return `Which field would you like to change? (e.g. "Rate: 55000", "Delivery location: Pune", or "Quantity: 25 MT")`;
+    case 'UPDATE_INQUIRY':
+      return `Which field would you like to change? (e.g. "Rate: 55000" or "Payment terms: 30 days")`;
+    case 'LOG_ORDER':
+      return `Which field would you like to change? (e.g. "Rate: 54000", "Delivery location: Pune", or "PO Number: PO-2026-001")`;
+    case 'UPDATE_ORDER':
+      return `Which field would you like to change? (e.g. "PO Number: PO-2026-001", "PO Date: 12-09-2026", or "Delivery location: Pune")`;
+    case 'LOG_VISIT':
+      return `Which field would you like to change? (e.g. "Person met: Jenny Shah", "Contact phone: 9820123456", "Visit date: 20-09-2026", or "Remarks: Discussed HR coil")`;
+    case 'UPDATE_VISIT':
+      return `Which field would you like to change? (e.g. "Person met: Jenny Shah", "Outcome: Positive", or "Remarks: Updated remarks")`;
+    case 'LOG_COMPLAINT':
+      return `Which field would you like to change? (e.g. "Description: Delivered product had severe rust", "Product: HR Sheet 3mm", or "Type: Quality Defect")`;
+    case 'UPDATE_COMPLAINT':
+      return `Which field would you like to change? (e.g. "Status: In Progress", "Type: Physical Damage", or "Description: Updated notes")`;
+    case 'LOG_NEW_CUSTOMER':
+      return `Which field would you like to change? (e.g. "Contact person: Rajesh Sharma", "Mobile: 9820123456", or "Delivery location: Satara")`;
+    default:
+      return `Which field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")`;
+  }
+}
+
 function buildOutOfScopeActivityResponse(currentAction, detectedAction) {
   const currentModuleName = getModuleDisplayName(currentAction);
   const targetVerb = getTargetActionVerb(detectedAction);
@@ -5245,7 +5270,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
       cleanInput === '2'
     ) {
       await recordSessionMessage(senderPhone, 'user', text);
-      const editPrompt = `Which field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")`;
+      const editPrompt = getEditPromptForAction(action);
       await recordSessionMessage(senderPhone, 'assistant', editPrompt);
       await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_editing|${action}|${draftJsonStr}`);
       return {
@@ -5361,8 +5386,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
 
     // Edit button tapped again while already in edit mode
-    if (cleanInput === 'btn_confirm_edit' || cleanInput === 'edit details') {
-      const alreadyEditMsg = `You are currently editing this draft. Which field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")`;
+    if (cleanInput === 'btn_confirm_edit' || cleanInput === 'edit details' || cleanInput === 'edit') {
+      const alreadyEditMsg = `You are currently editing this draft. ${getEditPromptForAction(action)}`;
       return { handled: true, reply: alreadyEditMsg };
     }
 
@@ -5454,7 +5479,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     // Check if resolving candidate visit selection (by date or number)
     let candidateResolved = false;
     if (existingDraft._visit_candidates && Array.isArray(existingDraft._visit_candidates)) {
-      const cleanNum = text.replace(/[.#️⃣*️⃣\s]/g, '');
+      const cleanNum = text.replace(/^(?:option|no\.?|choice)\s*/i, '').replace(/[.#️⃣*️⃣\s]/g, '');
       const numIdx = parseInt(cleanNum, 10);
       let matchedCandidate = null;
 
@@ -5481,7 +5506,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     // Check if resolving candidate inquiry selection (by ID or number)
     let inquiryCandidateResolved = false;
     if (existingDraft._inquiry_candidates && Array.isArray(existingDraft._inquiry_candidates)) {
-      const cleanNum = text.replace(/[.#️⃣*️⃣\s]/g, '');
+      const cleanNum = text.replace(/^(?:option|no\.?|choice)\s*/i, '').replace(/[.#️⃣*️⃣\s]/g, '');
       const numIdx = parseInt(cleanNum, 10);
       let matchedCandidate = null;
 
@@ -5526,7 +5551,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     // Check if resolving candidate order selection for LOG_COMPLAINT (by number, PO, or INQ)
     let orderCandidateResolved = false;
     if (existingDraft._order_candidates && Array.isArray(existingDraft._order_candidates)) {
-      const cleanNum = text.replace(/[.#️⃣*️⃣\s]/g, '');
+      const cleanNum = text.replace(/^(?:option|no\.?|choice)\s*/i, '').replace(/[.#️⃣*️⃣\s]/g, '');
       const numIdx = parseInt(cleanNum, 10);
       let matchedCandidate = null;
 
@@ -5593,15 +5618,23 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
 
     // Extract fields from user message
-    const updatedDraft = await extractFieldsWithLLM(action, text, existingDraft);
-    if (existingDraft.visit_id && !updatedDraft.visit_id) {
-      updatedDraft.visit_id = existingDraft.visit_id;
-    }
-    if (existingDraft.visit_date && !updatedDraft.visit_date) {
-      updatedDraft.visit_date = existingDraft.visit_date;
-    }
-    if (existingDraft.inquiry_id && !updatedDraft.inquiry_id) {
-      updatedDraft.inquiry_id = existingDraft.inquiry_id;
+    const isPureCandidateSelection = (candidateResolved || inquiryCandidateResolved || orderCandidateResolved) &&
+      (/^\s*(?:option|choice|no\.?)?\s*[1-9]\d*\.?\s*$/i.test(text) || /^(?:PO|Purchase\s*Order|INQ|DEAL)[\s#:-]*[0-9A-Za-z-]+$/i.test(text.trim()));
+
+    const updatedDraft = isPureCandidateSelection
+      ? { ...existingDraft }
+      : await extractFieldsWithLLM(action, text, existingDraft);
+
+    const preserveKeys = [
+      'visit_id', 'visit_date', 'inquiry_id', '_inquiry_display_id',
+      'deal_id', 'po_number', 'linked_inquiry_or_po', 'affected_product',
+      'complaint_type', 'complaint_description', 'company_name',
+      '_customer_verified', '_new_customer_created'
+    ];
+    for (const key of preserveKeys) {
+      if (existingDraft[key] !== undefined && (updatedDraft[key] === undefined || updatedDraft[key] === null || updatedDraft[key] === '')) {
+        updatedDraft[key] = existingDraft[key];
+      }
     }
     if (existingDraft._inquiry_display_id && !updatedDraft._inquiry_display_id) {
       updatedDraft._inquiry_display_id = existingDraft._inquiry_display_id;

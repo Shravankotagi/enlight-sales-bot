@@ -259,6 +259,7 @@ async function runTests() {
                  cmpRes.reply.includes('PO-20260921-9974') &&
                  cmpRes.reply.includes('INQ-1151E4') &&
                  !cmpRes.reply.includes('INQ-2DEA6A');
+  await saveActiveSession(menonOwnerPhone, 'Unknown', 'general');
   console.log('Test 11 Passed:', pass11);
 
   // TEST 12: Direct Write Logging Blocked in Idle State (Enforce Catalog Flow Only)
@@ -454,9 +455,103 @@ async function runTests() {
   // Clean up test follow-up visits
   if (completedVisit?.id) await supabase.from('customer_visits').delete().eq('id', completedVisit.id);
   if (pendingVisit?.id) await supabase.from('customer_visits').delete().eq('id', pendingVisit.id);
+  await saveActiveSession(testFollowupPhone, 'Unknown', 'general');
+
+  // TEST 17: Multi-Order Disambiguation Selection by Number (Replying "2" to "Multiple Confirmed Orders Found")
+  console.log('\n[TEST 17] Multi-Order Disambiguation Selection by Number');
+  const testMultiOrderPhone = '919999911111';
+
+  // Create 2 test won deals for Apex Precision Ltd
+  const { data: wonDeal1 } = await supabase
+    .from('deals')
+    .insert({
+      stage: 'won',
+      customer_name: 'Apex Precision Ltd',
+      po_number: 'PO-APEX-8801',
+      delivery_location: 'Plot 10, Bhosari Pune',
+      salesperson_phone: testMultiOrderPhone,
+      created_at: new Date(Date.now() - 10 * 86400000).toISOString(),
+    })
+    .select()
+    .single();
+
+  const { data: wonDeal2 } = await supabase
+    .from('deals')
+    .insert({
+      stage: 'won',
+      customer_name: 'Apex Precision Ltd',
+      po_number: 'PO-APEX-8802',
+      delivery_location: 'Plot 10, Bhosari Pune',
+      salesperson_phone: testMultiOrderPhone,
+      created_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  if (wonDeal1) {
+    await supabase.from('deal_items').insert({
+      deal_id: wonDeal1.id,
+      sku_text: 'HR Sheet',
+      dimensions: '3.00 mm',
+      quantity: 5,
+      unit: 'MT',
+    });
+  }
+
+  if (wonDeal2) {
+    await supabase.from('deal_items').insert({
+      deal_id: wonDeal2.id,
+      sku_text: 'HR Sheet',
+      dimensions: '3.00 mm',
+      quantity: 15,
+      unit: 'MT',
+    });
+  }
+
+  // 17a: Initiate complaint -> triggers multi-order disambiguation list
+  await saveActiveSession(testMultiOrderPhone, 'Unknown', 'catalog_flow|LOG_COMPLAINT|{}');
+  const multiCmpRes = await handleCatalogFlow('log a compliant for Apex Precision Ltd, HR Sheet 3.00 mm, rust on the upper surface', testMultiOrderPhone);
+  console.log('Multi-Order Prompt Response:\n', multiCmpRes.reply);
+  const pass17a = multiCmpRes.handled === true &&
+                  multiCmpRes.reply.includes('Multiple Confirmed Orders Found for Apex Precision Ltd') &&
+                  multiCmpRes.reply.includes('PO-APEX-8801') &&
+                  multiCmpRes.reply.includes('PO-APEX-8802') &&
+                  multiCmpRes.reply.includes('Reply with the *Number*');
+
+  // 17b: User replies with number "2" -> immediately selects candidate 2 (PO-APEX-8801) and presents confirmation summary
+  const selectTwoRes = await handleCatalogFlow('2', testMultiOrderPhone);
+  console.log('Select Candidate "2" Response:\n', selectTwoRes.reply);
+  const pass17b = selectTwoRes.handled === true &&
+                  selectTwoRes.reply.includes("Here's what I've captured:") &&
+                  selectTwoRes.reply.includes('Apex Precision Ltd') &&
+                  selectTwoRes.reply.includes('PO-APEX-8801') &&
+                  selectTwoRes.reply.includes('rust on the upper surface') &&
+                  !selectTwoRes.reply.includes('Which field would you like to change');
+
+  // 17c: User confirms "save / yes" -> logs complaint successfully
+  const confirmCmpRes = await handleCatalogFlow('save / yes', testMultiOrderPhone);
+  console.log('Confirm Complaint Response:\n', confirmCmpRes.reply);
+  const pass17c = confirmCmpRes.handled === true &&
+                  confirmCmpRes.reply.includes('Customer Complaint Logged Successfully!') &&
+                  confirmCmpRes.reply.includes('Apex Precision Ltd');
+
+  const pass17 = pass17a && pass17b && pass17c;
+  console.log('Test 17 Passed:', pass17, `(17a:${pass17a}, 17b:${pass17b}, 17c:${pass17c})`);
+
+  // Clean up test deals, items, complaints, and session
+  if (wonDeal1?.id) {
+    await supabase.from('deal_items').delete().eq('deal_id', wonDeal1.id);
+    await supabase.from('deals').delete().eq('id', wonDeal1.id);
+  }
+  if (wonDeal2?.id) {
+    await supabase.from('deal_items').delete().eq('deal_id', wonDeal2.id);
+    await supabase.from('deals').delete().eq('id', wonDeal2.id);
+  }
+  await supabase.from('complaints').delete().ilike('customer_name', '%Apex Precision Ltd%');
+  await saveActiveSession(testMultiOrderPhone, 'Unknown', 'general');
 
   // Summary
-  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14 && pass15 && pass16;
+  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14 && pass15 && pass16 && pass17;
   console.log('\n========================================');
   console.log('FINAL RESULT: ' + (allPassed ? 'ALL TESTS PASSED ✅' : 'SOME TESTS FAILED ❌'));
   console.log('========================================');
