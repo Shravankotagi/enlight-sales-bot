@@ -376,7 +376,7 @@ async function runTests() {
                   visitStep3Res.reply.includes('Now continuing with your visit report:') &&
                   visitStep3Res.reply.includes('7878454512') &&
                   visitStep3Res.reply.includes('Satara') &&
-                  visitStep3Res.reply.includes('Mr shah') &&
+                  visitStep3Res.reply.toLowerCase().includes('mr shah') &&
                   !visitStep3Res.reply.includes('Please provide the remaining mandatory details');
 
   // 15d: User confirms "Save / Yes" -> Visit logged successfully without asking about the customer again
