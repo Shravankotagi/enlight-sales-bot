@@ -580,8 +580,27 @@ async function runTests() {
   // Clean up
   await saveActiveSession(testSwitchPhone, 'Unknown', 'general');
 
+  // TEST 19: Provide PO number and Complaint details in active LOG_COMPLAINT flow
+  console.log('\n[TEST 19] Provide PO number and Complaint details in active LOG_COMPLAINT flow');
+  const testCmpPhone = '919999988888';
+  // Step 1: User selects option 8 (Log Complaint)
+  const step1Cmp = await handleCatalogFlow('8', testCmpPhone);
+  console.log('Step 1 (Menu 8 Log Complaint Prompt):\n', step1Cmp.reply);
+
+  // Step 2: User provides complaint details containing PO number and damage
+  const step2Cmp = await handleCatalogFlow('Maurya Industries,PO: PO-MAU-2109,Physical Damage', testCmpPhone);
+  console.log('Step 2 (Complaint Details Captured Response):\n', step2Cmp.reply);
+  const pass19 = step2Cmp.handled === true &&
+                 !step2Cmp.reply.includes('To update an order') &&
+                 !step2Cmp.reply.includes('You are currently in the Complaint flow') &&
+                 (step2Cmp.reply.includes('Maurya Industries') || step2Cmp.reply.includes('PO-MAU-2109') || step2Cmp.reply.includes('Physical Damage') || step2Cmp.reply.includes('Please provide the remaining mandatory details'));
+  console.log('Test 19 Passed:', pass19);
+
+  // Clean up
+  await saveActiveSession(testCmpPhone, 'Unknown', 'general');
+
   // Summary
-  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14 && pass15 && pass16 && pass17 && pass18;
+  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14 && pass15 && pass16 && pass17 && pass18 && pass19;
   console.log('\n========================================');
   console.log('FINAL RESULT: ' + (allPassed ? 'ALL TESTS PASSED ✅' : 'SOME TESTS FAILED ❌'));
   console.log('========================================');

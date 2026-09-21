@@ -4677,13 +4677,19 @@ function detectOperationalAction(text) {
     return 'UPDATE_INQUIRY';
   }
 
-  // 7. Explicit ID-based updates
-  if (/\b(?:po-)\b/i.test(lower)) return 'UPDATE_ORDER';
+  // 7. Explicit ID-based updates (requires update/link verb or standalone ID input)
+  if (/\b(?:attach|link|set|update|modify|change|edit)\b.*?\b(?:po-|\bpo\b)/i.test(lower) || /^\s*po-[a-z0-9-]+\s*$/i.test(lower)) {
+    return 'UPDATE_ORDER';
+  }
   if (/\b(?:inq-)\b/i.test(lower)) {
     if (/\b(?:attach|link|set|update)\b.*?\b(?:po-|\bpo\b)/i.test(lower)) return 'UPDATE_ORDER';
-    return 'UPDATE_INQUIRY';
+    if (/\b(?:update|change|modify|set|edit|revise)\b/i.test(lower) || /^\s*inq-[a-z0-9-]+\s*$/i.test(lower)) {
+      return 'UPDATE_INQUIRY';
+    }
   }
-  if (/\b(?:vis-)\b/i.test(lower)) return 'UPDATE_VISIT';
+  if (/\b(?:vis-)\b/i.test(lower) && /\b(?:update|change|modify|set|edit)\b/i.test(lower)) {
+    return 'UPDATE_VISIT';
+  }
 
   // 8. Explicit Update patterns
   if (/\b(?:update|change|modify|set|mark|resolve|close|reopen|attach|link|add\s+po|correct|fix|edit|amend|revise|increase|decrease|reduce|adjust|make)\b/i.test(lower)) {
@@ -4799,50 +4805,39 @@ Respond ONLY with the single exact action name (e.g. LOG_INQUIRY) or NONE. No fo
 const DIRECT_ACTION_MAP = [
   // 1. Customer Acquisition
   { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|record|add|create|onboard|acquire)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?customer\b/i, action: 'LOG_NEW_CUSTOMER' },
-  { pattern: /\b(?:new\s+customer\s+acquisition|customer\s+acquisition|new\s+customer\s+onboarding|new\s+customer)\b/i, action: 'LOG_NEW_CUSTOMER' },
+  { pattern: /^\s*(?:new\s+customer\s+acquisition|customer\s+acquisition|new\s+customer\s+onboarding)\b/i, action: 'LOG_NEW_CUSTOMER' },
 
-  // 2. Complaints Update (MUST BE BEFORE LOG_COMPLAINT)
+  // 2. Complaints Update
   { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:update|resolve|change|modify|close|reopen|set|mark)\s+(?:the\s+|a\s+)?(?:customer\s+)?complaint\b/i, action: 'UPDATE_COMPLAINT' },
-  { pattern: /\b(?:change|update|modify|set)\s+(?:the\s+)?complaint\s+(?:type|status|description|action|notes)\b/i, action: 'UPDATE_COMPLAINT' },
   { pattern: /\b(?:mark|set)\s+(?:the\s+)?complaint\s+(?:as\s+)?(?:resolved|closed|pending|in progress|reopened)\b/i, action: 'UPDATE_COMPLAINT' },
-  { pattern: /\b(?:resolve|close|reopen)\s+complaint\b/i, action: 'UPDATE_COMPLAINT' },
+  { pattern: /\b(?:resolve|close|reopen)\s+(?:the\s+)?complaint\b/i, action: 'UPDATE_COMPLAINT' },
 
   // 3. Complaints Log
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|record|raise|report|register|create|add|received|got|have|had)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?complaint\b/i, action: 'LOG_COMPLAINT' },
-  { pattern: /\b(?:complaint\s+(?:from|for|by|of|regarding|about|on|against|regarding\s+this))\b/i, action: 'LOG_COMPLAINT' },
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|record|raise|report|register|create)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?complaint\b/i, action: 'LOG_COMPLAINT' },
+  { pattern: /^\s*(?:log|record|raise|register|new)\s+complaint\b/i, action: 'LOG_COMPLAINT' },
 
-  // 4. Visits Update (MUST BE BEFORE LOG_VISIT)
+  // 4. Visits Update
   { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:update|change|modify|set|correct|fix|edit|amend|revise)\s+(?:the\s+|a\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'UPDATE_VISIT' },
-  { pattern: /\b(?:correct|fix|change|update|edit|modify)\s+(?:the\s+)?(?:contact\s+person|person\s+met|location|address|remarks|outcome|date)\s+for\b/i, action: 'UPDATE_VISIT' },
 
   // 5. Visits Log
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|record|add|create|had)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'LOG_VISIT' },
-  { pattern: /\b(?:visited|went\s+to\s+meet|had\s+a\s+meeting|had\s+a\s+visit|meeting\s+with)\b/i, action: 'LOG_VISIT' },
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|record|add|create)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'LOG_VISIT' },
+  { pattern: /^\s*(?:log|record|new)\s+(?:field\s*|customer\s*|site\s*)?visit\b/i, action: 'LOG_VISIT' },
 
-  // 6. Orders Update (MUST BE BEFORE LOG_ORDER)
+  // 6. Orders Update
   { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:update|change|modify)\s+(?:the\s+|a\s+)?(?:purchase\s+)?order\b/i, action: 'UPDATE_ORDER' },
-  { pattern: /\b(?:attach|link|add|set|update)\s+(?:the\s+)?po\s*(?:no|number|#)?\b/i, action: 'UPDATE_ORDER' },
-  { pattern: /\b(?:attach|link)\s+(?:the\s+|a\s+)?(?:po|purchase\s+order)\b/i, action: 'UPDATE_ORDER' },
+  { pattern: /\b(?:attach|link|update)\s+(?:the\s+)?po\s*(?:no|number|#)?\s+(?:to|for)\b/i, action: 'UPDATE_ORDER' },
 
   // 7. Orders Log
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:record|log|create|add|received|place|enter)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:purchase\s+)?order\b/i, action: 'LOG_ORDER' },
-  { pattern: /\b(?:order\s+(?:from|for|by|of|regarding|with|creation|logging))\b/i, action: 'LOG_ORDER' },
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:record|log|create|add|place|enter)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:purchase\s+)?order\b/i, action: 'LOG_ORDER' },
+  { pattern: /^\s*(?:log|record|create|new)\s+(?:purchase\s+)?order\b/i, action: 'LOG_ORDER' },
 
-  // 8. Inquiries Update (MUST BE BEFORE LOG_INQUIRY)
+  // 8. Inquiries Update
   { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:update|edit|modify|change|correct|revise|amend)\s+(?:an?\s+|the\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i, action: 'UPDATE_INQUIRY' },
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:edit|update|change|modify)\s+(?:an?\s+|the\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\s+(?:for|of|from|with|to)\b/i, action: 'UPDATE_INQUIRY' },
-  { pattern: /\b(?:update|edit|modify|change)\s+(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i, action: 'UPDATE_INQUIRY' },
   { pattern: /\b(?:mark|move|put)\s+(?:the\s+|a\s+)?(?:deal|inquiry)?\s*(?:as\s+|to\s+)?(?:won|lost|negotiation|quoted|on\s+hold|hold)\b/i, action: 'UPDATE_INQUIRY' },
-  { pattern: /\b(?:deal\s+won|deal\s+lost|inquiry\s+won|inquiry\s+lost)\b/i, action: 'UPDATE_INQUIRY' },
-  { pattern: /\b(?:update|change|modify|set|revise|correct|edit)\s+(?:the\s+)?(?:rate|price|pricing|payment\s+terms?|credit\s+terms?|terms|delivery\s+location|location|destination|quantity|qty|tonnage|specs?|specifications?|make|preferred\s+make)\b/i, action: 'UPDATE_INQUIRY' },
 
-  // 9. Inquiries Log (Extensive phrase matching across all sales terminology)
-  { pattern: /^(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal|deals)\b/i, action: 'LOG_INQUIRY' },
-  { pattern: /\b(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal|deals)\s+(?:from|for|by|of|regarding|with|details?|logging|creation)\b/i, action: 'LOG_INQUIRY' },
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|create|new|add|received|got|have|had|record|enter|save)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal)\b/i, action: 'LOG_INQUIRY' },
-  { pattern: /\b(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|rfqs|deal)\s*[:=-]/i, action: 'LOG_INQUIRY' },
-  { pattern: /\b(?:rate|price|quote|quotation)\s+(?:manga|chahiye|bhejo|do|required|needed)\b/i, action: 'LOG_INQUIRY' },
-  { pattern: /\b(?:party|client|customer)\s*[:=-]\s*.*?\b(?:material|product|requirement|qty|quantity)\s*[:=-]/i, action: 'LOG_INQUIRY' },
+  // 9. Inquiries Log
+  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|create|new|add|record|enter|save)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|deal)\b/i, action: 'LOG_INQUIRY' },
+  { pattern: /^\s*(?:log|create|new)\s+(?:inquiry|enquiry|rfq|deal)\b/i, action: 'LOG_INQUIRY' },
 ];
 
 function detectOutOfScopeActionAttempt(currentAction, text) {
@@ -5021,8 +5016,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
     if (!isControlReply && !isOperationalQuery(text)) {
       const isLLMQuery = await isOperationalQueryWithLLM(text);
       if (!isLLMQuery) {
-        // Strict Activity Scope Guard: Check if input belongs to a DIFFERENT module
-        const detectedNewAction = await detectNewOperationalIntent(text);
+        // Strict Activity Scope Guard: Check if input is an explicit switch to a DIFFERENT module
+        const detectedNewAction = detectOutOfScopeActionAttempt(currentAction, text);
         if (detectedNewAction) {
           const currentFamily = getModuleFamily(currentAction);
           const newFamily = getModuleFamily(detectedNewAction);
