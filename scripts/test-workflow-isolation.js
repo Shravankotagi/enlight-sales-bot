@@ -347,10 +347,45 @@ async function runTests() {
                  sess14?.last_intent?.startsWith('catalog_flow|LOG_ORDER');
   console.log('Test 14 Passed:', pass14);
 
-  await saveActiveSession(testPhone, 'Unknown', 'general');
+  // TEST 15: Nested New Customer Onboarding with Field Forwarding to Visit Report
+  console.log('\n[TEST 15] Nested New Customer Onboarding with Field Forwarding to Visit Report');
+  const testVisitPhone = '919999988888';
+  await saveActiveSession(testVisitPhone, 'Unknown', 'catalog_flow|LOG_VISIT|{}');
+
+  // 15a: User logs visit for unrecognized company
+  const visitStep1Res = await handleCatalogFlow('log a visit for Mahendra Motors 2 days before, met Mr shah evrything went well', testVisitPhone);
+  console.log('Visit Step 1 (Ask New Customer):\n', visitStep1Res.reply);
+  const pass15a = visitStep1Res.handled === true &&
+                  visitStep1Res.reply.includes('Mahendra Motors') &&
+                  visitStep1Res.reply.includes('is not in your customer list');
+
+  // 15b: User confirms "Yes, Add Customer"
+  const visitStep2Res = await handleCatalogFlow('yes', testVisitPhone);
+  console.log('Visit Step 2 (Ask Customer Details):\n', visitStep2Res.reply);
+  const pass15b = visitStep2Res.handled === true &&
+                  visitStep2Res.reply.includes('New Customer Acquisition — Mahendra Motors') &&
+                  visitStep2Res.reply.includes('Mobile Number');
+
+  // 15c: User provides phone & location -> Customer created & Visit confirmation summary immediately displayed without asking twice
+  const visitStep3Res = await handleCatalogFlow('7878454512, Satara', testVisitPhone);
+  console.log('Visit Step 3 (Auto-Forwarded Visit Confirmation):\n', visitStep3Res.reply);
+  const pass15c = visitStep3Res.handled === true &&
+                  visitStep3Res.reply.includes('New Customer "Mahendra Motors" Successfully Created!') &&
+                  visitStep3Res.reply.includes('Now continuing with your visit report:') &&
+                  visitStep3Res.reply.includes('7878454512') &&
+                  visitStep3Res.reply.includes('Satara') &&
+                  visitStep3Res.reply.includes('Mr shah') &&
+                  !visitStep3Res.reply.includes('Please provide the remaining mandatory details');
+
+  const pass15 = pass15a && pass15b && pass15c;
+  console.log('Test 15 Passed:', pass15);
+
+  // Clean up test customer & visit session
+  await supabase.from('customer_accounts').delete().ilike('company_name', '%Mahendra Motors%');
+  await saveActiveSession(testVisitPhone, 'Unknown', 'general');
 
   // Summary
-  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14;
+  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14 && pass15;
   console.log('\n========================================');
   console.log('FINAL RESULT: ' + (allPassed ? 'ALL TESTS PASSED ✅' : 'SOME TESTS FAILED ❌'));
   console.log('========================================');
@@ -364,4 +399,5 @@ runTests().catch((err) => {
   console.error('Test execution error:', err);
   process.exit(1);
 });
+
 

@@ -1131,6 +1131,44 @@ function mergeDraft(action, baseDraft, newExtracted, userInput = '') {
   return mergeSingleDraft(action, baseDraft, newExtracted, userInput);
 }
 
+// ── FORWARD CUSTOMER DETAILS TO PARENT DRAFT ──────────────────────────────
+
+function forwardCustomerDetailsToParentDraft(originalAction, originalDraft, custDraft) {
+  if (!originalDraft || typeof originalDraft !== 'object') return originalDraft;
+  if (!custDraft || typeof custDraft !== 'object') return originalDraft;
+
+  // 1. Company Name
+  if (custDraft.company_name) {
+    originalDraft.company_name = custDraft.company_name;
+  }
+
+  // 2. Phone / Mobile Number
+  const phoneVal = custDraft.mobile_number || custDraft.phone || custDraft.contact_phone;
+  if (phoneVal) {
+    if (!originalDraft.contact_phone) originalDraft.contact_phone = phoneVal;
+    if (!originalDraft.mobile_number) originalDraft.mobile_number = phoneVal;
+    if (!originalDraft.phone) originalDraft.phone = phoneVal;
+  }
+
+  // 3. Location / City / Delivery Address
+  const locVal = custDraft.delivery_location || custDraft.city_location || custDraft.location || custDraft.address;
+  if (locVal) {
+    if (!originalDraft.city_location) originalDraft.city_location = locVal;
+    if (!originalDraft.delivery_location) originalDraft.delivery_location = locVal;
+    if (!originalDraft.location) originalDraft.location = locVal;
+    if (!originalDraft.address) originalDraft.address = locVal;
+  }
+
+  // 4. Contact Person / Person Met
+  const personVal = custDraft.contact_person || custDraft.person_met;
+  if (personVal) {
+    if (!originalDraft.person_met) originalDraft.person_met = personVal;
+    if (!originalDraft.contact_person) originalDraft.contact_person = personVal;
+  }
+
+  return originalDraft;
+}
+
 // ── VALIDATE MANDATORY FIELDS ────────────────────────────────────────────────
 
 function validateMandatoryFields(action, draft) {
@@ -1138,6 +1176,9 @@ function validateMandatoryFields(action, draft) {
 
   switch (action) {
     case 'LOG_INQUIRY':
+      if (!draft.delivery_location && (draft.city_location || draft.location || draft.address)) {
+        draft.delivery_location = draft.city_location || draft.location || draft.address;
+      }
       if (!draft.company_name) missing.push('Company Name');
       if (!draft.product_description && (!Array.isArray(draft.line_items) || draft.line_items.length === 0)) {
         missing.push('Product Description / Quantity');
@@ -1164,6 +1205,9 @@ function validateMandatoryFields(action, draft) {
       break;
 
     case 'LOG_ORDER':
+      if (!draft.delivery_location && (draft.city_location || draft.location || draft.address)) {
+        draft.delivery_location = draft.city_location || draft.location || draft.address;
+      }
       if (!draft.inquiry_id) missing.push('Inquiry ID (e.g. INQ-F4D982)');
       if (!draft.company_name) missing.push('Company Name');
       if (!draft.po_number) missing.push('PO Number (e.g. PO-2026-0042)');
@@ -1204,6 +1248,15 @@ function validateMandatoryFields(action, draft) {
       if (!draft.meeting_remarks && (draft.followup_action || draft.notes || draft.additional_notes)) {
         draft.meeting_remarks = draft.followup_action || draft.notes || draft.additional_notes;
       }
+      if (!draft.contact_phone && (draft.mobile_number || draft.phone)) {
+        draft.contact_phone = draft.mobile_number || draft.phone;
+      }
+      if (!draft.city_location && (draft.delivery_location || draft.location || draft.address)) {
+        draft.city_location = draft.delivery_location || draft.location || draft.address;
+      }
+      if (!draft.person_met && draft.contact_person) {
+        draft.person_met = draft.contact_person;
+      }
       if (!draft.company_name) missing.push('Customer / Company Name');
       if (!draft.person_met) missing.push('Person Met');
       if (!draft.contact_phone) missing.push('Contact Phone');
@@ -1225,6 +1278,15 @@ function validateMandatoryFields(action, draft) {
     }
 
     case 'LOG_NEW_CUSTOMER':
+      if (!draft.contact_person && draft.person_met) {
+        draft.contact_person = draft.person_met;
+      }
+      if (!draft.mobile_number && (draft.contact_phone || draft.phone)) {
+        draft.mobile_number = draft.contact_phone || draft.phone;
+      }
+      if (!draft.delivery_location && (draft.city_location || draft.location || draft.address)) {
+        draft.delivery_location = draft.city_location || draft.location || draft.address;
+      }
       if (!draft.company_name) missing.push('Company Name');
       if (!draft.contact_person) missing.push('Contact Person');
       if (!draft.mobile_number && !draft.phone && !draft.contact_phone) missing.push('Mobile Number');
@@ -4834,11 +4896,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
       const custDraft = {
         action: 'LOG_NEW_CUSTOMER',
         company_name: unrecognizedName,
-        contact_person: originalDraft.person_met || null,
-        mobile_number: originalDraft.contact_phone || null,
-        delivery_location: originalDraft.delivery_location || originalDraft.city_location || null,
-        email: null,
-        gst_number: null,
+        contact_person: originalDraft.person_met || originalDraft.contact_person || null,
+        mobile_number: originalDraft.contact_phone || originalDraft.mobile_number || originalDraft.phone || null,
+        delivery_location: originalDraft.delivery_location || originalDraft.city_location || originalDraft.location || originalDraft.address || null,
+        email: originalDraft.email || null,
+        gst_number: originalDraft.gst_number || null,
         _parentAction: originalAction,
         _parentDraft: originalDraft,
       };
@@ -4849,7 +4911,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
         // All customer mandatory fields already supplied (e.g. from field visit)
         await executeAction('LOG_NEW_CUSTOMER', custDraft, senderPhone);
 
-        originalDraft.company_name = custDraft.company_name;
+        forwardCustomerDetailsToParentDraft(originalAction, originalDraft, custDraft);
         const custProdCheck = validateDraftProducts(originalAction, originalDraft);
         if (!custProdCheck.isValid) {
           const resumeMsg = `✅ *New Customer "${custDraft.company_name}" Created!*\n\n${custProdCheck.clarificationMessage}`;
@@ -5011,7 +5073,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
       await executeAction('LOG_NEW_CUSTOMER', updatedCustDraft, senderPhone);
 
       const originalDraft = updatedCustDraft._parentDraft || {};
-      originalDraft.company_name = updatedCustDraft.company_name;
+      forwardCustomerDetailsToParentDraft(originalAction, originalDraft, updatedCustDraft);
       const collectProdCheck = validateDraftProducts(originalAction, originalDraft);
       if (!collectProdCheck.isValid) {
         const resumeMsg = `✅ *New Customer "${updatedCustDraft.company_name}" Successfully Created!*\n\n${collectProdCheck.clarificationMessage}`;
