@@ -3378,33 +3378,12 @@ Logged to Sales Pipeline & Inquiries! ✅`;
           .select()
           .single();
 
-        // 2. Insert into deals (stage = 'won')
-        const { data: dealRow, error: dealErr } = await supabase
-          .from('deals')
-          .insert({
-            inquiry_id: inqRow ? inqRow.id : null,
-            stage: 'won',
-            won_at: new Date().toISOString(),
-            po_number: draft.po_number,
-            po_date: draft.po_date,
-            customer_name: companyName,
-            customer_address: draft.delivery_location || null,
-            delivery_location: draft.delivery_location,
-            payment_terms: draft.payment_terms,
-            total_amount: totalAmount,
-            inquiry_type: 'purchase_order',
-            status: 'auto_created',
-            salesperson_phone: senderPhone,
-            created_at: new Date().toISOString(),
-          })
-          .select()
-          .single();
+        // 2. Update existing deal (if linked) OR insert new deal with stage = 'won'
+        let targetDealId = draft.deal_id || null;
 
-        if (dealErr) console.error('[CatalogFlow] Order deal insert error:', dealErr);
-
-        // Update original linked deal to won if linked
-        if (draft.deal_id) {
-          await supabase
+        if (targetDealId) {
+          // Update the existing linked deal to won with PO details
+          const { error: updErr } = await supabase
             .from('deals')
             .update({
               stage: 'won',
@@ -3414,24 +3393,69 @@ Logged to Sales Pipeline & Inquiries! ✅`;
               total_amount: totalAmount,
               delivery_location: draft.delivery_location,
               payment_terms: draft.payment_terms,
+              customer_address: draft.delivery_location || null,
+              inquiry_type: 'purchase_order',
             })
-            .eq('id', draft.deal_id);
-        }
+            .eq('id', targetDealId);
 
-        // 3. Insert line items
-        if (dealRow && structuredLineItems.length > 0) {
-          const itemsPayload = structuredLineItems.map(it => ({
-            deal_id: dealRow.id,
-            sku_text: it.sku_text || it.description,
-            dimensions: it.dimensions || it.spec || null,
-            grade: it.grade || null,
-            quantity: Number(it.quantity) || 0,
-            unit: it.unit || 'MT',
-            rate: Number(it.rate) || 0,
-            amount: Number(it.amount) || (Number(it.quantity) * Number(it.rate)),
-            created_at: new Date().toISOString(),
-          }));
-          await supabase.from('deal_items').insert(itemsPayload);
+          if (updErr) console.error('[CatalogFlow] Order deal update error:', updErr);
+
+          // Update or replace line items for this existing deal
+          if (structuredLineItems.length > 0) {
+            await supabase.from('deal_items').delete().eq('deal_id', targetDealId);
+            const itemsPayload = structuredLineItems.map(it => ({
+              deal_id: targetDealId,
+              sku_text: it.sku_text || it.description,
+              dimensions: it.dimensions || it.spec || null,
+              grade: it.grade || null,
+              quantity: Number(it.quantity) || 0,
+              unit: it.unit || 'MT',
+              rate: Number(it.rate) || 0,
+              amount: Number(it.amount) || (Number(it.quantity) * Number(it.rate)),
+              created_at: new Date().toISOString(),
+            }));
+            await supabase.from('deal_items').insert(itemsPayload);
+          }
+        } else {
+          // No existing deal -> Insert single new deal row
+          const { data: dealRow, error: dealErr } = await supabase
+            .from('deals')
+            .insert({
+              inquiry_id: inqRow ? inqRow.id : null,
+              stage: 'won',
+              won_at: new Date().toISOString(),
+              po_number: draft.po_number,
+              po_date: draft.po_date,
+              customer_name: companyName,
+              customer_address: draft.delivery_location || null,
+              delivery_location: draft.delivery_location,
+              payment_terms: draft.payment_terms,
+              total_amount: totalAmount,
+              inquiry_type: 'purchase_order',
+              status: 'auto_created',
+              salesperson_phone: senderPhone,
+              created_at: new Date().toISOString(),
+            })
+            .select()
+            .single();
+
+          if (dealErr) console.error('[CatalogFlow] Order deal insert error:', dealErr);
+
+          if (dealRow && structuredLineItems.length > 0) {
+            targetDealId = dealRow.id;
+            const itemsPayload = structuredLineItems.map(it => ({
+              deal_id: dealRow.id,
+              sku_text: it.sku_text || it.description,
+              dimensions: it.dimensions || it.spec || null,
+              grade: it.grade || null,
+              quantity: Number(it.quantity) || 0,
+              unit: it.unit || 'MT',
+              rate: Number(it.rate) || 0,
+              amount: Number(it.amount) || (Number(it.quantity) * Number(it.rate)),
+              created_at: new Date().toISOString(),
+            }));
+            await supabase.from('deal_items').insert(itemsPayload);
+          }
         }
 
         // 4. Log KRA 1 (Won Deal)
