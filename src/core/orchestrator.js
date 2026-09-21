@@ -157,7 +157,7 @@ Always interpret the underlying business intent and map seamlessly to the approp
   - Rep Visit Leaderboard: "Which salesperson has logged the most visits?" -> call get_visits with mode: "rep_leaderboard".
   - Week-over-Week Visits: "How many visits happened this week vs last week?" -> call get_visits with mode: "week_comparison".
   - Duplicate Visits: "List duplicate visits to the same customer on the same day" -> call get_visits with mode: "duplicates".
-  - Incomplete Visits: "Which visits are missing a location / contact person?" -> call get_visits with missing_location: true / missing_contact_person: true.
+  - Pending Follow-Up Visits / Follow-ups Due: When the user asks "show visit follow ups due", "which visits require follow-up", "pending visit followups", "visit follow ups due", call get_visits with mode: "pending_followup". Return ONLY visits where the follow-up is actively pending (`requires_follow_up: true` and `follow_up_status: "pending"`). NEVER list visits where the follow-up is already completed or marked done!
   - Visited Without Orders: "Which customers have visits logged but no orders yet?" -> call get_visits with mode: "visits_no_orders". Report the dynamic list of prospective accounts with logged visits that haven't placed an order yet.
 - **COMPLAINTS INTELLIGENCE**:
   - NO COMPLAINT ID (CRITICAL): There is NO concept of a "Complaint ID" anywhere in the system. Complaints are identified and referenced ONLY by Customer Name, PO Number, and Product. NEVER mention, invent, format, or output any "Complaint ID" (e.g. #80FC077A, Complaint ID, etc.) in your responses under any circumstances!

@@ -5,6 +5,8 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 const { handleCatalogFlow, buildConfirmationSummary } = require('../src/core/catalogFlow');
 const { saveActiveSession, getFullActiveSession, supabase } = require('../src/supabase');
 const { calculateQuotationBreakdown } = require('../src/utils/pricingEngine');
+const { executeGetVisits } = require('../src/core/retrievalTools');
+const { getVisitsPendingFollowup } = require('../src/queryhandler');
 
 async function runTests() {
   const testPhone = '919999988888';
@@ -397,8 +399,64 @@ async function runTests() {
   await supabase.from('kra_logs').delete().ilike('customer_name', '%Mahendra Motors%');
   await saveActiveSession(testVisitPhone, 'Unknown', 'general');
 
+  // TEST 16: Completed Visit Follow-ups Excluded from Pending Follow-ups Queries
+  console.log('\n[TEST 16] Completed Visit Follow-ups Excluded from Pending Follow-ups');
+  const testFollowupPhone = '919999988888';
+  
+  // Insert test visit 1: Completed follow-up
+  const { data: completedVisit } = await supabase.from('customer_visits').insert({
+    salesperson_phone: testFollowupPhone,
+    customer_name: 'Omega Test Completed Corp',
+    person_met: 'Rajesh Kulkarni',
+    contact_no: '7878778787',
+    customer_address: 'Nashik',
+    visited_at: new Date().toISOString(),
+    follow_up_action: 'Follow-up on Tuesday',
+    follow_up_status: 'completed',
+    remarks: '[Outcome: positive] [FollowUp: Follow-up on Tuesday] [FollowUpStatus: completed] Discussed requirements',
+  }).select().single();
+
+  // Insert test visit 2: Pending follow-up
+  const { data: pendingVisit } = await supabase.from('customer_visits').insert({
+    salesperson_phone: testFollowupPhone,
+    customer_name: 'Sigma Test Pending Corp',
+    person_met: 'Vikas Joshi',
+    contact_no: '9823055667',
+    customer_address: 'Pune',
+    visited_at: new Date().toISOString(),
+    follow_up_action: 'Send official price quote in 3 days',
+    follow_up_status: 'pending',
+    remarks: '[Outcome: positive] [FollowUp: Send official price quote in 3 days] [FollowUpStatus: pending] Discussed 25 MT MS Plate',
+  }).select().single();
+
+  // 16a: Query via executeGetVisits (mode: pending_followup)
+  const getVisitsRes = await executeGetVisits(
+    { mode: 'pending_followup' },
+    { role: 'salesperson', phone: testFollowupPhone, employeeId: null }
+  );
+  const pendingVisitsList = getVisitsRes.data?.visits || [];
+  const hasCompletedInGetVisits = pendingVisitsList.some(v => v.customer_name === 'Omega Test Completed Corp');
+  const hasPendingInGetVisits = pendingVisitsList.some(v => v.customer_name === 'Sigma Test Pending Corp');
+  console.log('executeGetVisits pending count:', pendingVisitsList.length);
+  console.log('Completed visit excluded in executeGetVisits:', !hasCompletedInGetVisits);
+  console.log('Pending visit included in executeGetVisits:', hasPendingInGetVisits);
+  const pass16a = !hasCompletedInGetVisits && hasPendingInGetVisits;
+
+  // 16b: Query via getVisitsPendingFollowup (queryhandler)
+  const qhRes = await getVisitsPendingFollowup(testFollowupPhone, 'shwo visit follow ups due');
+  console.log('getVisitsPendingFollowup response:\n', qhRes);
+  const pass16b = !qhRes.includes('Omega Test Completed Corp') && qhRes.includes('Sigma Test Pending Corp');
+  console.log('Completed visit excluded in getVisitsPendingFollowup:', !qhRes.includes('Omega Test Completed Corp'));
+
+  const pass16 = pass16a && pass16b;
+  console.log('Test 16 Passed:', pass16);
+
+  // Clean up test follow-up visits
+  if (completedVisit?.id) await supabase.from('customer_visits').delete().eq('id', completedVisit.id);
+  if (pendingVisit?.id) await supabase.from('customer_visits').delete().eq('id', pendingVisit.id);
+
   // Summary
-  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14 && pass15;
+  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14 && pass15 && pass16;
   console.log('\n========================================');
   console.log('FINAL RESULT: ' + (allPassed ? 'ALL TESTS PASSED ✅' : 'SOME TESTS FAILED ❌'));
   console.log('========================================');

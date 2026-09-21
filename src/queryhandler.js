@@ -1835,8 +1835,17 @@ function formatVisitDate(dateVal) {
 
 /** Helper to classify follow-up action into deliverable, scheduled_call, or none */
 function classifyFollowUp(visit) {
-  let rawFollowUp = visit.follow_up_action || visit.follow_up || null;
   const remarks = visit.remarks || '';
+  const statusMatch =
+    remarks.match(/\[(?:FollowUpStatus|Follow-?Up\s*Status):\s*([^\]]+)\]/i) ||
+    remarks.match(/(?:^|\||\n)\s*Follow-?up\s*Status:\s*([^|\]\n]+)/i);
+  const tagStatus = statusMatch ? statusMatch[1].trim().toLowerCase() : null;
+  const rawStatus = visit.follow_up_status || tagStatus || null;
+  if (rawStatus && ['completed', 'done', 'resolved', 'closed'].includes(String(rawStatus).toLowerCase().trim())) {
+    return null;
+  }
+
+  let rawFollowUp = visit.follow_up_action || visit.follow_up || null;
 
   if (!rawFollowUp && remarks) {
     const match = remarks.match(/\[Follow-?Up:\s*([^\]]+)\]/i);

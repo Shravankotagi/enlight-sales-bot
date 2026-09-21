@@ -475,6 +475,22 @@ function parseVisitRemarks(remarks) {
     }
   }
 
+  let followUpStatus = null;
+  const statusMatch =
+    remarks.match(/\[(?:FollowUpStatus|Follow-?Up\s*Status):\s*([^\]]+)\]/i) ||
+    remarks.match(/(?:^|\||\n)\s*Follow-?up\s*Status:\s*([^|\]\n]+)/i);
+  if (statusMatch) {
+    const rawSt = statusMatch[1].trim().toLowerCase();
+    if (['completed', 'done', 'resolved', 'closed'].includes(rawSt)) {
+      followUpStatus = 'completed';
+    } else if (rawSt === 'pending') {
+      followUpStatus = 'pending';
+    }
+  }
+
+  const isCompleted = followUpStatus === 'completed';
+  const requiresFollowUp = Boolean(followUpAction) && !isCompleted;
+
   let materialRequirement = null;
   const matMatch =
     remarks.match(/\[(?:Material )?Requirements?:\s*([^\]]+)\]/i) ||
@@ -502,10 +518,13 @@ function parseVisitRemarks(remarks) {
   const cleanRemarks = remarks
     .replace(/\[Outcome:\s*[^\]]+\]/gi, '')
     .replace(/\[(?:Follow-?Up|Follow-?up\s*Action):\s*[^\]]+\]/gi, '')
+    .replace(/\[(?:FollowUpStatus|Follow-?Up\s*Status):\s*[^\]]+\]/gi, '')
+    .replace(/\[(?:FollowUpDate|Follow-?Up\s*Date):\s*[^\]]+\]/gi, '')
     .replace(/\[(?:Material )?Requirements?:\s*[^\]]+\]/gi, '')
     .replace(/\[Location:\s*[^\]]+\]/gi, '')
     .replace(/\[Interests?:\s*[^\]]+\]/gi, '')
     .replace(/(?:^|\||\n)\s*Follow-?up(?:\s*Action)?:\s*[^|\n]+/gi, '')
+    .replace(/(?:^|\||\n)\s*Follow-?up\s*Status:\s*[^|\n]+/gi, '')
     .replace(/(?:^|\||\n)\s*(?:Material )?Requirement:\s*[^|\n]+/gi, '')
     .replace(/(?:^|\||\n)\s*Location:\s*[^|\n]+/gi, '')
     .replace(/(?:^|\||\n)\s*Interests?:\s*[^|\n]+/gi, '')
@@ -515,7 +534,8 @@ function parseVisitRemarks(remarks) {
   return {
     outcome,
     follow_up_action: followUpAction,
-    requires_follow_up: Boolean(followUpAction),
+    follow_up_status: followUpStatus || (followUpAction ? (isCompleted ? 'completed' : 'pending') : null),
+    requires_follow_up: requiresFollowUp,
     material_requirement: materialRequirement,
     location,
     interests,
@@ -1655,6 +1675,12 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
       !String(rawFu).toLowerCase().startsWith('no follow');
     const followUp = isFuValid ? String(rawFu).trim() : null;
 
+    // Follow-up status check (DB column + tag fallback)
+    const rawStatus = r.follow_up_status || parsed.follow_up_status || (followUp ? 'pending' : null);
+    const isCompleted = rawStatus && ['completed', 'done', 'resolved', 'closed'].includes(String(rawStatus).toLowerCase().trim());
+    const followUpStatus = isCompleted ? 'completed' : (followUp ? 'pending' : null);
+    const requiresFollowUp = Boolean(followUp) && !isCompleted;
+
     return {
       id: r.id,
       customer_name: r.customer_name || 'Unnamed Account',
@@ -1665,7 +1691,8 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
       location: loc,
       outcome: out,
       follow_up_action: followUp,
-      requires_follow_up: Boolean(followUp) || parsed.requires_follow_up,
+      follow_up_status: followUpStatus,
+      requires_follow_up: requiresFollowUp,
       material_requirement: r.material_requirement || r.requirement || parsed.material_requirement,
       remarks: parsed.clean_remarks || rawRemarks,
       created_at: r.created_at || r.visited_at,
