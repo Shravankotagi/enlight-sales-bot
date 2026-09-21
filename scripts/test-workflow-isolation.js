@@ -596,11 +596,118 @@ async function runTests() {
                  (step2Cmp.reply.includes('Maurya Industries') || step2Cmp.reply.includes('PO-MAU-2109') || step2Cmp.reply.includes('Physical Damage') || step2Cmp.reply.includes('Please provide the remaining mandatory details'));
   console.log('Test 19 Passed:', pass19);
 
+  // TEST 20: Post-Activity Quick Action Buttons & Repeat Initiation
+  console.log('\n[TEST 20] Post-Activity Quick Action Buttons & Repeat Action Initiation');
+  const testRepeatPhone = '919999988888';
+  const complaintDraft = {
+    company_name: 'Apex Precision Ltd',
+    issue_type: 'Quality Issue',
+    description: 'Dimensional deviation in thickness',
+    root_cause: 'Calibration drift',
+    corrective_action: 'Recalibrated slitters',
+  };
+  await saveActiveSession(testRepeatPhone, 'Apex Precision Ltd', `catalog_confirm|LOG_COMPLAINT|${JSON.stringify(complaintDraft)}`);
+  const confirmCmpPostRes = await handleCatalogFlow('btn_confirm_yes', testRepeatPhone);
+  console.log('Post-Activity Confirmation Response:\n', confirmCmpPostRes.reply);
+  console.log('Post-Activity Buttons:', confirmCmpPostRes.interactiveButtons);
+
+  const pass20a = confirmCmpPostRes.handled === true &&
+                  confirmCmpPostRes.interactiveType === 'buttons' &&
+                  Array.isArray(confirmCmpPostRes.interactiveButtons) &&
+                  confirmCmpPostRes.interactiveButtons.some(b => b.id === 'btn_repeat_log_complaint') &&
+                  confirmCmpPostRes.interactiveButtons.some(b => b.id === 'btn_post_menu');
+
+  // Test tapping "Log Another Complaint"
+  const repeatRes = await handleCatalogFlow('btn_repeat_log_complaint', testRepeatPhone);
+  console.log('Repeat Action Response:\n', repeatRes.reply);
+  const sessRepeat = await getFullActiveSession(testRepeatPhone);
+  const pass20b = repeatRes.handled === true &&
+                  (repeatRes.reply.includes('Log Customer Complaint') || repeatRes.reply.includes('Customer / Company')) &&
+                  sessRepeat?.last_intent?.startsWith('catalog_flow|LOG_COMPLAINT|{}');
+
+  const pass20 = pass20a && pass20b;
+  console.log('Test 20 Passed:', pass20, `(20a:${pass20a}, 20b:${pass20b})`);
+
   // Clean up
-  await saveActiveSession(testCmpPhone, 'Unknown', 'general');
+  await supabase.from('complaints').delete().ilike('customer_name', '%Apex Precision Ltd%');
+  await saveActiveSession(testRepeatPhone, 'Unknown', 'general');
+
+  // TEST 21: Mid-Flow Retrieval Query Interruption & Yes/Continue Exact State Restoration
+  console.log('\n[TEST 21] Mid-Flow Retrieval Interruption & Yes/Continue State Restoration');
+  const testResumePhone = '919999988888';
+  const visitDraft = {
+    company_name: 'Apex Precision Ltd',
+    person_met: 'Rajesh Sharma',
+  };
+  await saveActiveSession(testResumePhone, 'Apex Precision Ltd', `catalog_flow|LOG_VISIT|${JSON.stringify(visitDraft)}`);
+  
+  // Interrupted by operational query
+  const queryInterruptRes = await handleCatalogFlow('what is the rate of HR Coil 2.5mm?', testResumePhone);
+  console.log('Query Interruption Response:\n', queryInterruptRes.reply);
+  console.log('Query Interruption Buttons:', queryInterruptRes.interactiveButtons);
+  const sessResumeAsk = await getFullActiveSession(testResumePhone);
+
+  const pass21a = queryInterruptRes.handled === true &&
+                  queryInterruptRes.interactiveType === 'buttons' &&
+                  queryInterruptRes.reply.includes('You were in the middle of *Field Visit* — do you want to continue?') &&
+                  queryInterruptRes.interactiveButtons.some(b => b.id === 'btn_resume_yes') &&
+                  queryInterruptRes.interactiveButtons.some(b => b.id === 'btn_resume_no') &&
+                  sessResumeAsk?.last_intent?.startsWith('catalog_resume_ask|catalog_flow|LOG_VISIT|');
+
+  // User taps "Yes, Continue"
+  const resumeYesRes = await handleCatalogFlow('btn_resume_yes', testResumePhone);
+  console.log('Resume "Yes" Response:\n', resumeYesRes.reply);
+  const sessRestored = await getFullActiveSession(testResumePhone);
+  const pass21b = resumeYesRes.handled === true &&
+                  resumeYesRes.reply.includes('Please provide the remaining mandatory details for this visit report') &&
+                  sessRestored?.last_intent?.startsWith('catalog_flow|LOG_VISIT|') &&
+                  sessRestored?.last_intent?.includes('Rajesh Sharma');
+
+  const pass21 = pass21a && pass21b;
+  console.log('Test 21 Passed:', pass21, `(21a:${pass21a}, 21b:${pass21b})`);
+
+  // Clean up
+  await saveActiveSession(testResumePhone, 'Unknown', 'general');
+
+  // TEST 22: Mid-Flow Retrieval Query Interruption & No/Menu Cancellation
+  console.log('\n[TEST 22] Mid-Flow Retrieval Interruption & No/Menu Clean Cancellation');
+  const testCancelPhone = '919999988888';
+  const inqDraft = {
+    company_name: 'Tata Motors',
+    products: 'CR Sheet 2mm 50 MT',
+    rate: '62000',
+    delivery_location: 'Pune',
+    payment_terms: '30 days',
+  };
+  await saveActiveSession(testCancelPhone, 'Tata Motors', `catalog_confirm|LOG_INQUIRY|${JSON.stringify(inqDraft)}`);
+
+  // Interrupted by query
+  const inqQueryRes = await handleCatalogFlow('what was the last rate quoted to Tata Motors?', testCancelPhone);
+  console.log('Inquiry Query Interruption Response:\n', inqQueryRes.reply);
+
+  const pass22a = inqQueryRes.handled === true &&
+                  inqQueryRes.reply.includes('You were in the middle of *Inquiry* — do you want to continue?') &&
+                  inqQueryRes.interactiveType === 'buttons';
+
+  // User taps "No, Go to Menu"
+  const cancelMenuRes = await handleCatalogFlow('btn_resume_no', testCancelPhone);
+  console.log('Resume "No" Response:\n', cancelMenuRes.reply);
+  const sessCancelled = await getFullActiveSession(testCancelPhone);
+
+  const pass22b = cancelMenuRes.handled === true &&
+                  cancelMenuRes.reply.includes('Activity cancelled.') &&
+                  cancelMenuRes.reply.includes('Welcome to *SalesOS Assistant*!') &&
+                  cancelMenuRes.interactiveType === 'list' &&
+                  sessCancelled?.last_intent === 'general';
+
+  const pass22 = pass22a && pass22b;
+  console.log('Test 22 Passed:', pass22, `(22a:${pass22a}, 22b:${pass22b})`);
+
+  // Clean up
+  await saveActiveSession(testCancelPhone, 'Unknown', 'general');
 
   // Summary
-  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14 && pass15 && pass16 && pass17 && pass18 && pass19;
+  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14 && pass15 && pass16 && pass17 && pass18 && pass19 && pass20 && pass21 && pass22;
   console.log('\n========================================');
   console.log('FINAL RESULT: ' + (allPassed ? 'ALL TESTS PASSED ✅' : 'SOME TESTS FAILED ❌'));
   console.log('========================================');

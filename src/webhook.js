@@ -197,6 +197,12 @@ router.post('/', async (req, res) => {
                   raw_text = 'edit';
                 } else if (btnId === 'btn_confirm_cancel' || btnId === 'btn_cust_no') {
                   raw_text = 'cancel';
+                } else if (btnId === 'btn_resume_yes') {
+                  raw_text = 'btn_resume_yes';
+                } else if (btnId === 'btn_resume_no') {
+                  raw_text = 'btn_resume_no';
+                } else if (btnId === 'btn_post_menu') {
+                  raw_text = 'menu';
                 } else {
                   raw_text = btnId || btnTitle;
                 }

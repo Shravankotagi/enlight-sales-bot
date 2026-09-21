@@ -97,6 +97,65 @@ const NEW_CUSTOMER_BUTTONS = [
   { id: 'btn_cust_no', title: 'No / Cancel' },
 ];
 
+const RESUME_QUERY_BUTTONS = [
+  { id: 'btn_resume_yes', title: 'Yes, Continue' },
+  { id: 'btn_resume_no', title: 'No, Go to Menu' },
+];
+
+function getPostActivityButtons(action) {
+  switch (action) {
+    case 'LOG_COMPLAINT':
+      return [
+        { id: 'btn_repeat_log_complaint', title: 'Log Another Complaint' },
+        { id: 'btn_post_menu', title: 'Menu' },
+      ];
+    case 'UPDATE_COMPLAINT':
+      return [
+        { id: 'btn_repeat_update_complaint', title: 'Update Complaint' },
+        { id: 'btn_post_menu', title: 'Menu' },
+      ];
+    case 'LOG_VISIT':
+      return [
+        { id: 'btn_repeat_log_visit', title: 'Log Another Visit' },
+        { id: 'btn_post_menu', title: 'Menu' },
+      ];
+    case 'UPDATE_VISIT':
+      return [
+        { id: 'btn_repeat_update_visit', title: 'Update Another Visit' },
+        { id: 'btn_post_menu', title: 'Menu' },
+      ];
+    case 'LOG_INQUIRY':
+      return [
+        { id: 'btn_repeat_log_inquiry', title: 'Log Another Inquiry' },
+        { id: 'btn_post_menu', title: 'Menu' },
+      ];
+    case 'UPDATE_INQUIRY':
+      return [
+        { id: 'btn_repeat_update_inquiry', title: 'Update Another Inq' },
+        { id: 'btn_post_menu', title: 'Menu' },
+      ];
+    case 'LOG_ORDER':
+      return [
+        { id: 'btn_repeat_log_order', title: 'Record Another Order' },
+        { id: 'btn_post_menu', title: 'Menu' },
+      ];
+    case 'UPDATE_ORDER':
+      return [
+        { id: 'btn_repeat_update_order', title: 'Update Another Order' },
+        { id: 'btn_post_menu', title: 'Menu' },
+      ];
+    case 'LOG_NEW_CUSTOMER':
+      return [
+        { id: 'btn_repeat_log_new_customer', title: 'Onboard Another' },
+        { id: 'btn_post_menu', title: 'Menu' },
+      ];
+    default:
+      return [
+        { id: 'btn_post_menu', title: 'Menu' },
+      ];
+  }
+}
+
 function isDiscardOrCancelIntent(text) {
   if (!text || typeof text !== 'string') return false;
   const clean = text.toLowerCase().trim().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ');
@@ -431,7 +490,7 @@ function isGreeting(text) {
   const greetings = [
     'hi', 'hello', 'hey', 'start', 'menu', 'main menu', 'options',
     'namaste', 'good morning', 'good afternoon', 'good evening',
-    'hii', 'hiii', 'heyy', 'catalog', 'help'
+    'hii', 'hiii', 'heyy', 'catalog', 'help', 'btn_post_menu'
   ];
   if (greetings.includes(clean)) return true;
   return /^(?:hi|hello|hey|start|menu|namaste)\b/i.test(clean) && clean.length <= 15;
@@ -570,6 +629,15 @@ function isExplicitMenuSelection(text, hasActiveSession = false) {
   // 3. Action command / start prefix (e.g. "start_log_order", "start_update_inquiry")
   if (/^start_(?:log|update)_(?:inquiry|order|visit|customer|complaint)$/i.test(clean)) {
     return matchActionFromInput(text);
+  }
+
+  // 3b. Repeat action button / command (e.g. "btn_repeat_log_complaint", "log another complaint")
+  if (/^btn_repeat_/i.test(clean) || /\b(?:log|record|update|onboard|add)\s+another\b/i.test(clean)) {
+    if (clean.includes('complaint')) return clean.includes('update') ? 'UPDATE_COMPLAINT' : 'LOG_COMPLAINT';
+    if (clean.includes('visit')) return clean.includes('update') ? 'UPDATE_VISIT' : 'LOG_VISIT';
+    if (clean.includes('order')) return clean.includes('update') ? 'UPDATE_ORDER' : 'LOG_ORDER';
+    if (clean.includes('inquiry') || clean.includes('inq')) return clean.includes('update') ? 'UPDATE_INQUIRY' : 'LOG_INQUIRY';
+    if (clean.includes('customer') || clean.includes('cust') || clean.includes('onboard')) return 'LOG_NEW_CUSTOMER';
   }
 
   // 4. Standalone action verbs when NOT providing complex data/arguments (e.g. "log order", "new inquiry", "log visit")
@@ -4563,60 +4631,129 @@ function isStageUpdatePrompt(text) {
 }
 
 /**
+ * Checks if incoming text is a data retrieval query (either by pattern or LLM).
+ */
+async function isMidFlowReadQuery(text) {
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.trim();
+
+  // Standalone IDs or references for form fields are NOT mid-flow read queries
+  if (/^(?:inq|po|ord|cmp|vis)[-_][a-z0-9]+/i.test(clean)) return false;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}/i.test(clean)) return false;
+  if (/^(?:option\s*)?[1-9]\.?$/i.test(clean)) return false;
+
+  if (isOperationalQuery(clean)) return true;
+  if (clean.length >= 8 && !/^(?:log|record|add|create|new|onboard|acquire|update|modify|change|set|mark|resolve|close|upadte|edit|cancel|save|yes|no|discard|btn_)\b/i.test(clean)) {
+    return await isOperationalQueryWithLLM(clean);
+  }
+  return false;
+}
+
+/**
  * Handles a read/retrieval query mid-flow without dropping or wiping the active catalog state.
- * Returns the answer along with a prompt to resume the active form.
+ * Returns the answer along with a prompt to resume the active form and Yes/No quick action buttons.
  */
 async function handleMidFlowRetrievalQuery(text, senderPhone, activeState, action, draft) {
   const { runOrchestrator } = require('./orchestrator');
   const queryAnswer = await runOrchestrator(text, senderPhone);
 
-  const actionName = getActionFriendlyName(action);
-  let resumePrompt = '';
-  let interactiveType = null;
-  let interactiveButtons = null;
+  const actionDisplayName = getModuleDisplayName(action);
+  const resumeMsg = `You were in the middle of *${actionDisplayName}* — do you want to continue?`;
+  const combinedReply = `${queryAnswer}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
 
-  if (activeState === 'catalog_confirm') {
-    const summary = buildConfirmationSummary(action, draft);
-    resumePrompt = `Continuing your ${actionName}:\n\n${summary}`;
-    interactiveType = 'buttons';
-    interactiveButtons = CONFIRMATION_BUTTONS;
-  } else if (activeState === 'catalog_editing') {
-    resumePrompt = `Continuing your ${actionName} — Which field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")\n\n_Reply with field update, or tap *Discard Draft* / send *Cancel* to discard._`;
-    interactiveType = 'buttons';
-    interactiveButtons = DISCARD_DRAFT_BUTTONS;
-  } else if (activeState === 'catalog_implicit_cust_ask') {
-    resumePrompt = `Continuing your ${actionName} — Please reply *Yes* to onboard *${draft.company_name || 'customer'}* as a new customer, or *No* to re-enter the company name.`;
-    interactiveType = 'buttons';
-    interactiveButtons = NEW_CUSTOMER_BUTTONS;
-  } else {
-    // catalog_flow or catalog_implicit_cust_collect
-    const missing = validateMandatoryFields(action, draft);
-    if (missing.length === 0) {
-      const summary = buildConfirmationSummary(action, draft);
-      resumePrompt = `Continuing your ${actionName}:\n\n${summary}`;
-      interactiveType = 'buttons';
-      interactiveButtons = CONFIRMATION_BUTTONS;
-    } else {
-      const missingList = missing.map((m) => `• *${m}*`).join('\n');
-      resumePrompt = `Continuing your ${actionName} — Please provide the remaining mandatory details:\n\n${missingList}\n\n_Reply with details to continue, or tap *Discard Draft* / send *Cancel* to cancel logging._`;
-      interactiveType = 'buttons';
-      interactiveButtons = DISCARD_DRAFT_BUTTONS;
-    }
-  }
-
-  const combinedReply = `${queryAnswer}\n\n━━━━━━━━━━━━━━━━━━━━\n*(Continuing your ${actionName})*\n${resumePrompt}`;
   await recordSessionMessage(senderPhone, 'user', text);
   await recordSessionMessage(senderPhone, 'assistant', combinedReply, {
     action_type: action,
     customer_name: draft.company_name || null,
   });
 
+  await saveActiveSession(
+    senderPhone,
+    draft.company_name || 'Customer',
+    `catalog_resume_ask|${activeState}|${action}|${JSON.stringify(draft)}`
+  );
+
   return {
     handled: true,
     reply: combinedReply,
-    interactiveType,
-    interactiveButtons,
+    interactiveType: 'buttons',
+    interactiveButtons: RESUME_QUERY_BUTTONS,
   };
+}
+
+/**
+ * Restores the exact interrupted flow state and re-prompts the exact pending question or summary.
+ */
+async function restoreInterruptedFlow(senderPhone, interruptedState, action, draft) {
+  const actionName = getActionFriendlyName(action);
+
+  if (interruptedState === 'catalog_confirm') {
+    const summary = buildConfirmationSummary(action, draft);
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: summary,
+      interactiveType: 'buttons',
+      interactiveButtons: CONFIRMATION_BUTTONS,
+    };
+  }
+
+  if (interruptedState === 'catalog_editing') {
+    const editPrompt = getEditPromptForAction(action);
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_editing|${action}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: editPrompt,
+      interactiveType: 'buttons',
+      interactiveButtons: DISCARD_DRAFT_BUTTONS,
+    };
+  }
+
+  if (interruptedState === 'catalog_implicit_cust_ask') {
+    const askPrompt = `Is *${draft.company_name || 'this customer'}* a new customer you would like to onboard now?`;
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_implicit_cust_ask|${action}|${draft.company_name || 'Customer'}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: askPrompt,
+      interactiveType: 'buttons',
+      interactiveButtons: NEW_CUSTOMER_BUTTONS,
+    };
+  }
+
+  if (interruptedState === 'catalog_implicit_cust_collect') {
+    const missing = validateMandatoryFields('LOG_NEW_CUSTOMER', draft);
+    const missingList = missing.map((m) => `• *${m}*`).join('\n');
+    const askRemaining = `Please provide the remaining customer details for *${draft.company_name || 'Customer'}*:\n\n${missingList}`;
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_implicit_cust_collect|${action}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: askRemaining,
+      interactiveType: 'buttons',
+      interactiveButtons: DISCARD_DRAFT_BUTTONS,
+    };
+  }
+
+  // Default: catalog_flow
+  const missing = validateMandatoryFields(action, draft);
+  if (missing.length === 0) {
+    const summary = buildConfirmationSummary(action, draft);
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: summary,
+      interactiveType: 'buttons',
+      interactiveButtons: CONFIRMATION_BUTTONS,
+    };
+  } else {
+    const missingList = missing.map((m) => `• *${m}*`).join('\n');
+    const indexTag = draft._totalCount > 1 ? ` (${draft._currentIndex || 1} of ${draft._totalCount}: ${draft.company_name || 'Item'})` : '';
+    const askMissing = `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: askMissing,
+    };
+  }
 }
 
 function detectOperationalAction(text) {
@@ -4989,7 +5126,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
   }
 
   // ── 2b. ACTIVE SESSION SCOPE GUARD ─────────────────────────────────────────
-  if (hasActiveCatalogSession) {
+  if (hasActiveCatalogSession && !lastIntent.startsWith('catalog_resume_ask|')) {
     const cleanInput = text.toLowerCase().replace(/[^a-z0-9\s_/]/g, ' ').replace(/\s+/g, ' ').trim();
     const parts = lastIntent.split('|');
     const currentAction = parts[1];
@@ -5030,6 +5167,81 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
   }
 
+  // ── 3-0. HANDLE RESUME ASK STATE (catalog_resume_ask|interruptedState|action|draftJson) ──
+  if (lastIntent.startsWith('catalog_resume_ask|')) {
+    const parts = lastIntent.split('|');
+    const interruptedState = parts[1] || 'catalog_flow';
+    const action = parts[2] || 'LOG_INQUIRY';
+    const draftJsonStr = parts.slice(3).join('|');
+    const draft = safeParseJSON(draftJsonStr, {});
+
+    const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
+
+    // 1. User says YES -> restore the interrupted flow exactly
+    if (
+      cleanInput === 'btn_resume_yes' ||
+      cleanInput === 'yes, continue' ||
+      cleanInput === 'yes continue' ||
+      cleanInput === 'yes' ||
+      cleanInput === 'y' ||
+      cleanInput === 'haan' ||
+      cleanInput === 'ha' ||
+      cleanInput === 'continue' ||
+      cleanInput === 'resume' ||
+      cleanInput === 'proceed' ||
+      cleanInput === 'sure' ||
+      cleanInput === 'ok'
+    ) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      const res = await restoreInterruptedFlow(senderPhone, interruptedState, action, draft);
+      await recordSessionMessage(senderPhone, 'assistant', res.reply, {
+        action_type: action,
+        customer_name: draft.company_name || null,
+      });
+      return res;
+    }
+
+    // 2. User says NO / Cancel / Menu -> finalize and show catalog
+    if (
+      cleanInput === 'btn_resume_no' ||
+      cleanInput === 'no, go to menu' ||
+      cleanInput === 'no go to menu' ||
+      cleanInput === 'no' ||
+      cleanInput === 'n' ||
+      cleanInput === 'nahi' ||
+      cleanInput === 'menu' ||
+      cleanInput === 'cancel' ||
+      cleanInput === 'discard' ||
+      cleanInput === 'btn_post_menu' ||
+      isDiscardOrCancelIntent(cleanInput) ||
+      isDiscardOrCancelIntent(text)
+    ) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      await finalizeCurrentSession(senderPhone, `Cancelled ${getActionFriendlyName(action)} draft after query interruption`);
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      const exitMsg = `Activity cancelled.\n\n` + CATALOG_MENU;
+      await recordSessionMessage(senderPhone, 'assistant', exitMsg, { action_type: 'CATALOG_MENU' });
+      return {
+        handled: true,
+        reply: exitMsg,
+        interactiveType: 'list',
+        interactiveList: {
+          bodyText: 'Here is the menu to start a new activity:',
+          buttonText: 'Choose Action',
+          sections: CATALOG_MENU_SECTIONS,
+        },
+      };
+    }
+
+    // 3. User asks ANOTHER retrieval query mid-resume
+    if (await isMidFlowReadQuery(text)) {
+      return await handleMidFlowRetrievalQuery(text, senderPhone, interruptedState, action, draft);
+    }
+
+    // 4. User directly provides field data / response for the interrupted flow
+    lastIntent = `${interruptedState}|${action}|${draftJsonStr}`;
+  }
+
   // ── 3a. HANDLE IMPLICIT CUSTOMER CONFIRMATION ASK (catalog_implicit_cust_ask|...) ──
   if (lastIntent.startsWith('catalog_implicit_cust_ask|')) {
     const parts = lastIntent.split('|');
@@ -5037,6 +5249,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const unrecognizedName = parts[2];
     const originalDraftJsonStr = parts.slice(3).join('|');
     const originalDraft = safeParseJSON(originalDraftJsonStr, {});
+
+    if (await isMidFlowReadQuery(text)) {
+      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_implicit_cust_ask', originalAction, { company_name: unrecognizedName, ...originalDraft });
+    }
+
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
 
     // User confirmed YES (This is a new customer)
@@ -5214,7 +5431,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const custDraftJsonStr = parts.slice(2).join('|');
     const custDraft = safeParseJSON(custDraftJsonStr, {});
 
-    if (isOperationalQuery(text)) {
+    if (await isMidFlowReadQuery(text)) {
       return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_implicit_cust_collect', 'LOG_NEW_CUSTOMER', custDraft);
     }
 
@@ -5293,7 +5510,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const draftJsonStr = parts.slice(2).join('|');
     const draft = safeParseJSON(draftJsonStr, {});
 
-    if (isOperationalQuery(text)) {
+    if (await isMidFlowReadQuery(text)) {
       return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_confirm', action, draft);
     }
 
@@ -5385,7 +5602,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
         extracted_data: draft,
       });
       await saveActiveSession(senderPhone, 'Unknown', 'general');
-      return { handled: true, reply };
+      return {
+        handled: true,
+        reply,
+        interactiveType: 'buttons',
+        interactiveButtons: getPostActivityButtons(action),
+      };
     }
 
     // Request EDIT
@@ -5494,7 +5716,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const draftJsonStr = parts.slice(2).join('|');
     const draft = safeParseJSON(draftJsonStr, {});
 
-    if (isOperationalQuery(text)) {
+    if (await isMidFlowReadQuery(text)) {
       return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_editing', action, draft);
     }
 
@@ -5599,7 +5821,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const draftJsonStr = parts.slice(2).join('|');
     let existingDraft = safeParseJSON(draftJsonStr, {});
 
-    if (isOperationalQuery(text)) {
+    if (await isMidFlowReadQuery(text)) {
       return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_flow', action, existingDraft);
     }
 
