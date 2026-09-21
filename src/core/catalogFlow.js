@@ -87,10 +87,48 @@ const CONFIRMATION_BUTTONS = [
   { id: 'btn_confirm_cancel', title: 'Cancel' },
 ];
 
+const DISCARD_DRAFT_BUTTONS = [
+  { id: 'btn_confirm_cancel', title: '🗑️ Discard Draft' },
+];
+
 const NEW_CUSTOMER_BUTTONS = [
   { id: 'btn_cust_yes', title: 'Yes, Add Customer' },
   { id: 'btn_cust_no', title: 'No / Cancel' },
 ];
+
+function isDiscardOrCancelIntent(text) {
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.toLowerCase().trim().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ');
+  if (
+    clean === 'btn_confirm_cancel' ||
+    clean === 'btn_cust_no' ||
+    clean === 'btn_flow_discard' ||
+    clean === 'cancel' ||
+    clean === 'discard' ||
+    clean === 'stop' ||
+    clean === 'exit' ||
+    clean === 'quit' ||
+    clean === 'abort' ||
+    clean === 'drop' ||
+    clean === 'nahi' ||
+    clean === 'galat' ||
+    clean === 'no' ||
+    clean === 'no cancel' ||
+    clean === 'discard draft' ||
+    clean === 'cancel draft'
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:cancel|discard|stop|abort|drop|quit|clear)\b.*?\b(?:inquiry|logging|order|draft|visit|complaint|flow|session|process|this|task|entry|creation|form|record|customer|acquisition)\b/i.test(clean) ||
+    /\b(?:cancel|discard|stop|abort|drop|quit|clear)\s+(?:it|this|that|all|now|please|logging)\b/i.test(clean) ||
+    /^(?:cancel|discard|stop|abort|quit|drop)\s+/i.test(clean) ||
+    /\b(?:don'?t\s+want|do\s+not\s+want|never\s+mind|mat\s+karo|nahi\s+chahiye|cancel\s+kar\s+do|discard\s+kar\s+do|cancel\s+karo|discard\s+karo)\b/i.test(clean)
+  ) {
+    return true;
+  }
+  return false;
+}
 
 const CATALOG_MENU_SECTIONS = [
   {
@@ -4027,7 +4065,9 @@ async function handleMidFlowRetrievalQuery(text, senderPhone, activeState, actio
     interactiveType = 'buttons';
     interactiveButtons = CONFIRMATION_BUTTONS;
   } else if (activeState === 'catalog_editing') {
-    resumePrompt = `Continuing your ${actionName} — Which field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")`;
+    resumePrompt = `Continuing your ${actionName} — Which field would you like to change? (e.g. "Rate: 55000" or "Delivery location: Pune")\n\n_Reply with field update, or tap *Discard Draft* / send *Cancel* to discard._`;
+    interactiveType = 'buttons';
+    interactiveButtons = DISCARD_DRAFT_BUTTONS;
   } else if (activeState === 'catalog_implicit_cust_ask') {
     resumePrompt = `Continuing your ${actionName} — Please reply *Yes* to onboard *${draft.company_name || 'customer'}* as a new customer, or *No* to re-enter the company name.`;
     interactiveType = 'buttons';
@@ -4042,7 +4082,9 @@ async function handleMidFlowRetrievalQuery(text, senderPhone, activeState, actio
       interactiveButtons = CONFIRMATION_BUTTONS;
     } else {
       const missingList = missing.map((m) => `• *${m}*`).join('\n');
-      resumePrompt = `Continuing your ${actionName} — Please provide the remaining mandatory details:\n\n${missingList}`;
+      resumePrompt = `Continuing your ${actionName} — Please provide the remaining mandatory details:\n\n${missingList}\n\n_Reply with details to continue, or tap *Discard Draft* / send *Cancel* to cancel logging._`;
+      interactiveType = 'buttons';
+      interactiveButtons = DISCARD_DRAFT_BUTTONS;
     }
   }
 
@@ -4374,17 +4416,20 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     const isCustAskState = lastIntent.startsWith('catalog_implicit_cust_ask|') || lastIntent.startsWith('catalog_implicit_cust_collect|');
 
-    const isControlReply = isCustAskState
-      ? [
-          'yes', 'y', 'haan', 'ha', 'sahi hai', 'btn_cust_yes', 'yes add customer', 'yes, add customer', 'confirm', 'add',
-          'no', 'n', 'nahi', 'wrong', 'galat', 'cancel', 'discard', 'stop', 'exit', 'quit', 'btn_cust_no', 'no / cancel', 'no/cancel', 'no cancel'
-        ].includes(cleanInput)
-      : [
-          'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure', 'save / yes', 'save/yes', 'save yes',
-          'edit', 'change', '2', 'edit details',
-          'cancel', 'discard', 'no', 'n', '3', 'stop', 'exit', 'quit', 'nahi', 'wrong', 'galat',
-          'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel'
-        ].includes(cleanInput);
+    const isControlReply =
+      isDiscardOrCancelIntent(text) ||
+      isDiscardOrCancelIntent(cleanInput) ||
+      (isCustAskState
+        ? [
+            'yes', 'y', 'haan', 'ha', 'sahi hai', 'btn_cust_yes', 'yes add customer', 'yes, add customer', 'confirm', 'add',
+            'no', 'n', 'nahi', 'wrong', 'galat', 'cancel', 'discard', 'stop', 'exit', 'quit', 'btn_cust_no', 'no / cancel', 'no/cancel', 'no cancel'
+          ].includes(cleanInput)
+        : [
+            'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure', 'save / yes', 'save/yes', 'save yes',
+            'edit', 'change', '2', 'edit details',
+            'cancel', 'discard', 'no', 'n', '3', 'stop', 'exit', 'quit', 'nahi', 'wrong', 'galat',
+            'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel'
+          ].includes(cleanInput));
 
     // If it's not a control reply and not a retrieval query
     if (!isControlReply && !isOperationalQuery(text)) {
@@ -4603,7 +4648,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     await recordSessionMessage(senderPhone, 'user', text);
 
-    if (/^(?:cancel|stop|discard|exit|quit)$/i.test(text)) {
+    if (isDiscardOrCancelIntent(text)) {
       const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
       await recordSessionMessage(senderPhone, 'assistant', cancelReply);
       await finalizeCurrentSession(senderPhone, `Discarded customer onboarding flow`);
@@ -4789,16 +4834,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
       };
     }
 
-    // CANCEL
+    // CANCEL / DISCARD
     if (
       cleanInput === 'btn_confirm_cancel' ||
-      cleanInput === 'cancel' ||
-      cleanInput === 'discard' ||
-      cleanInput === 'no' ||
-      cleanInput === '3' ||
-      cleanInput === 'stop' ||
-      cleanInput === 'exit' ||
-      cleanInput === 'quit'
+      isDiscardOrCancelIntent(cleanInput) ||
+      isDiscardOrCancelIntent(text)
     ) {
       await recordSessionMessage(senderPhone, 'user', text);
       const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
@@ -4880,7 +4920,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
 
     // Cancel during edit
-    if (cleanInput === 'btn_confirm_cancel' || /^(?:cancel|stop|discard|exit|quit)$/i.test(cleanInput)) {
+    if (
+      cleanInput === 'btn_confirm_cancel' ||
+      isDiscardOrCancelIntent(cleanInput) ||
+      isDiscardOrCancelIntent(text)
+    ) {
       await recordSessionMessage(senderPhone, 'user', text);
       const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
       await recordSessionMessage(senderPhone, 'assistant', cancelReply);
@@ -5119,8 +5163,9 @@ async function handleCatalogFlow(rawText, senderPhone) {
       }
     }
 
-    if (/^(?:cancel|stop|discard|exit|quit)$/i.test(text)) {
+    if (isDiscardOrCancelIntent(text)) {
       const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
+      await recordSessionMessage(senderPhone, 'user', text);
       await recordSessionMessage(senderPhone, 'assistant', cancelReply);
       await finalizeCurrentSession(senderPhone, `Discarded ${getActionFriendlyName(action)} flow`);
       await saveActiveSession(senderPhone, 'Unknown', 'general');
