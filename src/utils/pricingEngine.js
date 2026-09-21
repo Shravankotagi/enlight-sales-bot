@@ -412,10 +412,12 @@ function calculateQuotationBreakdown(baseAmount) {
   const subtotal = Math.max(0, Number(baseAmount) || 0);
   const CGST = Math.round(subtotal * 0.09 * 100) / 100;
   const SGST = Math.round(subtotal * 0.09 * 100) / 100;
-  const exactTotal = subtotal + CGST + SGST;
+  const GST = Math.round(subtotal * 0.18 * 100) / 100;
+  const exactTotal = subtotal + GST;
   const grandTotal = Math.round(exactTotal);
   const rounding = Math.round((grandTotal - exactTotal) * 100) / 100;
 
+  const hasGstDecimals = (GST % 1 !== 0);
   const hasCgstDecimals = (CGST % 1 !== 0);
   const hasSgstDecimals = (SGST % 1 !== 0);
   const hasSubtotalDecimals = (subtotal % 1 !== 0);
@@ -424,11 +426,13 @@ function calculateQuotationBreakdown(baseAmount) {
     subtotal,
     CGST,
     SGST,
+    GST,
     rounding,
     grandTotal,
     formattedSubtotal: formatIndianCurrency(subtotal, hasSubtotalDecimals),
     formattedCGST: formatIndianCurrency(CGST, hasCgstDecimals),
     formattedSGST: formatIndianCurrency(SGST, hasSgstDecimals),
+    formattedGST: formatIndianCurrency(GST, hasGstDecimals),
     formattedRounding: rounding !== 0 ? (rounding > 0 ? `+₹${formatIndianCurrency(rounding, true)}` : `-₹${formatIndianCurrency(Math.abs(rounding), true)}`) : '₹0',
     formattedGrandTotal: `₹${formatIndianCurrency(grandTotal, false)}`,
   };

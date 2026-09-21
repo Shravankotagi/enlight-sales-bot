@@ -69,7 +69,10 @@ async function runTests() {
   };
   const summary = buildConfirmationSummary('LOG_ORDER', orderDraft);
   console.log('Order Summary:\n', summary);
-  const pass5 = summary.includes('Sub Total:* ₹2,430') && summary.includes('CGST (9%):* ₹218.70') && summary.includes('SGST (9%):* ₹218.70') && summary.includes('Total Order Value:* ₹2,867');
+  const pass5 = summary.includes('Sub Total:* ₹2,430') &&
+                summary.includes('GST (18%):* ₹437.40') &&
+                summary.includes('Total Order Value:* ₹2,867') &&
+                summary.includes('Total Tonnage:* 45 MT');
   console.log('Test 5 Passed:', pass5);
 
   // TEST 6: Discard Flow
@@ -119,7 +122,9 @@ async function runTests() {
             orderFromInqRes.reply.includes('Super Quoted Industries') &&
             orderFromInqRes.reply.includes('HR Coil') &&
             orderFromInqRes.reply.includes('PO-') &&
+            orderFromInqRes.reply.includes('Total Tonnage:* 50 MT') &&
             orderFromInqRes.reply.includes('Sub Total:') &&
+            orderFromInqRes.reply.includes('GST (18%):') &&
             orderFromInqRes.reply.includes('Total Order Value:');
 
     if (pass7) {
@@ -127,6 +132,9 @@ async function runTests() {
       console.log('Order Confirmation response:\n', confirmRes.reply);
       const passConfirm = confirmRes.handled === true &&
                           confirmRes.reply.includes('Order Recorded & Deal Marked as WON!') &&
+                          confirmRes.reply.includes(`Inquiry ID:* #INQ-${testInqCode}`) &&
+                          confirmRes.reply.includes('Total Tonnage:* 50 MT') &&
+                          confirmRes.reply.includes('GST (18%):') &&
                           confirmRes.reply.includes('Super Quoted Industries');
       pass7 = pass7 && passConfirm;
     }

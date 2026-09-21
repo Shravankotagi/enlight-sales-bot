@@ -2523,12 +2523,16 @@ function buildConfirmationSummary(action, draft) {
       summary += `• *Delivery Location:* ${draft.delivery_location}\n`;
       summary += `• *Payment Terms:* ${draft.payment_terms}\n`;
       let subtotal = 0;
+      let totalTonnage = 0;
+      let primaryUnit = 'MT';
       if (Array.isArray(draft.line_items) && draft.line_items.length === 1) {
         const it = draft.line_items[0];
         const qty = Number(it.quantity) || 0;
         const rate = Number(it.rate) || 0;
         const amount = Number(it.amount) || qty * rate;
         subtotal += amount;
+        totalTonnage += qty;
+        primaryUnit = it.unit || 'MT';
         const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
         const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
         summary += `• *Product:* ${it.sku_text || it.description}${specStr}${hsnStr} — ${qty} ${it.unit || 'MT'} @ ₹${rate.toLocaleString('en-IN')}/${it.unit || 'MT'}\n`;
@@ -2539,25 +2543,27 @@ function buildConfirmationSummary(action, draft) {
           const rate = Number(it.rate) || 0;
           const amount = Number(it.amount) || qty * rate;
           subtotal += amount;
+          totalTonnage += qty;
+          primaryUnit = it.unit || 'MT';
           const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
           const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
           summary += `  • ${it.sku_text || it.description}${specStr}${hsnStr} — ${qty} ${it.unit || 'MT'} @ ₹${rate.toLocaleString('en-IN')}/${it.unit || 'MT'} (₹${amount.toLocaleString('en-IN')})\n`;
         });
       }
+      if (totalTonnage > 0) {
+        summary += `• *Total Tonnage:* ${totalTonnage.toLocaleString('en-IN')} ${primaryUnit}\n`;
+      }
       const breakdown = calculateQuotationBreakdown(subtotal);
       summary += `• *Sub Total:* ₹${breakdown.formattedSubtotal}\n`;
-      summary += `• *CGST (9%):* ₹${breakdown.formattedCGST}\n`;
-      summary += `• *SGST (9%):* ₹${breakdown.formattedSGST}\n`;
-      if (breakdown.rounding !== 0) {
-        summary += `• *Rounding:* ${breakdown.formattedRounding}\n`;
-      }
+      summary += `• *GST (18%):* ₹${breakdown.formattedGST}\n`;
       summary += `• *Total Order Value:* ${breakdown.formattedGrandTotal}\n`;
       break;
     }
 
     case 'UPDATE_ORDER': {
       if (draft.inquiry_id) {
-        summary += `• *Inquiry ID:* ${draft.inquiry_id}\n`;
+        const cleanDisplayInq = draft.inquiry_id.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
+        summary += `• *Inquiry ID:* #INQ-${cleanDisplayInq}\n`;
       }
       const poToDisplay = draft.updates?.po_number || draft.po_number;
       if (poToDisplay) {
@@ -3411,8 +3417,13 @@ Logged to Sales Pipeline & Inquiries! ✅`;
           created_at: new Date().toISOString(),
         });
 
-        const inqDisplay = draft.inquiry_id ? `\n📋 *Inquiry ID:* ${draft.inquiry_id}` : '';
-        const roundStr = breakdown.rounding !== 0 ? `\n⚖️ *Rounding:* ${breakdown.formattedRounding}` : '';
+        const inqRaw = (draft.inquiry_id || draft.deal_id || '').trim();
+        const cleanInqCode = inqRaw.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
+        const inqDisplay = cleanInqCode ? `\n📋 *Inquiry ID:* #INQ-${cleanInqCode}` : '';
+
+        const totalTonnage = structuredLineItems.reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);
+        const mainUnit = structuredLineItems[0]?.unit || 'MT';
+        const tonnageDisplay = totalTonnage > 0 ? `\n⚖️ *Total Tonnage:* ${totalTonnage.toLocaleString('en-IN')} ${mainUnit}` : '';
 
         return `🎉 *Order Recorded & Deal Marked as WON!*
 ${inqDisplay}
@@ -3420,10 +3431,9 @@ ${inqDisplay}
 🏢 *Customer:* ${companyName}
 📅 *PO Date:* ${draft.po_date}
 📍 *Delivery Location:* ${draft.delivery_location}
-💳 *Payment Terms:* ${draft.payment_terms}
+💳 *Payment Terms:* ${draft.payment_terms}${tonnageDisplay}
 💰 *Sub Total:* ₹${breakdown.formattedSubtotal}
-📋 *CGST (9%):* ₹${breakdown.formattedCGST}
-📋 *SGST (9%):* ₹${breakdown.formattedSGST}${roundStr}
+📋 *GST (18%):* ₹${breakdown.formattedGST}
 💵 *Total Order Value:* ${breakdown.formattedGrandTotal}
 
 Updated Sales Achievement Card! 🏆`;
