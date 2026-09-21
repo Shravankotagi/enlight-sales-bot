@@ -1976,7 +1976,21 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
     if (found) return found;
   }
 
-  const inquiries = (inqsRes?.data || []).filter(inq => isInquiryAccessible(inq));
+  const inquiries = (inqsRes?.data || [])
+    .filter(inq => isInquiryAccessible(inq))
+    .filter(inq => {
+      const rawText = inq.raw_text || '';
+      const name = (inq.sender_name || inq.ai_extraction_json?.customer?.name || inq.ai_extraction_json?.companyName || '').toLowerCase();
+      if (
+        /test industries\s*\d*/i.test(rawText) ||
+        /test customer\s*\d*/i.test(rawText) ||
+        /test prospect\s*\d*/i.test(rawText) ||
+        /^test\s+(industries|customer|corp|company)\b/i.test(name)
+      ) {
+        return false;
+      }
+      return true;
+    });
   if (inquiries.length > 0) {
     const foundInq = inquiries.find(
       (inq) =>

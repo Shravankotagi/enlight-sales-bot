@@ -837,7 +837,7 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   });
 
   // Materialize unified records
-  const materialized = inqs.map((row) => {
+  let materialized = inqs.map((row) => {
     const linkedDeal = inqDealMap.get(row.id);
     let custName = linkedDeal?.customer_name || row.sender_name || 'Direct / New Customer';
     let lineItems = [];
@@ -903,6 +903,21 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
       created_at: row.created_at,
       won_at: linkedDeal?.won_at || null,
     };
+  });
+
+  // Strict Production Safety: Filter out synthetic test inquiries
+  materialized = materialized.filter((m) => {
+    const rawText = m.raw_text_snippet || '';
+    const cust = (m.customer_name || '').toLowerCase();
+    if (
+      /test industries\s*\d*/i.test(rawText) ||
+      /test customer\s*\d*/i.test(rawText) ||
+      /test prospect\s*\d*/i.test(rawText) ||
+      /^test\s+(industries|customer|corp|company)\b/i.test(cust)
+    ) {
+      return false;
+    }
+    return true;
   });
 
   // ── Mode: Specific Inquiry ID Lookup ───────────────────────────────────────
@@ -3278,7 +3293,9 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
 
   if (error) throw new Error(`get_deal_ids error: ${error.message}`);
 
-  const rows = (deals || []).map((d) => {
+  const rows = (deals || [])
+    .filter((d) => !/^test\s+(industries|customer|corp|company)\b/i.test(d.customer_name || ''))
+    .map((d) => {
     const rawId = d.id || d.inquiry_id || '';
     const formattedCode = `#INQ-${rawId.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     return {
