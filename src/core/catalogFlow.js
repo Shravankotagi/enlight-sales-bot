@@ -210,7 +210,7 @@ Please provide the *Inquiry ID* (e.g. INQ-F4D982) linked to this order:
   - Quantity & Unit
   - Rate (₹ per unit)
 
-💡 _Tip: If the Inquiry is already in Quoted stage, you can simply reply with the Inquiry ID to auto-load all products, rates, and customer details!_`,
+💡 _Tip: If the Inquiry is already Quoted, in Negotiation, or On Hold, you can simply reply with the Inquiry ID to auto-load all products, rates, and customer details!_`,
 
   UPDATE_ORDER: `✏️ *Update Order*
 
@@ -1435,42 +1435,32 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   const rawStage = (matchedDeal ? matchedDeal.stage : matchedInq.status) || 'new_inquiry';
   const stageLower = String(rawStage).toLowerCase().trim();
 
-  const isQuotedStage = [
-    'quoted',
-    'quotation_sent',
-    'quotation sent',
-    'price_quote',
-    'price quote',
-    'proposal',
-    'proposal/price quote',
-    'proposal / price quote',
-    'qualified'
+  const isNewInquiryStage = [
+    'new_inquiry',
+    'new',
+    'auto_created',
+    'inquiry'
   ].includes(stageLower);
 
-  if (!isQuotedStage) {
-    // Format human-readable stage name
-    let stageDisplayName = 'New Inquiry';
-    if (stageLower === 'new_inquiry' || stageLower === 'new' || stageLower === 'auto_created') {
-      stageDisplayName = 'New Inquiry';
-    } else if (stageLower === 'negotiation' || stageLower === 'in_negotiation' || stageLower === 'review' || stageLower === 'negotiation/review') {
-      stageDisplayName = 'Negotiation';
-    } else if (stageLower === 'on_hold' || stageLower === 'on hold' || stageLower === 'hold') {
-      stageDisplayName = 'On Hold';
-    } else if (stageLower === 'lost' || stageLower === 'closed lost' || stageLower === 'closed_lost') {
-      stageDisplayName = 'Lost';
-    } else if (stageLower === 'won' || stageLower === 'closed won' || stageLower === 'closed_won') {
-      stageDisplayName = 'Won';
-    } else {
-      stageDisplayName = stageLower.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-    }
-
+  if (isNewInquiryStage) {
     const formattedCode = matchedDeal
       ? (matchedDeal.inquiry_id ? `INQ-${matchedDeal.inquiry_id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : `INQ-${matchedDeal.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`)
       : `INQ-${matchedInq.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
 
     return {
       isValid: false,
-      reply: `Order cannot be created. Inquiry #${formattedCode} is currently in ${stageDisplayName} stage. A quotation must be sent and the inquiry must be in Quoted stage before an order can be recorded.`,
+      reply: `Order cannot be created. Inquiry #${formattedCode} is currently in New Inquiry stage. A quotation must be sent before an order can be recorded.`,
+    };
+  }
+
+  if (stageLower === 'lost' || stageLower === 'closed lost' || stageLower === 'closed_lost') {
+    const formattedCode = matchedDeal
+      ? (matchedDeal.inquiry_id ? `INQ-${matchedDeal.inquiry_id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : `INQ-${matchedDeal.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`)
+      : `INQ-${matchedInq.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+
+    return {
+      isValid: false,
+      reply: `Order cannot be created. Inquiry #${formattedCode} is marked as Lost. Please reopen or update the inquiry before recording an order.`,
     };
   }
 

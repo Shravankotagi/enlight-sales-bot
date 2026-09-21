@@ -35,7 +35,8 @@ async function runTests() {
   console.log('Test 3 Passed:', pass3);
 
   // TEST 4: Order Gate - Non-Quoted Stage Inquiry
-  console.log('\n[TEST 4] Order Creation Gate: Non-Quoted Stage Inquiry');
+  // TEST 4: Order Gate - New Inquiry Stage Inquiry Blocked
+  console.log('\n[TEST 4] Order Creation Gate: New Inquiry Stage Inquiry Blocked');
   const { data: newDeals } = await supabase.from('deals').select('id, inquiry_id, customer_name, stage, salesperson_phone').eq('stage', 'new_inquiry').limit(1);
   let pass4 = false;
   if (newDeals && newDeals.length > 0) {
@@ -45,8 +46,8 @@ async function runTests() {
     console.log('Testing with real DB new_inquiry deal:', d.id, 'Stage:', d.stage, 'Code:', inqCode, 'Phone:', ownerPhone);
     await saveActiveSession(ownerPhone, 'Unknown', 'catalog_flow|LOG_ORDER|{}');
     const nonQuotedRes = await handleCatalogFlow(`INQ-${inqCode}`, ownerPhone);
-    console.log('Non-Quoted Inq Response:', nonQuotedRes.reply);
-    pass4 = nonQuotedRes.handled === true && nonQuotedRes.reply.includes('Order cannot be created') && nonQuotedRes.reply.includes('New Inquiry') && nonQuotedRes.reply.includes('A quotation must be sent and the inquiry must be in Quoted stage');
+    console.log('New Inquiry Gate Response:', nonQuotedRes.reply);
+    pass4 = nonQuotedRes.handled === true && nonQuotedRes.reply.includes('Order cannot be created') && nonQuotedRes.reply.includes('New Inquiry') && nonQuotedRes.reply.includes('A quotation must be sent before an order can be recorded');
     console.log('Test 4 Passed:', pass4);
   } else {
     console.log('No new_inquiry deal found in DB, passing test 4 on unit logic');
@@ -82,7 +83,6 @@ async function runTests() {
 
   // TEST 7: Order creation with ONLY Inquiry ID when Inquiry is in Quoted stage
   console.log('\n[TEST 7] Order creation with ONLY Inquiry ID in Quoted stage');
-  // Create a temporary quoted deal
   const { data: testQuotedDeal } = await supabase
     .from('deals')
     .insert({
@@ -111,7 +111,6 @@ async function runTests() {
     const testInqCode = testQuotedDeal.id.replace(/-/g, '').slice(0, 6).toUpperCase();
     console.log('Created test Quoted deal:', testQuotedDeal.id, 'Code:', testInqCode);
 
-    // Salesperson selects Option 3 (LOG_ORDER) and enters ONLY the inquiry ID
     await saveActiveSession(testPhone, 'Unknown', 'catalog_flow|LOG_ORDER|{}');
     const orderFromInqRes = await handleCatalogFlow(`INQ-${testInqCode}`, testPhone);
     console.log('Order creation from Quoted Inquiry response:\n', orderFromInqRes.reply);
@@ -123,7 +122,6 @@ async function runTests() {
             orderFromInqRes.reply.includes('Sub Total:') &&
             orderFromInqRes.reply.includes('Total Order Value:');
 
-    // Confirm the order
     if (pass7) {
       const confirmRes = await handleCatalogFlow('yes', testPhone);
       console.log('Order Confirmation response:\n', confirmRes.reply);
@@ -133,7 +131,6 @@ async function runTests() {
       pass7 = pass7 && passConfirm;
     }
 
-    // Clean up temporary test deal & deal_items
     await supabase.from('deal_items').delete().eq('deal_id', testQuotedDeal.id);
     await supabase.from('deals').delete().eq('id', testQuotedDeal.id);
     await supabase.from('kra_logs').delete().eq('salesperson_phone', testPhone).eq('customer_name', 'Super Quoted Industries');
@@ -144,8 +141,94 @@ async function runTests() {
   }
   console.log('Test 7 Passed:', pass7);
 
+  // TEST 8: Order creation with Inquiry in Negotiation stage
+  console.log('\n[TEST 8] Order creation with Inquiry in Negotiation stage');
+  const { data: testNegDeal } = await supabase
+    .from('deals')
+    .insert({
+      stage: 'negotiation',
+      customer_name: 'Negotiation Forge Ltd',
+      delivery_location: 'Bhosari Pune',
+      payment_terms: '30 days',
+      salesperson_phone: testPhone,
+      created_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  let pass8 = false;
+  if (testNegDeal) {
+    await supabase.from('deal_items').insert({
+      deal_id: testNegDeal.id,
+      sku_text: 'CR Sheet',
+      dimensions: '2mm',
+      quantity: 20,
+      unit: 'MT',
+      rate: 62000,
+      amount: 1240000,
+    });
+    const inqCode = testNegDeal.id.replace(/-/g, '').slice(0, 6).toUpperCase();
+    await saveActiveSession(testPhone, 'Unknown', 'catalog_flow|LOG_ORDER|{}');
+    const negRes = await handleCatalogFlow(`INQ-${inqCode}`, testPhone);
+    console.log('Order creation from Negotiation Inquiry response:\n', negRes.reply);
+
+    pass8 = negRes.handled === true &&
+            negRes.reply.includes('Negotiation Forge Ltd') &&
+            negRes.reply.includes('CR Sheet') &&
+            negRes.reply.includes('Total Order Value:');
+
+    await supabase.from('deal_items').delete().eq('deal_id', testNegDeal.id);
+    await supabase.from('deals').delete().eq('id', testNegDeal.id);
+    await saveActiveSession(testPhone, 'Unknown', 'general');
+    console.log('Cleaned up test negotiation deal.');
+  }
+  console.log('Test 8 Passed:', pass8);
+
+  // TEST 9: Order creation with Inquiry in On Hold stage
+  console.log('\n[TEST 9] Order creation with Inquiry in On Hold stage');
+  const { data: testHoldDeal } = await supabase
+    .from('deals')
+    .insert({
+      stage: 'on_hold',
+      customer_name: 'Hold Metal Works',
+      delivery_location: 'Talegaon',
+      payment_terms: '60 days credit',
+      salesperson_phone: testPhone,
+      created_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  let pass9 = false;
+  if (testHoldDeal) {
+    await supabase.from('deal_items').insert({
+      deal_id: testHoldDeal.id,
+      sku_text: 'MS Angle',
+      dimensions: '50x50x6',
+      quantity: 15,
+      unit: 'MT',
+      rate: 51000,
+      amount: 765000,
+    });
+    const inqCode = testHoldDeal.id.replace(/-/g, '').slice(0, 6).toUpperCase();
+    await saveActiveSession(testPhone, 'Unknown', 'catalog_flow|LOG_ORDER|{}');
+    const holdRes = await handleCatalogFlow(`INQ-${inqCode}`, testPhone);
+    console.log('Order creation from On Hold Inquiry response:\n', holdRes.reply);
+
+    pass9 = holdRes.handled === true &&
+            holdRes.reply.includes('Hold Metal Works') &&
+            holdRes.reply.includes('MS Angle') &&
+            holdRes.reply.includes('Total Order Value:');
+
+    await supabase.from('deal_items').delete().eq('deal_id', testHoldDeal.id);
+    await supabase.from('deals').delete().eq('id', testHoldDeal.id);
+    await saveActiveSession(testPhone, 'Unknown', 'general');
+    console.log('Cleaned up test on_hold deal.');
+  }
+  console.log('Test 9 Passed:', pass9);
+
   // Summary
-  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7;
+  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9;
   console.log('\n========================================');
   console.log('FINAL RESULT: ' + (allPassed ? 'ALL TESTS PASSED ✅' : 'SOME TESTS FAILED ❌'));
   console.log('========================================');
