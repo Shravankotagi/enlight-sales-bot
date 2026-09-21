@@ -374,6 +374,66 @@ function calculatePricingSummary(input, options = {}) {
   };
 }
 
+/**
+ * Formats a number to Indian currency string (e.g. 1,23,456.78).
+ */
+function formatIndianCurrency(num, includeDecimals = false) {
+  if (num === null || num === undefined || isNaN(Number(num))) {
+    return '0.00';
+  }
+  const n = Number(num);
+  const isNegative = n < 0;
+  const absNum = Math.abs(n);
+
+  const parts = absNum.toFixed(2).split('.');
+  const integerPart = parts[0];
+  const decimalPart = parts[1];
+
+  let lastThree = integerPart.substring(integerPart.length - 3);
+  const otherNumbers = integerPart.substring(0, integerPart.length - 3);
+  if (otherNumbers !== '') {
+    lastThree = ',' + lastThree;
+  }
+  const formattedInt = otherNumbers.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + lastThree;
+
+  const result = includeDecimals ? `${formattedInt}.${decimalPart}` : formattedInt;
+  return isNegative ? `-${result}` : result;
+}
+
+/**
+ * Calculates standard GST 9% + 9% and Rounding financial breakdown for quotation / order displays.
+ * Sub Total = Qty × Rate
+ * CGST 9% = Sub Total × 0.09
+ * SGST 9% = Sub Total × 0.09
+ * Rounding adjustment
+ * Total = Sub Total + CGST + SGST + Rounding
+ */
+function calculateQuotationBreakdown(baseAmount) {
+  const subtotal = Math.max(0, Number(baseAmount) || 0);
+  const CGST = Math.round(subtotal * 0.09 * 100) / 100;
+  const SGST = Math.round(subtotal * 0.09 * 100) / 100;
+  const exactTotal = subtotal + CGST + SGST;
+  const grandTotal = Math.round(exactTotal);
+  const rounding = Math.round((grandTotal - exactTotal) * 100) / 100;
+
+  const hasCgstDecimals = (CGST % 1 !== 0);
+  const hasSgstDecimals = (SGST % 1 !== 0);
+  const hasSubtotalDecimals = (subtotal % 1 !== 0);
+
+  return {
+    subtotal,
+    CGST,
+    SGST,
+    rounding,
+    grandTotal,
+    formattedSubtotal: formatIndianCurrency(subtotal, hasSubtotalDecimals),
+    formattedCGST: formatIndianCurrency(CGST, hasCgstDecimals),
+    formattedSGST: formatIndianCurrency(SGST, hasSgstDecimals),
+    formattedRounding: rounding !== 0 ? (rounding > 0 ? `+₹${formatIndianCurrency(rounding, true)}` : `-₹${formatIndianCurrency(Math.abs(rounding), true)}`) : '₹0',
+    formattedGrandTotal: `₹${formatIndianCurrency(grandTotal, false)}`,
+  };
+}
+
 module.exports = {
   DEFAULT_GST_RATE,
   normalizeUnit,
@@ -381,10 +441,12 @@ module.exports = {
   convertLineItemToMt,
   extractDimensions,
   isDimensionCompatible,
+  formatIndianCurrency,
   calculateLineItem,
   calculateLineItems,
   calculateSubtotal,
   calculateGst,
   calculateGrandTotal,
   calculatePricingSummary,
+  calculateQuotationBreakdown,
 };

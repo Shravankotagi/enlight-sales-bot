@@ -34,6 +34,7 @@ const {
   MASTER_PRODUCTS_CATALOG,
 } = require('../utils/hsnDetector');
 const { safeParseJSON } = require('../utils/jsonUtils');
+const { calculateQuotationBreakdown } = require('../utils/pricingEngine');
 const {
   startNewCatalogSession,
   recordSessionMessage,
@@ -195,9 +196,9 @@ Example:
 
   LOG_ORDER: `🛒 *Record New Order*
 
-Please provide the following details :
+Please provide the following details:
 
-• *Company Name:* *
+• *Inquiry ID:* * (e.g. INQ-F4D982)
 • *PO Number:* * (e.g. PO-2026-0042)
 • *PO Date:* * (e.g. 10-09-2026)
 • *Delivery Location:* *
@@ -714,6 +715,7 @@ IMPORTANT RULES FOR INQUIRIES:
 LOG_ORDER:
 {
   "action": "LOG_ORDER",
+  "inquiry_id": "<Inquiry ID e.g. INQ-F4D982, INQ-2026-0042, #INQ-F4D982, else null>",
   "company_name": "<Company Name, else null>",
   "po_number": "<PO Number e.g. PO-2026-0042, else null>",
   "po_date": "<PO Date in DD-MM-YYYY format, else null>",
@@ -734,6 +736,7 @@ LOG_ORDER:
   ],
   "entries": [
     {
+      "inquiry_id": "<Inquiry ID>",
       "company_name": "<Company Name>",
       "po_number": "<PO Number>",
       "po_date": "<PO Date>",
@@ -1121,6 +1124,7 @@ function validateMandatoryFields(action, draft) {
       break;
 
     case 'LOG_ORDER':
+      if (!draft.inquiry_id) missing.push('Inquiry ID (e.g. INQ-F4D982)');
       if (!draft.company_name) missing.push('Company Name');
       if (!draft.po_number) missing.push('PO Number (e.g. PO-2026-0042)');
       if (!draft.po_date) missing.push('PO Date (e.g. 10-09-2026)');
@@ -1334,6 +1338,182 @@ async function validateDraftComplaintReference(draft, senderPhone) {
   }
 
   return { isValid: true };
+}
+
+// ── VALIDATE ORDER INQUIRY STAGE GATE ───────────────────────────────────────
+
+/**
+ * Validates that an Order is linked to an existing Inquiry that is in Quoted stage.
+ * Per Rule B:
+ * - Salesperson provides an Inquiry ID → bot queries Inquiries/deals table → checks current stage
+ * - If stage is Quoted / Price Quote → proceed with order creation flow ✅
+ * - If stage is New Inquiry, Negotiation, On Hold, or any pre-quote stage → block:
+ *   "Order cannot be created. Inquiry #INQ-XXXXX is currently in [stage] stage. A quotation must be sent and the inquiry must be in Quoted stage before an order can be recorded."
+ * - If Inquiry ID does not exist → block:
+ *   "Inquiry ID not found. Please verify and try again."
+ */
+async function validateOrderInquiryStage(draft, senderPhone) {
+  if (!draft) return { isValid: false, reply: 'Inquiry ID not found. Please verify and try again.' };
+
+  const rawInq = (draft.inquiry_id || '').trim();
+  if (!rawInq) {
+    return {
+      isValid: false,
+      isMissingId: true,
+      reply: `🛒 *Record New Order*\n\nPlease provide the *Inquiry ID* (e.g. INQ-F4D982) linked to this order:`,
+    };
+  }
+
+  const cleanInqCode = rawInq.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/^#+/, '').replace(/-/g, '').trim().toUpperCase();
+
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+  const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
+  // 1. Fetch candidate deals matching cleanInqCode
+  let dQuery = supabase
+    .from('deals')
+    .select('id, inquiry_id, customer_name, stage, po_number, delivery_location, payment_terms, salesperson_phone, created_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
+    .order('created_at', { ascending: false });
+
+  if (!scope.isAdmin && targetPhones.length > 0) {
+    dQuery = dQuery.in('salesperson_phone', targetPhones);
+  }
+
+  const { data: deals, error: dErr } = await dQuery.limit(100);
+  if (dErr) console.warn('[CatalogFlow] validateOrderInquiryStage deals fetch warning:', dErr.message);
+
+  let matchedDeal = (deals || []).find(d => {
+    const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+    const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+    return dId.startsWith(cleanInqCode) || inqId.startsWith(cleanInqCode) || (d.id || '').toUpperCase().startsWith(cleanInqCode) || dId.includes(cleanInqCode) || inqId.includes(cleanInqCode);
+  });
+
+  let matchedInq = null;
+  if (!matchedDeal) {
+    let iQuery = supabase
+      .from('inquiries')
+      .select('id, sender_name, status, salesperson_phone, created_at, ai_extraction_json')
+      .order('created_at', { ascending: false });
+
+    if (!scope.isAdmin && targetPhones.length > 0) {
+      iQuery = iQuery.in('salesperson_phone', targetPhones);
+    }
+
+    const { data: inqs, error: iErr } = await iQuery.limit(100);
+    if (iErr) console.warn('[CatalogFlow] validateOrderInquiryStage inqs fetch warning:', iErr.message);
+
+    matchedInq = (inqs || []).find(i => {
+      const iId = (i.id || '').replace(/-/g, '').toUpperCase();
+      return iId.startsWith(cleanInqCode) || (i.id || '').toUpperCase().startsWith(cleanInqCode) || iId.includes(cleanInqCode);
+    });
+  }
+
+  if (!matchedDeal && !matchedInq) {
+    return {
+      isValid: false,
+      reply: `Inquiry ID not found. Please verify and try again.`,
+    };
+  }
+
+  // Determine stage & display formatting
+  const rawStage = (matchedDeal ? matchedDeal.stage : matchedInq.status) || 'new_inquiry';
+  const stageLower = String(rawStage).toLowerCase().trim();
+
+  const isQuotedStage = [
+    'quoted',
+    'quotation_sent',
+    'quotation sent',
+    'price_quote',
+    'price quote',
+    'proposal',
+    'proposal/price quote',
+    'proposal / price quote',
+    'qualified'
+  ].includes(stageLower);
+
+  if (!isQuotedStage) {
+    // Format human-readable stage name
+    let stageDisplayName = 'New Inquiry';
+    if (stageLower === 'new_inquiry' || stageLower === 'new' || stageLower === 'auto_created') {
+      stageDisplayName = 'New Inquiry';
+    } else if (stageLower === 'negotiation' || stageLower === 'in_negotiation' || stageLower === 'review' || stageLower === 'negotiation/review') {
+      stageDisplayName = 'Negotiation';
+    } else if (stageLower === 'on_hold' || stageLower === 'on hold' || stageLower === 'hold') {
+      stageDisplayName = 'On Hold';
+    } else if (stageLower === 'lost' || stageLower === 'closed lost' || stageLower === 'closed_lost') {
+      stageDisplayName = 'Lost';
+    } else if (stageLower === 'won' || stageLower === 'closed won' || stageLower === 'closed_won') {
+      stageDisplayName = 'Won';
+    } else {
+      stageDisplayName = stageLower.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    }
+
+    const formattedCode = matchedDeal
+      ? (matchedDeal.inquiry_id ? `INQ-${matchedDeal.inquiry_id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : `INQ-${matchedDeal.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`)
+      : `INQ-${matchedInq.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+
+    return {
+      isValid: false,
+      reply: `Order cannot be created. Inquiry #${formattedCode} is currently in ${stageDisplayName} stage. A quotation must be sent and the inquiry must be in Quoted stage before an order can be recorded.`,
+    };
+  }
+
+  // If Quoted stage -> Auto populate customer name and link IDs
+  if (matchedDeal) {
+    draft.deal_id = matchedDeal.id;
+    draft.inquiry_id = matchedDeal.inquiry_id || matchedDeal.id;
+    if (!draft.company_name && matchedDeal.customer_name) {
+      draft.company_name = matchedDeal.customer_name;
+    }
+    if (!draft.delivery_location && matchedDeal.delivery_location) {
+      draft.delivery_location = matchedDeal.delivery_location;
+    }
+    if (!draft.payment_terms && matchedDeal.payment_terms) {
+      draft.payment_terms = matchedDeal.payment_terms;
+    }
+    if ((!Array.isArray(draft.line_items) || draft.line_items.length === 0) && Array.isArray(matchedDeal.deal_items) && matchedDeal.deal_items.length > 0) {
+      draft.line_items = matchedDeal.deal_items.map(it => ({
+        sku_text: it.sku_text,
+        description: it.sku_text,
+        dimensions: it.dimensions || null,
+        spec: it.dimensions || null,
+        quantity: it.quantity,
+        unit: it.unit || 'MT',
+        rate: it.rate,
+        amount: it.amount || (it.quantity * it.rate),
+      }));
+    }
+  } else if (matchedInq) {
+    draft.inquiry_id = matchedInq.id;
+    if (!draft.company_name && matchedInq.sender_name) {
+      draft.company_name = matchedInq.sender_name;
+    }
+    const aiJson = matchedInq.ai_extraction_json || {};
+    if (!draft.delivery_location && (aiJson.delivery_location || aiJson.delivery_address)) {
+      draft.delivery_location = aiJson.delivery_location || aiJson.delivery_address;
+    }
+    if (!draft.payment_terms && aiJson.payment_terms) {
+      draft.payment_terms = aiJson.payment_terms;
+    }
+    if ((!Array.isArray(draft.line_items) || draft.line_items.length === 0) && Array.isArray(aiJson.line_items) && aiJson.line_items.length > 0) {
+      draft.line_items = aiJson.line_items.map(it => ({
+        sku_text: it.sku_text || it.description,
+        description: it.description || it.sku_text,
+        dimensions: it.dimensions || it.spec || null,
+        spec: it.dimensions || it.spec || null,
+        quantity: it.quantity,
+        unit: it.unit || 'MT',
+        rate: it.rate,
+        amount: it.amount || (it.quantity * it.rate),
+      }));
+    }
+  }
+
+  return {
+    isValid: true,
+    deal: matchedDeal,
+    inquiry: matchedInq,
+  };
 }
 
 // ── STRICT PRODUCT CATALOG VERIFICATION ──────────────────────────────────────
@@ -2306,35 +2486,45 @@ function buildConfirmationSummary(action, draft) {
     }
 
     case 'LOG_ORDER': {
+      if (draft.inquiry_id) {
+        const cleanDisplayInq = draft.inquiry_id.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
+        summary += `• *Inquiry ID:* #INQ-${cleanDisplayInq}\n`;
+      }
       summary += `• *Customer / Company:* ${draft.company_name}\n`;
       summary += `• *PO Number:* ${draft.po_number}\n`;
       summary += `• *PO Date:* ${draft.po_date}\n`;
       summary += `• *Delivery Location:* ${draft.delivery_location}\n`;
       summary += `• *Payment Terms:* ${draft.payment_terms}\n`;
-      let totalAmount = 0;
+      let subtotal = 0;
       if (Array.isArray(draft.line_items) && draft.line_items.length === 1) {
         const it = draft.line_items[0];
         const qty = Number(it.quantity) || 0;
         const rate = Number(it.rate) || 0;
         const amount = Number(it.amount) || qty * rate;
-        totalAmount += amount;
+        subtotal += amount;
         const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
         const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
         summary += `• *Product:* ${it.sku_text || it.description}${specStr}${hsnStr} — ${qty} ${it.unit || 'MT'} @ ₹${rate.toLocaleString('en-IN')}/${it.unit || 'MT'}\n`;
-        summary += `• *Total Order Value:* ₹${totalAmount.toLocaleString('en-IN')}\n`;
       } else if (Array.isArray(draft.line_items) && draft.line_items.length > 1) {
         summary += `• *Line Items:*\n`;
         (draft.line_items || []).forEach((it) => {
           const qty = Number(it.quantity) || 0;
           const rate = Number(it.rate) || 0;
           const amount = Number(it.amount) || qty * rate;
-          totalAmount += amount;
+          subtotal += amount;
           const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
           const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
           summary += `  • ${it.sku_text || it.description}${specStr}${hsnStr} — ${qty} ${it.unit || 'MT'} @ ₹${rate.toLocaleString('en-IN')}/${it.unit || 'MT'} (₹${amount.toLocaleString('en-IN')})\n`;
         });
-        summary += `• *Total Order Value:* ₹${totalAmount.toLocaleString('en-IN')}\n`;
       }
+      const breakdown = calculateQuotationBreakdown(subtotal);
+      summary += `• *Sub Total:* ₹${breakdown.formattedSubtotal}\n`;
+      summary += `• *CGST (9%):* ₹${breakdown.formattedCGST}\n`;
+      summary += `• *SGST (9%):* ₹${breakdown.formattedSGST}\n`;
+      if (breakdown.rounding !== 0) {
+        summary += `• *Rounding:* ${breakdown.formattedRounding}\n`;
+      }
+      summary += `• *Total Order Value:* ${breakdown.formattedGrandTotal}\n`;
       break;
     }
 
@@ -2438,7 +2628,7 @@ function buildConfirmationSummary(action, draft) {
     }
   }
 
-  summary += `\n*Reply:*\n• *Yes* — to save\n• *Edit* — to change something\n• *Cancel* — to discard`;
+  // summary += `\n*Reply:*\n• *Yes* — to save\n• *Edit* — to change something\n• *Cancel* — to discard`;
   return summary;
 }
 
@@ -3044,7 +3234,7 @@ Logged to Sales Pipeline & Inquiries! ✅`;
           city: draft.delivery_location || null,
         });
 
-        let totalAmount = 0;
+        let subtotal = 0;
         const structuredLineItems = (Array.isArray(draft.line_items) && draft.line_items.length > 0)
           ? draft.line_items.map((it) => {
               const sText = it.sku_text || it.description || '';
@@ -3052,7 +3242,7 @@ Logged to Sales Pipeline & Inquiries! ✅`;
               const qty = Number(it.quantity) || 0;
               const rate = Number(it.rate) || 0;
               const amt = Number(it.amount) || qty * rate;
-              totalAmount += amt;
+              subtotal += amt;
               const hCode = it.hsn_code || it.hsn_sac || detectHsnCode(sText, sDim) || detectHsnCode(it.description || '') || '72083840';
               return {
                 sku_text: sText,
@@ -3069,6 +3259,9 @@ Logged to Sales Pipeline & Inquiries! ✅`;
             })
           : [];
 
+        const breakdown = calculateQuotationBreakdown(subtotal);
+        const totalAmount = breakdown.grandTotal;
+
         const structuredAiJson = {
           customer: {
             name: companyName,
@@ -3078,6 +3271,7 @@ Logged to Sales Pipeline & Inquiries! ✅`;
           },
           customer_name: companyName,
           companyName: companyName,
+          inquiry_id: draft.inquiry_id || null,
           po_number: draft.po_number,
           po_date: draft.po_date,
           delivery_location: draft.delivery_location || null,
@@ -3087,12 +3281,17 @@ Logged to Sales Pipeline & Inquiries! ✅`;
           productType: structuredLineItems[0] ? structuredLineItems[0].sku_text : null,
           line_items: structuredLineItems,
           lineItems: structuredLineItems,
+          subtotal: breakdown.subtotal,
+          cgst_amount: breakdown.CGST,
+          sgst_amount: breakdown.SGST,
           total_amount: totalAmount,
+          grand_total: totalAmount,
           inquiry_type: 'purchase_order',
           overall_confidence: 0.98,
         };
 
         let humanRawText = `Customer: ${companyName}\nPO Number: ${draft.po_number}\nPO Date: ${draft.po_date}\n`;
+        if (draft.inquiry_id) humanRawText += `Linked Inquiry: ${draft.inquiry_id}\n`;
         if (structuredLineItems.length > 0) {
           humanRawText += `Line Items:\n` + structuredLineItems.map((it, i) => `${i + 1}. ${it.description || it.sku_text} ${it.dimensions ? `(${it.dimensions})` : ''} - ${it.quantity} ${it.unit} @ ₹${it.rate}/${it.unit}`).join('\n') + `\n`;
         }
@@ -3120,7 +3319,7 @@ Logged to Sales Pipeline & Inquiries! ✅`;
         const { data: dealRow, error: dealErr } = await supabase
           .from('deals')
           .insert({
-            inquiry_id: inqRow ? inqRow.id : null,
+            inquiry_id: draft.deal_id || (inqRow ? inqRow.id : null),
             stage: 'won',
             won_at: new Date().toISOString(),
             po_number: draft.po_number,
@@ -3163,20 +3362,26 @@ Logged to Sales Pipeline & Inquiries! ✅`;
           kra_type: 'won_deal',
           value: totalAmount,
           customer_name: companyName,
-          description: `Order Logged: PO #${draft.po_number} for ${companyName} (₹${totalAmount.toLocaleString('en-IN')})`,
+          description: `Order Logged: PO #${draft.po_number} for ${companyName} (${breakdown.formattedGrandTotal})`,
           month: new Date().getMonth() + 1,
           year: new Date().getFullYear(),
           created_at: new Date().toISOString(),
         });
 
-        return `🎉 *Order Recorded & Deal Marked as WON!*
+        const inqDisplay = draft.inquiry_id ? `\n📋 *Inquiry ID:* ${draft.inquiry_id}` : '';
+        const roundStr = breakdown.rounding !== 0 ? `\n⚖️ *Rounding:* ${breakdown.formattedRounding}` : '';
 
+        return `🎉 *Order Recorded & Deal Marked as WON!*
+${inqDisplay}
 🛒 *PO Number:* ${draft.po_number}
 🏢 *Customer:* ${companyName}
 📅 *PO Date:* ${draft.po_date}
 📍 *Delivery Location:* ${draft.delivery_location}
 💳 *Payment Terms:* ${draft.payment_terms}
-💰 *Total Order Value:* ₹${totalAmount.toLocaleString('en-IN')}
+💰 *Sub Total:* ₹${breakdown.formattedSubtotal}
+📋 *CGST (9%):* ₹${breakdown.formattedCGST}
+📋 *SGST (9%):* ₹${breakdown.formattedSGST}${roundStr}
+💵 *Total Order Value:* ${breakdown.formattedGrandTotal}
 
 Updated Sales Achievement Card! 🏆`;
       }
@@ -5127,6 +5332,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
 
     // Check if user wants to abort / switch (only if not resolving candidate selection)
+    // Check if user wants to abort / switch (only if not resolving candidate selection)
     if (!candidateResolved && !inquiryCandidateResolved && !orderCandidateResolved) {
       let switchAction = matchActionFromInput(text);
       if (!switchAction) {
@@ -5150,15 +5356,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
           };
         }
 
-        const initialPrompt = MODULE_PROMPTS[switchAction];
-        // If message has specific content beyond just trigger keywords, extract for the new action immediately
-        if (text.length > 25 || /\b(?:for|to|on|with|at|midc|midc\s+pune)\b/i.test(text)) {
-          action = switchAction;
-          existingDraft = {};
-        } else if (initialPrompt) {
-          await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: switchAction });
-          await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${switchAction}|{}`);
-          return { handled: true, reply: initialPrompt };
+        const currentFamily = getModuleFamily(action);
+        const switchFamily = getModuleFamily(switchAction);
+        if (switchFamily !== 'OTHER' && switchFamily !== currentFamily) {
+          console.log(`[CatalogFlow] Strict activity scope guard in catalog_flow: active=${action} (${currentFamily}), incoming=${switchAction} (${switchFamily})`);
+          return buildOutOfScopeActivityResponse(action, switchAction);
         }
       }
     }
@@ -5188,6 +5390,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
     if (existingDraft._inquiry_display_id && !updatedDraft._inquiry_display_id) {
       updatedDraft._inquiry_display_id = existingDraft._inquiry_display_id;
+    }
+
+    // 0. LOG_ORDER Inquiry Quoted Stage Gate check
+    if (action === 'LOG_ORDER') {
+      const stageCheck = await validateOrderInquiryStage(updatedDraft, senderPhone);
+      if (!stageCheck.isValid) {
+        await recordSessionMessage(senderPhone, 'assistant', stageCheck.reply, { action_type: action });
+        await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: stageCheck.reply };
+      }
     }
 
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
@@ -5393,6 +5605,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     const updatedDraft = await extractFieldsWithLLM(action, text, initialDraft);
 
+    // 0. LOG_ORDER Inquiry Quoted Stage Gate check
+    if (action === 'LOG_ORDER') {
+      const stageCheck = await validateOrderInquiryStage(updatedDraft, senderPhone);
+      if (!stageCheck.isValid) {
+        await recordSessionMessage(senderPhone, 'assistant', stageCheck.reply, { action_type: action });
+        await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: stageCheck.reply };
+      }
+    }
+
     // 1. Customer Verification (for new creations)
     if (['LOG_INQUIRY', 'LOG_ORDER', 'LOG_VISIT', 'LOG_COMPLAINT', 'LOG_NEW_CUSTOMER'].includes(action)) {
       const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
@@ -5572,6 +5794,7 @@ module.exports = {
   detectOperationalAction,
   extractFieldsWithLLM,
   mergeDraft,
+  validateOrderInquiryStage,
   checkInquiriesForUpdate,
   checkOrdersForUpdate,
   checkComplaintsForUpdate,
