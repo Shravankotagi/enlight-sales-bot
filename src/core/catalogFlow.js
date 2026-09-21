@@ -196,20 +196,21 @@ Example:
 
   LOG_ORDER: `🛒 *Record New Order*
 
-Please provide the following details:
+Please provide the *Inquiry ID* (e.g. INQ-F4D982) linked to this order:
 
 • *Inquiry ID:* * (e.g. INQ-F4D982)
-• *PO Number:* * (e.g. PO-2026-0042)
-• *PO Date:* * (e.g. 10-09-2026)
-• *Delivery Location:* *
-• *Payment Terms:* *
+• *PO Number:* (e.g. PO-2026-0042, or auto-generated if not provided)
+• *PO Date:* (e.g. 10-09-2026, or today's date if not provided)
+• *Delivery Location:* (optional, defaults to Quoted Inquiry details)
+• *Payment Terms:* (optional, defaults to Quoted Inquiry details)
 
-• *Line Items:* * (repeat for each product)
+• *Line Items:* (if not already specified in the Quoted Inquiry)
   - Product Name / Description
-  - Spec
-  - HSN/SAC Code
+  - Spec / Dimensions
   - Quantity & Unit
-  - Rate (₹ per unit)`,
+  - Rate (₹ per unit)
+
+💡 _Tip: If the Inquiry is already in Quoted stage, you can simply reply with the Inquiry ID to auto-load all products, rates, and customer details!_`,
 
   UPDATE_ORDER: `✏️ *Update Order*
 
@@ -885,8 +886,9 @@ CRITICAL RULES:
 7. MULTIPLE ENTITIES / COMPANIES (CRITICAL): If and only if the user message itself introduces multiple distinct companies/records (e.g. 'Visited two customers today: ABC Steel in Mumbai (positive) and Sharma Construction in Pune (neutral)' or 'Inquiry from ABC for 10 MT and XYZ for 20 MT'):
 Output an 'entries' array containing a separate object for EACH individual customer/visit/inquiry/complaint!
 If only a single company is mentioned or if filling missing fields for an existing draft, return the top-level fields (e.g. company_name, person_met, contact_phone, etc.) and do NOT output an entries array.
-8. In UPDATE_ORDER: If the user provides an Inquiry ID (e.g. INQ-936C7B, #INQ-3C86DE) and asks to attach/set/update a PO number (e.g. 'attach PO-2026-8899 to INQ-936C7B' or 'INQ-936C7B PO is PO-2026-8899'), extract the inquiry ID into 'inquiry_id' and the PO number into 'po_number' and 'updates.po_number'.
-9. PRODUCT CATALOG RULES:
+8. In LOG_ORDER: If the user provides an Inquiry ID (e.g. INQ-F4D982, #INQ-F4D982, or 'regarding inquiry INQ-F4D982'), extract the inquiry ID into 'inquiry_id'.
+9. In UPDATE_ORDER: If the user provides an Inquiry ID (e.g. INQ-936C7B, #INQ-3C86DE) and asks to attach/set/update a PO number (e.g. 'attach PO-2026-8899 to INQ-936C7B' or 'INQ-936C7B PO is PO-2026-8899'), extract the inquiry ID into 'inquiry_id' and the PO number into 'po_number' and 'updates.po_number'.
+10. PRODUCT CATALOG RULES:
 The official Enlight Metals product catalog consists of:
 • Flat Steel: HR Coil, HR Sheet, HR Plate, HRPO Coil, HRPO Sheet, CR Coil, CR Sheet, GP Coil, GP Sheet, Galvalume Coil, Galvalume Sheet, Chequered Coil, Chequered Sheet
 • Structural Steel: MS Round Bar, MS Flat Bar, MS Square Bar, TMT Bar, MS Angle, MS Channel, MS Beam
@@ -1035,6 +1037,14 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
       merged[targetDateKey] = formatDateDDMMYYYY(new Date(Date.now() - 24 * 3600 * 1000));
     } else if (/\b(?:today|now|just now|aaj)\b/i.test(userInput)) {
       merged[targetDateKey] = formatDateDDMMYYYY(new Date());
+    }
+  }
+
+  // Fallback inquiry_id injection if missing and user mentioned INQ- or DEAL- ID
+  if (!merged.inquiry_id && ['LOG_ORDER', 'UPDATE_ORDER', 'UPDATE_INQUIRY'].includes(action)) {
+    const inqMatch = userInput.match(/\b(?:INQ|DEAL)-[A-Z0-9]+\b|#INQ-[A-Z0-9]+/i);
+    if (inqMatch) {
+      merged.inquiry_id = inqMatch[0].replace(/^#/, '').trim().toUpperCase();
     }
   }
 
@@ -1217,7 +1227,13 @@ function validateMandatoryFields(action, draft) {
 
 async function verifyDraftCustomer(action, draft, senderPhone) {
   if (!draft || !draft.company_name) return { isValid: true };
-  if (action === 'LOG_NEW_CUSTOMER' || action === 'UPDATE_INQUIRY' || action === 'UPDATE_ORDER' || action === 'UPDATE_COMPLAINT') return { isValid: true };
+  if (
+    action === 'LOG_NEW_CUSTOMER' ||
+    action === 'UPDATE_INQUIRY' ||
+    action === 'UPDATE_ORDER' ||
+    action === 'UPDATE_COMPLAINT' ||
+    (action === 'LOG_ORDER' && draft.deal_id)
+  ) return { isValid: true };
 
   const rawName = String(draft.company_name).trim();
   if (!rawName || rawName.toLowerCase() === 'null' || rawName.toLowerCase() === 'unknown') {
@@ -1458,18 +1474,30 @@ async function validateOrderInquiryStage(draft, senderPhone) {
     };
   }
 
-  // If Quoted stage -> Auto populate customer name and link IDs
+  // If Quoted stage -> Auto populate customer name, delivery location, payment terms, line items, PO details
   if (matchedDeal) {
     draft.deal_id = matchedDeal.id;
     draft.inquiry_id = matchedDeal.inquiry_id || matchedDeal.id;
     if (!draft.company_name && matchedDeal.customer_name) {
       draft.company_name = matchedDeal.customer_name;
     }
-    if (!draft.delivery_location && matchedDeal.delivery_location) {
-      draft.delivery_location = matchedDeal.delivery_location;
+    if (!draft.delivery_location) {
+      draft.delivery_location = matchedDeal.delivery_location || 'Standard / Ex-Works';
     }
-    if (!draft.payment_terms && matchedDeal.payment_terms) {
-      draft.payment_terms = matchedDeal.payment_terms;
+    if (!draft.payment_terms) {
+      draft.payment_terms = matchedDeal.payment_terms || 'Standard Terms';
+    }
+    if (!draft.po_date) {
+      draft.po_date = formatDateDDMMYYYY(new Date());
+    }
+    if (!draft.po_number) {
+      if (matchedDeal.po_number) {
+        draft.po_number = matchedDeal.po_number;
+      } else {
+        const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        const randomNum = Math.floor(1000 + Math.random() * 9000);
+        draft.po_number = `PO-${todayStr}-${randomNum}`;
+      }
     }
     if ((!Array.isArray(draft.line_items) || draft.line_items.length === 0) && Array.isArray(matchedDeal.deal_items) && matchedDeal.deal_items.length > 0) {
       draft.line_items = matchedDeal.deal_items.map(it => ({
@@ -1489,11 +1517,19 @@ async function validateOrderInquiryStage(draft, senderPhone) {
       draft.company_name = matchedInq.sender_name;
     }
     const aiJson = matchedInq.ai_extraction_json || {};
-    if (!draft.delivery_location && (aiJson.delivery_location || aiJson.delivery_address)) {
-      draft.delivery_location = aiJson.delivery_location || aiJson.delivery_address;
+    if (!draft.delivery_location) {
+      draft.delivery_location = aiJson.delivery_location || aiJson.delivery_address || 'Standard / Ex-Works';
     }
-    if (!draft.payment_terms && aiJson.payment_terms) {
-      draft.payment_terms = aiJson.payment_terms;
+    if (!draft.payment_terms) {
+      draft.payment_terms = aiJson.payment_terms || 'Standard Terms';
+    }
+    if (!draft.po_date) {
+      draft.po_date = formatDateDDMMYYYY(new Date());
+    }
+    if (!draft.po_number) {
+      const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const randomNum = Math.floor(1000 + Math.random() * 9000);
+      draft.po_number = `PO-${todayStr}-${randomNum}`;
     }
     if ((!Array.isArray(draft.line_items) || draft.line_items.length === 0) && Array.isArray(aiJson.line_items) && aiJson.line_items.length > 0) {
       draft.line_items = aiJson.line_items.map(it => ({
@@ -3319,7 +3355,7 @@ Logged to Sales Pipeline & Inquiries! ✅`;
         const { data: dealRow, error: dealErr } = await supabase
           .from('deals')
           .insert({
-            inquiry_id: draft.deal_id || (inqRow ? inqRow.id : null),
+            inquiry_id: inqRow ? inqRow.id : null,
             stage: 'won',
             won_at: new Date().toISOString(),
             po_number: draft.po_number,
@@ -3338,6 +3374,22 @@ Logged to Sales Pipeline & Inquiries! ✅`;
           .single();
 
         if (dealErr) console.error('[CatalogFlow] Order deal insert error:', dealErr);
+
+        // Update original linked deal to won if linked
+        if (draft.deal_id) {
+          await supabase
+            .from('deals')
+            .update({
+              stage: 'won',
+              won_at: new Date().toISOString(),
+              po_number: draft.po_number,
+              po_date: draft.po_date,
+              total_amount: totalAmount,
+              delivery_location: draft.delivery_location,
+              payment_terms: draft.payment_terms,
+            })
+            .eq('id', draft.deal_id);
+        }
 
         // 3. Insert line items
         if (dealRow && structuredLineItems.length > 0) {
