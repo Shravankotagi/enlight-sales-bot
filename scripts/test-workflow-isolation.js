@@ -25,7 +25,7 @@ async function runTests() {
   await saveActiveSession(testPhone, 'Apex Steel', 'catalog_flow|LOG_VISIT|{"company_name":"Apex Steel"}');
   const crossRes2 = await handleCatalogFlow('log customer complaint for damaged material', testPhone);
   console.log('Cross-module response 2:', crossRes2.reply);
-  const pass2 = crossRes2.handled === true && crossRes2.reply.includes('You are currently in the *Customer Field Visit* flow');
+  const pass2 = crossRes2.handled === true && crossRes2.reply.includes('You are currently in the *Field Visit* flow');
   console.log('Test 2 Passed:', pass2);
 
   // TEST 3: Order Gate - Invalid Inquiry ID
@@ -270,14 +270,14 @@ async function runTests() {
   const directOrderRes = await handleCatalogFlow('create an order regarding this inquiry INQ-F4D982', testPhone);
   console.log('Direct Order Response:\n', directOrderRes.reply);
   const pass12a = directOrderRes.handled === true &&
-                  directOrderRes.reply.includes('To perform an activity') &&
+                  directOrderRes.reply.includes('To start an activity') &&
                   directOrderRes.reply.includes('Log New Order');
 
   // 12b: Direct Complaint command in idle state -> must return catalog gating menu
   const directCmpRes = await handleCatalogFlow('i want to log complaint for this latest order, material was defective', testPhone);
   console.log('Direct Complaint Response:\n', directCmpRes.reply);
   const pass12b = directCmpRes.handled === true &&
-                  directCmpRes.reply.includes('To perform an activity') &&
+                  directCmpRes.reply.includes('To start an activity') &&
                   directCmpRes.reply.includes('Log Customer Complaint');
 
   // 12c: Read-only data retrieval query in idle state -> must return handled: false (unobstructed for query handler)
@@ -525,7 +525,7 @@ async function runTests() {
                   selectTwoRes.reply.includes("Here's what I've captured:") &&
                   selectTwoRes.reply.includes('Apex Precision Ltd') &&
                   selectTwoRes.reply.includes('PO-APEX-8801') &&
-                  selectTwoRes.reply.includes('rust on the upper surface') &&
+                  selectTwoRes.reply.toLowerCase().includes('rust on the upper surface') &&
                   !selectTwoRes.reply.includes('Which field would you like to change');
 
   // 17c: User confirms "save / yes" -> logs complaint successfully
@@ -550,8 +550,38 @@ async function runTests() {
   await supabase.from('complaints').delete().ilike('customer_name', '%Apex Precision Ltd%');
   await saveActiveSession(testMultiOrderPhone, 'Unknown', 'general');
 
+  // TEST 18: Direct Catalog Menu Selection Transition from Active Session
+  console.log('\n[TEST 18] Direct Catalog Menu Selection Transition from Active Session');
+  const testSwitchPhone = '919999988888';
+  // Start active visit flow
+  await saveActiveSession(testSwitchPhone, 'Active Visit Corp', 'catalog_flow|LOG_VISIT|{"company_name":"Active Visit Corp"}');
+  
+  // 18a: Transition via WhatsApp list ID `menu_3` -> immediately enters LOG_ORDER
+  const menuSwitchRes = await handleCatalogFlow('menu_3', testSwitchPhone);
+  console.log('Menu Switch "menu_3" Response:\n', menuSwitchRes.reply);
+  const sess18a = await getFullActiveSession(testSwitchPhone);
+  const pass18a = menuSwitchRes.handled === true &&
+                  menuSwitchRes.reply.includes('Record New Order') &&
+                  menuSwitchRes.reply.includes('Inquiry ID') &&
+                  sess18a?.last_intent?.startsWith('catalog_flow|LOG_ORDER');
+
+  // 18b: Transition via WhatsApp list Title `5. Log Field Visit` from Order flow
+  const titleSwitchRes = await handleCatalogFlow('5. Log Field Visit', testSwitchPhone);
+  console.log('Title Switch "5. Log Field Visit" Response:\n', titleSwitchRes.reply);
+  const sess18b = await getFullActiveSession(testSwitchPhone);
+  const pass18b = titleSwitchRes.handled === true &&
+                  titleSwitchRes.reply.includes('Log Customer Field Visit') &&
+                  titleSwitchRes.reply.includes('Person Met') &&
+                  sess18b?.last_intent?.startsWith('catalog_flow|LOG_VISIT');
+
+  const pass18 = pass18a && pass18b;
+  console.log('Test 18 Passed:', pass18, `(18a:${pass18a}, 18b:${pass18b})`);
+
+  // Clean up
+  await saveActiveSession(testSwitchPhone, 'Unknown', 'general');
+
   // Summary
-  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14 && pass15 && pass16 && pass17;
+  const allPassed = pass1 && pass2 && pass3 && pass4 && pass5 && pass6 && pass7 && pass8 && pass9 && pass10 && pass11 && pass12 && pass13 && pass14 && pass15 && pass16 && pass17 && pass18;
   console.log('\n========================================');
   console.log('FINAL RESULT: ' + (allPassed ? 'ALL TESTS PASSED ✅' : 'SOME TESTS FAILED ❌'));
   console.log('========================================');

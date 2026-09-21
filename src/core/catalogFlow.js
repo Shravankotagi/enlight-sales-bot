@@ -358,9 +358,9 @@ function getModuleDisplayName(action) {
   switch (family) {
     case 'INQUIRY': return 'Inquiry';
     case 'ORDER': return 'Order';
-    case 'VISIT': return 'Customer Field Visit';
-    case 'COMPLAINT': return 'Customer Complaint';
-    case 'CUSTOMER': return 'New Customer Acquisition';
+    case 'VISIT': return 'Field Visit';
+    case 'COMPLAINT': return 'Complaint';
+    case 'CUSTOMER': return 'Customer Acquisition';
     default: return getActionFriendlyName(action);
   }
 }
@@ -371,9 +371,9 @@ function getTargetActionVerb(action) {
     case 'UPDATE_INQUIRY': return 'update an inquiry';
     case 'LOG_ORDER': return 'log an order';
     case 'UPDATE_ORDER': return 'update an order';
-    case 'LOG_VISIT': return 'log a visit';
-    case 'UPDATE_VISIT': return 'update a visit';
-    case 'LOG_NEW_CUSTOMER': return 'onboard a new customer';
+    case 'LOG_VISIT': return 'log a field visit';
+    case 'UPDATE_VISIT': return 'update a field visit';
+    case 'LOG_NEW_CUSTOMER': return 'onboard a customer';
     case 'LOG_COMPLAINT': return 'log a complaint';
     case 'UPDATE_COMPLAINT': return 'update a complaint';
     default: return `start ${getActionFriendlyName(action)}`;
@@ -533,6 +533,56 @@ function matchActionFromInput(text) {
     fullClean.includes('general search or intelligence')
   ) {
     return 'GENERAL_QUERY';
+  }
+
+  return null;
+}
+
+function isExplicitMenuSelection(text, hasActiveSession = false) {
+  if (!text || typeof text !== 'string') return null;
+  const firstLine = text.split(/[\r\n]+/)[0].trim();
+  const clean = firstLine.toLowerCase().replace(/[🔟*️⃣\uFE0F\u20E3]/g, '').trim();
+  const fullClean = text.toLowerCase().replace(/[🔟*️⃣\uFE0F\u20E3]/g, '').trim();
+
+  // 1. WhatsApp List Item ID (e.g. menu_1 .. menu_10)
+  if (/^menu_(?:[1-9]|10)$/i.test(clean)) {
+    return matchActionFromInput(text);
+  }
+
+  // 2. Exact catalog list titles / descriptions
+  if (
+    /^(?:1|2|3|4|5|6|7|8|9|10)[\.\)\s\-]+(?:log|update|record|new|onboard)?\s*(?:new\s*)?(?:inquiry|order|visit|field visit|customer visit|complaint|customer complaint|customer|acquisition|customer acquisition|general query|other query|other)\b/i.test(clean) ||
+    fullClean.includes('capture customer requirements') ||
+    fullClean.includes('update rates, specs or stage') ||
+    fullClean.includes('record new confirmed po') ||
+    fullClean.includes('attach po, update items') ||
+    fullClean.includes('record client meeting') ||
+    fullClean.includes('update meeting outcome') ||
+    fullClean.includes('add new customer profile') ||
+    fullClean.includes('report quality or delay') ||
+    fullClean.includes('update resolution status') ||
+    fullClean.includes('ask any data retrieval query') ||
+    fullClean.includes('general search or intelligence')
+  ) {
+    return matchActionFromInput(text);
+  }
+
+  // 3. Action command / start prefix (e.g. "start_log_order", "start_update_inquiry")
+  if (/^start_(?:log|update)_(?:inquiry|order|visit|customer|complaint)$/i.test(clean)) {
+    return matchActionFromInput(text);
+  }
+
+  // 4. Standalone action verbs when NOT providing complex data/arguments (e.g. "log order", "new inquiry", "log visit")
+  if (
+    /^(?:log|update|record|new|onboard)?\s*(?:new\s*)?(?:inquiry|order|visit|field visit|customer visit|complaint|customer complaint|customer acquisition|customer onboarding|general query|other query)$/i.test(clean) &&
+    clean.length <= 30
+  ) {
+    return matchActionFromInput(text);
+  }
+
+  // 5. If NOT in an active session (idle/general), single digits 1-10 are catalog selections
+  if (!hasActiveSession && /^(?:[1-9]|10)\.?$/i.test(clean)) {
+    return matchActionFromInput(text);
   }
 
   return null;
@@ -4883,7 +4933,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
       reply: CATALOG_MENU,
       interactiveType: 'list',
       interactiveList: {
-        bodyText: `Welcome to *SalesOS Assistant*!\n\nWhat would you like to do today? Select an option below or type what you need.`,
+        bodyText: `Welcome to *SalesOS Assistant*!\n\nHere is the menu to start a new activity:`,
         buttonText: 'Choose Action',
         sections: CATALOG_MENU_SECTIONS,
       },
@@ -4909,8 +4959,42 @@ async function handleCatalogFlow(rawText, senderPhone) {
     return { handled: false };
   }
 
-  // ── 2a. ACTIVE SESSION SCOPE GUARD & PREEMPTION CHECK ───────────────────────
-  if (lastIntent.startsWith('catalog_')) {
+  const hasActiveCatalogSession = lastIntent.startsWith('catalog_');
+
+  // ── 2a. DIRECT EXPLICIT MENU SELECTION (PREEMPTION) ────────────────────────
+  // When user selects any option from catalog list ([Choose Action] or direct action commands),
+  // immediately clean up any prior flow and start the newly selected module prompt.
+  const explicitAction = isExplicitMenuSelection(text, hasActiveCatalogSession);
+  if (explicitAction) {
+    if (hasActiveCatalogSession) {
+      await finalizeCurrentSession(senderPhone, `Switched to ${getActionFriendlyName(explicitAction)}`);
+    }
+    await recordSessionMessage(senderPhone, 'user', text);
+
+    if (explicitAction === 'GENERAL_QUERY') {
+      const genReply = `🔍 *SalesOS Search & Intelligence*\n\nAsk any question about your inquiries, quotations, customer profiles, site visits, or complaints!\n\n_Example: "What was the last rate quoted to Horizon Sheet Metal?" or "Show pending complaints"_`;
+      await recordSessionMessage(senderPhone, 'assistant', genReply, { action_type: 'GENERAL_QUERY' });
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return {
+        handled: true,
+        reply: genReply,
+      };
+    }
+
+    const initialPrompt = MODULE_PROMPTS[explicitAction];
+    if (initialPrompt) {
+      await startNewCatalogSession(senderPhone, initialPrompt);
+      await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: explicitAction });
+      await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${explicitAction}|{}`);
+      return {
+        handled: true,
+        reply: initialPrompt,
+      };
+    }
+  }
+
+  // ── 2b. ACTIVE SESSION SCOPE GUARD ─────────────────────────────────────────
+  if (hasActiveCatalogSession) {
     const cleanInput = text.toLowerCase().replace(/[^a-z0-9\s_/]/g, ' ').replace(/\s+/g, ' ').trim();
     const parts = lastIntent.split('|');
     const currentAction = parts[1];
@@ -4937,23 +5021,14 @@ async function handleCatalogFlow(rawText, senderPhone) {
     if (!isControlReply && !isOperationalQuery(text)) {
       const isLLMQuery = await isOperationalQueryWithLLM(text);
       if (!isLLMQuery) {
-        const matchedMenu = matchActionFromInput(text);
-
-        // 1. Explicit menu selection from catalog (e.g. user sends "1", "3", "5", "menu_5", "3. Log New Order")
-        if (matchedMenu) {
-          await finalizeCurrentSession(senderPhone, `Switched to ${getActionFriendlyName(matchedMenu)} menu`);
-          await saveActiveSession(senderPhone, 'Unknown', 'general');
-          lastIntent = '';
-        } else if (!matchedMenu) {
-          // 2. Strict Activity Scope Guard: Check if input belongs to a DIFFERENT module
-          const detectedNewAction = await detectNewOperationalIntent(text);
-          if (detectedNewAction) {
-            const currentFamily = getModuleFamily(currentAction);
-            const newFamily = getModuleFamily(detectedNewAction);
-            if (newFamily !== 'OTHER' && newFamily !== currentFamily) {
-              console.log(`[CatalogFlow] Strict activity scope guard: active=${currentAction} (${currentFamily}), incoming=${detectedNewAction} (${newFamily})`);
-              return buildOutOfScopeActivityResponse(currentAction, detectedNewAction);
-            }
+        // Strict Activity Scope Guard: Check if input belongs to a DIFFERENT module
+        const detectedNewAction = await detectNewOperationalIntent(text);
+        if (detectedNewAction) {
+          const currentFamily = getModuleFamily(currentAction);
+          const newFamily = getModuleFamily(detectedNewAction);
+          if (newFamily !== 'OTHER' && newFamily !== currentFamily) {
+            console.log(`[CatalogFlow] Strict activity scope guard: active=${currentAction} (${currentFamily}), incoming=${detectedNewAction} (${newFamily})`);
+            return buildOutOfScopeActivityResponse(currentAction, detectedNewAction);
           }
         }
       }
@@ -5894,7 +5969,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
   // MUST strictly be initiated via Catalog Menu selection (1–10 / buttons).
   // Direct free-text input in idle state is reserved exclusively for read-only data queries.
   await recordSessionMessage(senderPhone, 'user', text);
-  const gatingReply = `To perform an activity (Log Inquiry, Order, Field Visit, Customer Acquisition, or Complaint), please select the relevant option from the menu below:\n\n` + CATALOG_MENU;
+  const gatingReply = `To start an activity, please select the relevant option from the menu below:\n\nHere is the menu to start a new activity:\n\n` + CATALOG_MENU;
   await recordSessionMessage(senderPhone, 'assistant', gatingReply, { action_type: 'CATALOG_GATED_PROMPT' });
   await startNewCatalogSession(senderPhone, gatingReply);
   return {
@@ -5902,7 +5977,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     reply: gatingReply,
     interactiveType: 'list',
     interactiveList: {
-      bodyText: `To perform an activity (Log Inquiry, Order, Field Visit, Customer Acquisition, or Complaint), please select the relevant option from the menu below:\n\nWhat would you like to do?`,
+      bodyText: `Here is the menu to start a new activity:`,
       buttonText: 'Choose Action',
       sections: CATALOG_MENU_SECTIONS,
     },
@@ -5914,6 +5989,7 @@ module.exports = {
   MODULE_PROMPTS,
   isGreeting,
   matchActionFromInput,
+  isExplicitMenuSelection,
   validateMandatoryFields,
   buildConfirmationSummary,
   executeAction,
