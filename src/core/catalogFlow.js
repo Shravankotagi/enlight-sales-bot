@@ -1019,15 +1019,15 @@ LOG_COMPLAINT:
 {
   "action": "LOG_COMPLAINT",
   "company_name": "<Company / Customer Name, else null>",
-  "affected_product": "<specific product/material affected e.g. '12 MT MS angle', 'CR Sheet 1.20mm coils', 'MS Angle Bars' - else null>",
-  "linked_inquiry_or_po": "<Linked Inquiry ID e.g. INQ-8971B1 or PO Number e.g. 6712, PO-2026-TI-101 if mentioned, else null>",
+  "affected_product": "<Product name from the official 22 catalog products list (e.g. 'HR Coil', 'HR Sheet', 'CR Sheet', 'MS Angle', etc.) if explicitly named, or null if only generic words like '2 coils', 'material', 'defective goods' are mentioned>",
+  "linked_inquiry_or_po": "<Linked Inquiry ID e.g. INQ-8971B1 or PO Number e.g. PO-Apex-4567, 6712 if mentioned, else null>",
   "complaint_type": "<Quality Defect | Physical Damage | Quantity Shortage | Delivery Delay | Billing Mismatch | Specification Mismatch | Other, if mentioned or inferred from issue, else null>",
-  "complaint_description": "<Detailed complaint description, else null>",
+  "complaint_description": "<Detailed complaint description including issue details and any quantities mentioned, else null>",
   "corrective_action": "<Corrective action taken if mentioned, else null>",
   "entries": [
     {
       "company_name": "<Company Name>",
-      "affected_product": "<Product, else null>",
+      "affected_product": "<Product from official catalog, else null>",
       "linked_inquiry_or_po": "<Linked ID, else null>",
       "complaint_type": "<Type>",
       "complaint_description": "<Description>",
@@ -1063,15 +1063,19 @@ Output an 'entries' array containing a separate object for EACH individual custo
 If only a single company is mentioned or if filling missing fields for an existing draft, return the top-level fields (e.g. company_name, person_met, contact_phone, etc.) and do NOT output an entries array.
 8. In LOG_ORDER: If the user provides an Inquiry ID (e.g. INQ-F4D982 or 'regarding inquiry INQ-F4D982'), extract the inquiry ID into 'inquiry_id'.
 9. In UPDATE_ORDER: If the user provides an Inquiry ID (e.g. INQ-936C7B, INQ-3C86DE) and asks to attach/set/update a PO number (e.g. 'attach PO-2026-8899 to INQ-936C7B' or 'INQ-936C7B PO is PO-2026-8899'), extract the inquiry ID into 'inquiry_id' and the PO number into 'po_number' and 'updates.po_number'.
-10. PRODUCT CATALOG RULES:
-The official Enlight Metals product catalog consists of:
+10. OFFICIAL PRODUCT CATALOG RULES:
+The product catalog strictly contains the following 22 products across 4 categories:
 • Flat Steel: HR Coil, HR Sheet, HR Plate, HRPO Coil, HRPO Sheet, CR Coil, CR Sheet, GP Coil, GP Sheet, Galvalume Coil, Galvalume Sheet, Chequered Coil, Chequered Sheet
 • Structural Steel: MS Round Bar, MS Flat Bar, MS Square Bar, TMT Bar, MS Angle, MS Channel, MS Beam
-• Pipes & Tubes: MS Round Pipe, MS Square Pipe, MS Rectangular Tube
-• Value Added: Slotted Angle, Solar Mounting Structure, Cable Tray – Perforated, Cable Tray – Ladder, GI Earthing Strip
-In line_items:
-- "sku_text": Set to the matching catalog product name if recognized (e.g. 'HR Coil', 'CR Sheet', 'MS Angle'). If an unknown product like 'LW coil' or 'Aluminum' is typed, extract the raw text (e.g. 'LW coil 8mm') so validation can detect it.
+• Pipes and Tubes: MS Round Pipe, MS Square Pipe, MS Rectangular Tube
+• Value Added Products: Slotted Angle, Solar Mounting Structure, Cable Tray – Perforated, Cable Tray – Ladder, GI Earthing Strip
+
+For all activities (LOG_INQUIRY, LOG_ORDER, LOG_COMPLAINT):
+- "sku_text" / "affected_product": Must match one of the 22 official catalog product names above.
+- Do NOT extract generic phrases (e.g. '2 coils', 'steel material', 'damaged material', 'goods') as product names.
+- In LOG_COMPLAINT: if no official catalog product name is mentioned, leave 'affected_product' as null so the system automatically resolves it from the linked Order / PO!
 - "dimensions" / "spec": Extract thickness, gauge, width, and size (e.g. '8mm', '1250 x 2500', '50x50x6').
+
 `;
 
   const userPrompt = `Existing Active Draft:
@@ -2031,8 +2035,13 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
       draft.deal_id = matched.id;
       draft.po_number = matched.po_number || null;
       draft.linked_inquiry_or_po = matched.po_number ? `PO: ${matched.po_number} (${matched.deal_code})` : matched.deal_code;
-      if (!draft.affected_product && matched.product_summary) {
-        draft.affected_product = matched.product_summary;
+      const dealProd = matched.product_summary || (matched.items && matched.items.length > 0 ? matched.items.map(it => it.sku_text).filter(Boolean).join(', ') : null);
+      const isCatalogProd = draft.affected_product && isValidCatalogProduct(draft.affected_product);
+      if ((!draft.affected_product || !isCatalogProd) && dealProd) {
+        draft.affected_product = dealProd;
+      } else if (isCatalogProd) {
+        const norm = normalizeProductToCatalog(draft.affected_product);
+        if (norm.catalogName) draft.affected_product = norm.catalogName;
       }
       return { handled: false, needsDisambiguation: false, draft };
     } else {
@@ -2066,8 +2075,13 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
     draft.deal_id = singleDeal.effective_deal_id || singleDeal.inquiry_id || singleDeal.id;
     draft.po_number = singleDeal.po_number || null;
     draft.linked_inquiry_or_po = singleDeal.po_number ? `PO: ${singleDeal.po_number} (${singleDeal.deal_code})` : singleDeal.deal_code;
-    if (!draft.affected_product && singleDeal.product_summary) {
-      draft.affected_product = singleDeal.product_summary;
+    const singleProd = singleDeal.product_summary || (singleDeal.items && singleDeal.items.length > 0 ? singleDeal.items.map(it => it.sku_text).filter(Boolean).join(', ') : null);
+    const isCatalogProd = draft.affected_product && isValidCatalogProduct(draft.affected_product);
+    if ((!draft.affected_product || !isCatalogProd) && singleProd) {
+      draft.affected_product = singleProd;
+    } else if (isCatalogProd) {
+      const norm = normalizeProductToCatalog(draft.affected_product);
+      if (norm.catalogName) draft.affected_product = norm.catalogName;
     }
     return { handled: false, needsDisambiguation: false, draft };
   }
@@ -2691,7 +2705,7 @@ function buildConfirmationSummary(action, draft) {
 
   switch (action) {
     case 'LOG_INQUIRY': {
-      summary += `• *Customer / Company:* ${draft.company_name}\n`;
+      summary += `• *Customer / Company:* ${draft.company_name || '-'}\n`;
       if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
         if (draft.line_items.length === 1) {
           const it = draft.line_items[0];
@@ -2713,12 +2727,12 @@ function buildConfirmationSummary(action, draft) {
         }
       } else {
         const rateStr = draft.rate ? ` @ ₹${Number(String(draft.rate).replace(/[^\d.]/g, '')).toLocaleString('en-IN')}/MT` : '';
-        summary += `• *Product:* ${draft.product_description}${rateStr}\n`;
+        summary += `• *Product:* ${draft.product_description || '-'}${rateStr}\n`;
       }
-      if (draft.preferred_make) summary += `• *Preferred Make:* ${draft.preferred_make}\n`;
-      if (draft.payment_terms) summary += `• *Payment Terms:* ${draft.payment_terms}\n`;
-      if (draft.delivery_location) summary += `• *Delivery Location:* ${draft.delivery_location}\n`;
-      if (draft.additional_notes) summary += `• *Additional Notes:* ${draft.additional_notes}\n`;
+      summary += `• *Preferred Make:* ${draft.preferred_make || '-'}\n`;
+      summary += `• *Payment Terms:* ${draft.payment_terms || '-'}\n`;
+      summary += `• *Delivery Location:* ${draft.delivery_location || '-'}\n`;
+      summary += `• *Additional Notes:* ${draft.additional_notes || '-'}\n`;
       if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
         const totalAmt = draft.line_items.reduce((sum, it) => sum + (Number(it.amount) || ((Number(it.quantity) || 0) * (Number(it.rate) || 0)) || 0), 0);
         if (totalAmt > 0) {
@@ -2765,11 +2779,11 @@ function buildConfirmationSummary(action, draft) {
         const cleanDisplayInq = draft.inquiry_id.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
         summary += `• *Inquiry ID:* INQ-${cleanDisplayInq}\n`;
       }
-      summary += `• *Customer / Company:* ${draft.company_name}\n`;
-      summary += `• *PO Number:* ${draft.po_number}\n`;
-      summary += `• *PO Date:* ${draft.po_date}\n`;
-      summary += `• *Delivery Location:* ${draft.delivery_location}\n`;
-      summary += `• *Payment Terms:* ${draft.payment_terms}\n`;
+      summary += `• *Customer / Company:* ${draft.company_name || '-'}\n`;
+      summary += `• *PO Number:* ${draft.po_number || '-'}\n`;
+      summary += `• *PO Date:* ${draft.po_date || '-'}\n`;
+      summary += `• *Delivery Location:* ${draft.delivery_location || '-'}\n`;
+      summary += `• *Payment Terms:* ${draft.payment_terms || '-'}\n`;
       let subtotal = 0;
       let totalTonnage = 0;
       let primaryUnit = 'MT';
@@ -2840,14 +2854,14 @@ function buildConfirmationSummary(action, draft) {
     }
 
     case 'LOG_VISIT': {
-      summary += `• *Customer / Company:* ${draft.company_name}\n`;
-      summary += `• *Person Met:* ${draft.person_met}\n`;
-      summary += `• *Contact Phone:* ${draft.contact_phone}\n`;
-      summary += `• *City / Location:* ${draft.city_location}\n`;
-      summary += `• *Visit Date:* ${draft.visit_date}\n`;
-      summary += `• *Visit Outcome:* ${draft.visit_outcome}\n`;
-      if (draft.followup_action) summary += `• *Follow-up Action:* ${draft.followup_action}\n`;
-      summary += `• *Meeting Remarks:* ${draft.meeting_remarks}\n`;
+      summary += `• *Customer / Company:* ${draft.company_name || '-'}\n`;
+      summary += `• *Person Met:* ${draft.person_met || '-'}\n`;
+      summary += `• *Contact Phone:* ${draft.contact_phone || '-'}\n`;
+      summary += `• *City / Location:* ${draft.city_location || '-'}\n`;
+      summary += `• *Visit Date:* ${draft.visit_date || '-'}\n`;
+      summary += `• *Visit Outcome:* ${draft.visit_outcome || '-'}\n`;
+      summary += `• *Follow-up Action:* ${draft.followup_action || '-'}\n`;
+      summary += `• *Meeting Remarks:* ${draft.meeting_remarks || '-'}\n`;
       break;
     }
 
@@ -2865,29 +2879,25 @@ function buildConfirmationSummary(action, draft) {
     }
 
     case 'LOG_NEW_CUSTOMER': {
-      summary += `• *Company Name:* ${draft.company_name}\n`;
-      summary += `• *Contact Person:* ${draft.contact_person}\n`;
-      const phoneVal = draft.mobile_number || draft.phone || draft.contact_phone;
+      summary += `• *Company Name:* ${draft.company_name || '-'}\n`;
+      summary += `• *Contact Person:* ${draft.contact_person || '-'}\n`;
+      const phoneVal = draft.mobile_number || draft.phone || draft.contact_phone || '-';
       summary += `• *Mobile Number:* ${phoneVal}\n`;
-      const locVal = draft.delivery_location || draft.city_location || draft.address;
+      const locVal = draft.delivery_location || draft.city_location || draft.address || '-';
       summary += `• *Delivery Location:* ${locVal}\n`;
-      if (draft.email) summary += `• *Email:* ${draft.email}\n`;
-      const gstVal = draft.gst_number || draft.gst;
-      if (gstVal) summary += `• *GST Number:* ${gstVal}\n`;
+      summary += `• *Email:* ${draft.email || '-'}\n`;
+      const gstVal = draft.gst_number || draft.gst || '-';
+      summary += `• *GST Number:* ${gstVal}\n`;
       break;
     }
 
     case 'LOG_COMPLAINT': {
-      summary += `• *Customer / Company:* ${draft.company_name}\n`;
-      if (draft.linked_inquiry_or_po) {
-        summary += `• *Linked Order / Ref:* ${draft.linked_inquiry_or_po}\n`;
-      }
-      if (draft.affected_product || draft.product_name) {
-        summary += `• *Product / Material:* ${draft.affected_product || draft.product_name}\n`;
-      }
+      summary += `• *Customer / Company:* ${draft.company_name || '-'}\n`;
+      summary += `• *Linked Order / Ref:* ${draft.linked_inquiry_or_po || '-'}\n`;
+      summary += `• *Product / Material:* ${draft.affected_product || draft.product_name || '-'}\n`;
       summary += `• *Complaint Type:* ${draft.complaint_type || 'Quality Defect'}\n`;
-      summary += `• *Description:* ${draft.complaint_description || draft.affected_product}\n`;
-      if (draft.corrective_action) summary += `• *Corrective Action:* ${draft.corrective_action}\n`;
+      summary += `• *Description:* ${draft.complaint_description || draft.affected_product || '-'}\n`;
+      summary += `• *Corrective Action:* ${draft.corrective_action || '-'}\n`;
       summary += `• *Status:* Open (48-Hour SLA Clock Started)\n`;
       break;
     }
@@ -5984,8 +5994,13 @@ async function handleCatalogFlow(rawText, senderPhone) {
         existingDraft.linked_inquiry_or_po = matchedCandidate.po_number
           ? `PO: ${matchedCandidate.po_number} (${matchedCandidate.deal_code})`
           : matchedCandidate.deal_code;
-        if (!existingDraft.affected_product && matchedCandidate.product_summary) {
-          existingDraft.affected_product = matchedCandidate.product_summary;
+        const dealProduct = matchedCandidate.product_summary || (matchedCandidate.items && matchedCandidate.items.length > 0 ? matchedCandidate.items.map(it => it.sku_text).filter(Boolean).join(', ') : null);
+        const isCatProd = existingDraft.affected_product && isValidCatalogProduct(existingDraft.affected_product);
+        if ((!existingDraft.affected_product || !isCatProd) && dealProduct) {
+          existingDraft.affected_product = dealProduct;
+        } else if (isCatProd) {
+          const norm = normalizeProductToCatalog(existingDraft.affected_product);
+          if (norm.catalogName) existingDraft.affected_product = norm.catalogName;
         }
         delete existingDraft._order_candidates;
         orderCandidateResolved = true;
