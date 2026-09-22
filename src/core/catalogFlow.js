@@ -6999,4 +6999,5 @@ module.exports = {
   RESUME_QUERY_BUTTONS,
   restoreInterruptedFlow,
   handleMidFlowStageUpdate,
+  classifyActiveSessionIntent,
 };
