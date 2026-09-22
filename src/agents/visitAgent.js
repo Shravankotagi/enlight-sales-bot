@@ -1123,11 +1123,18 @@ async function handleVisitCorrection(text, senderPhone) {
       });
 
       const choicesText = candidateSummaries
-        .map(
-          (c) =>
-            `${c.index}. ${c.customer_name} (${c.date}) - Outcome: ${c.outcome} - Contact: ${c.person_met}`,
-        )
-        .join('\n');
+        .map((c) => {
+          const lines = [
+            `${c.index}. *Visit on ${c.date}*`,
+            `   • *Person Met:* ${c.person_met}`,
+            `   • *Outcome:* ${c.outcome}`,
+          ];
+          if (c.remarks && c.remarks !== 'No remarks') {
+            lines.push(`   • *Remarks:* ${c.remarks}`);
+          }
+          return lines.join('\n');
+        })
+        .join('\n\n');
 
       const sessionPayload = {
         target_field: targetField,
@@ -1143,10 +1150,10 @@ async function handleVisitCorrection(text, senderPhone) {
       );
 
       return (
-        `Which visit to ${candidateVisits[0].customer_name} would you like to update?\n\n` +
-        `Please select which visit to update to ${newValue}:\n\n` +
+        `📅 *Multiple Visits Found for ${candidateVisits[0].customer_name}:*\n\n` +
+        `Please choose which visit you want to update:\n\n` +
         `${choicesText}\n\n` +
-        `Reply with the number (e.g. "1") or visit date.`
+        `👉 Reply with the *Option Number* (1–${candidateSummaries.length}), *Visit Date*, or what you want to update.`
       );
     }
 

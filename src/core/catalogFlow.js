@@ -206,6 +206,76 @@ function isDiscardOrCancelIntent(text) {
   return false;
 }
 
+/**
+ * Extracts a candidate option index (1-based integer) from anywhere within natural language text.
+ * Supports:
+ * - "option 1", "opt 1", "choice 2", "no. 1", "#1", "in option 1", "for option 2"
+ * - "1st option", "2nd one", "3rd inquiry", "1st", "2nd", "3rd"
+ * - "first", "second", "third", "fourth", "fifth", "last"
+ * - Standalone "1", "1.", "1)", "1️⃣"
+ */
+function extractCandidateIndex(text, candidateCount = 5) {
+  if (!text || typeof text !== 'string') return null;
+  const clean = text.trim();
+
+  // Pattern 1: Explicit "option 1", "opt 1", "choice 2", "no. 1", "#1", "in option 1", "for option 2" anywhere in text
+  const optMatch = clean.match(/\b(?:in\s+|for\s+|from\s+|of\s+)?(?:option|opt|choice|no\.?|number|#|item|row)\s*([1-9]\d*)\b/i);
+  if (optMatch) {
+    const idx = parseInt(optMatch[1], 10);
+    if (idx >= 1 && idx <= candidateCount) return idx;
+  }
+
+  // Pattern 2: "1st option", "2nd one", "3rd inquiry", "1st", "2nd", "3rd"
+  const ordMatch = clean.match(/\b([1-9]\d*)\s*(?:st|nd|rd|th)\b/i);
+  if (ordMatch) {
+    const idx = parseInt(ordMatch[1], 10);
+    if (idx >= 1 && idx <= candidateCount) return idx;
+  }
+
+  // Pattern 3: English ordinals ("first", "second", "third", "fourth", "fifth", "last")
+  const wordOrdinals = {
+    first: 1,
+    '1st': 1,
+    second: 2,
+    '2nd': 2,
+    third: 3,
+    '3rd': 3,
+    fourth: 4,
+    '4th': 4,
+    fifth: 5,
+    '5th': 5,
+    last: candidateCount,
+  };
+  for (const [word, val] of Object.entries(wordOrdinals)) {
+    const wordRegex = new RegExp(`\\b(?:in\\s+|for\\s+|from\\s+|of\\s+)?(?:the\\s+)?${word}\\s*(?:option|choice|inquiry|order|visit|complaint|deal|one|item|row)?\\b`, 'i');
+    if (wordRegex.test(clean) && val <= candidateCount) {
+      return val;
+    }
+  }
+
+  // Pattern 4: Standalone / start-of-line number ("1", "1.", "1)", "1 -", "#1", "1️⃣")
+  const cleanKeycap = clean.replace(/([1-9]|10)️⃣/g, '$1');
+  const startNumMatch = cleanKeycap.match(/^\s*(?:option\s*|no\.?\s*|#\s*)?([1-9]\d*)\s*(?:[.)\-:\s]|$)/i);
+  if (startNumMatch) {
+    const idx = parseInt(startNumMatch[1], 10);
+    if (idx >= 1 && idx <= candidateCount) return idx;
+  }
+
+  return null;
+}
+
+/**
+ * Checks if the user message is purely an option/identifier selector without any field update instructions.
+ */
+function isPureOptionSelectorOnly(text) {
+  if (!text || typeof text !== 'string') return true;
+  const clean = text.trim();
+  if (/^\s*(?:option|choice|no\.?|#)?\s*[1-9]\d*\.?\s*$/i.test(clean)) return true;
+  if (/^\s*(?:the\s+)?(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|last)\s*(?:option|choice|inquiry|order|visit|one)?\.?\s*$/i.test(clean)) return true;
+  if (/^(?:PO|Purchase\s*Order|INQ|DEAL)[\s#:-]*[0-9A-Za-z-]+$/i.test(clean)) return true;
+  return false;
+}
+
 const CATALOG_MENU_SECTIONS = [
   {
     title: 'Inquiries & Orders',
@@ -1988,25 +2058,42 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
     const dateFormatted = formatDateDDMMYYYY(vDate);
     const outTagMatch = (v.remarks || '').match(/\[Outcome:\s*([^\]]+)\]/i);
     const outcome = outTagMatch ? outTagMatch[1] : 'Positive';
+    const cleanRemarks = (v.remarks || '')
+      .replace(/\[Outcome:\s*[^\]]+\]/gi, '')
+      .replace(/\[Follow-up:\s*[^\]]+\]/gi, '')
+      .trim();
     return {
       index: idx + 1,
       id: v.id,
+      company_name: v.customer_name || draft.company_name,
       date: dateFormatted,
       visited_at: v.visited_at,
       person_met: v.person_met || 'Not recorded',
       location: v.customer_address || 'Not recorded',
       outcome: outcome,
+      remarks: cleanRemarks ? (cleanRemarks.length > 80 ? cleanRemarks.slice(0, 77) + '...' : cleanRemarks) : null,
     };
   });
 
   const choicesText = candidateSummaries
-    .map(c => `• *${c.index}.* *${c.date}* — Met: ${c.person_met} (${c.location}, ${c.outcome})`)
-    .join('\n');
+    .map(c => {
+      const lines = [
+        `${c.index}. *Visit on ${c.date}*`,
+        `   • *Person Met:* ${c.person_met}`,
+        `   • *Location:* ${c.location}`,
+        `   • *Outcome:* ${c.outcome}`,
+      ];
+      if (c.remarks) {
+        lines.push(`   • *Remarks:* ${c.remarks}`);
+      }
+      return lines.join('\n');
+    })
+    .join('\n\n');
 
-  const prompt = `📅 *Multiple Visits Found for ${draft.company_name}*\n\n` +
-    `Please specify which visit date you want to update:\n\n` +
+  const prompt = `📅 *Multiple Visits Found for ${draft.company_name}:*\n\n` +
+    `Please choose which visit you want to update:\n\n` +
     `${choicesText}\n\n` +
-    `Reply with the *Visit Date* (e.g. "${candidateSummaries[0].date}") or option number (1–${candidateSummaries.length}).`;
+    `👉 Reply with the *Option Number* (1–${candidateSummaries.length}), *Visit Date* (e.g. "${candidateSummaries[0].date}"), or what you want to update (e.g. "update remarks in option 1 to Positive").`;
 
   draft._visit_candidates = candidateSummaries;
 
@@ -2030,7 +2117,7 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
   // Query confirmed won orders from Orders module (deals table with stage = 'won') strictly scoped by role
   let dealsQuery = supabase
     .from('deals')
-    .select('id, inquiry_id, customer_name, po_number, stage, total_amount, delivery_location, created_at, salesperson_phone')
+    .select('id, inquiry_id, customer_name, po_number, stage, total_amount, delivery_location, payment_terms, created_at, salesperson_phone')
     .ilike('customer_name', `%${companyName}%`)
     .eq('stage', 'won')
     .order('created_at', { ascending: false });
@@ -2081,7 +2168,8 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
       ? itms.map(it => `${it.sku_text || 'Steel'} ${it.dimensions || ''} ${it.quantity ? `(${it.quantity} ${it.unit || 'MT'})` : ''}`.trim()).join(', ')
       : 'Steel Material';
     const dateFormatted = d.created_at ? new Date(d.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'numeric', year: 'numeric' }) : '';
-    const loc = d.delivery_location ? `${d.delivery_location}` : '';
+    const loc = d.delivery_location ? `${d.delivery_location}` : 'Not specified';
+    const payment = d.payment_terms ? `${d.payment_terms}` : 'Not specified';
 
     return {
       ...d,
@@ -2092,8 +2180,27 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
       product_summary: prodSummary,
       date_formatted: dateFormatted,
       location: loc,
+      payment_terms: payment,
+      total_amount: Number(d.total_amount) || 0,
     };
   });
+
+  const formatOrderCandidate = (d, idx) => {
+    const poRef = d.po_number ? `PO: *${d.po_number}* (${d.deal_code})` : `*${d.deal_code}*`;
+    const lines = [
+      `${idx + 1}. ${poRef} — _${d.stage ? (d.stage.charAt(0).toUpperCase() + d.stage.slice(1)) : 'Won'}_`,
+      `   • *Product:* ${d.product_summary}`,
+      `   • *Delivery Location:* ${d.location}`,
+      `   • *Payment Terms:* ${d.payment_terms}`,
+    ];
+    if (d.total_amount > 0) {
+      lines.push(`   • *Total Value:* ₹${d.total_amount.toLocaleString('en-IN')}`);
+    }
+    if (d.date_formatted) {
+      lines.push(`   • *Date:* ${d.date_formatted}`);
+    }
+    return lines.join('\n');
+  };
 
   // Check if candidate PO or Inquiry ID was specified in user text or draft
   const rawRef = (draft.linked_inquiry_or_po || draft.po_number || draft.deal_id || '').trim();
@@ -2131,16 +2238,12 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
       return { handled: false, needsDisambiguation: false, draft };
     } else {
       // Specified PO or Inquiry not found among won orders
-      const availableList = enrichedDeals.map((d, idx) => {
-        const poRef = d.po_number ? `PO: *${d.po_number}* (${d.deal_code})` : `*${d.deal_code}*`;
-        const extra = [d.location, d.date_formatted].filter(Boolean).join(', ');
-        return `${idx + 1}. ${poRef} — ${d.product_summary}${extra ? ` — ${extra}` : ''}`;
-      }).join('\n');
+      const availableList = enrichedDeals.map(formatOrderCandidate).join('\n\n');
 
       const reply = `❌ *Order / PO Not Found in Orders Module*\n\n` +
         `Customer: *${companyName}*\n` +
         `Order / PO *"${rawRef}"* was not found among confirmed orders for ${companyName}.\n\n` +
-        `*Available Confirmed Orders for ${companyName}:*\n` +
+        `*Available Confirmed Orders for ${companyName}:*\n\n` +
         `${availableList}\n\n` +
         `👉 Please reply with a valid *PO Number* or *Inquiry ID* from the list above.`;
 
@@ -2172,16 +2275,12 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
   }
 
   // Multiple won orders exist and no specific PO/INQ was provided -> Multi-Order Disambiguation
-  const orderList = enrichedDeals.map((d, idx) => {
-    const poRef = d.po_number ? `PO: *${d.po_number}* (${d.deal_code})` : `*${d.deal_code}*`;
-    const extra = [d.location, d.date_formatted].filter(Boolean).join(', ');
-    return `${idx + 1}. ${poRef} — ${d.product_summary}${extra ? ` — ${extra}` : ''}`;
-  }).join('\n');
+  const orderList = enrichedDeals.map(formatOrderCandidate).join('\n\n');
 
-  const prompt = `⚠️ *Multiple Confirmed Orders Found for ${companyName}*\n\n` +
+  const prompt = `⚠️ *Multiple Confirmed Orders Found for ${companyName}:*\n\n` +
     `Please specify which order or PO this complaint is about:\n\n` +
     `${orderList}\n\n` +
-    `👉 Reply with the *Number* (e.g. *1* or *2*) or the *Inquiry ID* / *PO Number*.`;
+    `👉 Reply with the *Number* (1–${enrichedDeals.length}) or the *Inquiry ID* / *PO Number*.`;
 
   draft._order_candidates = enrichedDeals;
 
@@ -2594,6 +2693,17 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
 
   // ── Case C: Multiple Editable Inquiries Found ──
   const candidateSummaries = editable.slice(0, 5).map((inq, idx) => {
+    let rateStr = null;
+    let makeStr = null;
+    if (Array.isArray(inq.deal_items) && inq.deal_items.length > 0) {
+      const firstItem = inq.deal_items[0];
+      if (firstItem.rate) {
+        rateStr = `₹${Number(firstItem.rate).toLocaleString('en-IN')}${firstItem.unit ? `/${firstItem.unit}` : '/MT'}`;
+      }
+      if (firstItem.preferred_make || firstItem.make) {
+        makeStr = firstItem.preferred_make || firstItem.make;
+      }
+    }
     return {
       index: idx + 1,
       id: inq.inquiry_id || inq.id,
@@ -2602,19 +2712,35 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       date: inq.dateFormatted,
       stage: formatStageLabel(inq.stage),
       productSummary: formatProductSummary(inq),
-      payment_terms: inq.payment_terms,
-      delivery_location: inq.delivery_location,
+      payment_terms: inq.payment_terms || 'Not specified',
+      delivery_location: inq.delivery_location || 'Not specified',
+      rate: rateStr,
+      make: makeStr,
     };
   });
 
   const choicesText = candidateSummaries
-    .map(c => `• *${c.index}.* *${c.displayId}* (${c.date}) — ${c.productSummary} [${c.stage}]`)
-    .join('\n');
+    .map(c => {
+      const lines = [
+        `${c.index}. *${c.displayId}* (${c.date}) — _${c.stage}_`,
+        `   • *Product:* ${c.productSummary}`,
+        `   • *Delivery Location:* ${c.delivery_location}`,
+        `   • *Payment Terms:* ${c.payment_terms}`,
+      ];
+      if (c.rate && !c.productSummary.includes('@ ₹')) {
+        lines.push(`   • *Rate:* ${c.rate}`);
+      }
+      if (c.make) {
+        lines.push(`   • *Make:* ${c.make}`);
+      }
+      return lines.join('\n');
+    })
+    .join('\n\n');
 
   const prompt = `📋 *Multiple Editable Inquiries Found for ${targetName}:*\n\n` +
     `Please choose which inquiry you want to edit:\n\n` +
     `${choicesText}\n\n` +
-    `Reply with the *Inquiry ID* (e.g. "${candidateSummaries[0].displayId}") or option number (1–${candidateSummaries.length}).`;
+    `👉 Reply with the *Option Number* (1–${candidateSummaries.length}), *Inquiry ID* (e.g. "${candidateSummaries[0].displayId}"), or what you want to update (e.g. "update location in option 1 to Bhiwandi").`;
 
   draft._inquiry_candidates = candidateSummaries;
 
@@ -6836,11 +6962,10 @@ async function handleCatalogFlow(rawText, senderPhone) {
     // Check if resolving candidate visit selection (by date or number)
     let candidateResolved = false;
     if (existingDraft._visit_candidates && Array.isArray(existingDraft._visit_candidates)) {
-      const cleanNum = text.replace(/^(?:option|no\.?|choice)\s*/i, '').replace(/[.#️⃣*️⃣\s]/g, '');
-      const numIdx = parseInt(cleanNum, 10);
+      const numIdx = extractCandidateIndex(text, existingDraft._visit_candidates.length);
       let matchedCandidate = null;
 
-      if (!isNaN(numIdx) && numIdx >= 1 && numIdx <= existingDraft._visit_candidates.length) {
+      if (numIdx !== null && numIdx >= 1 && numIdx <= existingDraft._visit_candidates.length) {
         matchedCandidate = existingDraft._visit_candidates[numIdx - 1];
       } else {
         const normInputDate = normalizeDateToDDMMYYYY(text);
@@ -6857,17 +6982,33 @@ async function handleCatalogFlow(rawText, senderPhone) {
         existingDraft.visit_date = matchedCandidate.date;
         delete existingDraft._visit_candidates;
         candidateResolved = true;
+
+        const isPureSelect = isPureOptionSelectorOnly(text);
+        const hasUpdates = (existingDraft.updates && Object.values(existingDraft.updates).some(v => v !== null && v !== undefined && v !== '')) ||
+          Boolean(existingDraft.person_met || existingDraft.contact_phone || existingDraft.visit_outcome || existingDraft.meeting_remarks);
+
+        if (isPureSelect && !hasUpdates) {
+          const prompt = `✏️ **Selected Field Visit for ${matchedCandidate.company_name || 'Customer'} (${matchedCandidate.date}):**\n\n` +
+            `- **Person Met:** ${matchedCandidate.person_met || 'Not specified'}\n` +
+            `- **Visit Outcome:** ${matchedCandidate.outcome || 'Not specified'}\n` +
+            `- **Remarks:** ${matchedCandidate.remarks || 'Not specified'}\n\n` +
+            `What details would you like to update?\n` +
+            `_(e.g., Person Met, Outcome to Positive, Remarks, or Follow-up Action)_`;
+
+          await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
+          await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+          return { handled: true, reply: prompt };
+        }
       }
     }
 
     // Check if resolving candidate inquiry selection (by ID or number)
     let inquiryCandidateResolved = false;
     if (existingDraft._inquiry_candidates && Array.isArray(existingDraft._inquiry_candidates)) {
-      const cleanNum = text.replace(/^(?:option|no\.?|choice)\s*/i, '').replace(/[.#️⃣*️⃣\s]/g, '');
-      const numIdx = parseInt(cleanNum, 10);
+      const numIdx = extractCandidateIndex(text, existingDraft._inquiry_candidates.length);
       let matchedCandidate = null;
 
-      if (!isNaN(numIdx) && numIdx >= 1 && numIdx <= existingDraft._inquiry_candidates.length) {
+      if (numIdx !== null && numIdx >= 1 && numIdx <= existingDraft._inquiry_candidates.length) {
         matchedCandidate = existingDraft._inquiry_candidates[numIdx - 1];
       } else {
         const cleanText = text.replace(/[^0-9A-Za-z]/g, '').toUpperCase();
@@ -6885,10 +7026,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
         delete existingDraft._inquiry_candidates;
         inquiryCandidateResolved = true;
 
+        const isPureSelect = isPureOptionSelectorOnly(text);
         const hasUpdates = (existingDraft.updates && Object.values(existingDraft.updates).some(v => v !== null && v !== undefined && v !== '')) ||
           (Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0);
 
-        if (!hasUpdates) {
+        if (isPureSelect && !hasUpdates) {
           const prompt = `✏️ **Selected Inquiry ${matchedCandidate.displayId} (${matchedCandidate.company_name}):**\n\n` +
             `- **Date:** ${matchedCandidate.date}\n` +
             `- **Stage:** ${matchedCandidate.stage}\n` +
@@ -6905,14 +7047,13 @@ async function handleCatalogFlow(rawText, senderPhone) {
       }
     }
 
-    // Check if resolving candidate order selection for LOG_COMPLAINT (by number, PO, or INQ)
+    // Check if resolving candidate order selection for LOG_COMPLAINT or UPDATE_ORDER (by number, PO, or INQ)
     let orderCandidateResolved = false;
     if (existingDraft._order_candidates && Array.isArray(existingDraft._order_candidates)) {
-      const cleanNum = text.replace(/^(?:option|no\.?|choice)\s*/i, '').replace(/[.#️⃣*️⃣\s]/g, '');
-      const numIdx = parseInt(cleanNum, 10);
+      const numIdx = extractCandidateIndex(text, existingDraft._order_candidates.length);
       let matchedCandidate = null;
 
-      if (!isNaN(numIdx) && numIdx >= 1 && numIdx <= existingDraft._order_candidates.length) {
+      if (numIdx !== null && numIdx >= 1 && numIdx <= existingDraft._order_candidates.length) {
         matchedCandidate = existingDraft._order_candidates[numIdx - 1];
       } else {
         const cleanText = text.replace(/^(?:PO|Purchase\s*Order|INQ|DEAL)[\s#:-]*/i, '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
@@ -6944,6 +7085,25 @@ async function handleCatalogFlow(rawText, senderPhone) {
         }
         delete existingDraft._order_candidates;
         orderCandidateResolved = true;
+
+        if (action === 'UPDATE_ORDER') {
+          const isPureSelect = isPureOptionSelectorOnly(text);
+          const hasUpdates = (existingDraft.updates && Object.values(existingDraft.updates).some(v => v !== null && v !== undefined && v !== '')) ||
+            (Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0);
+
+          if (isPureSelect && !hasUpdates) {
+            const prompt = `✏️ **Selected Order ${matchedCandidate.po_number ? `PO: ${matchedCandidate.po_number}` : matchedCandidate.deal_code} (${matchedCandidate.customer_name || 'Customer'}):**\n\n` +
+              `- **Date:** ${matchedCandidate.po_date || matchedCandidate.dateFormatted || 'Not specified'}\n` +
+              `- **Stage:** ${matchedCandidate.stage || 'Won'}\n` +
+              `- **Total Value:** ₹${Number(matchedCandidate.total_amount || 0).toLocaleString('en-IN')}\n\n` +
+              `What details would you like to update?\n` +
+              `_(e.g., Attach PO Number, Delivery Location, Payment Terms, Rate, or Quantity)_`;
+
+            await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
+            await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+            return { handled: true, reply: prompt };
+          }
+        }
       }
     }
 
@@ -6980,8 +7140,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
 
     // Extract fields from user message
-    const isPureCandidateSelection = (candidateResolved || inquiryCandidateResolved || orderCandidateResolved) &&
-      (/^\s*(?:option|choice|no\.?)?\s*[1-9]\d*\.?\s*$/i.test(text) || /^(?:PO|Purchase\s*Order|INQ|DEAL)[\s#:-]*[0-9A-Za-z-]+$/i.test(text.trim()));
+    const isPureCandidateSelection = (candidateResolved || inquiryCandidateResolved || orderCandidateResolved) && isPureOptionSelectorOnly(text);
 
     const updatedDraft = isPureCandidateSelection
       ? { ...existingDraft }
