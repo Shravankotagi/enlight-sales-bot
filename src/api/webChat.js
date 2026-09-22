@@ -243,6 +243,59 @@ async function handlePendingSessionState(rawText, senderPhone) {
 }
 
 /**
+ * Normalizes incoming interactive button IDs / action triggers into standard flow commands.
+ */
+function normalizeIncomingButtonPayload(rawInput) {
+  if (!rawInput || typeof rawInput !== 'string') return '';
+  const text = rawInput.trim();
+
+  // Specific Button ID mappings to action commands
+  if (text === 'btn_confirm_yes' || text === 'btn_cust_yes' || text === 'btn_resume_yes') {
+    return 'yes';
+  }
+  if (text === 'btn_confirm_edit') {
+    return 'edit';
+  }
+  if (text === 'btn_confirm_cancel' || text === 'btn_cust_no') {
+    return 'cancel';
+  }
+  if (text === 'btn_resume_no' || text === 'btn_post_menu') {
+    return 'menu';
+  }
+  if (text.startsWith('btn_repeat_log_inquiry')) {
+    return '1';
+  }
+  if (text.startsWith('btn_repeat_update_inquiry')) {
+    return '2';
+  }
+  if (text.startsWith('btn_repeat_log_order')) {
+    return '3';
+  }
+  if (text.startsWith('btn_repeat_update_order')) {
+    return '4';
+  }
+  if (text.startsWith('btn_repeat_log_visit')) {
+    return '5';
+  }
+  if (text.startsWith('btn_repeat_update_visit')) {
+    return '6';
+  }
+  if (text.startsWith('btn_repeat_log_new_customer')) {
+    return '7';
+  }
+  if (text.startsWith('btn_repeat_log_complaint')) {
+    return '8';
+  }
+  if (text.startsWith('btn_repeat_update_complaint')) {
+    return '9';
+  }
+  if (text.startsWith('menu_')) {
+    return text.replace('menu_', '');
+  }
+  return text;
+}
+
+/**
  * POST /chat/web/message
  * Entry point for Web AI Assistant messages.
  * Body: { message: string, employeePhone?: string, userId?: string, employeeName?: string, role?: string }
@@ -262,7 +315,7 @@ router.post('/message', requireWebApiKey, async (req, res) => {
       cleanPhone = '9619226169'; // Default fallback phone for sales ops
     }
 
-    const rawText = message.trim();
+    const rawText = normalizeIncomingButtonPayload(message);
     const empName = employeeName || 'Sales Staff';
 
     console.log(`[WebChat] Processing message from ${empName} (${cleanPhone}): "${rawText.slice(0, 80)}"`);
@@ -271,10 +324,14 @@ router.post('/message', requireWebApiKey, async (req, res) => {
     const catalogResult = await handleCatalogFlow(rawText, cleanPhone);
     if (catalogResult && catalogResult.handled && catalogResult.reply) {
       const formattedReply = formatForWeb(catalogResult.reply);
+      const interactiveType = catalogResult.interactiveType || 'text';
       return res.json({
         success: true,
         reply: formattedReply,
-        type: catalogResult.interactiveType || 'text',
+        type: interactiveType,
+        interactiveType,
+        interactiveButtons: catalogResult.interactiveButtons || null,
+        interactiveList: catalogResult.interactiveList || null,
         data: catalogResult.interactiveButtons || catalogResult.interactiveList || null,
       });
     }
@@ -287,6 +344,9 @@ router.post('/message', requireWebApiKey, async (req, res) => {
         success: true,
         reply: formattedReply,
         type: 'text',
+        interactiveType: 'text',
+        interactiveButtons: null,
+        interactiveList: null,
       });
     }
 
