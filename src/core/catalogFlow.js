@@ -897,6 +897,7 @@ LOG_ORDER:
   "po_date": "<PO Date in DD-MM-YYYY format, else null>",
   "delivery_location": "<Delivery Location, else null>",
   "payment_terms": "<Payment Terms, else null>",
+  "rate": <numeric rate per unit in INR without symbol e.g. 50000 or 58000 if mentioned at top level or single rate, else null>,
   "line_items": [
     {
       "sku_text": "<Core metal product name e.g. 'MS Plate 10mm', 'HR Coil'>",
@@ -918,6 +919,7 @@ LOG_ORDER:
       "po_date": "<PO Date>",
       "delivery_location": "<Location>",
       "payment_terms": "<Payment Terms>",
+      "rate": <rate or null>,
       "line_items": []
     }
   ]
@@ -1227,6 +1229,26 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     }
   }
 
+  // Fallback rate extraction for LOG_ORDER / LOG_INQUIRY / UPDATE_INQUIRY
+  if (!merged.rate && ['LOG_ORDER', 'LOG_INQUIRY', 'UPDATE_INQUIRY'].includes(action)) {
+    const rateMatch = userInput.match(/(?:rate|price|@|bhav)[\s:=-]*₹?\s*(\d+(?:,\d+)*(?:\.\d+)?)/i) ||
+      userInput.match(/(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:\/|\s*per\s*)(?:mt|ton|tonne|kg|pcs|sheet)/i);
+    if (rateMatch) {
+      merged.rate = Number(rateMatch[1].replace(/,/g, ''));
+    }
+  }
+
+  // Fallback PO number extraction for LOG_ORDER / UPDATE_ORDER
+  if (!merged.po_number && ['LOG_ORDER', 'UPDATE_ORDER'].includes(action)) {
+    const poMatch = userInput.match(/\b(?:PO[-_:#\s]*([A-Za-z0-9_-]+)|(?:po\s*number|po\s*no\.?|po#)[\s:=-]*([A-Za-z0-9_-]+))\b/i);
+    if (poMatch) {
+      const candidate = (poMatch[1] || poMatch[2] || '').trim();
+      if (candidate && !/^(?:date|for|to|is|with|number|no|details?)$/i.test(candidate)) {
+        merged.po_number = candidate.toUpperCase().startsWith('PO') ? candidate.toUpperCase() : `PO-${candidate.toUpperCase()}`;
+      }
+    }
+  }
+
   // Update normalization for edit workflows
   if (action === 'UPDATE_ORDER') {
     if (!merged.updates) merged.updates = {};
@@ -1484,7 +1506,7 @@ async function verifyDraftCustomer(action, draft, senderPhone) {
     action === 'UPDATE_ORDER' ||
     action === 'UPDATE_COMPLAINT' ||
     action === 'LOG_COMPLAINT' ||
-    (action === 'LOG_ORDER' && draft.deal_id)
+    (action === 'LOG_ORDER' && (draft.deal_id || draft.inquiry_id || draft._inquiry_display_id))
   ) return { isValid: true };
 
   const rawName = String(draft.company_name).trim();
@@ -1741,73 +1763,113 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   }
 
   // If Quoted stage -> Auto populate customer name, delivery location, payment terms, line items, PO details
-  draft.inquiry_id = canonicalInqId;
-  if (matchedDeal) {
-    draft.deal_id = matchedDeal.id;
-    if (!draft.company_name && matchedDeal.customer_name) {
-      draft.company_name = matchedDeal.customer_name;
-    }
-    if (!draft.delivery_location) {
-      draft.delivery_location = matchedDeal.delivery_location || 'Standard / Ex-Works';
-    }
-    if (!draft.payment_terms) {
-      draft.payment_terms = matchedDeal.payment_terms || 'Standard Terms';
-    }
-    if (!draft.po_date) {
-      draft.po_date = formatDateDDMMYYYY(new Date());
-    }
-    if (!draft.po_number) {
-      if (matchedDeal.po_number) {
-        draft.po_number = matchedDeal.po_number;
-      } else {
-        const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-        const randomNum = Math.floor(1000 + Math.random() * 9000);
-        draft.po_number = `PO-${todayStr}-${randomNum}`;
-      }
-    }
-    if ((!Array.isArray(draft.line_items) || draft.line_items.length === 0) && Array.isArray(matchedDeal.deal_items) && matchedDeal.deal_items.length > 0) {
-      draft.line_items = matchedDeal.deal_items.map(it => ({
-        sku_text: it.sku_text,
-        description: it.sku_text,
-        dimensions: it.dimensions || null,
-        spec: it.dimensions || null,
-        quantity: it.quantity,
-        unit: it.unit || 'MT',
-        rate: it.rate,
-        amount: it.amount || (it.quantity * it.rate),
-      }));
-    }
-  } else if (matchedInq) {
-    draft.inquiry_id = matchedInq.id;
-    if (!draft.company_name && matchedInq.sender_name) {
-      draft.company_name = matchedInq.sender_name;
-    }
-    const aiJson = matchedInq.ai_extraction_json || {};
-    if (!draft.delivery_location) {
-      draft.delivery_location = aiJson.delivery_location || aiJson.delivery_address || 'Standard / Ex-Works';
-    }
-    if (!draft.payment_terms) {
-      draft.payment_terms = aiJson.payment_terms || 'Standard Terms';
-    }
-    if (!draft.po_date) {
-      draft.po_date = formatDateDDMMYYYY(new Date());
-    }
-    if (!draft.po_number) {
+  draft.inquiry_id = formattedCode;
+  draft._inquiry_display_id = formattedCode;
+
+  const sessionRate = draft.rate ? Number(String(draft.rate).replace(/[^\d.]/g, '')) : (Array.isArray(draft.line_items) && draft.line_items[0]?.rate ? Number(draft.line_items[0].rate) : null);
+
+  // 1. Customer Name
+  if (!draft.company_name) {
+    draft.company_name = matchedDeal?.customer_name || matchedInq?.sender_name || matchedInq?.ai_extraction_json?.customer_name || matchedInq?.ai_extraction_json?.companyName || 'Customer';
+  }
+  draft._customer_verified = true;
+
+  // 2. Delivery Location
+  if (!draft.delivery_location) {
+    draft.delivery_location = matchedDeal?.delivery_location || matchedInq?.ai_extraction_json?.delivery_location || matchedInq?.ai_extraction_json?.deliveryLocation || matchedInq?.ai_extraction_json?.delivery_address || 'Standard / Ex-Works';
+  }
+
+  // 3. Payment Terms
+  if (!draft.payment_terms) {
+    draft.payment_terms = matchedDeal?.payment_terms || matchedInq?.ai_extraction_json?.payment_terms || matchedInq?.ai_extraction_json?.paymentTerms || 'Standard Terms';
+  }
+
+  // 4. PO Date
+  if (!draft.po_date) {
+    draft.po_date = formatDateDDMMYYYY(new Date());
+  }
+
+  // 5. PO Number
+  if (!draft.po_number) {
+    if (matchedDeal?.po_number) {
+      draft.po_number = matchedDeal.po_number;
+    } else {
       const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
       const randomNum = Math.floor(1000 + Math.random() * 9000);
       draft.po_number = `PO-${todayStr}-${randomNum}`;
     }
-    if ((!Array.isArray(draft.line_items) || draft.line_items.length === 0) && Array.isArray(aiJson.line_items) && aiJson.line_items.length > 0) {
-      draft.line_items = aiJson.line_items.map(it => ({
-        sku_text: it.sku_text || it.description,
-        description: it.description || it.sku_text,
-        dimensions: it.dimensions || it.spec || null,
-        spec: it.dimensions || it.spec || null,
-        quantity: it.quantity,
-        unit: it.unit || 'MT',
-        rate: it.rate,
-        amount: it.amount || (it.quantity * it.rate),
-      }));
+  }
+
+  // 6. Fetch DB line items
+  let dbItems = [];
+  if (matchedDeal && Array.isArray(matchedDeal.deal_items) && matchedDeal.deal_items.length > 0) {
+    dbItems = matchedDeal.deal_items;
+  } else if (matchedDeal?.id) {
+    const { data: dItems } = await supabase.from('deal_items').select('*').eq('deal_id', matchedDeal.id);
+    if (dItems && dItems.length > 0) dbItems = dItems;
+  }
+
+  if (dbItems.length === 0 && canonicalInqId) {
+    const { data: inqItems } = await supabase.from('inquiry_items').select('*').eq('inquiry_id', canonicalInqId);
+    if (inqItems && inqItems.length > 0) dbItems = inqItems;
+  }
+
+  if (dbItems.length === 0 && matchedInq?.ai_extraction_json?.line_items) {
+    dbItems = matchedInq.ai_extraction_json.line_items;
+  }
+
+  if (dbItems.length > 0) {
+    if (!Array.isArray(draft.line_items) || draft.line_items.length === 0) {
+      draft.line_items = dbItems.map(it => {
+        const qty = Number(it.quantity) || 0;
+        const rate = (sessionRate && sessionRate > 0) ? sessionRate : (Number(it.rate) || (matchedInq?.ai_extraction_json?.rate ? Number(matchedInq.ai_extraction_json.rate) : 0));
+        const amount = qty > 0 && rate > 0 ? qty * rate : (Number(it.amount) || 0);
+        const sku = it.sku_text || it.description || 'Metal Product';
+        const dim = it.dimensions || it.spec || null;
+        const norm = normalizeProductToCatalog(sku, dim);
+        const canonicalSku = norm.isValid ? norm.catalogName : sku;
+        const hsn = it.hsn_code || it.hsn_sac || (norm.isValid ? norm.hsnCode : detectHsnCode(sku, dim));
+        return {
+          sku_text: canonicalSku,
+          description: it.description || canonicalSku,
+          dimensions: dim,
+          spec: dim,
+          quantity: qty,
+          unit: it.unit || 'MT',
+          rate: rate,
+          amount: amount,
+          hsn_sac: hsn,
+          hsn_code: hsn,
+          is_valid_catalog: norm.isValid,
+        };
+      });
+    } else {
+      draft.line_items = draft.line_items.map((it, idx) => {
+        const fallbackDb = dbItems[idx] || dbItems[0] || {};
+        const qty = Number(it.quantity) || Number(fallbackDb.quantity) || 0;
+        const rate = (sessionRate && sessionRate > 0) ? sessionRate : (Number(it.rate) || Number(fallbackDb.rate) || 0);
+        const amount = qty > 0 && rate > 0 ? qty * rate : (Number(it.amount) || 0);
+        const sku = it.sku_text || it.description || fallbackDb.sku_text || fallbackDb.description || 'Metal Product';
+        const dim = it.dimensions || it.spec || fallbackDb.dimensions || fallbackDb.spec || null;
+        const norm = normalizeProductToCatalog(sku, dim);
+        const canonicalSku = norm.isValid ? norm.catalogName : sku;
+        const hsn = it.hsn_code || it.hsn_sac || fallbackDb.hsn_code || (norm.isValid ? norm.hsnCode : detectHsnCode(sku, dim));
+        return {
+          ...fallbackDb,
+          ...it,
+          sku_text: canonicalSku,
+          description: it.description || fallbackDb.description || canonicalSku,
+          dimensions: dim,
+          spec: dim,
+          quantity: qty,
+          unit: it.unit || fallbackDb.unit || 'MT',
+          rate: rate,
+          amount: amount,
+          hsn_sac: hsn,
+          hsn_code: hsn,
+          is_valid_catalog: norm.isValid,
+        };
+      });
     }
   }
 
@@ -3921,6 +3983,20 @@ async function executeAction(action, draft, senderPhone) {
 
         // 2. Update existing linked inquiry / deal OR insert new deal with stage = 'won'
         let targetDealId = draft.deal_id || draft.inquiry_id || null;
+        if (targetDealId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(targetDealId)) {
+          const cleanCode = String(targetDealId).replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase();
+          const { data: matchedInqRows } = await supabase.from('inquiries').select('id').limit(500);
+          const foundInq = (matchedInqRows || []).find(i => (i.id || '').replace(/-/g, '').toUpperCase().startsWith(cleanCode));
+          if (foundInq) {
+            targetDealId = foundInq.id;
+          } else {
+            const { data: matchedDealRows } = await supabase.from('deals').select('id, inquiry_id').limit(500);
+            const foundDeal = (matchedDealRows || []).find(d => (d.id || '').replace(/-/g, '').toUpperCase().startsWith(cleanCode) || (d.inquiry_id && d.inquiry_id.replace(/-/g, '').toUpperCase().startsWith(cleanCode)));
+            if (foundDeal) {
+              targetDealId = foundDeal.id;
+            }
+          }
+        }
 
         if (targetDealId) {
           // Update the existing linked inquiry & deal to won with PO details
@@ -5424,6 +5500,16 @@ Return ONLY JSON:
   }
 
   // 6. Build Confirmation and Resume Prompt
+  if (draft) {
+    if (!draft.inquiry_id && formattedDisplayId) {
+      draft.inquiry_id = formattedDisplayId;
+      draft._inquiry_display_id = formattedDisplayId;
+    }
+    if (!draft.company_name) {
+      draft.company_name = deal?.customer_name || inq?.sender_name || inq?.ai_extraction_json?.companyName || null;
+    }
+  }
+
   const confirmationMsg = `Stage for ${formattedDisplayId} has been updated to ${stageDisplayName}.`;
   const actionDisplayName = getModuleDisplayName(action);
   const resumeMsg = `You were in the middle of the ${actionDisplayName} flow — do you want to continue?`;
@@ -5451,9 +5537,73 @@ Return ONLY JSON:
 
 /**
  * Restores the exact interrupted flow state and re-prompts the exact pending question or summary.
+ * Re-validates and auto-loads database entity records (Inquiry/Deal/Items) merged with user session data.
  */
 async function restoreInterruptedFlow(senderPhone, interruptedState, action, draft) {
   const actionName = getActionFriendlyName(action);
+
+  if (action === 'LOG_ORDER') {
+    if (draft.inquiry_id || draft.deal_id || draft._inquiry_display_id) {
+      const stageCheck = await validateOrderInquiryStage(draft, senderPhone);
+      if (!stageCheck.isValid) {
+        await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_ORDER|${JSON.stringify(draft)}`);
+        return {
+          handled: true,
+          reply: stageCheck.reply,
+        };
+      }
+    }
+
+    if (draft.rate && Array.isArray(draft.line_items) && draft.line_items.length > 0) {
+      const globalRate = Number(String(draft.rate).replace(/[^\d.]/g, '')) || 0;
+      if (globalRate > 0) {
+        draft.line_items = draft.line_items.map(it => {
+          const qty = Number(it.quantity) || 0;
+          const r = globalRate || it.rate;
+          return {
+            ...it,
+            rate: r,
+            amount: qty > 0 && r > 0 ? qty * r : (it.amount || 0),
+          };
+        });
+      }
+    }
+
+    if (!draft.po_date) {
+      draft.po_date = formatDateDDMMYYYY(new Date());
+    }
+    if (!draft.po_number) {
+      const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const randomNum = Math.floor(1000 + Math.random() * 9000);
+      draft.po_number = `PO-${todayStr}-${randomNum}`;
+    }
+    if (!draft.delivery_location) {
+      draft.delivery_location = 'Standard / Ex-Works';
+    }
+    if (!draft.payment_terms) {
+      draft.payment_terms = 'Standard Terms';
+    }
+
+    const missing = validateMandatoryFields('LOG_ORDER', draft);
+    if (missing.length === 0) {
+      const summary = buildConfirmationSummary('LOG_ORDER', draft);
+      await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|LOG_ORDER|${JSON.stringify(draft)}`);
+      return {
+        handled: true,
+        reply: summary,
+        interactiveType: 'buttons',
+        interactiveButtons: CONFIRMATION_BUTTONS,
+      };
+    } else {
+      const missingList = missing.map((m) => `• *${m}*`).join('\n');
+      const askMissing = `Please provide the remaining mandatory details for this order:\n\n${missingList}`;
+      await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_ORDER|${JSON.stringify(draft)}`);
+      return {
+        handled: true,
+        reply: askMissing,
+      };
+    }
+  }
 
   if (interruptedState === 'catalog_confirm') {
     const summary = buildConfirmationSummary(action, draft);
@@ -6853,7 +7003,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
       'visit_id', 'visit_date', 'inquiry_id', '_inquiry_display_id',
       'deal_id', 'po_number', 'linked_inquiry_or_po', 'affected_product',
       'complaint_type', 'complaint_description', 'company_name',
-      '_customer_verified', '_new_customer_created'
+      'rate', '_customer_verified', '_new_customer_created'
     ];
     for (const key of preserveKeys) {
       if (existingDraft[key] !== undefined && (updatedDraft[key] === undefined || updatedDraft[key] === null || updatedDraft[key] === '')) {

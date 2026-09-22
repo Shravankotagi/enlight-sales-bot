@@ -62,24 +62,16 @@ async function runComprehensiveAudit() {
   // Reset INQ-D013D7 in Supabase to auto_created for clean deterministic test
   await supabase.from('inquiries').update({ status: 'auto_created' }).eq('id', 'd013d712-c64e-448f-b5da-5f328348ee61');
 
-  // 2.1 Test Order Gate blocks when inquiry is in New Inquiry stage
-  await saveActiveSession(testPhone, 'CrossMAT Ltd', 'catalog_flow|LOG_ORDER|{}');
-  const gateRes = await handleCatalogFlow('INQ-D013D7', testPhone);
+  // 2.1 Test Order Gate blocks when inquiry is in New Inquiry stage with user-provided rate and PO
+  await saveActiveSession(testPhone, 'Unknown', 'catalog_flow|LOG_ORDER|{}');
+  const gateRes = await handleCatalogFlow('INQ-D013D7,recevied the Po for this inquiry with rate 50000/MT, PO number is PO-CRM-9089', testPhone);
   assert('2.1 Order creation blocked for INQ-D013D7 in New Inquiry stage', 
     gateRes.handled === true && gateRes.reply.includes('Order cannot be created') && gateRes.reply.includes('New Inquiry stage'),
     gateRes.reply
   );
 
-  // 2.2 Test mid-flow stage update: "update the stage to price quote for above inquiry"
-  const orderDraft = {
-    company_name: 'CrossMAT Ltd',
-    inquiry_id: 'INQ-D013D7',
-    po_number: 'PO-2026-901',
-    po_date: '22/09/2026'
-  };
-  await saveActiveSession(testPhone, 'CrossMAT Ltd', `catalog_flow|LOG_ORDER|${JSON.stringify(orderDraft)}`);
-  
-  const stageUpdRes = await handleCatalogFlow('update the stage to price quote for above inquiry', testPhone);
+  // 2.2 Test mid-flow stage update: "upadte the stage of INQ-D013D7 to quoted stage"
+  const stageUpdRes = await handleCatalogFlow('upadte the stage of INQ-D013D7 to quoted stage', testPhone);
   assert('2.2 Mid-flow stage update finds INQ-D013D7 and confirms Price Quote',
     stageUpdRes.handled === true && stageUpdRes.reply.includes('Stage for INQ-D013D7 has been updated to Price Quote') && stageUpdRes.reply.includes('You were in the middle of the Order flow — do you want to continue?'),
     stageUpdRes.reply
@@ -93,12 +85,27 @@ async function runComprehensiveAudit() {
   const { data: verifiedInq } = await supabase.from('inquiries').select('id, status').eq('id', 'd013d712-c64e-448f-b5da-5f328348ee61').single();
   assert('2.3 Database status for d013d712 is quoted', verifiedInq?.status === 'quoted', `Status: ${verifiedInq?.status}`);
 
-  // 2.4 Verify resuming with "Yes" restores the active Order session
-  const resumeRes = await handleCatalogFlow('yes', testPhone);
+  // 2.4 Verify resuming with "Yes, Continue" auto-loads DB inquiry data merged with session rate & PO, and shows confirmation summary
+  const resumeRes = await handleCatalogFlow('btn_resume_yes', testPhone);
   const sessionAfterResume = await getFullActiveSession(testPhone);
-  assert('2.4 Resuming with Yes restores Order draft with INQ-D013D7 attached',
-    resumeRes.handled === true && sessionAfterResume?.last_intent?.startsWith('catalog_flow|LOG_ORDER|') && sessionAfterResume?.last_intent?.includes('INQ-D013D7'),
-    sessionAfterResume?.last_intent
+  assert('2.4 Resuming with Yes auto-loads inquiry and shows pre-filled confirmation summary',
+    resumeRes.handled === true &&
+    resumeRes.reply.includes('INQ-D013D7') &&
+    resumeRes.reply.includes('CrossMAT Ltd') &&
+    resumeRes.reply.includes('PO-CRM-9089') &&
+    resumeRes.reply.includes('50,000') &&
+    resumeRes.reply.includes('Total Order Value:') &&
+    sessionAfterResume?.last_intent?.startsWith('catalog_confirm|LOG_ORDER|'),
+    resumeRes.reply
+  );
+
+  // 2.5 Confirm order with "save / yes"
+  const orderConfirmRes = await handleCatalogFlow('save / yes', testPhone);
+  assert('2.5 Confirming order records order and marks deal as Won',
+    orderConfirmRes.handled === true &&
+    orderConfirmRes.reply.includes('Order Recorded & Deal Marked as WON!') &&
+    orderConfirmRes.reply.includes('INQ-D013D7'),
+    orderConfirmRes.reply
   );
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -108,6 +115,12 @@ async function runComprehensiveAudit() {
 
   // 3.1 Reset INQ-D013D7 to auto_created and test invalid transition to Won directly from New Inquiry
   await supabase.from('inquiries').update({ status: 'auto_created' }).eq('id', 'd013d712-c64e-448f-b5da-5f328348ee61');
+  const orderDraft = {
+    company_name: 'CrossMAT Ltd',
+    inquiry_id: 'INQ-D013D7',
+    po_number: 'PO-2026-901',
+    po_date: '22/09/2026'
+  };
   await saveActiveSession(testPhone, 'CrossMAT Ltd', `catalog_flow|LOG_ORDER|${JSON.stringify(orderDraft)}`);
   
   const invalidTransRes = await handleCatalogFlow('mark INQ-D013D7 as won', testPhone);
