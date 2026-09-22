@@ -1833,7 +1833,23 @@ function formatVisitDate(dateVal) {
   return `${day} ${monthNames[d.getMonth()]} ${d.getFullYear()}`;
 }
 
-/** Helper to classify follow-up action into deliverable, scheduled_call, or none */
+/** Helper to parse date string into YYYY-MM-DD */
+function parseDateToIso(str) {
+  if (!str) return null;
+  const raw = String(str).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const dmy = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+  if (dmy) {
+    return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+  }
+  const parsed = new Date(raw);
+  if (!isNaN(parsed.getTime())) {
+    return parsed.toISOString().split('T')[0];
+  }
+  return null;
+}
+
+/** Helper to classify follow-up action, calculate due date, and determine urgency */
 function classifyFollowUp(visit) {
   const remarks = visit.remarks || '';
   const statusMatch =
@@ -1845,35 +1861,45 @@ function classifyFollowUp(visit) {
     return null;
   }
 
-  let rawFollowUp = visit.follow_up_action || visit.follow_up || null;
+  // 1. Extract action cleanly (avoid capturing [Outcome: Follow-up Required] as an action!)
+  let rawAction =
+    visit.follow_up_action ||
+    visit.followup ||
+    visit.follow_up ||
+    (remarks.match(/\[(?:Follow-?Up|Follow-?up\s*Action):\s*([^\]]+)\]/i)?.[1]) ||
+    (remarks.match(/(?:^|\||\n)\s*Follow-?up(?:\s*Action)?:\s*([^|\]\n]+)/i)?.[1]) ||
+    null;
 
-  if (!rawFollowUp && remarks) {
-    const match = remarks.match(/\[Follow-?Up:\s*([^\]]+)\]/i);
-    if (match) {
-      rawFollowUp = match[1].trim();
-    } else {
-      const inlineMatch = remarks.match(
-        /\bfollow-?up\s*(?:needed|required)?\s*(?:to|:)?\s*([^\n\r.]+)/i,
-      );
-      if (inlineMatch) {
-        rawFollowUp = inlineMatch[1].trim();
-      }
-    }
-  }
+  if (!rawAction) return null;
 
-  if (!rawFollowUp) return null;
-
-  const cleanAction = rawFollowUp.trim();
+  const cleanAction = String(rawAction).trim();
   const lowerAction = cleanAction.toLowerCase();
 
-  // Exclude non-actionable or completed remarks
+  // Exclude non-actionable, invalid, or completed remarks
   if (
-    /^(no\s+follow\s*up(\s*needed|\s*required)?|none|not\s+required|not\s+needed|not\s+interested|n\/?a|nil|nothing|done|completed)$/i.test(
+    !cleanAction ||
+    cleanAction === '-' ||
+    /^(no\s+follow\s*up(\s*needed|\s*required)?|none|not\s+required|not\s+needed|not\s+interested|n\/?a|nil|nothing|done|completed|null)$/i.test(
       lowerAction,
     ) ||
-    lowerAction.startsWith('no remarks')
+    lowerAction.startsWith('no remarks') ||
+    lowerAction.startsWith('no follow') ||
+    lowerAction.startsWith(']')
   ) {
     return null;
+  }
+
+  // 2. Extract due date string (YYYY-MM-DD)
+  let dueDateStr = null;
+  if (visit.follow_up_date) {
+    dueDateStr = parseDateToIso(visit.follow_up_date);
+  }
+
+  if (!dueDateStr && remarks) {
+    const dateTagMatch = remarks.match(/\[(?:FollowUpDate|Follow-?Up\s*Date):\s*([^\]]+)\]/i);
+    if (dateTagMatch) {
+      dueDateStr = parseDateToIso(dateTagMatch[1]);
+    }
   }
 
   // Determine deliverable vs scheduled_call
@@ -1888,13 +1914,45 @@ function classifyFollowUp(visit) {
       lowerAction,
     );
 
+  // 3. Compute diffDays and urgency relative to Indian Standard Time (Asia/Kolkata)
+  let diffDays = null;
+  let urgency = 'no_date';
+  let formattedDueDate = null;
+
+  if (dueDateStr) {
+    try {
+      const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date()); // "YYYY-MM-DD"
+      const [tY, tM, tD] = todayStr.split('-').map(Number);
+      const [dY, dM, dD] = dueDateStr.split('-').map(Number);
+      const todayDate = new Date(Date.UTC(tY, tM - 1, tD));
+      const targetDate = new Date(Date.UTC(dY, dM - 1, dD));
+      diffDays = Math.round((targetDate.getTime() - todayDate.getTime()) / (1000 * 60 * 60 * 24));
+
+      formattedDueDate = targetDate.toLocaleDateString('en-IN', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+        timeZone: 'UTC',
+      });
+
+      if (diffDays < 0) urgency = 'overdue';
+      else if (diffDays === 0) urgency = 'today';
+      else if (diffDays === 1) urgency = 'tomorrow';
+      else urgency = 'upcoming';
+    } catch {}
+  }
+
   return {
     action: cleanAction,
     category: isDeliverable ? 'deliverable' : 'scheduled_call',
+    dueDateStr,
+    formattedDueDate,
+    diffDays,
+    urgency,
   };
 }
 
-/** Pending Follow-up Visits (Actionable deliverables vs scheduled check-ins) */
+/** Pending Follow-up Visits (Actionable deliverables vs scheduled check-ins & Due Date Verification) */
 async function getVisitsPendingFollowup(scopeOrPhone, text = '') {
   try {
     const supabase = getSupabase();
@@ -1933,8 +1991,13 @@ async function getVisitsPendingFollowup(scopeOrPhone, text = '') {
       );
     }
 
-    const deliverables = [];
-    const scheduledCalls = [];
+    const lower = (text || '').toLowerCase().trim();
+    const isDueToday = /\b(today|aaj|due today)\b/i.test(lower);
+    const isDueTomorrow = /\b(tomorrow|kal|due tomorrow)\b/i.test(lower);
+    const isOverdue = /\b(overdue|delay|delayed|baaki|pending overdue)\b/i.test(lower);
+    const isThisWeek = /\b(this week|is hafte|upcoming)\b/i.test(lower) && !isDueToday && !isDueTomorrow;
+
+    const allFollowups = [];
 
     for (const v of visits) {
       const classified = classifyFollowUp(v);
@@ -1943,45 +2006,165 @@ async function getVisitsPendingFollowup(scopeOrPhone, text = '') {
       const dateStr = formatVisitDate(v.visited_at || v.created_at);
       const custName = v.customer_name || 'Customer';
       const personMet = v.person_met || 'Not recorded';
-      const item = {
+      const location = v.customer_address || v.location || '';
+      allFollowups.push({
         customer_name: custName,
         dateStr,
         personMet,
+        location,
         action: classified.action,
-      };
-
-      if (classified.category === 'deliverable') {
-        deliverables.push(item);
-      } else {
-        scheduledCalls.push(item);
-      }
+        category: classified.category,
+        dueDateStr: classified.dueDateStr,
+        formattedDueDate: classified.formattedDueDate,
+        diffDays: classified.diffDays,
+        urgency: classified.urgency,
+      });
     }
 
-    const totalPending = deliverables.length + scheduledCalls.length;
-    if (totalPending === 0) {
+    // ── 1. Specific Timeframe: DUE TODAY ─────────────────────────────────────
+    if (isDueToday) {
+      const todayItems = allFollowups.filter((f) => f.urgency === 'today');
+      if (todayItems.length === 0) {
+        return (
+          `📍 *Customer Visits Due Today*\n\n` +
+          `You have *0* visit follow-ups due today.\n\n` +
+          `All visit follow-ups are up to date! ✅`
+        );
+      }
+
+      const lines = todayItems.map((item, idx) => {
+        let entry = `${idx + 1}. *${item.customer_name}* (Visited: ${item.dateStr})\n` +
+          `  • Contact: ${item.personMet}\n` +
+          (item.location ? `  • Location: ${item.location}\n` : '') +
+          `  • Follow-up Action: ${item.action}\n` +
+          `  • Status: *Due Today* (${item.formattedDueDate || 'Today'}) ⚠️`;
+        return entry;
+      });
+
+      return (
+        `📍 *Customer Visits Due Today* (${todayItems.length} found)\n\n` +
+        lines.join('\n\n')
+      );
+    }
+
+    // ── 2. Specific Timeframe: DUE TOMORROW ──────────────────────────────────
+    if (isDueTomorrow) {
+      const tomorrowItems = allFollowups.filter((f) => f.urgency === 'tomorrow');
+      if (tomorrowItems.length === 0) {
+        return (
+          `📍 *Customer Visits Due Tomorrow*\n\n` +
+          `You have *0* visit follow-ups due tomorrow.`
+        );
+      }
+
+      const lines = tomorrowItems.map((item, idx) => {
+        let entry = `${idx + 1}. *${item.customer_name}* (Visited: ${item.dateStr})\n` +
+          `  • Contact: ${item.personMet}\n` +
+          (item.location ? `  • Location: ${item.location}\n` : '') +
+          `  • Follow-up Action: ${item.action}\n` +
+          `  • Status: *Due Tomorrow* (${item.formattedDueDate || 'Tomorrow'})`;
+        return entry;
+      });
+
+      return (
+        `📍 *Customer Visits Due Tomorrow* (${tomorrowItems.length} found)\n\n` +
+        lines.join('\n\n')
+      );
+    }
+
+    // ── 3. Specific Timeframe: OVERDUE ──────────────────────────────────────
+    if (isOverdue) {
+      const overdueItems = allFollowups.filter((f) => f.urgency === 'overdue');
+      if (overdueItems.length === 0) {
+        return (
+          `📍 *Overdue Visit Follow-ups*\n\n` +
+          `You have *0* overdue visit follow-ups. All follow-ups are on schedule! ✅`
+        );
+      }
+
+      const lines = overdueItems.map((item, idx) => {
+        const daysAgo = Math.abs(item.diffDays || 1);
+        const dayLabel = daysAgo === 1 ? '1 day overdue' : `${daysAgo} days overdue`;
+        let entry = `${idx + 1}. *${item.customer_name}* (Visited: ${item.dateStr})\n` +
+          `  • Contact: ${item.personMet}\n` +
+          (item.location ? `  • Location: ${item.location}\n` : '') +
+          `  • Follow-up Action: ${item.action}\n` +
+          `  • Status: *${dayLabel}* (${item.formattedDueDate || 'Past Due'}) ⚠️`;
+        return entry;
+      });
+
+      return (
+        `📍 *Overdue Visit Follow-ups* (${overdueItems.length} found)\n\n` +
+        lines.join('\n\n')
+      );
+    }
+
+    // ── 4. Specific Timeframe: THIS WEEK / UPCOMING ─────────────────────────
+    if (isThisWeek) {
+      const upcomingItems = allFollowups.filter(
+        (f) => f.diffDays !== null && f.diffDays >= 0 && f.diffDays <= 7,
+      );
+      if (upcomingItems.length === 0) {
+        return (
+          `📍 *Upcoming Visit Follow-ups (This Week)*\n\n` +
+          `You have *0* visit follow-ups scheduled for this week.`
+        );
+      }
+
+      const lines = upcomingItems.map((item, idx) => {
+        const dueText = item.diffDays === 0
+          ? 'Due Today'
+          : item.diffDays === 1
+            ? 'Due Tomorrow'
+            : `In ${item.diffDays} days (${item.formattedDueDate})`;
+        let entry = `${idx + 1}. *${item.customer_name}* (Visited: ${item.dateStr})\n` +
+          `  • Contact: ${item.personMet}\n` +
+          (item.location ? `  • Location: ${item.location}\n` : '') +
+          `  • Follow-up Action: ${item.action}\n` +
+          `  • Due: *${dueText}*`;
+        return entry;
+      });
+
+      return (
+        `📍 *Upcoming Visit Follow-ups (This Week)* (${upcomingItems.length} found)\n\n` +
+        lines.join('\n\n')
+      );
+    }
+
+    // ── 5. General / All Pending Follow-ups (Default) ────────────────────────
+    if (allFollowups.length === 0) {
       return (
         `Customer Visits Pending Follow-up\n\n` +
         `No visits currently have pending follow-up actions. All visit follow-ups are up to date!`
       );
     }
 
+    const deliverables = allFollowups.filter((f) => f.category === 'deliverable');
+    const scheduledCalls = allFollowups.filter((f) => f.category !== 'deliverable');
+
     const sections = [];
     if (deliverables.length > 0) {
       const delLines = deliverables
-        .map(
-          (d) =>
-            `- ${d.customer_name} (Visited: ${d.dateStr})\n  Contact: ${d.personMet}\n  Action: ${d.action}`,
-        )
+        .map((d) => {
+          let line = `- ${d.customer_name} (Visited: ${d.dateStr})\n  Contact: ${d.personMet}\n  Action: ${d.action}`;
+          if (d.formattedDueDate) {
+            line += `\n  Due: ${d.formattedDueDate}` + (d.diffDays !== null ? (d.diffDays < 0 ? ` (${Math.abs(d.diffDays)}d overdue)` : d.diffDays === 0 ? ' (Today)' : ` (In ${d.diffDays}d)`) : '');
+          }
+          return line;
+        })
         .join('\n\n');
       sections.push(`Actionable Deliverables:\n${delLines}`);
     }
 
     if (scheduledCalls.length > 0) {
       const callLines = scheduledCalls
-        .map(
-          (c) =>
-            `- ${c.customer_name} (Visited: ${c.dateStr})\n  Contact: ${c.personMet}\n  Action: ${c.action}`,
-        )
+        .map((c) => {
+          let line = `- ${c.customer_name} (Visited: ${c.dateStr})\n  Contact: ${c.personMet}\n  Action: ${c.action}`;
+          if (c.formattedDueDate) {
+            line += `\n  Due: ${c.formattedDueDate}` + (c.diffDays !== null ? (c.diffDays < 0 ? ` (${Math.abs(c.diffDays)}d overdue)` : c.diffDays === 0 ? ' (Today)' : ` (In ${c.diffDays}d)`) : '');
+          }
+          return line;
+        })
         .join('\n\n');
       sections.push(`Scheduled Follow-up Calls:\n${callLines}`);
     }
@@ -1989,7 +2172,7 @@ async function getVisitsPendingFollowup(scopeOrPhone, text = '') {
     return (
       `Customer Visits Pending Follow-up\n\n` +
       sections.join('\n\n') +
-      `\n\nTotal Pending Follow-up Visits: ${totalPending}`
+      `\n\nTotal Pending Follow-up Visits: ${allFollowups.length}`
     );
   } catch (err) {
     console.error('getVisitsPendingFollowup error:', err.message);
@@ -3345,6 +3528,12 @@ async function routeToHandler(category, text, scope, supabase, extra = {}) {
       return await getRateSheet();
     case 'visit_list':
       return await getVisitList(scope, text);
+    case 'visit_followup':
+    case 'visit_followups':
+    case 'pending_followups':
+    case 'followup':
+    case 'follow_ups':
+      return await getVisitsPendingFollowup(scope, text);
     case 'payment_aging':
       return await getPaymentAging(scope);
     case 'lost_deals':
@@ -3810,13 +3999,16 @@ async function handleQuery(text, senderPhone) {
   }
   // Visit pending follow-ups
   if (
+    lower.includes('follow-up') ||
+    lower.includes('followup') ||
+    lower.includes('follow up') ||
     (lower.includes('visit') &&
-      (lower.includes('follow') ||
-        lower.includes('pending') ||
-        lower.includes('remaining'))) ||
-    lower.includes('pending follow-up') ||
-    lower.includes('pending followup') ||
-    lower.includes('pending follow up')
+      (lower.includes('pending') ||
+        lower.includes('remaining') ||
+        lower.includes('due') ||
+        lower.includes('today') ||
+        lower.includes('tomorrow') ||
+        lower.includes('overdue')))
   ) {
     return await getVisitsPendingFollowup(effectiveScope, text);
   }
