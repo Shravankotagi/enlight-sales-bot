@@ -65,20 +65,20 @@ function getPhoneVariants(phone) {
   return Array.from(variants);
 }
 
-const CATALOG_MENU = `👋 Welcome to *SalesOS Assistant*!
+const CATALOG_MENU = `👋 Welcome to **SalesOS Assistant**!
 
 What would you like to do today?
 
-*1️⃣ Log New Inquiry*
-*2️⃣ Update Inquiry*
-*3️⃣ Log New Order*
-*4️⃣ Update Order*
-*5️⃣ Log Customer Field Visit*
-*6️⃣ Update Field Visit*
-*7️⃣ New Customer Acquisition*
-*8️⃣ Log Customer Complaint*
-*9️⃣ Update Customer Complaint*
-*1️⃣0️⃣ Other / General Query*
+1. **Log New Inquiry**
+2. **Update Inquiry**
+3. **Log New Order**
+4. **Update Order**
+5. **Log Customer Field Visit**
+6. **Update Field Visit**
+7. **New Customer Acquisition**
+8. **Log Customer Complaint**
+9. **Update Customer Complaint**
+10. **Other / General Query**
 
 Reply with a number (1–10) or type what you'd like to do.`;
 
@@ -237,49 +237,49 @@ const CATALOG_MENU_SECTIONS = [
 // ── MODULE COLLECTION PROMPTS ────────────────────────────────────────────────
 
 const MODULE_PROMPTS = {
-  LOG_INQUIRY: `📋 *Log New Inquiry*
+  LOG_INQUIRY: `📋 **Log New Inquiry**
 
 Please provide the following details:
 
-• *Customer / Company:* *
-• *Product Description / Quantity:* *
-• *Rate:* (optional)
-• *Preferred Make:* (optional)
-• *Payment Terms:* *
-• *Delivery Location:* *
-• *Additional Notes:* (optional)
+- **Customer / Company:** *
+- **Product Description / Quantity:** *
+- **Rate:** (optional)
+- **Preferred Make:** (optional)
+- **Payment Terms:** *
+- **Delivery Location:** *
+- **Additional Notes:** (optional)
 
 You can reply in any format — just include the field names or values in order.`,
 
-  UPDATE_INQUIRY: `✏️ *Update Inquiry*
+  UPDATE_INQUIRY: `✏️ **Update Inquiry**
 
-• *Inquiry ID:* * (e.g. INQ-2026-0042)
+- **Inquiry ID:** * (e.g. INQ-2026-0042)
 
 Which fields do you want to update? Mention the field name and new value.
 
-*Updatable Fields:*
-• Product Description / Quantity
-• Rate
-• Preferred Make
-• Payment Terms
-• Delivery Location
-• Additional Notes
-• Status (Open / Quoted / Won / Lost / On Hold)
+**Updatable Fields:**
+- Product Description / Quantity
+- Rate
+- Preferred Make
+- Payment Terms
+- Delivery Location
+- Additional Notes
+- Status (Open / Quoted / Won / Lost / On Hold)
 
 Example:
 "INQ-2026-0042, update rate to 54000, payment terms to 45 days credit, status to Quoted"`,
 
-  LOG_ORDER: `🛒 *Record New Order*
+  LOG_ORDER: `🛒 **Record New Order**
 
-Please provide the *Inquiry ID* (e.g. INQ-F4D982) linked to this order:
+Please provide the **Inquiry ID** (e.g. INQ-F4D982) linked to this order:
 
-• *Inquiry ID:* * (e.g. INQ-F4D982)
-• *PO Number:* (e.g. PO-2026-0042, or auto-generated if not provided)
-• *PO Date:* (e.g. 10-09-2026, or today's date if not provided)
-• *Delivery Location:* (optional, defaults to Quoted Inquiry details)
-• *Payment Terms:* (optional, defaults to Quoted Inquiry details)
+- **Inquiry ID:** * (e.g. INQ-F4D982)
+- **PO Number:** (e.g. PO-2026-0042, or auto-generated if not provided)
+- **PO Date:** (e.g. 10-09-2026, or today's date if not provided)
+- **Delivery Location:** (optional, defaults to Quoted Inquiry details)
+- **Payment Terms:** (optional, defaults to Quoted Inquiry details)
 
-• *Line Items:* (if not already specified in the Quoted Inquiry)
+- **Line Items:** (if not already specified in the Quoted Inquiry)
   - Product Name / Description
   - Spec / Dimensions
   - Quantity & Unit
@@ -287,98 +287,98 @@ Please provide the *Inquiry ID* (e.g. INQ-F4D982) linked to this order:
 
 💡 _Tip: If the Inquiry is already Quoted, in Negotiation, or On Hold, you can simply reply with the Inquiry ID to auto-load all products, rates, and customer details!_`,
 
-  UPDATE_ORDER: `✏️ *Update Order*
+  UPDATE_ORDER: `✏️ **Update Order**
 
 To identify the order, please provide ONE of the following:
-• *Inquiry ID:* * (e.g. INQ-936C7B or INQ-3C86DE)
-• *PO Number:* * (e.g. PO-2026-0042)
+- **Inquiry ID:** * (e.g. INQ-936C7B or INQ-3C86DE)
+- **PO Number:** * (e.g. PO-2026-0042)
 
 What would you like to update?
-• *Attach / Update PO Number:* (e.g. "attach PO-2026-8899")
-• *Header Fields:* PO Date, Delivery Location, Payment Terms, Status
-• *Line Item Updates:* Quantity, Rate, Add/Remove Items
+- **Attach / Update PO Number:** (e.g. "attach PO-2026-8899")
+- **Header Fields:** PO Date, Delivery Location, Payment Terms, Status
+- **Line Item Updates:** Quantity, Rate, Add/Remove Items
 
-*Examples:*
-• "For Inquiry INQ-936C7B, attach PO number PO-2026-8899"
-• "PO-2026-0042, update delivery location to Pune MIDC, change item 1 rate to 58000"`,
+**Examples:**
+- "For Inquiry INQ-936C7B, attach PO number PO-2026-8899"
+- "PO-2026-0042, update delivery location to Pune MIDC, change item 1 rate to 58000"`,
 
-  LOG_VISIT: `📍 *Log Customer Field Visit*
+  LOG_VISIT: `📍 **Log Customer Field Visit**
 
 Please provide the following details:
 
-• *Customer / Company:* *
-• *Person Met:* *
-• *Contact Phone:* *
-• *City / Location:* *
-• *Visit Date:* *
-• *Visit Outcome:* * (Positive / Negative / Neutral / Follow-up Required)
-• *Follow-up Action:* (optional)
-• *Meeting Remarks:* *`,
+- **Customer / Company:** *
+- **Person Met:** *
+- **Contact Phone:** *
+- **City / Location:** *
+- **Visit Date:** *
+- **Visit Outcome:** * (Positive / Negative / Neutral / Follow-up Required)
+- **Follow-up Action:** (optional)
+- **Meeting Remarks:** *`,
 
-  UPDATE_VISIT: `✏️ *Update Field Visit*
+  UPDATE_VISIT: `✏️ **Update Field Visit**
 
-• *Customer / Company:* * (e.g. Vanguard Industrial Automation Systems)
-• *Visit Date:* (optional e.g. 10-09-2026)
+- **Customer / Company:** * (e.g. Vanguard Industrial Automation Systems)
+- **Visit Date:** (optional e.g. 10-09-2026)
 
 Which fields do you want to update? Mention the field name and new value.
 
-*Updatable Fields:*
-• Person Met
-• Contact Phone
-• City / Location
-• Visit Date
-• Visit Outcome (Positive / Negative / Neutral / Follow-up Required)
-• Follow-up Action
-• Meeting Remarks
-• Status (Completed / Follow-up Pending / Cancelled)
+**Updatable Fields:**
+- Person Met
+- Contact Phone
+- City / Location
+- Visit Date
+- Visit Outcome (Positive / Negative / Neutral / Follow-up Required)
+- Follow-up Action
+- Meeting Remarks
+- Status (Completed / Follow-up Pending / Cancelled)
 
 Example:
 "Vanguard Industrial Automation Systems, update Person Met to Amit Sharma, Visit Outcome to Positive"`,
 
-  LOG_NEW_CUSTOMER: `👤 *New Customer Acquisition*
+  LOG_NEW_CUSTOMER: `👤 **New Customer Acquisition**
 
 Please provide the following details:
 
-• *Company Name:* *
-• *Contact Person:* *
-• *Mobile Number:* *
-• *Delivery Location:* *
-• *Email:* (optional)
-• *GST Number:* (optional)
+- **Company Name:** *
+- **Contact Person:** *
+- **Mobile Number:** *
+- **Delivery Location:** *
+- **Email:** (optional)
+- **GST Number:** (optional)
 
 You can reply in any format — just include the field names or values in order.
 
 Example:
 "Apex Steel Structures, Contact: Rajesh Sharma, Phone: 9820123456, Location: Chakan Pune, Email: rajesh@apexsteel.com, GST: 27AABCU9603R1ZM"`,
 
-  LOG_COMPLAINT: `⚠️ *Log Customer Complaint*
+  LOG_COMPLAINT: `⚠️ **Log Customer Complaint**
 
 Please provide the following details:
 
-• *Customer / Company:* *
-• *Linked Order / Ref:* (optional, auto-linked if customer has active orders)
-• *Product / Material:* (e.g. 12 MT MS angle)
-• *Complaint Type:* (optional: Quality Defect / Physical Damage / Quantity Shortage / Delivery Delay / Billing Mismatch / Specification Mismatch / Other)
-• *Description:* * (e.g. 12 MT MS angle with bending damage and edge cuts)
-• *Corrective Action:* (optional)
+- **Customer / Company:** *
+- **Linked Order / Ref:** (optional, auto-linked if customer has active orders)
+- **Product / Material:** (e.g. 12 MT MS angle)
+- **Complaint Type:** (optional: Quality Defect / Physical Damage / Quantity Shortage / Delivery Delay / Billing Mismatch / Specification Mismatch / Other)
+- **Description:** * (e.g. 12 MT MS angle with bending damage and edge cuts)
+- **Corrective Action:** (optional)
 
 Example:
 "Shree Balaji Pre-Engineered Buildings received 12 MT MS angle with bending damage and edge cuts during truck unloading"`,
 
-  UPDATE_COMPLAINT: `✏️ *Update Complaint*
+  UPDATE_COMPLAINT: `✏️ **Update Complaint**
 
 To identify the complaint, provide ONE of the following:
-• *Linked Order / Ref:* * (e.g. PO-2026-TI-101 or INQ-8971B1)
-• *Customer / Company:* (e.g. Tech Industries)
+- **Linked Order / Ref:** * (e.g. PO-2026-TI-101 or INQ-8971B1)
+- **Customer / Company:** (e.g. Tech Industries)
 
 What would you like to update?
 
-*Updatable Fields:*
-• Complaint Type (Quality Defect / Physical Damage / Quantity Shortage / Delivery Delay / Billing Mismatch / Specification Mismatch / Other)
-• Description
-• Corrective Action Taken
-• Resolution Notes
-• Status (Pending / In Progress / Resolved / Closed)
+**Updatable Fields:**
+- Complaint Type (Quality Defect / Physical Damage / Quantity Shortage / Delivery Delay / Billing Mismatch / Specification Mismatch / Other)
+- Description
+- Corrective Action Taken
+- Resolution Notes
+- Status (Pending / In Progress / Resolved / Closed)
 
 Example:
 "Update complaint for Tech Industries to Specification Mismatch"`
@@ -6808,7 +6808,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
         interactiveButtons: CONFIRMATION_BUTTONS,
       };
     } else {
-      const missingList = missing.map((m) => `• *${m}*`).join('\n');
+      const missingList = missing.map((m) => `- **${m}**`).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
       const askMissing = `Let's finish your ${actionName}${indexTag} first. Please provide the missing mandatory details:\n\n${missingList}`;
@@ -6889,12 +6889,12 @@ async function handleCatalogFlow(rawText, senderPhone) {
           (Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0);
 
         if (!hasUpdates) {
-          const prompt = `✏️ *Selected Inquiry ${matchedCandidate.displayId} (${matchedCandidate.company_name}):*\n\n` +
-            `• *Date:* ${matchedCandidate.date}\n` +
-            `• *Stage:* ${matchedCandidate.stage}\n` +
-            `• *Product / Requirement:* ${matchedCandidate.productSummary}\n` +
-            `• *Payment Terms:* ${matchedCandidate.payment_terms}\n` +
-            `• *Delivery Location:* ${matchedCandidate.delivery_location}\n\n` +
+          const prompt = `✏️ **Selected Inquiry ${matchedCandidate.displayId} (${matchedCandidate.company_name}):**\n\n` +
+            `- **Date:** ${matchedCandidate.date}\n` +
+            `- **Stage:** ${matchedCandidate.stage}\n` +
+            `- **Product / Requirement:** ${matchedCandidate.productSummary}\n` +
+            `- **Payment Terms:** ${matchedCandidate.payment_terms}\n` +
+            `- **Delivery Location:** ${matchedCandidate.delivery_location}\n\n` +
             `What details would you like to update?\n` +
             `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
 
@@ -7141,7 +7141,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
       };
     } else {
       // Missing mandatory fields -> Ask only for missing fields
-      const missingList = missing.map((m) => `• *${m}*`).join('\n');
+      const missingList = missing.map((m) => `- **${m}**`).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
       const askMissing = `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
