@@ -2648,46 +2648,25 @@ async function getCustomer360(senderPhone, text, extractedName = null) {
 
 async function getKnowledgeBaseAnswer(senderPhone, queryText) {
   try {
+    const { searchKnowledgeBase } = require('./services/kbRetrievalService');
+    const { resolveCallerContext } = require('./core/retrievalTools');
+    const caller = await resolveCallerContext(senderPhone);
     const supabase = getSupabase();
-    const apiKey =
-      process.env.GEMINI_API_KEY ||
-      process.env.GEMINI_API_KEY_1 ||
-      process.env.GEMINI_API_KEY_2;
 
-    // Generate query embedding via GoogleGenerativeAI with gemini-embedding-001
-    const { GoogleGenerativeAI } = require('@google/generative-ai');
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const embeddingModel = genAI.getGenerativeModel({
-      model: 'gemini-embedding-001',
-    });
-    const result = await embeddingModel.embedContent(queryText);
-    const raw = result.embedding.values;
-    const queryEmbedding = raw.length > 768 ? raw.slice(0, 768) : raw;
-
-    let { data: chunks, error } = await supabase.rpc('match_kb_chunks', {
-      query_embedding: queryEmbedding,
-      match_count: 3,
-      allowed_roles: ['all', 'salesperson', 'manager', 'admin'],
-    });
-
-    if (error) {
-      const res2 = await supabase.rpc('match_kb_chunks', {
-        query_embedding: JSON.stringify(queryEmbedding),
-        match_count: 3,
-        allowed_roles: ['all', 'salesperson', 'manager', 'admin'],
-      });
-      chunks = res2.data;
-      error = res2.error;
-    }
-
-    if (!chunks || chunks.length === 0) {
+    const res = await searchKnowledgeBase(queryText, caller, supabase);
+    if (!res || !res.knowledge_snippet) {
       return `📚 *Knowledge Base*\n\nI couldn't find specific company policy documentation for "${queryText}". Please check with your sales manager or operations lead.`;
     }
 
-    const topChunk = chunks[0];
-    const sourceTitle = topChunk.title || 'Company Policy';
+    let sourceNote = '';
+    if (res.source === 'admin_vector_kb' || res.source === 'admin_text_kb') {
+      const firstTitle = res.chunks?.[0]?.title || 'Company Policy';
+      sourceNote = `\n\n📄 _Source: ${firstTitle}_`;
+    } else if (res.source === 'domain_sop_fallback') {
+      sourceNote = `\n\n📋 _Guidance: Standard Enlight Metals Commercial SOP_`;
+    }
 
-    return `📚 *Enlight Metals Knowledge Base*\n\n${topChunk.content.trim()}\n\n📄 _Source: ${sourceTitle}_`;
+    return `📚 *Enlight Metals Knowledge Base*\n\n${res.knowledge_snippet}${sourceNote}`;
   } catch (err) {
     console.error('getKnowledgeBaseAnswer error:', err.message);
     return `⚠️ Could not search company knowledge base: ${err.message}`;
