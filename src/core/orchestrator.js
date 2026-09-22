@@ -231,7 +231,8 @@ Please reply with your preferred timeframe."
   3. If multiple source documents or sections are used, cite all distinct document titles (e.g. [Source: SOP 01 Standard Sales and Order Execution Policy]).
   4. If the answer is derived from practical standard commercial SOP guidance, cite [Source: Enlight Metals Standard Sales Operations SOP].
   5. NEVER omit the source citation tag [Source: ...] from knowledge base answers.
-- **INTELLIGENT DATA RETRIEVAL & CONTINUATION CONTEXT**: Use the 'RELEVANT DATABASE RECORDS & RETRIEVAL CONTEXT' or 'RECENTLY COMPLETED ACTIVITY' context blocks provided in your system context to answer queries, recall customer quotes/deals/visits/complaints, or apply follow-up updates directly, accurately, and comprehensively based on live database records.`;
+- **INTELLIGENT DATA RETRIEVAL & CONTINUATION CONTEXT**: Use the 'RELEVANT DATABASE RECORDS & RETRIEVAL CONTEXT' or 'RECENTLY COMPLETED ACTIVITY' context blocks provided in your system context to answer queries, recall customer quotes/deals/visits/complaints, or apply follow-up updates directly, accurately, and comprehensively based on live database records.
+- **LIST & POINTER FORMATTING (STRICT MARKDOWN)**: Whenever outputting multiple items, pointers, missing fields, steps, or options, ALWAYS format each pointer as a separate list item using standard Markdown ('- Item' or '1. Item') preceded by a blank line. NEVER output bullet points on the same line or use Unicode bullet characters without line breaks. Always use **bold** for field names, customer names, metrics, and key headers.`;
 
 
 // ── State Definition ──────────────────────────────────────────────────────
