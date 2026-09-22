@@ -4676,18 +4676,18 @@ Respond with ONLY "RETRIEVAL" or "OTHER".`;
 
 /**
  * Recognizes direct stage transition requests on deals / inquiries
- * (e.g. "stage update to won", "mark deal for SS Industries as won", "deal won", etc.)
+ * (e.g. "stage update to won", "mark deal for SS Industries as won", "deal won", "update stage to price quote for above inquiry", etc.)
  */
 function isStageUpdatePrompt(text) {
   if (!text || typeof text !== 'string') return false;
   const lower = text.toLowerCase().trim();
 
   if (
-    /\b(?:stage\s+update|update\s+stage|change\s+stage|set\s+stage|move\s+stage)\b/i.test(lower) ||
-    /\b(?:mark|move|put|change|set|update)\s+(?:the\s+|a\s+)?(?:deal|inquiry|status|stage)?\s*(?:as\s+|to\s+)?(won|lost|negotiation|quoted|quotated|on\s+hold|hold)\b/i.test(lower) ||
+    /\b(?:stage\s+update|update\s+stage|change\s+stage|set\s+stage|move\s+stage|upadte\s+(?:the\s+)?stage|update\s+(?:the\s+)?stage)\b/i.test(lower) ||
+    /\b(?:mark|move|put|change|set|update|upadte)\s+(?:the\s+|a\s+)?(?:deal|inquiry|status|stage)?\s*(?:as\s+|to\s+)?(won|lost|negotiation|quoted|quotated|price\s*quote|price\s*quotation|on\s+hold|hold|new\s*inquiry)\b/i.test(lower) ||
     /\b(?:deal\s+won|deal\s+lost|inquiry\s+won|inquiry\s+lost|deal\s+quoted|deal\s+negotiation|deal\s+on\s+hold)\b/i.test(lower) ||
-    /^(?:stage\s+(?:is\s+)?(?:to\s+)?(?:won|lost|negotiation|quoted|on\s+hold)|marked?\s+(?:as\s+)?(?:won|lost|negotiation|quoted|on\s+hold))\b/i.test(lower) ||
-    /^(?:mark\s+as\s+won|mark\s+as\s+lost|mark\s+as\s+negotiation|mark\s+as\s+quoted|mark\s+as\s+on\s+hold)$/i.test(lower) ||
+    /^(?:stage\s+(?:is\s+)?(?:to\s+)?(?:won|lost|negotiation|quoted|on\s+hold|price\s*quote)|marked?\s+(?:as\s+)?(?:won|lost|negotiation|quoted|on\s+hold|price\s*quote))\b/i.test(lower) ||
+    /^(?:mark\s+as\s+won|mark\s+as\s+lost|mark\s+as\s+negotiation|mark\s+as\s+quoted|mark\s+as\s+price\s*quote|mark\s+as\s+on\s+hold)$/i.test(lower) ||
     /^(?:won|lost|negotiation|quoted|on\s+hold)$/i.test(lower)
   ) {
     return true;
@@ -4737,6 +4737,264 @@ async function handleMidFlowRetrievalQuery(text, senderPhone, activeState, actio
     senderPhone,
     draft.company_name || 'Customer',
     `catalog_resume_ask|${activeState}|${action}|${JSON.stringify(draft)}`
+  );
+
+  return {
+    handled: true,
+    reply: combinedReply,
+    interactiveType: 'buttons',
+    interactiveButtons: RESUME_QUERY_BUTTONS,
+  };
+}
+
+/**
+ * Handles a stage update request mid-flow without dropping or corrupting the active catalog state.
+ * Executes the stage update directly against deals and inquiries tables in Supabase with pipeline validation,
+ * confirms the update, and appends the resume prompt with Yes/No quick action buttons.
+ */
+async function handleMidFlowStageUpdate(text, senderPhone, activeState, action, draft) {
+  const clean = text.trim();
+  const lower = clean.toLowerCase();
+
+  // 1. Identify target stage
+  let targetStage = null;
+  let stageDisplayName = null;
+
+  if (/\b(?:price\s*quote|price\s*quotation|quoted|quote|proposal|prop)\b/i.test(lower)) {
+    targetStage = 'quoted';
+    stageDisplayName = 'Price Quote';
+  } else if (/\b(?:negotiat(?:ion|ing|e)?|negot)\b/i.test(lower)) {
+    targetStage = 'negotiation';
+    stageDisplayName = 'Negotiation';
+  } else if (/\b(?:on\s*hold|hold)\b/i.test(lower)) {
+    targetStage = 'on_hold';
+    stageDisplayName = 'On Hold';
+  } else if (/\b(?:won|closed\s*won|order\s*confirmed|order\s*placed|deal\s*won)\b/i.test(lower)) {
+    targetStage = 'won';
+    stageDisplayName = 'Closed Won';
+  } else if (/\b(?:lost|closed\s*lost|deal\s*lost|cancelled|canceled|drop)\b/i.test(lower)) {
+    targetStage = 'lost';
+    stageDisplayName = 'Closed Lost';
+  } else if (/\b(?:new\s*inquiry|new\s*enquiry|new)\b/i.test(lower)) {
+    targetStage = 'new_inquiry';
+    stageDisplayName = 'New Inquiry';
+  }
+
+  // 2. Identify target inquiry / deal ID
+  let targetInqId = null;
+  const directIdMatch = clean.match(/(?:^|[\s#(,])(?:INQ|DEAL)[-_:#\s]+([A-Za-z0-9_-]{4,36})\b/i) ||
+    clean.match(/(?:^|[\s#(,])(?:INQ|DEAL)-?([A-Fa-f0-9]{4,36})\b/i) ||
+    clean.match(/#([A-Fa-f0-9]{4,8})\b/i) ||
+    clean.match(/\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/);
+
+  if (directIdMatch) {
+    const candidate = directIdMatch[1].replace(/^#+/, '').trim().toUpperCase();
+    if (!/^(?:UIRY|UIRE|STATUS|UPDATE|STAGE|RATE|DETAILS?|NOTES?|WITH|FROM|FOR|THE|ABOVE|THIS|DEAL|ORDER)$/i.test(candidate)) {
+      targetInqId = candidate;
+    }
+  }
+
+  // If no explicit ID in text, or user said "above inquiry" / "this inquiry" / "it":
+  if (!targetInqId) {
+    if (draft && (draft.inquiry_id || draft.deal_id || draft._inquiry_display_id)) {
+      const rawInq = draft.inquiry_id || draft.deal_id || draft._inquiry_display_id;
+      targetInqId = String(rawInq).replace(/^#?(?:INQ|DEAL)[-_:#\s]*/i, '').replace(/^#+/, '').replace(/-/g, '').trim().toUpperCase();
+    }
+  }
+
+  // If targetStage or targetInqId is still missing, attempt LLM extraction
+  if (!targetStage || !targetInqId) {
+    try {
+      const extractPrompt = `Extract the target deal/inquiry ID and new pipeline stage from the following message:
+Message: "${clean}"
+Active draft inquiry ID: "${draft?.inquiry_id || ''}"
+
+Return ONLY JSON:
+{
+  "inquiry_id": "<Inquiry ID e.g. INQ-D013D7 or null>",
+  "target_stage": "quoted|negotiation|on_hold|won|lost|new_inquiry|null"
+}`;
+      const res = await invokeWithFallback([new HumanMessage(extractPrompt)], null);
+      const jsonParsed = safeParseJSON(res.content, {});
+      if (!targetStage && jsonParsed.target_stage) {
+        targetStage = jsonParsed.target_stage;
+        const stageMap = {
+          quoted: 'Price Quote',
+          negotiation: 'Negotiation',
+          on_hold: 'On Hold',
+          won: 'Closed Won',
+          lost: 'Closed Lost',
+          new_inquiry: 'New Inquiry',
+        };
+        stageDisplayName = stageMap[targetStage] || targetStage;
+      }
+      if (!targetInqId && jsonParsed.inquiry_id) {
+        targetInqId = String(jsonParsed.inquiry_id).replace(/^#?(?:INQ|DEAL)[-_:#\s]*/i, '').replace(/^#+/, '').replace(/-/g, '').trim().toUpperCase();
+      }
+    } catch (e) {
+      console.warn('[CatalogFlow] handleMidFlowStageUpdate LLM extraction notice:', e.message);
+    }
+  }
+
+  if (!targetStage) {
+    targetStage = 'quoted';
+    stageDisplayName = 'Price Quote';
+  }
+
+  const cleanInqCode = targetInqId ? targetInqId.replace(/-/g, '').toUpperCase() : null;
+
+  // 3. Query deals and inquiries in Supabase
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+  const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
+  let dealsQuery = supabase
+    .from('deals')
+    .select('id, inquiry_id, customer_name, stage, po_number, delivery_location, payment_terms, salesperson_phone, created_at')
+    .order('created_at', { ascending: false });
+
+  if (!scope.isAdmin && targetPhones.length > 0) {
+    dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+  }
+
+  const { data: deals } = await dealsQuery.limit(100);
+
+  let deal = null;
+  if (deals && deals.length > 0) {
+    if (cleanInqCode) {
+      deal = deals.find(d => {
+        const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+        const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+        return dId.startsWith(cleanInqCode) || inqId.startsWith(cleanInqCode) || dId.includes(cleanInqCode) || inqId.includes(cleanInqCode);
+      }) || null;
+    }
+    if (!deal && draft?.company_name) {
+      deal = deals.find(d => d.customer_name && d.customer_name.toLowerCase().includes(draft.company_name.toLowerCase())) || null;
+    }
+  }
+
+  let inq = null;
+  if (!deal && cleanInqCode) {
+    let inqsQuery = supabase
+      .from('inquiries')
+      .select('id, company_name, sender_name, status, salesperson_phone, ai_extraction_json, deals(*)')
+      .order('created_at', { ascending: false });
+
+    if (!scope.isAdmin && targetPhones.length > 0) {
+      inqsQuery = inqsQuery.in('salesperson_phone', targetPhones);
+    }
+
+    const { data: inqRows } = await inqsQuery.limit(50);
+    if (inqRows && inqRows.length > 0) {
+      for (const iRow of inqRows) {
+        const iId = (iRow.id || '').replace(/-/g, '').toUpperCase();
+        if (iId.startsWith(cleanInqCode) || iId.includes(cleanInqCode)) {
+          inq = iRow;
+          if (iRow.deals && iRow.deals.length > 0) {
+            deal = iRow.deals[0];
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  // If no deal or inquiry found
+  if (!deal && !inq) {
+    const errorMsg = `❌ *Inquiry Not Found*\n\nCould not find an inquiry or deal matching ${targetInqId ? `"${targetInqId}"` : 'the specified reference'}.\n\nPlease check the Inquiry ID (e.g. INQ-D013D7) and try again.`;
+    const actionDisplayName = getModuleDisplayName(action);
+    const resumeMsg = `You were in the middle of *${actionDisplayName}* — do you want to continue?`;
+    const combinedReply = `${errorMsg}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
+
+    await recordSessionMessage(senderPhone, 'user', text);
+    await recordSessionMessage(senderPhone, 'assistant', combinedReply, { action_type: action });
+    await saveActiveSession(senderPhone, draft?.company_name || 'Customer', `catalog_resume_ask|${activeState}|${action}|${JSON.stringify(draft || {})}`);
+
+    return {
+      handled: true,
+      reply: combinedReply,
+      interactiveType: 'buttons',
+      interactiveButtons: RESUME_QUERY_BUTTONS,
+    };
+  }
+
+  // 4. Validate Pipeline Stage Transition Rules
+  const rawCurrentStage = (deal ? deal.stage : inq?.status) || 'new_inquiry';
+  const currStageLower = String(rawCurrentStage).toLowerCase().trim();
+  const formattedDisplayId = deal
+    ? `INQ-${(deal.id || deal.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`
+    : `INQ-${inq.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+
+  let transitionError = null;
+
+  // Rule: Cannot jump from New Inquiry directly to Won
+  if (targetStage === 'won' && ['new_inquiry', 'new', 'auto_created', 'inquiry'].includes(currStageLower)) {
+    transitionError = `Order cannot be marked as Won directly from New Inquiry stage. A quotation must be sent and the inquiry must be in Quoted stage before an order can be recorded.`;
+  } else if (targetStage === 'won' && ['lost', 'closed lost', 'closed_lost'].includes(currStageLower)) {
+    transitionError = `Inquiry ${formattedDisplayId} is marked as Lost. Please reopen or update the inquiry to Quoted or Negotiation before recording an order.`;
+  }
+
+  if (transitionError) {
+    const actionDisplayName = getModuleDisplayName(action);
+    const resumeMsg = `You were in the middle of *${actionDisplayName}* — do you want to continue?`;
+    const combinedReply = `⚠️ ${transitionError}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
+
+    await recordSessionMessage(senderPhone, 'user', text);
+    await recordSessionMessage(senderPhone, 'assistant', combinedReply, { action_type: action });
+    await saveActiveSession(senderPhone, draft?.company_name || 'Customer', `catalog_resume_ask|${activeState}|${action}|${JSON.stringify(draft || {})}`);
+
+    return {
+      handled: true,
+      reply: combinedReply,
+      interactiveType: 'buttons',
+      interactiveButtons: RESUME_QUERY_BUTTONS,
+    };
+  }
+
+  // 5. Execute Stage Update against database
+  if (deal) {
+    const dealUpdates = {
+      stage: targetStage,
+    };
+    if (targetStage === 'won' && !deal.won_at) {
+      dealUpdates.won_at = new Date().toISOString();
+    }
+    const { error: dUpdErr } = await supabase.from('deals').update(dealUpdates).eq('id', deal.id);
+    if (dUpdErr) console.error('[CatalogFlow] handleMidFlowStageUpdate deal update error:', dUpdErr.message);
+  }
+
+  const targetInquiryId = deal?.inquiry_id || deal?.id || inq?.id;
+  if (targetInquiryId) {
+    const inqUpdates = {
+      status: targetStage === 'won' ? 'confirmed' : targetStage,
+    };
+    const { data: inqRow } = await supabase.from('inquiries').select('id, ai_extraction_json').eq('id', targetInquiryId).single();
+    if (inqRow && inqRow.ai_extraction_json) {
+      inqUpdates.ai_extraction_json = {
+        ...inqRow.ai_extraction_json,
+        stage: targetStage,
+        status: targetStage,
+      };
+    }
+    const { error: iUpdErr } = await supabase.from('inquiries').update(inqUpdates).eq('id', targetInquiryId);
+    if (iUpdErr) console.warn('[CatalogFlow] handleMidFlowStageUpdate inq update notice:', iUpdErr.message);
+  }
+
+  // 6. Build Confirmation and Resume Prompt
+  const confirmationMsg = `Stage for ${formattedDisplayId} has been updated to ${stageDisplayName}.`;
+  const actionDisplayName = getModuleDisplayName(action);
+  const resumeMsg = `You were in the middle of the ${actionDisplayName} flow — do you want to continue?`;
+  const combinedReply = `${confirmationMsg}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
+
+  await recordSessionMessage(senderPhone, 'user', text);
+  await recordSessionMessage(senderPhone, 'assistant', combinedReply, {
+    action_type: action,
+    customer_name: draft?.company_name || null,
+  });
+
+  await saveActiveSession(
+    senderPhone,
+    draft?.company_name || 'Customer',
+    `catalog_resume_ask|${activeState}|${action}|${JSON.stringify(draft || {})}`
   );
 
   return {
@@ -5071,6 +5329,7 @@ The user is currently in the active [${activeActivity}] (${activityDisplayName})
 Incoming message: "${trimmed}"
 
 Classify this incoming message:
+- If this message is requesting to update, change, set, move, or mark the stage/status of an inquiry or deal (e.g. "update the stage to price quote for above inquiry", "update stage to quoted", "mark as negotiation", "move to on hold", "set status to price quote", "stage won", "set stage to lost") -> STAGE_UPDATE
 - If this message is reporting or logging a customer complaint, quality issue, defect, damage, rust, shortage, service problem, or delivery issue -> DIFFERENT_ACTIVITY:LOG_COMPLAINT
 - If this message is recording or logging a purchase order / PO -> DIFFERENT_ACTIVITY:LOG_ORDER
 - If this message is logging a new customer inquiry, requirement, or RFQ -> DIFFERENT_ACTIVITY:LOG_INQUIRY
@@ -5086,11 +5345,10 @@ DIFFERENT_ACTIVITY:LOG_VISIT
 DIFFERENT_ACTIVITY:LOG_ORDER
 DIFFERENT_ACTIVITY:LOG_INQUIRY
 DIFFERENT_ACTIVITY:LOG_NEW_CUSTOMER
-DIFFERENT_ACTIVITY:UPDATE_INQUIRY
-DIFFERENT_ACTIVITY:UPDATE_ORDER
 DIFFERENT_ACTIVITY:UPDATE_VISIT
 DIFFERENT_ACTIVITY:UPDATE_COMPLAINT
 RETRIEVAL_QUERY
+STAGE_UPDATE
 
 Classification:`;
 
@@ -5098,6 +5356,10 @@ Classification:`;
     const res = await invokeWithFallback([new HumanMessage(prompt)], null);
     const raw = (typeof res.content === 'string' ? res.content : '').trim().replace(/[*`]/g, '');
     console.log('[CatalogFlow] AI active session intent classifier raw response:', JSON.stringify(raw));
+
+    if (/STAGE_UPDATE/i.test(raw)) {
+      return { classification: 'STAGE_UPDATE' };
+    }
 
     const diffMatch = raw.match(/DIFFERENT_?ACTIVITY(?:\s*:\s*([A-Z_]+))?/i);
     if (diffMatch) {
@@ -5117,6 +5379,9 @@ Classification:`;
     }
 
     if (/SAME_ACTIVITY/i.test(raw)) {
+      if (isStageUpdatePrompt(trimmed)) {
+        return { classification: 'STAGE_UPDATE' };
+      }
       // Check if deterministic regex detects a clear cross-module action that LLM might have missed
       const fallbackDiff = detectOutOfScopeActionAttempt(activeActivity, trimmed);
       if (fallbackDiff) {
@@ -5129,6 +5394,10 @@ Classification:`;
   }
 
   // Deterministic fallback if model call failed or was ambiguous
+  if (isStageUpdatePrompt(trimmed)) {
+    return { classification: 'STAGE_UPDATE' };
+  }
+
   const fallbackDiff = detectOutOfScopeActionAttempt(activeActivity, trimmed);
   if (fallbackDiff) {
     return { classification: 'DIFFERENT_ACTIVITY', targetAction: fallbackDiff };
@@ -5323,6 +5592,10 @@ async function handleCatalogFlow(rawText, senderPhone) {
         return await handleMidFlowRetrievalQuery(text, senderPhone, activeState, currentAction, currentDraft);
       }
 
+      if (intentResult.classification === 'STAGE_UPDATE') {
+        return await handleMidFlowStageUpdate(text, senderPhone, activeState, currentAction, currentDraft);
+      }
+
       if (intentResult.classification === 'DIFFERENT_ACTIVITY') {
         console.log(`[CatalogFlow] Strict activity scope guard: active=${currentAction}, incoming=${intentResult.targetAction}`);
         return buildOutOfScopeActivityResponse(currentAction, intentResult.targetAction);
@@ -5397,7 +5670,10 @@ async function handleCatalogFlow(rawText, senderPhone) {
       };
     }
 
-    // 3. User asks ANOTHER retrieval query mid-resume
+    // 3. User asks ANOTHER stage update or retrieval query mid-resume
+    if (isStageUpdatePrompt(text)) {
+      return await handleMidFlowStageUpdate(text, senderPhone, interruptedState, action, draft);
+    }
     if (await isMidFlowReadQuery(text)) {
       return await handleMidFlowRetrievalQuery(text, senderPhone, interruptedState, action, draft);
     }
@@ -6381,4 +6657,5 @@ module.exports = {
   getPostActivityButtons,
   RESUME_QUERY_BUTTONS,
   restoreInterruptedFlow,
+  handleMidFlowStageUpdate,
 };
