@@ -468,14 +468,14 @@ function buildOutOfScopeActivityResponse(currentAction, detectedAction) {
   const currentModuleName = getModuleDisplayName(currentAction);
   const targetVerb = getTargetActionVerb(detectedAction);
 
-  const replyText = `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete or cancel the current activity first and select the relevant option from the menu.\n\nHere is the menu to start a new activity:\n\n${CATALOG_MENU}`;
+  const replyText = `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete the current ongoing activity or select the relevant option from the menu.\n\nHere is the menu to start a new activity:\n\n${CATALOG_MENU}`;
 
   return {
     handled: true,
     reply: replyText,
     interactiveType: 'list',
     interactiveList: {
-      bodyText: `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete or cancel the current activity first and select the relevant option from the menu.\n\nHere is the menu to start a new activity:`,
+      bodyText: `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete the current ongoing activity or select the relevant option from the menu.\n\nHere is the menu to start a new activity:`,
       buttonText: 'Choose Action',
       sections: CATALOG_MENU_SECTIONS,
     },

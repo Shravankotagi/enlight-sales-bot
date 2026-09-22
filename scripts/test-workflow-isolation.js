@@ -17,7 +17,7 @@ async function runTests() {
   await saveActiveSession(testPhone, 'Test Corp', 'catalog_flow|LOG_INQUIRY|{"company_name":"Test Corp"}');
   const crossRes = await handleCatalogFlow('create an order regarding this inquiry INQ-F4D982', testPhone);
   console.log('Cross-module response:', crossRes.reply);
-  const pass1 = crossRes.handled === true && crossRes.reply.includes('You are currently in the *Inquiry* flow') && crossRes.reply.includes('complete or cancel');
+  const pass1 = crossRes.handled === true && crossRes.reply.includes('You are currently in the *Inquiry* flow') && crossRes.reply.includes('complete the current ongoing activity');
   console.log('Test 1 Passed:', pass1);
 
   // TEST 2: Workflow Isolation in Visit flow
@@ -245,7 +245,7 @@ async function runTests() {
   const pass10 = crossOrderToCmpRes.handled === true &&
                  crossOrderToCmpRes.reply.includes('You are currently in the *Order* flow') &&
                  crossOrderToCmpRes.reply.includes('log a complaint') &&
-                 crossOrderToCmpRes.reply.includes('complete or cancel the current activity first');
+                 crossOrderToCmpRes.reply.includes('complete the current ongoing activity or select the relevant option from the menu');
   console.log('Test 10 Passed:', pass10);
 
   // TEST 11: Correct Inquiry ID Linkage on Complaint (Must match deal.id / dashboard INQ-1151E4)
