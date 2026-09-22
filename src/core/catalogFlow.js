@@ -5043,6 +5043,104 @@ const DIRECT_ACTION_MAP = [
   { pattern: /^\s*(?:log|create|new)\s+(?:inquiry|enquiry|rfq|deal)\b/i, action: 'LOG_INQUIRY' },
 ];
 
+async function classifyActiveSessionIntent(activeActivity, text) {
+  if (!activeActivity || !text || typeof text !== 'string') return { classification: 'SAME_ACTIVITY' };
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return { classification: 'SAME_ACTIVITY' };
+
+  // 1. Standalone reference IDs (INQ-*, PO-*, CMP-*, VIS-*, hex UUIDs) are field inputs for active draft
+  const isPureRefId = /^#?(?:INQ|DEAL|PO|VIS|CMP|ORD)[-_][A-Z0-9-]+$/i.test(trimmed) ||
+    /^[A-F0-9]{6,36}$/i.test(trimmed) ||
+    /^[0-9a-f]{8}-[0-9a-f]{4}/i.test(trimmed) ||
+    /^#?[A-F0-9]{6,8}$/i.test(trimmed);
+  if (isPureRefId) {
+    return { classification: 'SAME_ACTIVITY' };
+  }
+
+  // 2. Candidate disambiguation selections (1, 2, option 1, date strings) are field inputs
+  if (/^(?:option\s*|choice\s*|#\s*)?[1-9]\.?$/i.test(trimmed)) {
+    return { classification: 'SAME_ACTIVITY' };
+  }
+
+  const currentFamily = getModuleFamily(activeActivity);
+  const activityDisplayName = getModuleDisplayName(activeActivity);
+
+  const prompt = `You are a strict conversational intent classifier for an active B2B sales workflow session on WhatsApp.
+
+The user is currently in the active [${activeActivity}] (${activityDisplayName}) workflow.
+Incoming message: "${trimmed}"
+
+Classify this incoming message:
+- If this message is reporting or logging a customer complaint, quality issue, defect, damage, rust, shortage, service problem, or delivery issue -> DIFFERENT_ACTIVITY:LOG_COMPLAINT
+- If this message is recording or logging a purchase order / PO -> DIFFERENT_ACTIVITY:LOG_ORDER
+- If this message is logging a new customer inquiry, requirement, or RFQ -> DIFFERENT_ACTIVITY:LOG_INQUIRY
+- If this message is onboarding a new customer profile -> DIFFERENT_ACTIVITY:LOG_NEW_CUSTOMER
+- If this message is logging a customer field visit / client meeting -> DIFFERENT_ACTIVITY:LOG_VISIT
+- If this message provides field details (person met, location, meeting remarks, visit date, outcome, company name, rate, tonnage, quantity) for the active [${activeActivity}] (${activityDisplayName}) form -> SAME_ACTIVITY
+- If this message is asking a read-only data query or search (asking for rates, checking status, listing inquiries, checking orders) -> RETRIEVAL_QUERY
+
+Respond strictly with ONLY the classification label on a single line, nothing else. Valid responses:
+SAME_ACTIVITY
+DIFFERENT_ACTIVITY:LOG_COMPLAINT
+DIFFERENT_ACTIVITY:LOG_VISIT
+DIFFERENT_ACTIVITY:LOG_ORDER
+DIFFERENT_ACTIVITY:LOG_INQUIRY
+DIFFERENT_ACTIVITY:LOG_NEW_CUSTOMER
+DIFFERENT_ACTIVITY:UPDATE_INQUIRY
+DIFFERENT_ACTIVITY:UPDATE_ORDER
+DIFFERENT_ACTIVITY:UPDATE_VISIT
+DIFFERENT_ACTIVITY:UPDATE_COMPLAINT
+RETRIEVAL_QUERY
+
+Classification:`;
+
+  try {
+    const res = await invokeWithFallback([new HumanMessage(prompt)], null);
+    const raw = (typeof res.content === 'string' ? res.content : '').trim().replace(/[*`]/g, '');
+    console.log('[CatalogFlow] AI active session intent classifier raw response:', JSON.stringify(raw));
+
+    const diffMatch = raw.match(/DIFFERENT_?ACTIVITY(?:\s*:\s*([A-Z_]+))?/i);
+    if (diffMatch) {
+      let target = (diffMatch[1] || '').trim().toUpperCase();
+      if (!target || target === 'OTHER') {
+        target = 'LOG_COMPLAINT';
+      }
+      const targetFamily = getModuleFamily(target);
+      if (targetFamily !== 'OTHER' && targetFamily !== currentFamily) {
+        return { classification: 'DIFFERENT_ACTIVITY', targetAction: target };
+      }
+      return { classification: 'SAME_ACTIVITY' };
+    }
+
+    if (/RETRIEVAL_QUERY/i.test(raw)) {
+      return { classification: 'RETRIEVAL_QUERY' };
+    }
+
+    if (/SAME_ACTIVITY/i.test(raw)) {
+      // Check if deterministic regex detects a clear cross-module action that LLM might have missed
+      const fallbackDiff = detectOutOfScopeActionAttempt(activeActivity, trimmed);
+      if (fallbackDiff) {
+        return { classification: 'DIFFERENT_ACTIVITY', targetAction: fallbackDiff };
+      }
+      return { classification: 'SAME_ACTIVITY' };
+    }
+  } catch (err) {
+    console.warn('[CatalogFlow] AI active session intent classifier notice:', err.message);
+  }
+
+  // Deterministic fallback if model call failed or was ambiguous
+  const fallbackDiff = detectOutOfScopeActionAttempt(activeActivity, trimmed);
+  if (fallbackDiff) {
+    return { classification: 'DIFFERENT_ACTIVITY', targetAction: fallbackDiff };
+  }
+
+  if (isOperationalQuery(trimmed)) {
+    return { classification: 'RETRIEVAL_QUERY' };
+  }
+
+  return { classification: 'SAME_ACTIVITY' };
+}
+
 function detectOutOfScopeActionAttempt(currentAction, text) {
   if (!text || typeof text !== 'string') return null;
   const trimmed = text.trim();
@@ -5191,10 +5289,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
   }
 
-  // ── 2b. ACTIVE SESSION SCOPE GUARD ─────────────────────────────────────────
+  // ── 2b. ACTIVE SESSION SCOPE GUARD (AI INTENT CLASSIFICATION) ──────────────
   if (hasActiveCatalogSession && !lastIntent.startsWith('catalog_resume_ask|')) {
     const cleanInput = text.toLowerCase().replace(/[^a-z0-9\s_/]/g, ' ').replace(/\s+/g, ' ').trim();
     const parts = lastIntent.split('|');
+    const activeState = parts[0];
     const currentAction = parts[1];
     const currentDraft = safeParseJSON(parts.slice(2).join('|'), {});
 
@@ -5215,21 +5314,20 @@ async function handleCatalogFlow(rawText, senderPhone) {
             'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel'
           ].includes(cleanInput));
 
-    // If it's not a control reply and not a retrieval query
-    if (!isControlReply && !isOperationalQuery(text)) {
-      const isLLMQuery = await isOperationalQueryWithLLM(text);
-      if (!isLLMQuery) {
-        // Strict Activity Scope Guard: Check if input is an explicit switch to a DIFFERENT module
-        const detectedNewAction = detectOutOfScopeActionAttempt(currentAction, text);
-        if (detectedNewAction) {
-          const currentFamily = getModuleFamily(currentAction);
-          const newFamily = getModuleFamily(detectedNewAction);
-          if (newFamily !== 'OTHER' && newFamily !== currentFamily) {
-            console.log(`[CatalogFlow] Strict activity scope guard: active=${currentAction} (${currentFamily}), incoming=${detectedNewAction} (${newFamily})`);
-            return buildOutOfScopeActivityResponse(currentAction, detectedNewAction);
-          }
-        }
+    if (!isControlReply) {
+      // AI Intent Classifier: Classify every non-control incoming message against active session
+      const intentResult = await classifyActiveSessionIntent(currentAction, text);
+      console.log(`[CatalogFlow] Active session (${currentAction}) AI classification for "${text.slice(0, 50)}...":`, intentResult);
+
+      if (intentResult.classification === 'RETRIEVAL_QUERY') {
+        return await handleMidFlowRetrievalQuery(text, senderPhone, activeState, currentAction, currentDraft);
       }
+
+      if (intentResult.classification === 'DIFFERENT_ACTIVITY') {
+        console.log(`[CatalogFlow] Strict activity scope guard: active=${currentAction}, incoming=${intentResult.targetAction}`);
+        return buildOutOfScopeActivityResponse(currentAction, intentResult.targetAction);
+      }
+      // If SAME_ACTIVITY, proceed into the flow below!
     }
   }
 
@@ -5315,10 +5413,6 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const unrecognizedName = parts[2];
     const originalDraftJsonStr = parts.slice(3).join('|');
     const originalDraft = safeParseJSON(originalDraftJsonStr, {});
-
-    if (await isMidFlowReadQuery(text)) {
-      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_implicit_cust_ask', originalAction, { company_name: unrecognizedName, ...originalDraft });
-    }
 
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
 
@@ -5496,10 +5590,6 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const originalAction = parts[1];
     const custDraftJsonStr = parts.slice(2).join('|');
     const custDraft = safeParseJSON(custDraftJsonStr, {});
-
-    if (await isMidFlowReadQuery(text)) {
-      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_implicit_cust_collect', 'LOG_NEW_CUSTOMER', custDraft);
-    }
 
     await recordSessionMessage(senderPhone, 'user', text);
 
@@ -5782,10 +5872,6 @@ async function handleCatalogFlow(rawText, senderPhone) {
     const draftJsonStr = parts.slice(2).join('|');
     const draft = safeParseJSON(draftJsonStr, {});
 
-    if (await isMidFlowReadQuery(text)) {
-      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_editing', action, draft);
-    }
-
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
 
     // Cancel during edit
@@ -5886,10 +5972,6 @@ async function handleCatalogFlow(rawText, senderPhone) {
     let action = parts[1];
     const draftJsonStr = parts.slice(2).join('|');
     let existingDraft = safeParseJSON(draftJsonStr, {});
-
-    if (await isMidFlowReadQuery(text)) {
-      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_flow', action, existingDraft);
-    }
 
     await recordSessionMessage(senderPhone, 'user', text);
 
