@@ -1713,7 +1713,10 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   }
 
   // Determine stage & display formatting
-  const rawStage = (matchedDeal ? matchedDeal.stage : matchedInq.status) || 'new_inquiry';
+  const canonicalInqId = matchedInq ? matchedInq.id : (matchedDeal?.inquiry_id || matchedDeal?.id);
+  const formattedCode = canonicalInqId ? `INQ-${canonicalInqId.replace(/-/g, '').slice(0, 6).toUpperCase()}` : 'Inquiry';
+
+  const rawStage = (matchedInq ? (matchedInq.stage || matchedInq.status) : matchedDeal?.stage) || 'new_inquiry';
   const stageLower = String(rawStage).toLowerCase().trim();
 
   const isNewInquiryStage = [
@@ -1724,10 +1727,6 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   ].includes(stageLower);
 
   if (isNewInquiryStage) {
-    const formattedCode = matchedDeal
-      ? `INQ-${(matchedDeal.id || matchedDeal.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`
-      : `INQ-${matchedInq.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
-
     return {
       isValid: false,
       reply: `Order cannot be created. Inquiry ${formattedCode} is currently in New Inquiry stage. A quotation must be sent before an order can be recorded.`,
@@ -1735,10 +1734,6 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   }
 
   if (stageLower === 'lost' || stageLower === 'closed lost' || stageLower === 'closed_lost') {
-    const formattedCode = matchedDeal
-      ? `INQ-${(matchedDeal.id || matchedDeal.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`
-      : `INQ-${matchedInq.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
-
     return {
       isValid: false,
       reply: `Order cannot be created. Inquiry ${formattedCode} is marked as Lost. Please reopen or update the inquiry before recording an order.`,
@@ -1746,9 +1741,9 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   }
 
   // If Quoted stage -> Auto populate customer name, delivery location, payment terms, line items, PO details
+  draft.inquiry_id = canonicalInqId;
   if (matchedDeal) {
     draft.deal_id = matchedDeal.id;
-    draft.inquiry_id = matchedDeal.id || matchedDeal.inquiry_id;
     if (!draft.company_name && matchedDeal.customer_name) {
       draft.company_name = matchedDeal.customer_name;
     }
@@ -3300,16 +3295,21 @@ async function executeAction(action, draft, senderPhone) {
         if (draft.delivery_location) humanRawText += `Delivery Location: ${draft.delivery_location}\n`;
         if (draft.additional_notes) humanRawText += `Notes: ${draft.additional_notes}\n`;
 
-        // 1. Insert into inquiries
+        // 1. Insert into inquiries (primary canonical table with pipeline fields)
         const { data: inqRow, error: inqErr } = await supabase
           .from('inquiries')
           .insert({
             source_channel: 'WhatsApp',
             sender_name: companyName,
+            customer_name: companyName,
             raw_text: humanRawText.trim(),
             sender_phone: senderPhone,
             salesperson_phone: senderPhone,
-            status: 'auto_created',
+            status: 'new_inquiry',
+            stage: 'new_inquiry',
+            delivery_location: draft.delivery_location || null,
+            payment_terms: draft.payment_terms || null,
+            total_amount: totalAmount || null,
             ai_extraction_json: structuredAiJson,
             overall_confidence: 0.95,
             inquiry_type: 'inquiry',
@@ -3320,28 +3320,7 @@ async function executeAction(action, draft, senderPhone) {
 
         if (inqErr) console.error('[CatalogFlow] Inquiry insert error:', inqErr);
 
-        // 2. Insert into deals
-        const { data: dealRow, error: dealErr } = await supabase
-          .from('deals')
-          .insert({
-            inquiry_id: inqRow ? inqRow.id : null,
-            stage: 'new_inquiry',
-            customer_name: companyName,
-            customer_address: draft.delivery_location || null,
-            delivery_location: draft.delivery_location || null,
-            payment_terms: draft.payment_terms || null,
-            total_amount: totalAmount || null,
-            inquiry_type: 'inquiry',
-            status: 'auto_created',
-            salesperson_phone: senderPhone,
-            created_at: new Date().toISOString(),
-          })
-          .select()
-          .single();
-
-        if (dealErr) console.error('[CatalogFlow] Deal insert error:', dealErr);
-
-        const targetRecordId = inqRow?.id || dealRow?.id;
+        const targetRecordId = inqRow?.id;
         const hexCode = targetRecordId ? targetRecordId.replace(/-/g, '').slice(0, 6).toUpperCase() : Math.random().toString(16).substring(2, 8).toUpperCase();
         const inquiryCode = `INQ-${hexCode}`;
 
@@ -3351,10 +3330,10 @@ async function executeAction(action, draft, senderPhone) {
           await supabase.from('inquiries').update({ ai_extraction_json: structuredAiJson }).eq('id', inqRow.id);
         }
 
-        // 3. Insert line items into deal_items
-        if (dealRow && structuredLineItems.length > 0) {
-          const itemsPayload = structuredLineItems.map(it => ({
-            deal_id: dealRow.id,
+        // 2. Insert line items into inquiry_items (canonical items table)
+        if (inqRow && structuredLineItems.length > 0) {
+          const inqItemsPayload = structuredLineItems.map(it => ({
+            inquiry_id: inqRow.id,
             sku_text: it.sku_text || it.description,
             dimensions: it.dimensions || it.spec || null,
             grade: it.grade || null,
@@ -3365,7 +3344,47 @@ async function executeAction(action, draft, senderPhone) {
             confidence: 0.95,
             created_at: new Date().toISOString(),
           }));
-          await supabase.from('deal_items').insert(itemsPayload);
+          await supabase.from('inquiry_items').insert(inqItemsPayload);
+        }
+
+        // 3. Mirror into deals & deal_items (with id = inqRow.id, inquiry_id = inqRow.id for 100% backward-compatibility)
+        if (inqRow) {
+          const { data: dealRow, error: dealErr } = await supabase
+            .from('deals')
+            .insert({
+              id: inqRow.id,
+              inquiry_id: inqRow.id,
+              stage: 'new_inquiry',
+              customer_name: companyName,
+              customer_address: draft.delivery_location || null,
+              delivery_location: draft.delivery_location || null,
+              payment_terms: draft.payment_terms || null,
+              total_amount: totalAmount || null,
+              inquiry_type: 'inquiry',
+              status: 'auto_created',
+              salesperson_phone: senderPhone,
+              created_at: new Date().toISOString(),
+            })
+            .select()
+            .single();
+
+          if (dealErr) console.error('[CatalogFlow] Deal mirror insert error:', dealErr);
+
+          if (structuredLineItems.length > 0) {
+            const itemsPayload = structuredLineItems.map(it => ({
+              deal_id: inqRow.id,
+              sku_text: it.sku_text || it.description,
+              dimensions: it.dimensions || it.spec || null,
+              grade: it.grade || null,
+              quantity: Number(it.quantity) || null,
+              unit: it.unit || 'MT',
+              rate: Number(it.rate) || null,
+              amount: Number(it.amount) || null,
+              confidence: 0.95,
+              created_at: new Date().toISOString(),
+            }));
+            await supabase.from('deal_items').insert(itemsPayload);
+          }
         }
 
         // 4. Log KRA 6 (CRM Compliance)
@@ -3734,13 +3753,42 @@ async function executeAction(action, draft, senderPhone) {
               raw_text: updatedRawText.trim(),
             };
             if (dealUpdates.stage) {
+              inqUpdatePayload.stage = dealUpdates.stage;
               inqUpdatePayload.status = dealUpdates.stage === 'won' ? 'confirmed' : dealUpdates.stage;
             }
+            if (dealUpdates.total_amount) inqUpdatePayload.total_amount = dealUpdates.total_amount;
+            if (dealUpdates.delivery_location) inqUpdatePayload.delivery_location = dealUpdates.delivery_location;
+            if (dealUpdates.payment_terms) inqUpdatePayload.payment_terms = dealUpdates.payment_terms;
+            if (dealUpdates.po_number) inqUpdatePayload.po_number = dealUpdates.po_number;
+            if (dealUpdates.po_date) inqUpdatePayload.po_date = dealUpdates.po_date;
+            if (dealUpdates.won_at) inqUpdatePayload.won_at = dealUpdates.won_at;
+            if (dealUpdates.lost_reason) inqUpdatePayload.lost_reason = dealUpdates.lost_reason;
             await supabase.from('inquiries').update(inqUpdatePayload).eq('id', targetInqId);
+
+            if (itemsUpdated) {
+              const { data: refreshedItems } = await supabase.from('deal_items').select('*').eq('deal_id', deal.id);
+              if (refreshedItems && refreshedItems.length > 0) {
+                await supabase.from('inquiry_items').delete().eq('inquiry_id', targetInqId);
+                const inqItems = refreshedItems.map(it => ({
+                  inquiry_id: targetInqId,
+                  sku_text: it.sku_text,
+                  dimensions: it.dimensions,
+                  grade: it.grade,
+                  quantity: it.quantity,
+                  unit: it.unit,
+                  rate: it.rate,
+                  amount: it.amount,
+                  confidence: 0.95,
+                  created_at: new Date().toISOString(),
+                }));
+                await supabase.from('inquiry_items').insert(inqItems);
+              }
+            }
           }
         }
 
-        const displayInqId = draft._inquiry_display_id || (deal ? (deal.deal_number || `INQ-${deal.id.slice(0, 6).toUpperCase()}`) : (draft.inquiry_id || 'Inquiry'));
+        const canonicalTargetId = targetInqId || (deal ? (deal.inquiry_id || deal.id) : null);
+        const displayInqId = draft._inquiry_display_id || (canonicalTargetId ? `INQ-${canonicalTargetId.replace(/-/g, '').slice(0, 6).toUpperCase()}` : (deal ? (deal.deal_number || `INQ-${deal.id.slice(0, 6).toUpperCase()}`) : (draft.inquiry_id || 'Inquiry')));
         const displayCustName = deal?.customer_name || draft.company_name || 'Customer';
 
         let fieldsSummary = '';
@@ -3829,15 +3877,24 @@ async function executeAction(action, draft, senderPhone) {
         if (draft.payment_terms) humanRawText += `Payment Terms: ${draft.payment_terms}\n`;
         if (draft.delivery_location) humanRawText += `Delivery Location: ${draft.delivery_location}\n`;
 
-        // 1. Insert into inquiries
+        // 1. Insert into inquiries (primary canonical table with pipeline fields)
         const { data: inqRow } = await supabase
           .from('inquiries')
           .insert({
             source_channel: 'WhatsApp',
+            customer_name: companyName,
+            sender_name: companyName,
             raw_text: humanRawText.trim(),
             sender_phone: senderPhone,
             salesperson_phone: senderPhone,
-            status: 'auto_created',
+            status: 'confirmed',
+            stage: 'won',
+            won_at: new Date().toISOString(),
+            po_number: draft.po_number,
+            po_date: draft.po_date,
+            total_amount: totalAmount,
+            delivery_location: draft.delivery_location || null,
+            payment_terms: draft.payment_terms || null,
             ai_extraction_json: structuredAiJson,
             overall_confidence: 0.98,
             inquiry_type: 'purchase_order',
@@ -3846,11 +3903,41 @@ async function executeAction(action, draft, senderPhone) {
           .select()
           .single();
 
-        // 2. Update existing deal (if linked) OR insert new deal with stage = 'won'
-        let targetDealId = draft.deal_id || null;
+        if (inqRow && structuredLineItems.length > 0) {
+          const inqItemsPayload = structuredLineItems.map(it => ({
+            inquiry_id: inqRow.id,
+            sku_text: it.sku_text || it.description,
+            dimensions: it.dimensions || it.spec || null,
+            grade: it.grade || null,
+            quantity: Number(it.quantity) || 0,
+            unit: it.unit || 'MT',
+            rate: Number(it.rate) || 0,
+            amount: Number(it.amount) || (Number(it.quantity) * Number(it.rate)),
+            confidence: 0.95,
+            created_at: new Date().toISOString(),
+          }));
+          await supabase.from('inquiry_items').insert(inqItemsPayload);
+        }
+
+        // 2. Update existing linked inquiry / deal OR insert new deal with stage = 'won'
+        let targetDealId = draft.deal_id || draft.inquiry_id || null;
 
         if (targetDealId) {
-          // Update the existing linked deal to won with PO details
+          // Update the existing linked inquiry & deal to won with PO details
+          await supabase
+            .from('inquiries')
+            .update({
+              stage: 'won',
+              status: 'confirmed',
+              won_at: new Date().toISOString(),
+              po_number: draft.po_number,
+              po_date: draft.po_date,
+              total_amount: totalAmount,
+              delivery_location: draft.delivery_location,
+              payment_terms: draft.payment_terms,
+            })
+            .eq('id', targetDealId);
+
           const { error: updErr } = await supabase
             .from('deals')
             .update({
@@ -3868,8 +3955,23 @@ async function executeAction(action, draft, senderPhone) {
 
           if (updErr) console.error('[CatalogFlow] Order deal update error:', updErr);
 
-          // Update or replace line items for this existing deal
+          // Update or replace line items for this existing deal & inquiry
           if (structuredLineItems.length > 0) {
+            await supabase.from('inquiry_items').delete().eq('inquiry_id', targetDealId);
+            const inqItemsPayload = structuredLineItems.map(it => ({
+              inquiry_id: targetDealId,
+              sku_text: it.sku_text || it.description,
+              dimensions: it.dimensions || it.spec || null,
+              grade: it.grade || null,
+              quantity: Number(it.quantity) || 0,
+              unit: it.unit || 'MT',
+              rate: Number(it.rate) || 0,
+              amount: Number(it.amount) || (Number(it.quantity) * Number(it.rate)),
+              confidence: 0.95,
+              created_at: new Date().toISOString(),
+            }));
+            await supabase.from('inquiry_items').insert(inqItemsPayload);
+
             await supabase.from('deal_items').delete().eq('deal_id', targetDealId);
             const itemsPayload = structuredLineItems.map(it => ({
               deal_id: targetDealId,
@@ -3885,10 +3987,11 @@ async function executeAction(action, draft, senderPhone) {
             await supabase.from('deal_items').insert(itemsPayload);
           }
         } else {
-          // No existing deal -> Insert single new deal row
+          // No existing deal -> Insert single new deal row mirroring inqRow
           const { data: dealRow, error: dealErr } = await supabase
             .from('deals')
             .insert({
+              id: inqRow ? inqRow.id : undefined,
               inquiry_id: inqRow ? inqRow.id : null,
               stage: 'won',
               won_at: new Date().toISOString(),
