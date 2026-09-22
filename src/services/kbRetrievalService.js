@@ -268,7 +268,8 @@ async function searchKnowledgeBase(queryText, callerContext = {}, supabaseAdmin)
     source: 'domain_sop_fallback',
     query: cleanQuery,
     results_found: 1,
-    knowledge_snippet: `[Practical SOP Guidance: ${practicalFallback.title}]\n${practicalFallback.content}`,
+    source_title: practicalFallback.title,
+    knowledge_snippet: `[Source: ${practicalFallback.title}]\n${practicalFallback.content}`,
     fallback_guidance: practicalFallback,
   };
 }
