@@ -466,7 +466,7 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'search_knowledge_base',
-      description: `Searches company Knowledge Base documents (SOPs, product specifications, steel grade tables, discount policies, MOQ, and quotation validity).`,
+      description: `Searches company Knowledge Base documents (SOPs, product specifications, steel grade tables, discount policies, MOQ, credit terms, and quotation validity). CRITICAL: In your final response, you MUST cite the document source title at the bottom using the format [Source: <Document Title>].`,
       schema: z.object({
         query: z.string().describe('The search query or policy question to look up in the Knowledge Base.'),
       }),

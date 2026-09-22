@@ -22,6 +22,7 @@
 
 const { supabase, getEmployeeByPhone } = require('../supabase');
 const { convertLineItemToMt } = require('../utils/pricingEngine');
+const { searchKnowledgeBase } = require('../services/kbRetrievalService');
 
 // ─── RBAC Role Helper Functions ─────────────────────────────────────────────
 
@@ -3355,48 +3356,10 @@ async function executeSearchKnowledgeBase(args, callerContext, supabaseAdmin = s
     return { data: { message: 'Query parameter is required' }, rowCount: 0 };
   }
 
-  // Fallback direct text search on knowledge_base table
-  const { data: docs } = await supabaseAdmin
-    .from('knowledge_base')
-    .select('id, title, content, category, tags')
-    .or(`title.ilike.%${queryText}%,content.ilike.%${queryText}%,category.ilike.%${queryText}%`)
-    .limit(5);
-
-  if (docs && docs.length > 0) {
-    return {
-      data: {
-        query: queryText,
-        results: docs.map((d) => ({
-          title: d.title,
-          category: d.category,
-          snippet: (d.content || '').slice(0, 400),
-        })),
-      },
-      rowCount: docs.length,
-    };
-  }
-
-  // Standard Enlight Metals SOP reference knowledge
-  const SOP_KNOWLEDGE = {
-    moq: 'Minimum Order Quantity (MOQ) for Standard Steel is 5 MT per line item, or 1 full truckload (15-20 MT).',
-    quotation_validity: 'Standard Quotation Validity is 24 hours from issuance due to daily steel price fluctuations.',
-    payment_terms: 'Standard Payment Terms: Advance 20% against Order Confirmation, 80% balance against Proforma Invoice / Dispatch clearance.',
-    discount_policy: 'Discounts exceeding ₹500/MT require Sales Manager approval. Discounts exceeding ₹1,000/MT require Admin approval.',
-  };
-
-  const lowerQ = queryText.toLowerCase();
-  let matchedSnippet = null;
-  if (lowerQ.includes('moq') || lowerQ.includes('minimum order')) matchedSnippet = SOP_KNOWLEDGE.moq;
-  else if (lowerQ.includes('validity')) matchedSnippet = SOP_KNOWLEDGE.quotation_validity;
-  else if (lowerQ.includes('payment') || lowerQ.includes('terms')) matchedSnippet = SOP_KNOWLEDGE.payment_terms;
-  else if (lowerQ.includes('discount') || lowerQ.includes('approval')) matchedSnippet = SOP_KNOWLEDGE.discount_policy;
-
+  const result = await searchKnowledgeBase(queryText, callerContext, supabaseAdmin);
   return {
-    data: {
-      query: queryText,
-      knowledge_snippet: matchedSnippet || `Standard Enlight Metals Sales Operations SOP: Rates and quotes are subject to daily price confirmation and stock availability.`,
-    },
-    rowCount: 1,
+    data: result,
+    rowCount: result.results_found || 1,
   };
 }
 
