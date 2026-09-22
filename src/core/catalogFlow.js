@@ -1648,7 +1648,7 @@ async function validateOrderInquiryStage(draft, senderPhone) {
     dQuery = dQuery.in('salesperson_phone', targetPhones);
   }
 
-  const { data: deals, error: dErr } = await dQuery.limit(100);
+  const { data: deals, error: dErr } = await dQuery.limit(500);
   if (dErr) console.warn('[CatalogFlow] validateOrderInquiryStage deals fetch warning:', dErr.message);
 
   let matchedDeal = (deals || []).find(d => {
@@ -1661,20 +1661,48 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   if (!matchedDeal) {
     let iQuery = supabase
       .from('inquiries')
-      .select('id, sender_name, status, salesperson_phone, created_at, ai_extraction_json')
+      .select('id, sender_name, sender_phone, status, salesperson_phone, created_at, ai_extraction_json')
       .order('created_at', { ascending: false });
 
     if (!scope.isAdmin && targetPhones.length > 0) {
       iQuery = iQuery.in('salesperson_phone', targetPhones);
     }
 
-    const { data: inqs, error: iErr } = await iQuery.limit(100);
+    const { data: inqs, error: iErr } = await iQuery.limit(500);
     if (iErr) console.warn('[CatalogFlow] validateOrderInquiryStage inqs fetch warning:', iErr.message);
 
     matchedInq = (inqs || []).find(i => {
       const iId = (i.id || '').replace(/-/g, '').toUpperCase();
       return iId.startsWith(cleanInqCode) || (i.id || '').toUpperCase().startsWith(cleanInqCode) || iId.includes(cleanInqCode);
     });
+  }
+
+  // 1b. Unscoped fallback by explicit cleanInqCode
+  if (!matchedDeal && !matchedInq && cleanInqCode) {
+    const { data: allDeals } = await supabase
+      .from('deals')
+      .select('id, inquiry_id, customer_name, stage, po_number, delivery_location, payment_terms, salesperson_phone, created_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
+      .order('created_at', { ascending: false })
+      .limit(500);
+
+    matchedDeal = (allDeals || []).find(d => {
+      const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+      const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+      return dId.startsWith(cleanInqCode) || inqId.startsWith(cleanInqCode) || (d.id || '').toUpperCase().startsWith(cleanInqCode) || dId.includes(cleanInqCode) || inqId.includes(cleanInqCode);
+    });
+
+    if (!matchedDeal) {
+      const { data: allInqs } = await supabase
+        .from('inquiries')
+        .select('id, sender_name, sender_phone, status, salesperson_phone, created_at, ai_extraction_json')
+        .order('created_at', { ascending: false })
+        .limit(500);
+
+      matchedInq = (allInqs || []).find(i => {
+        const iId = (i.id || '').replace(/-/g, '').toUpperCase();
+        return iId.startsWith(cleanInqCode) || (i.id || '').toUpperCase().startsWith(cleanInqCode) || iId.includes(cleanInqCode);
+      });
+    }
   }
 
   if (!matchedDeal && !matchedInq) {
@@ -2186,8 +2214,8 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     if (dealsQuery) dealsQuery = dealsQuery.ilike('customer_name', `%${cleanWord}%`);
   }
 
-  if (dealsQuery) dealsQuery = dealsQuery.limit(200);
-  if (inqsQuery) inqsQuery = inqsQuery.limit(200);
+  if (dealsQuery) dealsQuery = dealsQuery.limit(500);
+  if (inqsQuery) inqsQuery = inqsQuery.limit(500);
 
   const [{ data: allDeals }, { data: allInqs }] = await Promise.all([
     dealsQuery ? dealsQuery : Promise.resolve({ data: [] }),
@@ -2267,6 +2295,75 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         seenKeys.add(inq.id);
       }
     });
+
+    // 1b. Unscoped fallback by explicit cleanInqId if not found in scoped list
+    if (matchedCandidates.length === 0) {
+      const { data: fallbackDeals } = await supabase
+        .from('deals')
+        .select('id, inquiry_id, customer_name, customer_phone, stage, total_amount, payment_terms, delivery_location, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+        .order('created_at', { ascending: false })
+        .limit(500);
+
+      (fallbackDeals || []).forEach(d => {
+        const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+        const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+        if (dId.startsWith(cleanInqId) || inqId.startsWith(cleanInqId) || (cleanInqId.length >= 4 && (dId.includes(cleanInqId) || inqId.includes(cleanInqId)))) {
+          const stage = (d.stage || 'new_inquiry').toLowerCase();
+          const displayId = `INQ-${(d.id || d.inquiry_id).slice(0, 6).toUpperCase()}`;
+          matchedCandidates.push({
+            id: d.id || d.inquiry_id,
+            deal_id: d.id,
+            inquiry_id: d.inquiry_id,
+            displayId,
+            company_name: d.customer_name || 'Customer',
+            stage,
+            payment_terms: d.payment_terms || 'Not specified',
+            delivery_location: d.delivery_location || 'Not specified',
+            total_amount: Number(d.total_amount) || 0,
+            deal_items: d.deal_items || [],
+            created_at: d.created_at,
+            dateFormatted: formatDateDDMMYYYY(d.created_at),
+            raw_text: '',
+          });
+          seenKeys.add(d.id);
+          if (d.inquiry_id) seenKeys.add(d.inquiry_id);
+        }
+      });
+
+      if (matchedCandidates.length === 0) {
+        const { data: fallbackInqs } = await supabase
+          .from('inquiries')
+          .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, inquiry_type, created_at, salesperson_phone')
+          .order('created_at', { ascending: false })
+          .limit(500);
+
+        (fallbackInqs || []).forEach(inq => {
+          if (seenKeys.has(inq.id)) return;
+          const inqId = (inq.id || '').replace(/-/g, '').toUpperCase();
+          if (inqId.startsWith(cleanInqId) || (cleanInqId.length >= 4 && inqId.includes(cleanInqId))) {
+            const ai = inq.ai_extraction_json || {};
+            const stage = (inq.status || 'new_inquiry').toLowerCase();
+            const displayId = `INQ-${inq.id.slice(0, 6).toUpperCase()}`;
+            matchedCandidates.push({
+              id: inq.id,
+              deal_id: null,
+              inquiry_id: inq.id,
+              displayId,
+              company_name: inq.sender_name || ai.companyName || ai.customer_name || 'Customer',
+              stage,
+              payment_terms: ai.paymentTerms || ai.payment_terms || 'Not specified',
+              delivery_location: ai.deliveryLocation || ai.delivery_location || 'Not specified',
+              total_amount: Number(ai.totalAmount) || Number(ai.grandTotal) || 0,
+              deal_items: ai.lineItems || ai.line_items || [],
+              created_at: inq.created_at,
+              dateFormatted: formatDateDDMMYYYY(inq.created_at),
+              raw_text: inq.raw_text,
+            });
+            seenKeys.add(inq.id);
+          }
+        });
+      }
+    }
   }
 
   // 2. Company Name Match if no direct ID match or if company_name provided
@@ -2505,7 +2602,7 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
     }
   }
 
-  const { data: deals } = dealsQuery ? await dealsQuery.limit(100) : { data: [] };
+  const { data: deals } = dealsQuery ? await dealsQuery.limit(500) : { data: [] };
 
   let deal = null;
   if (deals && deals.length > 0) {
@@ -2532,7 +2629,7 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
   if (!deal && cleanInqId) {
     let inqsQuery = supabase
       .from('inquiries')
-      .select('id, company_name, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
+      .select('id, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
       .order('created_at', { ascending: false });
 
     if (scope.phones !== null) {
@@ -2544,7 +2641,7 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
       }
     }
 
-    const { data: inqRows } = inqsQuery ? await inqsQuery.limit(50) : { data: [] };
+    const { data: inqRows } = inqsQuery ? await inqsQuery.limit(500) : { data: [] };
     if (inqRows) {
       for (const inq of inqRows) {
         const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
@@ -2556,7 +2653,7 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
             deal = {
               id: inq.id,
               inquiry_id: inq.id,
-              customer_name: inq.company_name || inq.sender_name || 'Customer',
+              customer_name: inq.sender_name || inqJson.customer_name || inqJson.companyName || 'Customer',
               total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0),
               delivery_location: inqJson.delivery_location || inqJson.location || null,
               payment_terms: inqJson.payment_terms || null,
@@ -2565,6 +2662,64 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
             };
           }
           break;
+        }
+      }
+    }
+  }
+
+  // 2b. Unscoped fallback by explicit cleanInqId or rawPo if not found yet
+  if (!deal && (cleanInqId || rawPo)) {
+    const { data: allDeals } = await supabase
+      .from('deals')
+      .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone')
+      .order('created_at', { ascending: false })
+      .limit(500);
+
+    if (allDeals && allDeals.length > 0) {
+      if (cleanInqId) {
+        deal = allDeals.find(d => {
+          const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+          const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+          return dId.startsWith(cleanInqId) || inqId.startsWith(cleanInqId) || dId.includes(cleanInqId) || inqId.includes(cleanInqId);
+        }) || null;
+      }
+      if (!deal && rawPo) {
+        deal = allDeals.find(d => {
+          if (!d.po_number) return false;
+          const dPo = String(d.po_number).trim();
+          return dPo.toLowerCase() === rawPo.toLowerCase() || (cleanPo && dPo.toLowerCase().includes(cleanPo.toLowerCase()));
+        }) || null;
+      }
+    }
+
+    if (!deal && cleanInqId) {
+      const { data: allInqs } = await supabase
+        .from('inquiries')
+        .select('id, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
+        .order('created_at', { ascending: false })
+        .limit(500);
+
+      if (allInqs) {
+        for (const inq of allInqs) {
+          const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
+          if (inqCode.startsWith(cleanInqId) || inqCode.includes(cleanInqId)) {
+            if (inq.deals && inq.deals.length > 0) {
+              deal = inq.deals[0];
+            } else {
+              const inqJson = inq.ai_extraction_json || {};
+              deal = {
+                id: inq.id,
+                inquiry_id: inq.id,
+                customer_name: inq.sender_name || inqJson.customer_name || inqJson.companyName || 'Customer',
+                total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0),
+                delivery_location: inqJson.delivery_location || inqJson.location || null,
+                payment_terms: inqJson.payment_terms || null,
+                po_number: rawPo || null,
+                stage: inq.status || 'new_inquiry',
+              };
+            }
+            break;
+          }
         }
       }
     }
@@ -3304,7 +3459,7 @@ async function executeAction(action, draft, senderPhone) {
             const cleanWord = cleanLegalSuffixes(companyName).split(' ').filter(w => w.length >= 2)[0] || companyName;
             dealsQuery = dealsQuery.ilike('customer_name', `%${cleanWord}%`);
           }
-          const { data: deals } = await dealsQuery.limit(100);
+          const { data: deals } = await dealsQuery.limit(500);
 
           if (deals && deals.length > 0) {
             if (cleanId) {
@@ -3331,7 +3486,7 @@ async function executeAction(action, draft, senderPhone) {
           if (!scope.isAdmin && targetPhones.length > 0) {
             inqQuery = inqQuery.in('salesperson_phone', targetPhones);
           }
-          const { data: inqRows } = await inqQuery.limit(50);
+          const { data: inqRows } = await inqQuery.limit(500);
           if (inqRows) {
             for (const inq of inqRows) {
               const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
@@ -3359,6 +3514,62 @@ async function executeAction(action, draft, senderPhone) {
                   }
                 }
                 break;
+              }
+            }
+          }
+        }
+
+        // Unscoped fallback by cleanId if still not found
+        if (!deal && cleanId) {
+          const { data: allDeals } = await supabase
+            .from('deals')
+            .select('id, inquiry_id, customer_name, stage, total_amount, payment_terms, delivery_location, salesperson_phone')
+            .order('created_at', { ascending: false })
+            .limit(500);
+
+          if (allDeals && allDeals.length > 0) {
+            deal = allDeals.find(d => {
+              const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+              const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+              return dId.startsWith(cleanId) || inqId.startsWith(cleanId) || (cleanId.length >= 4 && (dId.includes(cleanId) || inqId.includes(cleanId)));
+            }) || null;
+          }
+
+          if (!deal) {
+            const { data: allInqRows } = await supabase
+              .from('inquiries')
+              .select('id, sender_name, salesperson_phone, status, raw_text, ai_extraction_json, deals(*)')
+              .order('created_at', { ascending: false })
+              .limit(500);
+
+            if (allInqRows) {
+              for (const inq of allInqRows) {
+                const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
+                if (inqCode.startsWith(cleanId) || inqCode.includes(cleanId)) {
+                  if (inq.deals && inq.deals.length > 0) {
+                    deal = inq.deals[0];
+                  } else {
+                    const inqJson = inq.ai_extraction_json || {};
+                    const { data: newDealRows } = await supabase
+                      .from('deals')
+                      .insert({
+                        inquiry_id: inq.id,
+                        customer_name: inq.sender_name || inqJson.customer_name || inqJson.companyName || companyName || 'Customer',
+                        salesperson_phone: inq.salesperson_phone || senderPhone,
+                        stage: 'new_inquiry',
+                        total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0) || null,
+                        delivery_location: inqJson.delivery_location || inqJson.location || null,
+                        customer_address: inqJson.delivery_location || inqJson.location || null,
+                        payment_terms: inqJson.payment_terms || null,
+                        status: 'active',
+                      })
+                      .select();
+                    if (newDealRows && newDealRows.length > 0) {
+                      deal = newDealRows[0];
+                    }
+                  }
+                  break;
+                }
               }
             }
           }
@@ -3786,7 +3997,7 @@ async function executeAction(action, draft, senderPhone) {
           dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
         }
 
-        const { data: deals } = await dealsQuery.limit(100);
+        const { data: deals } = await dealsQuery.limit(500);
 
         let deal = null;
         if (deals && deals.length > 0) {
@@ -3819,13 +4030,13 @@ async function executeAction(action, draft, senderPhone) {
         if (!deal && cleanInqId) {
           let inqQuery = supabase
             .from('inquiries')
-            .select('id, company_name, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
+            .select('id, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
             .order('created_at', { ascending: false });
 
           if (!scope.isAdmin && targetPhones.length > 0) {
             inqQuery = inqQuery.in('salesperson_phone', targetPhones);
           }
-          const { data: inqRows } = await inqQuery.limit(50);
+          const { data: inqRows } = await inqQuery.limit(500);
           if (inqRows) {
             for (const inq of inqRows) {
               const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
@@ -3838,7 +4049,7 @@ async function executeAction(action, draft, senderPhone) {
                     .from('deals')
                     .insert({
                       inquiry_id: inq.id,
-                      customer_name: inq.company_name || inq.sender_name || 'Customer',
+                      customer_name: inq.sender_name || inqJson.customer_name || inqJson.companyName || 'Customer',
                       salesperson_phone: inq.salesperson_phone || senderPhone,
                       stage: 'won',
                       won_at: new Date().toISOString(),
@@ -3856,6 +4067,75 @@ async function executeAction(action, draft, senderPhone) {
                   }
                 }
                 break;
+              }
+            }
+          }
+        }
+
+        // 2b. Unscoped fallback by cleanInqId or rawPo if not found yet
+        if (!deal && (cleanInqId || rawPo)) {
+          const { data: allDeals } = await supabase
+            .from('deals')
+            .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone')
+            .order('created_at', { ascending: false })
+            .limit(500);
+
+          if (allDeals && allDeals.length > 0) {
+            if (cleanInqId) {
+              deal = allDeals.find(d => {
+                const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+                const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+                return dId.startsWith(cleanInqId) || inqId.startsWith(cleanInqId) || dId.includes(cleanInqId) || inqId.includes(cleanInqId);
+              }) || null;
+            }
+            if (!deal && rawPo) {
+              deal = allDeals.find(d => {
+                if (!d.po_number) return false;
+                const dPo = String(d.po_number).trim();
+                return dPo.toLowerCase() === rawPo.toLowerCase() ||
+                       (cleanPo && dPo.toLowerCase().includes(cleanPo.toLowerCase()));
+              }) || null;
+            }
+          }
+
+          if (!deal && cleanInqId) {
+            const { data: allInqRows } = await supabase
+              .from('inquiries')
+              .select('id, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
+              .order('created_at', { ascending: false })
+              .limit(500);
+
+            if (allInqRows) {
+              for (const inq of allInqRows) {
+                const inqCode = (inq.id || '').replace(/-/g, '').toUpperCase();
+                if (inqCode.startsWith(cleanInqId) || inqCode.includes(cleanInqId)) {
+                  if (inq.deals && inq.deals.length > 0) {
+                    deal = inq.deals[0];
+                  } else {
+                    const inqJson = inq.ai_extraction_json || {};
+                    const { data: newDealRows } = await supabase
+                      .from('deals')
+                      .insert({
+                        inquiry_id: inq.id,
+                        customer_name: inq.sender_name || inqJson.customer_name || inqJson.companyName || 'Customer',
+                        salesperson_phone: inq.salesperson_phone || senderPhone,
+                        stage: 'won',
+                        won_at: new Date().toISOString(),
+                        po_number: rawPo || null,
+                        po_date: new Date().toISOString().split('T')[0],
+                        total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0),
+                        delivery_location: inqJson.delivery_location || inqJson.location || null,
+                        customer_address: inqJson.delivery_location || inqJson.location || null,
+                        payment_terms: inqJson.payment_terms || null,
+                        status: 'active',
+                      })
+                      .select();
+                    if (newDealRows && newDealRows.length > 0) {
+                      deal = newDealRows[0];
+                    }
+                  }
+                  break;
+                }
               }
             }
           }
@@ -4856,34 +5136,29 @@ Return ONLY JSON:
     dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
   }
 
-  const { data: deals } = await dealsQuery.limit(100);
+  const { data: deals } = await dealsQuery.limit(500);
 
   let deal = null;
-  if (deals && deals.length > 0) {
-    if (cleanInqCode) {
-      deal = deals.find(d => {
-        const dId = (d.id || '').replace(/-/g, '').toUpperCase();
-        const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
-        return dId.startsWith(cleanInqCode) || inqId.startsWith(cleanInqCode) || dId.includes(cleanInqCode) || inqId.includes(cleanInqCode);
-      }) || null;
-    }
-    if (!deal && draft?.company_name) {
-      deal = deals.find(d => d.customer_name && d.customer_name.toLowerCase().includes(draft.company_name.toLowerCase())) || null;
-    }
+  if (deals && deals.length > 0 && cleanInqCode) {
+    deal = deals.find(d => {
+      const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+      const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+      return dId.startsWith(cleanInqCode) || inqId.startsWith(cleanInqCode) || dId.includes(cleanInqCode) || inqId.includes(cleanInqCode);
+    }) || null;
   }
 
   let inq = null;
   if (!deal && cleanInqCode) {
     let inqsQuery = supabase
       .from('inquiries')
-      .select('id, company_name, sender_name, status, salesperson_phone, ai_extraction_json, deals(*)')
+      .select('id, sender_name, sender_phone, status, salesperson_phone, ai_extraction_json, deals(*)')
       .order('created_at', { ascending: false });
 
     if (!scope.isAdmin && targetPhones.length > 0) {
       inqsQuery = inqsQuery.in('salesperson_phone', targetPhones);
     }
 
-    const { data: inqRows } = await inqsQuery.limit(50);
+    const { data: inqRows } = await inqsQuery.limit(500);
     if (inqRows && inqRows.length > 0) {
       for (const iRow of inqRows) {
         const iId = (iRow.id || '').replace(/-/g, '').toUpperCase();
@@ -4893,6 +5168,72 @@ Return ONLY JSON:
             deal = iRow.deals[0];
           }
           break;
+        }
+      }
+    }
+  }
+
+  // 3b. Unscoped fallback by explicit cleanInqCode if not found in scoped query
+  if (!deal && !inq && cleanInqCode) {
+    const { data: allDeals } = await supabase
+      .from('deals')
+      .select('id, inquiry_id, customer_name, stage, po_number, delivery_location, payment_terms, salesperson_phone, created_at')
+      .order('created_at', { ascending: false })
+      .limit(500);
+
+    if (allDeals && allDeals.length > 0) {
+      deal = allDeals.find(d => {
+        const dId = (d.id || '').replace(/-/g, '').toUpperCase();
+        const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
+        return dId.startsWith(cleanInqCode) || inqId.startsWith(cleanInqCode) || dId.includes(cleanInqCode) || inqId.includes(cleanInqCode);
+      }) || null;
+    }
+
+    if (!deal) {
+      const { data: allInqRows } = await supabase
+        .from('inquiries')
+        .select('id, sender_name, sender_phone, status, salesperson_phone, ai_extraction_json, deals(*)')
+        .order('created_at', { ascending: false })
+        .limit(500);
+
+      if (allInqRows && allInqRows.length > 0) {
+        for (const iRow of allInqRows) {
+          const iId = (iRow.id || '').replace(/-/g, '').toUpperCase();
+          if (iId.startsWith(cleanInqCode) || iId.includes(cleanInqCode)) {
+            inq = iRow;
+            if (iRow.deals && iRow.deals.length > 0) {
+              deal = iRow.deals[0];
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // 3c. Fallback by draft company_name ONLY if cleanInqCode was not provided or not matched
+  if (!deal && !inq && draft?.company_name) {
+    if (deals && deals.length > 0) {
+      deal = deals.find(d => isCustomerMatch(draft.company_name, null, d.customer_name, null)) ||
+             deals.find(d => d.customer_name && d.customer_name.toLowerCase().includes(draft.company_name.toLowerCase())) || null;
+    }
+
+    if (!deal) {
+      const { data: matchInqs } = await supabase
+        .from('inquiries')
+        .select('id, sender_name, sender_phone, status, salesperson_phone, ai_extraction_json, deals(*)')
+        .order('created_at', { ascending: false })
+        .limit(200);
+
+      if (matchInqs && matchInqs.length > 0) {
+        const matched = matchInqs.find(i => {
+          const ai = i.ai_extraction_json || {};
+          const cName = i.sender_name || ai.companyName || ai.customer_name || '';
+          return isCustomerMatch(draft.company_name, null, cName, null);
+        });
+        if (matched) {
+          inq = matched;
+          if (matched.deals && matched.deals.length > 0) deal = matched.deals[0];
         }
       }
     }
