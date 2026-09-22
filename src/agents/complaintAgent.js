@@ -80,7 +80,7 @@ async function getCustomerActiveDeals(customerName, senderPhone) {
 
   let query = supabase
     .from('deals')
-    .select('id, inquiry_id, stage, po_number, customer_name, total_amount, delivery_location, created_at, salesperson_phone')
+    .select('id, inquiry_id, stage, po_number, customer_name, total_amount, delivery_location, payment_terms, created_at, salesperson_phone')
     .ilike('customer_name', `%${cleanCust}%`)
     .eq('stage', 'won')
     .order('created_at', { ascending: false });
@@ -120,7 +120,8 @@ async function getCustomerActiveDeals(customerName, senderPhone) {
       ? itms.map(it => `${it.sku_text || 'Steel'} ${it.dimensions || ''} ${it.quantity ? `(${it.quantity} ${it.unit || 'MT'})` : ''}`.trim()).join(', ')
       : 'Steel Material';
     const dateFormatted = d.created_at ? new Date(d.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'numeric', year: 'numeric' }) : '';
-    const loc = d.delivery_location ? `${d.delivery_location}` : '';
+    const loc = d.delivery_location ? `${d.delivery_location}` : 'Not specified';
+    const pay = d.payment_terms ? `${d.payment_terms}` : 'Not specified';
 
     return {
       ...d,
@@ -132,6 +133,8 @@ async function getCustomerActiveDeals(customerName, senderPhone) {
       product_summary: prodSummary,
       date_formatted: dateFormatted,
       location: loc,
+      payment_terms: pay,
+      total_amount: Number(d.total_amount) || 0,
     };
   });
 }
@@ -772,15 +775,26 @@ async function processSingleComplaint(data, originalText, senderPhone) {
       if (activeWonDeals.length > 0) {
         const availableList = activeWonDeals.map((d, idx) => {
           const poRef = d.po_number ? `PO: *${d.po_number}* (${d.deal_code})` : `*${d.deal_code}*`;
-          const extra = [d.location, d.date_formatted].filter(Boolean).join(', ');
-          return `${idx + 1}. ${poRef} — ${d.product_summary}${extra ? ` — ${extra}` : ''}`;
-        }).join('\n');
+          const lines = [
+            `${idx + 1}. ${poRef}`,
+            `   • *Product:* ${d.product_summary}`,
+            `   • *Delivery Location:* ${d.location || 'Not specified'}`,
+            `   • *Payment Terms:* ${d.payment_terms || 'Not specified'}`,
+          ];
+          if (d.total_amount > 0) {
+            lines.push(`   • *Total Value:* ₹${d.total_amount.toLocaleString('en-IN')}`);
+          }
+          if (d.date_formatted) {
+            lines.push(`   • *Date:* ${d.date_formatted}`);
+          }
+          return lines.join('\n');
+        }).join('\n\n');
 
         const primaryRef = activeWonDeals[0].po_number || activeWonDeals[0].deal_code;
         return `❌ *Cannot Log Complaint - Order Not Found in Orders Module*\n\n` +
           `Customer: *${finalCustomerName}*\n` +
           `Order / PO *"${cleanPo || rawInquiryCandidate}"* was not found in the Orders module.\n\n` +
-          `*Available Confirmed Orders for ${finalCustomerName}:*\n` +
+          `*Available Confirmed Orders for ${finalCustomerName}:*\n\n` +
           `${availableList}\n\n` +
           `👉 Please reply with a valid *PO Number* (e.g. _"${primaryRef}"_) or *Inquiry ID* from the list above.`;
       } else {
@@ -825,9 +839,20 @@ async function processSingleComplaint(data, originalText, senderPhone) {
     } else if (activeWonDeals.length > 1 && !data.is_confirmation) {
       const dealListFormatted = activeWonDeals.map((d, idx) => {
         const poDisplay = d.po_number ? `PO: *${d.po_number}* (${d.deal_code})` : `*${d.deal_code}*`;
-        const extra = [d.location, d.date_formatted].filter(Boolean).join(', ');
-        return `${idx + 1}. ${poDisplay} — ${d.product_summary}${extra ? ` — ${extra}` : ''}`;
-      }).join('\n');
+        const lines = [
+          `${idx + 1}. ${poDisplay}`,
+          `   • *Product:* ${d.product_summary}`,
+          `   • *Delivery Location:* ${d.location || 'Not specified'}`,
+          `   • *Payment Terms:* ${d.payment_terms || 'Not specified'}`,
+        ];
+        if (d.total_amount > 0) {
+          lines.push(`   • *Total Value:* ₹${d.total_amount.toLocaleString('en-IN')}`);
+        }
+        if (d.date_formatted) {
+          lines.push(`   • *Date:* ${d.date_formatted}`);
+        }
+        return lines.join('\n');
+      }).join('\n\n');
 
       const samplePo = activeWonDeals[0].po_number || activeWonDeals[0].deal_code;
       const draftPayload = JSON.stringify({
@@ -840,10 +865,10 @@ async function processSingleComplaint(data, originalText, senderPhone) {
 
       await saveActiveSession(senderPhone, finalCustomerName, `complaint_confirm_deal|${draftPayload}`);
 
-      return `⚠️ *Multiple Confirmed Orders Found for ${finalCustomerName}*\n\n` +
+      return `⚠️ *Multiple Confirmed Orders Found for ${finalCustomerName}:*\n\n` +
         `Please specify which order or PO this complaint is about:\n\n` +
         `${dealListFormatted}\n\n` +
-        `👉 Please reply with the *Number* (e.g. *1* or *2*) or the *PO Number* (e.g. _"${samplePo}"_) / *Inquiry ID*.`;
+        `👉 Reply with the *Number* (1–${activeWonDeals.length}), *PO Number* (e.g. _"${samplePo}"_), or *Inquiry ID*.`;
     } else if (activeWonDeals.length === 1 && data.is_confirmation) {
       targetDealId = activeWonDeals[0].effective_deal_id || activeWonDeals[0].inquiry_id || activeWonDeals[0].id;
       targetPoNumber = activeWonDeals[0].po_number || null;

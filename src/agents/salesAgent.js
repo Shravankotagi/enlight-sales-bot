@@ -2116,14 +2116,21 @@ function formatOpenDealsListPrompt(customerName, openDeals) {
     .map((d, idx) => {
       const code = getDealCode(d);
       let itemsDesc = '';
+      let rateStr = null;
+      let makeStr = null;
       if (d.deal_items && d.deal_items.length > 0) {
         if (d.deal_items.length === 1) {
           const it = d.deal_items[0];
           const spec = it.dimensions ? ` ${it.dimensions}` : '';
           const qty = it.quantity || it.quantity_mt || 0;
           const unit = it.unit || 'MT';
-          const rate = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}/${unit}` : '';
-          itemsDesc = `${it.sku_text || 'Item'}${spec} (${qty} ${unit})${rate}`;
+          if (it.rate) {
+            rateStr = `₹${Number(it.rate).toLocaleString('en-IN')}/${unit}`;
+          }
+          if (it.preferred_make || it.make) {
+            makeStr = it.preferred_make || it.make;
+          }
+          itemsDesc = `${it.sku_text || 'Item'}${spec} (${qty} ${unit})`;
         } else {
           const totalQty = d.deal_items.reduce((s, it) => s + (Number(it.quantity || it.quantity_mt) || 0), 0);
           const names = d.deal_items.slice(0, 2).map(it => it.sku_text || 'Item').join(', ');
@@ -2135,16 +2142,27 @@ function formatOpenDealsListPrompt(customerName, openDeals) {
       const stageStr = formatStageLabel(d.stage);
       const dateStr = d.created_at ? new Date(d.created_at).toLocaleDateString('en-GB').replace(/\//g, '-') : '';
       const dateTag = dateStr ? ` (${dateStr})` : '';
-      return `• *${idx + 1}.* *${code}*${dateTag} — ${itemsDesc} [${stageStr}]`;
+      const loc = d.delivery_location || 'Not specified';
+      const pay = d.payment_terms || 'Not specified';
+
+      const lines = [
+        `${idx + 1}. *${code}*${dateTag} — _${stageStr}_`,
+        `   • *Product:* ${itemsDesc}`,
+        `   • *Delivery Location:* ${loc}`,
+        `   • *Payment Terms:* ${pay}`,
+      ];
+      if (rateStr) lines.push(`   • *Rate:* ${rateStr}`);
+      if (makeStr) lines.push(`   • *Make:* ${makeStr}`);
+      return lines.join('\n');
     })
-    .join('\n');
+    .join('\n\n');
 
   const firstCode = getDealCode(openDeals[0]);
   return (
     `📋 *Multiple Editable Inquiries Found for ${customerName}:*\n\n` +
     `Please choose which inquiry you want to edit:\n\n` +
     `${dealListLines}\n\n` +
-    `Reply with the *Inquiry ID* (e.g. "${firstCode}") or option number (1–${Math.min(openDeals.length, 5)}).`
+    `👉 Reply with the *Option Number* (1–${Math.min(openDeals.length, 5)}), *Inquiry ID* (e.g. "${firstCode}"), or what you want to update.`
   );
 }
 
