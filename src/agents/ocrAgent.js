@@ -447,7 +447,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
       );
     }
 
-    const frontendUrl = process.env.FRONTEND_URL || 'https://enlight-sales-frontend.vercel.app';
+    const frontendUrl = process.env.FRONTEND_URL || process.env.DASHBOARD_URL || 'https://app.enlightmetals.com';
     const inquiryEditLink = savedInq?.id ? `${frontendUrl}/inquiries?id=${savedInq.id}` : `${frontendUrl}/inquiries`;
 
     return (

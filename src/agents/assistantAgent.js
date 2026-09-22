@@ -30,7 +30,7 @@ async function handleConversationalQuery(text, senderPhone) {
     const isAdmin = empRole === 'admin';
     const isManager = empRole === 'sales_manager' || empRole === 'manager';
     const roleTitle = isAdmin ? 'Admin' : (isManager ? 'Sales Manager' : 'Salesperson');
-    const dashboardUrl = process.env.DASHBOARD_URL || 'https://enlight-sales-frontend.vercel.app';
+    const dashboardUrl = process.env.DASHBOARD_URL || process.env.FRONTEND_URL || 'https://app.enlightmetals.com';
     
     // Get live date/time formatted nicely for India Standard Time (Asia/Kolkata)
     const now = new Date();

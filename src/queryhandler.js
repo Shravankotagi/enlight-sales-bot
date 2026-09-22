@@ -3300,7 +3300,8 @@ async function routeToHandler(category, text, scope, supabase, extra = {}) {
     case 'dashboard_link': {
       const dashboardUrl =
         process.env.DASHBOARD_URL ||
-        'https://enlight-sales-frontend.vercel.app';
+        process.env.FRONTEND_URL ||
+        'https://app.enlightmetals.com';
       return `🔗 *Enlight Sales OS Portal*\n\n👉 ${dashboardUrl}\n\nEnter your registered WhatsApp number to log in.`;
     }
     case 'order_list':
@@ -3581,7 +3582,8 @@ async function handleQuery(text, senderPhone) {
       if (classification.category === 'blocked') {
         const dashboardUrl =
           process.env.DASHBOARD_URL ||
-          'https://enlight-sales-frontend.vercel.app';
+          process.env.FRONTEND_URL ||
+          'https://app.enlightmetals.com';
         if (userScope.isAdmin) {
           return (
             `🔗 *This action requires Dashboard access.*\n\n` +
@@ -3868,7 +3870,7 @@ async function handleQuery(text, senderPhone) {
     lower.includes('portal')
   ) {
     const dashboardUrl =
-      process.env.DASHBOARD_URL || 'https://enlight-sales-frontend.vercel.app';
+      process.env.DASHBOARD_URL || process.env.FRONTEND_URL || 'https://app.enlightmetals.com';
     return `🔗 *Enlight Sales OS Portal*\n\n👉 ${dashboardUrl}\n\nEnter your registered WhatsApp number to log in.`;
   }
 
