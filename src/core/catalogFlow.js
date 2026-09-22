@@ -3939,35 +3939,84 @@ async function executeAction(action, draft, senderPhone) {
         if (draft.payment_terms) humanRawText += `Payment Terms: ${draft.payment_terms}\n`;
         if (draft.delivery_location) humanRawText += `Delivery Location: ${draft.delivery_location}\n`;
 
-        // 1. Insert into inquiries (primary canonical table with pipeline fields)
-        const { data: inqRow } = await supabase
-          .from('inquiries')
-          .insert({
-            source_channel: 'WhatsApp',
-            customer_name: companyName,
-            sender_name: companyName,
-            raw_text: humanRawText.trim(),
-            sender_phone: senderPhone,
-            salesperson_phone: senderPhone,
-            status: 'confirmed',
-            stage: 'won',
-            won_at: new Date().toISOString(),
-            po_number: draft.po_number,
-            po_date: draft.po_date,
-            total_amount: totalAmount,
-            delivery_location: draft.delivery_location || null,
-            payment_terms: draft.payment_terms || null,
-            ai_extraction_json: structuredAiJson,
-            overall_confidence: 0.98,
-            inquiry_type: 'purchase_order',
-            created_at: new Date().toISOString(),
-          })
-          .select()
-          .single();
+        // 1. Resolve linked inquiry / deal ID if provided
+        let targetInquiryId = null;
+        let targetDealId = draft.deal_id || null;
 
-        if (inqRow && structuredLineItems.length > 0) {
+        const rawRef = draft.inquiry_id || draft.deal_id || draft._inquiry_display_id || null;
+        if (rawRef) {
+          const cleanCode = String(rawRef).replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase();
+          const { data: matchedInqRows } = await supabase.from('inquiries').select('id, salesperson_phone, sender_phone, sender_name').limit(500);
+          const foundInq = (matchedInqRows || []).find(i => (i.id || '').replace(/-/g, '').toUpperCase().startsWith(cleanCode));
+          if (foundInq) {
+            targetInquiryId = foundInq.id;
+          }
+
+          const { data: matchedDealRows } = await supabase.from('deals').select('id, inquiry_id, salesperson_phone, customer_name').limit(500);
+          const foundDeal = (matchedDealRows || []).find(d =>
+            (d.id || '').replace(/-/g, '').toUpperCase().startsWith(cleanCode) ||
+            (d.inquiry_id && d.inquiry_id.replace(/-/g, '').toUpperCase().startsWith(cleanCode)) ||
+            (targetInquiryId && d.inquiry_id === targetInquiryId) ||
+            (targetInquiryId && d.id === targetInquiryId)
+          );
+          if (foundDeal) {
+            targetDealId = foundDeal.id;
+            if (!targetInquiryId && foundDeal.inquiry_id) {
+              targetInquiryId = foundDeal.inquiry_id;
+            }
+          }
+        }
+
+        // 2. Handle Inquiries table
+        let finalInquiryId = targetInquiryId;
+        if (finalInquiryId) {
+          await supabase
+            .from('inquiries')
+            .update({
+              stage: 'won',
+              status: 'confirmed',
+              won_at: new Date().toISOString(),
+              po_number: draft.po_number,
+              po_date: draft.po_date,
+              total_amount: totalAmount,
+              delivery_location: draft.delivery_location || null,
+              payment_terms: draft.payment_terms || null,
+              ai_extraction_json: structuredAiJson,
+            })
+            .eq('id', finalInquiryId);
+        } else {
+          const { data: inqRow } = await supabase
+            .from('inquiries')
+            .insert({
+              source_channel: 'WhatsApp',
+              customer_name: companyName,
+              sender_name: companyName,
+              raw_text: humanRawText.trim(),
+              sender_phone: senderPhone,
+              salesperson_phone: senderPhone,
+              status: 'confirmed',
+              stage: 'won',
+              won_at: new Date().toISOString(),
+              po_number: draft.po_number,
+              po_date: draft.po_date,
+              total_amount: totalAmount,
+              delivery_location: draft.delivery_location || null,
+              payment_terms: draft.payment_terms || null,
+              ai_extraction_json: structuredAiJson,
+              overall_confidence: 0.98,
+              inquiry_type: 'purchase_order',
+              created_at: new Date().toISOString(),
+            })
+            .select()
+            .single();
+          if (inqRow) finalInquiryId = inqRow.id;
+        }
+
+        // 3. Update or Insert inquiry_items
+        if (finalInquiryId && structuredLineItems.length > 0) {
+          await supabase.from('inquiry_items').delete().eq('inquiry_id', finalInquiryId);
           const inqItemsPayload = structuredLineItems.map(it => ({
-            inquiry_id: inqRow.id,
+            inquiry_id: finalInquiryId,
             sku_text: it.sku_text || it.description,
             dimensions: it.dimensions || it.spec || null,
             grade: it.grade || null,
@@ -3981,42 +4030,13 @@ async function executeAction(action, draft, senderPhone) {
           await supabase.from('inquiry_items').insert(inqItemsPayload);
         }
 
-        // 2. Update existing linked inquiry / deal OR insert new deal with stage = 'won'
-        let targetDealId = draft.deal_id || draft.inquiry_id || null;
-        if (targetDealId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(targetDealId)) {
-          const cleanCode = String(targetDealId).replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase();
-          const { data: matchedInqRows } = await supabase.from('inquiries').select('id').limit(500);
-          const foundInq = (matchedInqRows || []).find(i => (i.id || '').replace(/-/g, '').toUpperCase().startsWith(cleanCode));
-          if (foundInq) {
-            targetDealId = foundInq.id;
-          } else {
-            const { data: matchedDealRows } = await supabase.from('deals').select('id, inquiry_id').limit(500);
-            const foundDeal = (matchedDealRows || []).find(d => (d.id || '').replace(/-/g, '').toUpperCase().startsWith(cleanCode) || (d.inquiry_id && d.inquiry_id.replace(/-/g, '').toUpperCase().startsWith(cleanCode)));
-            if (foundDeal) {
-              targetDealId = foundDeal.id;
-            }
-          }
-        }
-
-        if (targetDealId) {
-          // Update the existing linked inquiry & deal to won with PO details
-          await supabase
-            .from('inquiries')
-            .update({
-              stage: 'won',
-              status: 'confirmed',
-              won_at: new Date().toISOString(),
-              po_number: draft.po_number,
-              po_date: draft.po_date,
-              total_amount: totalAmount,
-              delivery_location: draft.delivery_location,
-              payment_terms: draft.payment_terms,
-            })
-            .eq('id', targetDealId);
-
+        // 4. Handle Deals table (Crucial for Orders page in frontend)
+        let finalDealId = targetDealId;
+        if (finalDealId) {
           const { error: updErr } = await supabase
             .from('deals')
             .update({
+              inquiry_id: finalInquiryId || null,
               stage: 'won',
               won_at: new Date().toISOString(),
               po_number: draft.po_number,
@@ -4024,51 +4044,17 @@ async function executeAction(action, draft, senderPhone) {
               total_amount: totalAmount,
               delivery_location: draft.delivery_location,
               payment_terms: draft.payment_terms,
+              customer_name: companyName,
               customer_address: draft.delivery_location || null,
               inquiry_type: 'purchase_order',
             })
-            .eq('id', targetDealId);
-
+            .eq('id', finalDealId);
           if (updErr) console.error('[CatalogFlow] Order deal update error:', updErr);
-
-          // Update or replace line items for this existing deal & inquiry
-          if (structuredLineItems.length > 0) {
-            await supabase.from('inquiry_items').delete().eq('inquiry_id', targetDealId);
-            const inqItemsPayload = structuredLineItems.map(it => ({
-              inquiry_id: targetDealId,
-              sku_text: it.sku_text || it.description,
-              dimensions: it.dimensions || it.spec || null,
-              grade: it.grade || null,
-              quantity: Number(it.quantity) || 0,
-              unit: it.unit || 'MT',
-              rate: Number(it.rate) || 0,
-              amount: Number(it.amount) || (Number(it.quantity) * Number(it.rate)),
-              confidence: 0.95,
-              created_at: new Date().toISOString(),
-            }));
-            await supabase.from('inquiry_items').insert(inqItemsPayload);
-
-            await supabase.from('deal_items').delete().eq('deal_id', targetDealId);
-            const itemsPayload = structuredLineItems.map(it => ({
-              deal_id: targetDealId,
-              sku_text: it.sku_text || it.description,
-              dimensions: it.dimensions || it.spec || null,
-              grade: it.grade || null,
-              quantity: Number(it.quantity) || 0,
-              unit: it.unit || 'MT',
-              rate: Number(it.rate) || 0,
-              amount: Number(it.amount) || (Number(it.quantity) * Number(it.rate)),
-              created_at: new Date().toISOString(),
-            }));
-            await supabase.from('deal_items').insert(itemsPayload);
-          }
         } else {
-          // No existing deal -> Insert single new deal row mirroring inqRow
-          const { data: dealRow, error: dealErr } = await supabase
+          const { data: newDealRow, error: dealErr } = await supabase
             .from('deals')
             .insert({
-              id: inqRow ? inqRow.id : undefined,
-              inquiry_id: inqRow ? inqRow.id : null,
+              inquiry_id: finalInquiryId || null,
               stage: 'won',
               won_at: new Date().toISOString(),
               po_number: draft.po_number,
@@ -4087,22 +4073,24 @@ async function executeAction(action, draft, senderPhone) {
             .single();
 
           if (dealErr) console.error('[CatalogFlow] Order deal insert error:', dealErr);
+          if (newDealRow) finalDealId = newDealRow.id;
+        }
 
-          if (dealRow && structuredLineItems.length > 0) {
-            targetDealId = dealRow.id;
-            const itemsPayload = structuredLineItems.map(it => ({
-              deal_id: dealRow.id,
-              sku_text: it.sku_text || it.description,
-              dimensions: it.dimensions || it.spec || null,
-              grade: it.grade || null,
-              quantity: Number(it.quantity) || 0,
-              unit: it.unit || 'MT',
-              rate: Number(it.rate) || 0,
-              amount: Number(it.amount) || (Number(it.quantity) * Number(it.rate)),
-              created_at: new Date().toISOString(),
-            }));
-            await supabase.from('deal_items').insert(itemsPayload);
-          }
+        // 5. Update or Insert deal_items (Crucial for Orders line items in frontend)
+        if (finalDealId && structuredLineItems.length > 0) {
+          await supabase.from('deal_items').delete().eq('deal_id', finalDealId);
+          const itemsPayload = structuredLineItems.map(it => ({
+            deal_id: finalDealId,
+            sku_text: it.sku_text || it.description,
+            dimensions: it.dimensions || it.spec || null,
+            grade: it.grade || null,
+            quantity: Number(it.quantity) || 0,
+            unit: it.unit || 'MT',
+            rate: Number(it.rate) || 0,
+            amount: Number(it.amount) || (Number(it.quantity) * Number(it.rate)),
+            created_at: new Date().toISOString(),
+          }));
+          await supabase.from('deal_items').insert(itemsPayload);
         }
 
         // 4. Log KRA 1 (Won Deal)
@@ -5441,7 +5429,7 @@ Return ONLY JSON:
   const rawCurrentStage = (deal ? deal.stage : inq?.status) || 'new_inquiry';
   const currStageLower = String(rawCurrentStage).toLowerCase().trim();
   const formattedDisplayId = deal
-    ? `INQ-${(deal.id || deal.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`
+    ? `INQ-${(deal.inquiry_id || deal.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`
     : `INQ-${inq.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
 
   let transitionError = null;

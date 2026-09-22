@@ -60,7 +60,8 @@ async function runComprehensiveAudit() {
   console.log('\n--- SECTION 2: Real Database Inquiry Lookup & Stage Update ---');
 
   // Reset INQ-D013D7 in Supabase to auto_created for clean deterministic test
-  await supabase.from('inquiries').update({ status: 'auto_created' }).eq('id', 'd013d712-c64e-448f-b5da-5f328348ee61');
+  await supabase.from('inquiries').update({ status: 'auto_created', stage: 'new_inquiry' }).eq('id', 'd013d712-c64e-448f-b5da-5f328348ee61');
+  await supabase.from('deals').update({ stage: 'new_inquiry', won_at: null }).or('inquiry_id.eq.d013d712-c64e-448f-b5da-5f328348ee61,id.eq.d013d712-c64e-448f-b5da-5f328348ee61');
 
   // 2.1 Test Order Gate blocks when inquiry is in New Inquiry stage with user-provided rate and PO
   await saveActiveSession(testPhone, 'Unknown', 'catalog_flow|LOG_ORDER|{}');
@@ -113,8 +114,8 @@ async function runComprehensiveAudit() {
   // ─────────────────────────────────────────────────────────────────────────────
   console.log('\n--- SECTION 3: Stage Transition Gate Rules ---');
 
-  // 3.1 Reset INQ-D013D7 to auto_created and test invalid transition to Won directly from New Inquiry
-  await supabase.from('inquiries').update({ status: 'auto_created' }).eq('id', 'd013d712-c64e-448f-b5da-5f328348ee61');
+  await supabase.from('inquiries').update({ status: 'auto_created', stage: 'new_inquiry' }).eq('id', 'd013d712-c64e-448f-b5da-5f328348ee61');
+  await supabase.from('deals').update({ stage: 'new_inquiry', won_at: null }).or('inquiry_id.eq.d013d712-c64e-448f-b5da-5f328348ee61,id.eq.d013d712-c64e-448f-b5da-5f328348ee61');
   const orderDraft = {
     company_name: 'CrossMAT Ltd',
     inquiry_id: 'INQ-D013D7',
