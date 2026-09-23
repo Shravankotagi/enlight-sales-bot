@@ -3610,6 +3610,38 @@ async function findAndMatchComplaint(draft, senderPhone) {
     }
   }
 
+  // 3. Unscoped fallback by targetRef (PO Number, Inquiry ID / Deal ID, or Complaint UUID)
+  if (targetRef && !scope.isAdmin) {
+    try {
+      const { data: unscopedComplaints } = await supabase
+        .from('complaints')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+      if (unscopedComplaints && unscopedComplaints.length > 0) {
+        const cleanRef = targetRef.replace(/^#?(?:INQ|DEAL|PO)-?/i, '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+        const unscopedMatch = unscopedComplaints.find(c => {
+          const cId = (c.id || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+          const po = (c.po_number || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+          const dealId = (c.deal_id || '').replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+          const cust = (c.customer_name || '').toLowerCase();
+
+          return (
+            (cleanRef.length >= 4 && cId.startsWith(cleanRef)) ||
+            (cleanRef.length >= 2 && po.includes(cleanRef)) ||
+            (cleanRef.length >= 2 && dealId.includes(cleanRef)) ||
+            (cleanRef.length >= 3 && cust.includes(cleanRef))
+          );
+        });
+
+        if (unscopedMatch) return unscopedMatch;
+      }
+    } catch (e) {
+      console.warn('[CatalogFlow] Error in unscoped complaint fallback:', e.message);
+    }
+  }
+
   return null;
 }
 
@@ -5514,6 +5546,13 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.complaint_description) cmpUpdates.description = updates.complaint_description;
         if (updates.corrective_action) cmpUpdates.corrective_action = updates.corrective_action;
         if (updates.resolution_notes) cmpUpdates.resolution_notes = updates.resolution_notes;
+        if (updates.product_name || updates.affected_product || updates.product) {
+          const p = updates.product_name || updates.affected_product || updates.product;
+          cmpUpdates.product_name = p;
+          cmpUpdates.affected_product = p;
+        }
+        if (updates.po_number) cmpUpdates.po_number = updates.po_number;
+        if (updates.deal_id) cmpUpdates.deal_id = updates.deal_id;
         const isResolved = updates.status && ['resolved', 'closed'].includes(String(updates.status).toLowerCase());
         if (updates.status) {
           const st = String(updates.status).toLowerCase();
@@ -5607,6 +5646,7 @@ async function executeAction(action, draft, senderPhone) {
 
         let fieldsSummary = '';
         if (cmpUpdates.complaint_type) fieldsSummary += `• *Complaint Type:* ${cmpUpdates.complaint_type}\n`;
+        if (cmpUpdates.product_name) fieldsSummary += `• *Product:* ${cmpUpdates.product_name}\n`;
         if (updates.status) fieldsSummary += `• *Status:* ${updates.status}\n`;
         if (cmpUpdates.description) fieldsSummary += `• *Description:* ${cmpUpdates.description}\n`;
         if (cmpUpdates.corrective_action) fieldsSummary += `• *Corrective Action:* ${cmpUpdates.corrective_action}\n`;

@@ -974,7 +974,7 @@ async function handleVisitCorrection(text, senderPhone) {
     let query = supabase
       .from('customer_visits')
       .select(
-        'id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, salesperson_phone, outcome',
+        'id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, salesperson_phone',
       )
       .order('visited_at', { ascending: false });
 
@@ -1203,7 +1203,6 @@ async function applyVisitFieldUpdate(
     const normOut =
       newValue.charAt(0).toUpperCase() + newValue.slice(1).toLowerCase();
     newValue = normOut;
-    updatePayload.outcome = normOut.toLowerCase();
     // Update outcome tag in remarks
     let updatedRemarks = targetVisit.remarks || '';
     if (/\[Outcome:\s*[^\]]+\]/i.test(updatedRemarks)) {
