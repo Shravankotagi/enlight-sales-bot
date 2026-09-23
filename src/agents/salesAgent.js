@@ -4350,11 +4350,24 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
     }
 
     try {
+      const isWon = effectiveStage === 'won';
+      const isQuoted = effectiveStage === 'quoted';
+      const desc = isWon
+        ? `New order ${poNumber ? `PO: ${poNumber} ` : ''}confirmed for ${finalCustomerName}${dealAmount ? ` (₹${Number(dealAmount).toLocaleString('en-IN')})` : ''}`.trim()
+        : isQuoted
+          ? `Quotation updated for ${finalCustomerName}${dealAmount ? ` (₹${Number(dealAmount).toLocaleString('en-IN')})` : ''}`
+          : (existingDeal ? `Inquiry updated for ${finalCustomerName}` : `New inquiry received from ${finalCustomerName} via WhatsApp`);
+      const mod = isWon ? 'Orders' : 'Inquiries';
+      const actType = isWon ? 'order_created' : (existingDeal ? 'inquiry_updated' : 'inquiry_created');
+
       logBotActivity({
         salesperson_phone: senderPhone,
-        description: `New inquiry received from ${finalCustomerName} via WhatsApp`,
-        module: 'Inquiries',
+        description: desc,
+        module: mod,
         customer_name: finalCustomerName,
+        entity_id: dealId || inqId,
+        entity_type: isWon ? 'deal' : 'inquiry',
+        action_type: actType,
       });
     } catch (actErr) {
       console.warn('[SalesAgent] Activity log notice:', actErr?.message);

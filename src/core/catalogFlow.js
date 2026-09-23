@@ -40,6 +40,7 @@ const {
   recordSessionMessage,
   finalizeCurrentSession,
 } = require('./sessionManager');
+const { logBotActivity } = require('../utils/activityLogger');
 
 function cleanPhone(p) {
   if (!p) return '';
@@ -3587,6 +3588,21 @@ async function executeAction(action, draft, senderPhone) {
           created_at: new Date().toISOString(),
         });
 
+        // 5. Log to activity_logs
+        try {
+          logBotActivity({
+            salesperson_phone: senderPhone,
+            description: `New inquiry ${inquiryCode} logged for ${companyName}${totalAmount ? ` (₹${Number(totalAmount).toLocaleString('en-IN')})` : ''}`,
+            module: 'Inquiries',
+            customer_name: companyName,
+            entity_id: inqRow?.id || targetRecordId,
+            entity_type: 'inquiry',
+            action_type: 'inquiry_created',
+          });
+        } catch (actErr) {
+          console.warn('[CatalogFlow] Activity log notice for LOG_INQUIRY:', actErr?.message);
+        }
+
         let productSummaryLines = '';
         if (structuredLineItems.length > 0) {
           if (structuredLineItems.length === 1) {
@@ -3987,6 +4003,22 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.preferred_make) fieldsSummary += `• *Preferred Make:* ${updates.preferred_make}\n`;
         if (updates.additional_notes) fieldsSummary += `• *Additional Notes:* ${updates.additional_notes}\n`;
 
+        // Log to activity_logs
+        try {
+          logBotActivity({
+            salesperson_phone: senderPhone,
+            description: `Inquiry ${displayInqId} updated for ${displayCustName}${updates.stage ? ` (Stage: ${updates.stage})` : ''}`,
+            module: 'Inquiries',
+            customer_name: displayCustName,
+            entity_id: canonicalTargetId,
+            entity_type: 'inquiry',
+            action_type: 'inquiry_updated',
+            change_detail: dealUpdates,
+          });
+        } catch (actErr) {
+          console.warn('[CatalogFlow] Activity log notice for UPDATE_INQUIRY:', actErr?.message);
+        }
+
         return `✅ *Inquiry Updated Successfully!*\n\n` +
           `• *Inquiry ID:* ${displayInqId}\n` +
           `• *Customer / Company:* ${displayCustName}\n` +
@@ -4231,6 +4263,21 @@ async function executeAction(action, draft, senderPhone) {
           year: new Date().getFullYear(),
           created_at: new Date().toISOString(),
         });
+
+        // 5. Log to activity_logs
+        try {
+          logBotActivity({
+            salesperson_phone: senderPhone,
+            description: `New order PO: ${draft.po_number || 'N/A'} recorded for ${companyName}${totalAmount ? ` (${breakdown?.formattedGrandTotal || `₹${Number(totalAmount).toLocaleString('en-IN')}`})` : ''}`,
+            module: 'Orders',
+            customer_name: companyName,
+            entity_id: finalDealId || finalInquiryId,
+            entity_type: 'deal',
+            action_type: 'order_created',
+          });
+        } catch (actErr) {
+          console.warn('[CatalogFlow] Activity log notice for LOG_ORDER:', actErr?.message);
+        }
 
         const inqRaw = (draft.inquiry_id || draft.deal_id || '').trim();
         const cleanInqCode = inqRaw.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
@@ -4581,6 +4628,22 @@ async function executeAction(action, draft, senderPhone) {
         const displayPayment = dealUpdates.payment_terms || deal.payment_terms;
         const displayPoDate = dealUpdates.po_date || deal.po_date;
 
+        // Log to activity_logs
+        try {
+          logBotActivity({
+            salesperson_phone: senderPhone,
+            description: `Order ${displayPo} updated for ${displayCust}${dealUpdates.stage ? ` (Stage: ${dealUpdates.stage})` : ''}`,
+            module: 'Orders',
+            customer_name: displayCust,
+            entity_id: deal.id,
+            entity_type: 'deal',
+            action_type: 'order_updated',
+            change_detail: dealUpdates,
+          });
+        } catch (actErr) {
+          console.warn('[CatalogFlow] Activity log notice for UPDATE_ORDER:', actErr?.message);
+        }
+
         return `✅ *Order Updated Successfully!*\n\n` +
           `• *Inquiry ID:* ${displayInq}\n` +
           `• *Customer / Company:* ${displayCust}\n` +
@@ -4671,6 +4734,19 @@ async function executeAction(action, draft, senderPhone) {
           year: new Date().getFullYear(),
           created_at: new Date().toISOString(),
         });
+
+        // 4. Log to activity_logs
+        try {
+          logBotActivity({
+            salesperson_phone: senderPhone,
+            description: `Customer visit logged for ${companyName}${draft.city_location ? ` (${draft.city_location})` : ''}${draft.person_met ? ` - Met: ${draft.person_met}` : ''}`,
+            module: 'Visits',
+            customer_name: companyName,
+            action_type: 'visit_logged',
+          });
+        } catch (actErr) {
+          console.warn('[CatalogFlow] Activity log notice for LOG_VISIT:', actErr?.message);
+        }
 
         return `📍 *Customer Field Visit Logged Successfully!*\n\n` +
           `• *Customer / Company:* ${companyName}\n` +
@@ -4836,6 +4912,22 @@ async function executeAction(action, draft, senderPhone) {
         if (newFollowupStatus && (isExplicitCompleted || isRemarksCompleted)) updatesSummary += `• *Follow-up Status:* Completed ✅\n`;
         if (updates.meeting_remarks) updatesSummary += `• *Meeting Remarks:* ${updates.meeting_remarks}\n`;
 
+        // Log to activity_logs
+        try {
+          logBotActivity({
+            salesperson_phone: senderPhone,
+            description: `Customer visit updated for ${resolvedCust}${visitUpdates.follow_up_action ? ` (Follow-up: ${visitUpdates.follow_up_action})` : ''}`,
+            module: 'Visits',
+            customer_name: resolvedCust,
+            entity_id: targetVisit?.id,
+            entity_type: 'visit',
+            action_type: 'visit_updated',
+            change_detail: visitUpdates,
+          });
+        } catch (actErr) {
+          console.warn('[CatalogFlow] Activity log notice for UPDATE_VISIT:', actErr?.message);
+        }
+
         return `✅ *Field Visit Updated Successfully!*\n\n` +
           `• *Customer / Company:* ${resolvedCust}\n` +
           updatesSummary +
@@ -4916,6 +5008,21 @@ async function executeAction(action, draft, senderPhone) {
           year: new Date().getFullYear(),
           created_at: new Date().toISOString(),
         });
+
+        // 5. Log to activity_logs
+        try {
+          logBotActivity({
+            salesperson_phone: senderPhone,
+            description: `New customer acquired: ${companyName}${contactPerson ? ` (${contactPerson})` : ''}`,
+            module: 'Customers',
+            customer_name: companyName,
+            entity_id: newCust?.id,
+            entity_type: 'customer',
+            action_type: 'customer_created',
+          });
+        } catch (actErr) {
+          console.warn('[CatalogFlow] Activity log notice for LOG_NEW_CUSTOMER:', actErr?.message);
+        }
 
         const custId = newCust ? newCust.id : '';
 
@@ -5611,6 +5718,23 @@ Return ONLY JSON:
     }
     const { error: iUpdErr } = await supabase.from('inquiries').update(inqUpdates).eq('id', targetInquiryId);
     if (iUpdErr) console.warn('[CatalogFlow] handleMidFlowStageUpdate inq update notice:', iUpdErr.message);
+  }
+
+  // Log to activity_logs
+  try {
+    const custName = draft?.company_name || deal?.customer_name || inq?.sender_name || inq?.ai_extraction_json?.companyName || 'Customer';
+    logBotActivity({
+      salesperson_phone: senderPhone,
+      description: `Stage for ${formattedDisplayId} (${custName}) updated to ${stageDisplayName}`,
+      module: 'Inquiries',
+      customer_name: custName,
+      entity_id: targetInquiryId,
+      entity_type: 'inquiry',
+      action_type: 'inquiry_updated',
+      change_detail: { stage: targetStage },
+    });
+  } catch (actErr) {
+    console.warn('[CatalogFlow] Activity log notice for handleMidFlowStageUpdate:', actErr?.message);
   }
 
   // 6. Build Confirmation and Resume Prompt
