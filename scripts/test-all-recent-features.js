@@ -292,7 +292,191 @@ async function runComprehensiveAudit() {
   await supabase.from('deals').delete().eq('po_number', testPoNumber);
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 8. CLEANUP & FINAL TEST SUMMARY
+  // 8. VERIFY COMPLAINT RESOLUTION NOTES VALIDATION & FLOW COMPLETION
+  // ─────────────────────────────────────────────────────────────────────────────
+  console.log('\n--- SECTION 8: Complaint Resolution Notes Validation & Flow Completion ---');
+
+  const testCmpPhone = '8262937458';
+  const testCustomer = 'Mehta Steel';
+
+  // Clean up any old test complaints for Mehta Steel
+  await supabase.from('complaints').delete().eq('customer_name', testCustomer);
+
+  // Insert an open test complaint for Mehta Steel
+  const { data: testCmp, error: cmpInsertErr } = await supabase.from('complaints').insert({
+    customer_name: testCustomer,
+    complaint_type: 'Quality Defect',
+    description: '10 MT HR Plates had surface rust and dimensional variance',
+    status: 'open',
+    reported_by: testCmpPhone,
+    reported_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(), // 2 hours ago
+  }).select().single();
+
+  if (cmpInsertErr) {
+    console.error('Error creating test complaint for Mehta Steel:', cmpInsertErr);
+  }
+
+  // 8.1 Start UPDATE_COMPLAINT flow
+  await saveActiveSession(testCmpPhone, 'Unknown', 'general');
+  const updCompStep1 = await handleCatalogFlow('9', testCmpPhone);
+  assert('8.1 Menu option 9 starts UPDATE_COMPLAINT flow',
+    updCompStep1.handled === true && updCompStep1.reply.includes('Update Complaint'),
+    updCompStep1.reply
+  );
+
+  // 8.2 User requests to resolve complaint without resolution notes
+  const updCompStep2 = await handleCatalogFlow('resolve my last complaint of Mehta Steel', testCmpPhone);
+  assert('8.2 Reject command fragment as notes and prompt for Resolution Notes',
+    updCompStep2.handled === true &&
+    updCompStep2.reply.includes('Resolution Notes') &&
+    !updCompStep2.reply.includes('my last complaint of'),
+    updCompStep2.reply
+  );
+
+  // 8.3 User provides valid resolution notes
+  const updCompStep3 = await handleCatalogFlow('10 MT replacement material delivered and accepted by customer', testCmpPhone);
+  assert('8.3 Captures exact resolution notes and displays confirmation summary',
+    updCompStep3.handled === true &&
+    updCompStep3.reply.includes('Mehta Steel') &&
+    updCompStep3.reply.includes('10 MT replacement material delivered and accepted by customer') &&
+    updCompStep3.reply.includes('Resolved'),
+    updCompStep3.reply
+  );
+
+  // 8.4 User confirms resolution with "yes"
+  const updCompStep4 = await handleCatalogFlow('yes', testCmpPhone);
+  assert('8.4 Complaint resolved cleanly without resume prompt loop',
+    updCompStep4.handled === true &&
+    updCompStep4.reply.includes('Customer Complaint Resolved Successfully!') &&
+    updCompStep4.reply.includes('10 MT replacement material delivered and accepted by customer') &&
+    !updCompStep4.reply.includes('You were in the middle of complaint update — do you want to continue?') &&
+    !updCompStep4.reply.includes('You were in the middle of Update Customer Complaint'),
+    updCompStep4.reply
+  );
+
+  // 8.5 Verify DB record is resolved and KRA 8 log was created
+  const { data: resolvedCmp } = await supabase.from('complaints').select('*').eq('id', testCmp.id).single();
+  assert('8.5 Complaint status in DB is resolved with resolution notes',
+    resolvedCmp?.status === 'resolved' &&
+    resolvedCmp?.resolution_notes === '10 MT replacement material delivered and accepted by customer' &&
+    resolvedCmp?.resolved_at !== null,
+    JSON.stringify(resolvedCmp)
+  );
+
+  const { data: kra8Logs } = await supabase.from('kra_logs')
+    .select('*')
+    .eq('customer_name', testCustomer)
+    .eq('kra_number', 8)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  assert('8.6 KRA 8 log inserted into kra_logs table',
+    kra8Logs && kra8Logs.length > 0 && kra8Logs[0].kra_type === 'complaint_resolved',
+    JSON.stringify(kra8Logs)
+  );
+
+  // 8.6b Test specific command prompt: "update this po PO: PO-20260923-9085 compliant and mark it resolved"
+  const testPoCustomer = 'Shiv Steel';
+  const testPoRef = 'PO-20260923-9085';
+  await supabase.from('complaints').delete().eq('po_number', testPoRef);
+
+  const { data: testPoCmp } = await supabase.from('complaints').insert({
+    customer_name: testPoCustomer,
+    po_number: testPoRef,
+    complaint_type: 'Physical Damage',
+    description: 'HR Sheet was damaged during transport',
+    status: 'open',
+    reported_by: testCmpPhone,
+    reported_at: new Date().toISOString(),
+  }).select().single();
+
+  await saveActiveSession(testCmpPhone, 'Unknown', 'general');
+  await handleCatalogFlow('9', testCmpPhone);
+
+  const poUpdStep1 = await handleCatalogFlow('update this po PO: PO-20260923-9085 compliant and mark it resolved', testCmpPhone);
+  assert('8.6b Rejects command string as resolution notes for PO resolution command and asks for Resolution Notes',
+    poUpdStep1.handled === true &&
+    poUpdStep1.reply.includes('Resolution Notes') &&
+    !poUpdStep1.reply.includes('update this po PO: PO-20260923-9085 compliant and mark it resolved') &&
+    !poUpdStep1.reply.includes('Resolution Notes → update this po'),
+    poUpdStep1.reply
+  );
+
+  const poUpdStep2 = await handleCatalogFlow('5 MT replacement coils dispatched and accepted by customer', testCmpPhone);
+  assert('8.6c Captures exact resolution notes and displays confirmation summary for Shiv Steel',
+    poUpdStep2.handled === true &&
+    poUpdStep2.reply.includes('Shiv Steel') &&
+    poUpdStep2.reply.includes('PO-20260923-9085') &&
+    poUpdStep2.reply.includes('5 MT replacement coils dispatched and accepted by customer') &&
+    poUpdStep2.reply.includes('Resolved'),
+    poUpdStep2.reply
+  );
+
+  const poUpdStep3 = await handleCatalogFlow('yes', testCmpPhone);
+  assert('8.6d Shiv Steel complaint resolved in DB with KRA 8 log and clean post-activity buttons',
+    poUpdStep3.handled === true &&
+    poUpdStep3.reply.includes('Customer Complaint Resolved Successfully!') &&
+    poUpdStep3.reply.includes('Shiv Steel') &&
+    !poUpdStep3.reply.includes('You were in the middle of'),
+    poUpdStep3.reply
+  );
+
+  // Clean up test PO complaint
+  await supabase.from('complaints').delete().eq('po_number', testPoRef);
+
+  // 8.7 Direct resolution prompt validation in KRA 8 module
+  const { handleComplaintResolution } = require('../src/kra8');
+  // Insert a second open complaint
+  await supabase.from('complaints').insert({
+    customer_name: testCustomer,
+    complaint_type: 'Billing Mismatch',
+    description: 'Invoice rate differed by ₹500/MT',
+    status: 'open',
+    reported_by: testCmpPhone,
+    reported_at: new Date().toISOString(),
+  });
+
+  const directReqNoNotes = await handleComplaintResolution('resolve complaint for Mehta Steel', testCmpPhone);
+  assert('8.7 Direct resolution command without notes requests resolution notes',
+    typeof directReqNoNotes === 'string' &&
+    directReqNoNotes.includes('Resolution Notes Required for Mehta Steel'),
+    directReqNoNotes
+  );
+
+  const directReqWithNotes = await handleComplaintResolution('resolve complaint for Mehta Steel - Credit note CN-2026-99 issued for ₹45,000', testCmpPhone);
+  assert('8.8 Direct resolution command with valid notes resolves complaint and shows resolution summary',
+    typeof directReqWithNotes === 'string' &&
+    directReqWithNotes.includes('Complaint Resolved') &&
+    directReqWithNotes.includes('Credit note CN-2026-99 issued for ₹45,000'),
+    directReqWithNotes
+  );
+
+  // 8.9 Mid-flow complaint resolution while in Visit flow
+  await saveActiveSession(testCmpPhone, 'Tech Industries', 'catalog_flow|LOG_VISIT|{"company_name":"Tech Industries"}');
+  // Insert third open complaint for Mehta Steel
+  await supabase.from('complaints').insert({
+    customer_name: testCustomer,
+    complaint_type: 'Physical Damage',
+    description: 'Bending damage on 5 MT coils',
+    status: 'open',
+    reported_by: testCmpPhone,
+    reported_at: new Date().toISOString(),
+  });
+
+  const midFlowRes = await handleCatalogFlow('resolve complaint for Mehta Steel - replacement coils delivered', testCmpPhone);
+  assert('8.9 Mid-flow resolution resolves complaint and asks to resume Visit flow',
+    midFlowRes.handled === true &&
+    midFlowRes.reply.includes('Complaint Resolved') &&
+    midFlowRes.reply.includes('Tech Industries') &&
+    midFlowRes.reply.includes('do you want to continue?'),
+    midFlowRes.reply
+  );
+
+  // Clean up test data
+  await supabase.from('complaints').delete().eq('customer_name', testCustomer);
+  await supabase.from('kra_logs').delete().eq('customer_name', testCustomer);
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 9. CLEANUP & FINAL TEST SUMMARY
   // ─────────────────────────────────────────────────────────────────────────────
   await saveActiveSession(testPhone, 'Unknown', 'general');
 
