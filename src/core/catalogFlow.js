@@ -3560,20 +3560,21 @@ async function executeAction(action, draft, senderPhone) {
           .select()
           .single();
 
-        if (inqErr) console.error('[CatalogFlow] Inquiry insert error:', inqErr);
+        if (inqErr || !inqRow) {
+          console.error('[CatalogFlow] Inquiry insert error:', inqErr);
+          return `❌ *Failed to log inquiry for ${companyName}.*\n\nReason: ${inqErr?.message || 'Database write error'}. Please try again.`;
+        }
 
-        const targetRecordId = inqRow?.id;
+        const targetRecordId = inqRow.id;
         const hexCode = targetRecordId ? targetRecordId.replace(/-/g, '').slice(0, 6).toUpperCase() : Math.random().toString(16).substring(2, 8).toUpperCase();
         const inquiryCode = `INQ-${hexCode}`;
 
-        if (inqRow) {
-          structuredAiJson.inquiry_code = inquiryCode;
-          structuredAiJson.display_id = inquiryCode;
-          await supabase.from('inquiries').update({ ai_extraction_json: structuredAiJson }).eq('id', inqRow.id);
-        }
+        structuredAiJson.inquiry_code = inquiryCode;
+        structuredAiJson.display_id = inquiryCode;
+        await supabase.from('inquiries').update({ ai_extraction_json: structuredAiJson }).eq('id', inqRow.id);
 
         // 2. Insert line items into inquiry_items (canonical items table)
-        if (inqRow && structuredLineItems.length > 0) {
+        if (structuredLineItems.length > 0) {
           const inqItemsPayload = structuredLineItems.map(it => ({
             inquiry_id: inqRow.id,
             sku_text: it.sku_text || it.description,
@@ -3590,43 +3591,39 @@ async function executeAction(action, draft, senderPhone) {
         }
 
         // 3. Mirror into deals & deal_items (with id = inqRow.id, inquiry_id = inqRow.id for 100% backward-compatibility)
-        if (inqRow) {
-          const { data: dealRow, error: dealErr } = await supabase
-            .from('deals')
-            .insert({
-              id: inqRow.id,
-              inquiry_id: inqRow.id,
-              stage: 'new_inquiry',
-              customer_name: companyName,
-              customer_address: draft.delivery_location || null,
-              delivery_location: draft.delivery_location || null,
-              payment_terms: draft.payment_terms || null,
-              total_amount: totalAmount || null,
-              inquiry_type: 'inquiry',
-              status: 'auto_created',
-              salesperson_phone: senderPhone,
-              created_at: new Date().toISOString(),
-            })
-            .select()
-            .single();
+        const { error: dealErr } = await supabase
+          .from('deals')
+          .insert({
+            id: inqRow.id,
+            inquiry_id: inqRow.id,
+            stage: 'new_inquiry',
+            customer_name: companyName,
+            customer_address: draft.delivery_location || null,
+            delivery_location: draft.delivery_location || null,
+            payment_terms: draft.payment_terms || null,
+            total_amount: totalAmount || null,
+            inquiry_type: 'inquiry',
+            status: 'auto_created',
+            salesperson_phone: senderPhone,
+            created_at: new Date().toISOString(),
+          });
 
-          if (dealErr) console.error('[CatalogFlow] Deal mirror insert error:', dealErr);
+        if (dealErr) console.warn('[CatalogFlow] Deal mirror insert warning:', dealErr);
 
-          if (structuredLineItems.length > 0) {
-            const itemsPayload = structuredLineItems.map(it => ({
-              deal_id: inqRow.id,
-              sku_text: it.sku_text || it.description,
-              dimensions: it.dimensions || it.spec || null,
-              grade: it.grade || null,
-              quantity: Number(it.quantity) || null,
-              unit: it.unit || 'MT',
-              rate: Number(it.rate) || null,
-              amount: Number(it.amount) || null,
-              confidence: 0.95,
-              created_at: new Date().toISOString(),
-            }));
-            await supabase.from('deal_items').insert(itemsPayload);
-          }
+        if (structuredLineItems.length > 0) {
+          const itemsPayload = structuredLineItems.map(it => ({
+            deal_id: inqRow.id,
+            sku_text: it.sku_text || it.description,
+            dimensions: it.dimensions || it.spec || null,
+            grade: it.grade || null,
+            quantity: Number(it.quantity) || null,
+            unit: it.unit || 'MT',
+            rate: Number(it.rate) || null,
+            amount: Number(it.amount) || null,
+            confidence: 0.95,
+            created_at: new Date().toISOString(),
+          }));
+          await supabase.from('deal_items').insert(itemsPayload);
         }
 
         // 4. Log KRA 6 (CRM Compliance)
@@ -3648,7 +3645,7 @@ async function executeAction(action, draft, senderPhone) {
             description: `New inquiry ${inquiryCode} logged for ${companyName}${totalAmount ? ` (₹${Number(totalAmount).toLocaleString('en-IN')})` : ''}`,
             module: 'Inquiries',
             customer_name: companyName,
-            entity_id: inqRow?.id || targetRecordId,
+            entity_id: inqRow.id,
             entity_type: 'inquiry',
             action_type: 'inquiry_created',
           });
@@ -3856,6 +3853,10 @@ async function executeAction(action, draft, senderPhone) {
           return `❌ Could not find an existing inquiry matching ${missingIdentifier} in your records.\n\nPlease verify the Inquiry ID or Customer Name and try again.`;
         }
 
+        const canonicalTargetId = deal.inquiry_id || deal.id;
+        const displayInqId = draft._inquiry_display_id || (canonicalTargetId ? `INQ-${canonicalTargetId.replace(/-/g, '').slice(0, 6).toUpperCase()}` : (deal ? (deal.deal_number || `INQ-${deal.id.slice(0, 6).toUpperCase()}`) : (draft.inquiry_id || 'Inquiry')));
+        const displayCustName = deal?.customer_name || draft.company_name || 'Customer';
+
         const updates = draft.updates || {};
         const dealUpdates = {};
 
@@ -3912,11 +3913,16 @@ async function executeAction(action, draft, senderPhone) {
             const itAmt = itQty > 0 && itRate > 0 ? itQty * itRate : 0;
             totalAmount += itAmt;
 
-            await supabase.from('deal_items').update({
+            const { error: dItemErr } = await supabase.from('deal_items').update({
               rate: itRate,
               quantity: itQty,
               amount: itAmt,
             }).eq('id', currentItem.id);
+
+            if (dItemErr) {
+              console.error('[CatalogFlow] Deal item update error:', dItemErr);
+              return `❌ *Failed to update inquiry ${displayInqId} for ${displayCustName}.*\n\nReason: ${dItemErr.message || 'Database item update error'}. Please try again.`;
+            }
             itemsUpdated = true;
           }
         } else if (updates.rate && dItems && dItems.length > 0) {
@@ -3927,7 +3933,11 @@ async function executeAction(action, draft, senderPhone) {
               const itQty = Number(it.quantity) || 0;
               const itAmt = itQty > 0 ? itQty * newRate : 0;
               totalAmount += itAmt;
-              await supabase.from('deal_items').update({ rate: newRate, amount: itAmt }).eq('id', it.id);
+              const { error: dItemErr } = await supabase.from('deal_items').update({ rate: newRate, amount: itAmt }).eq('id', it.id);
+              if (dItemErr) {
+                console.error('[CatalogFlow] Global rate update error:', dItemErr);
+                return `❌ *Failed to update inquiry ${displayInqId} for ${displayCustName}.*\n\nReason: ${dItemErr.message || 'Database item update error'}. Please try again.`;
+              }
             }
             itemsUpdated = true;
           }
@@ -3938,13 +3948,20 @@ async function executeAction(action, draft, senderPhone) {
         }
 
         if (Object.keys(dealUpdates).length > 0) {
-          await supabase.from('deals').update(dealUpdates).eq('id', deal.id);
+          const { error: dealUpdErr } = await supabase.from('deals').update(dealUpdates).eq('id', deal.id);
+          if (dealUpdErr) {
+            console.error('[CatalogFlow] Deal update error:', dealUpdErr);
+            return `❌ *Failed to update inquiry ${displayInqId} for ${displayCustName}.*\n\nReason: ${dealUpdErr.message || 'Database update error'}. Please try again.`;
+          }
         }
 
         // Synchronize inquiries table (ai_extraction_json AND raw_text)
         const targetInqId = deal.inquiry_id || deal.id;
         if (targetInqId) {
-          const { data: inqRow } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status').eq('id', targetInqId).single();
+          const { data: inqRow, error: fetchInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status').eq('id', targetInqId).single();
+          if (fetchInqErr) {
+            console.warn('[CatalogFlow] Fetch inquiry warning (will attempt direct update):', fetchInqErr.message);
+          }
           if (inqRow) {
             const aiJson = inqRow.ai_extraction_json || {};
             if (updates.payment_terms) {
@@ -4020,7 +4037,12 @@ async function executeAction(action, draft, senderPhone) {
             if (dealUpdates.po_date) inqUpdatePayload.po_date = dealUpdates.po_date;
             if (dealUpdates.won_at) inqUpdatePayload.won_at = dealUpdates.won_at;
             if (dealUpdates.lost_reason) inqUpdatePayload.lost_reason = dealUpdates.lost_reason;
-            await supabase.from('inquiries').update(inqUpdatePayload).eq('id', targetInqId);
+            
+            const { error: inqUpdErr } = await supabase.from('inquiries').update(inqUpdatePayload).eq('id', targetInqId);
+            if (inqUpdErr) {
+              console.error('[CatalogFlow] Inquiries table update error:', inqUpdErr);
+              return `❌ *Failed to update inquiry ${displayInqId} for ${displayCustName}.*\n\nReason: ${inqUpdErr.message || 'Database write error'}. Please try again.`;
+            }
 
             if (itemsUpdated) {
               const { data: refreshedItems } = await supabase.from('deal_items').select('*').eq('deal_id', deal.id);
@@ -4043,10 +4065,6 @@ async function executeAction(action, draft, senderPhone) {
             }
           }
         }
-
-        const canonicalTargetId = targetInqId || (deal ? (deal.inquiry_id || deal.id) : null);
-        const displayInqId = draft._inquiry_display_id || (canonicalTargetId ? `INQ-${canonicalTargetId.replace(/-/g, '').slice(0, 6).toUpperCase()}` : (deal ? (deal.deal_number || `INQ-${deal.id.slice(0, 6).toUpperCase()}`) : (draft.inquiry_id || 'Inquiry')));
-        const displayCustName = deal?.customer_name || draft.company_name || 'Customer';
 
         let fieldsSummary = '';
         if (updates.delivery_location) fieldsSummary += `• *Delivery Location:* ${updates.delivery_location}\n`;
@@ -4181,7 +4199,7 @@ async function executeAction(action, draft, senderPhone) {
         // 2. Handle Inquiries table
         let finalInquiryId = targetInquiryId;
         if (finalInquiryId) {
-          await supabase
+          const { error: inqUpdErr } = await supabase
             .from('inquiries')
             .update({
               stage: 'won',
@@ -4195,8 +4213,13 @@ async function executeAction(action, draft, senderPhone) {
               ai_extraction_json: structuredAiJson,
             })
             .eq('id', finalInquiryId);
+
+          if (inqUpdErr) {
+            console.error('[CatalogFlow] Order inquiry update error:', inqUpdErr);
+            return `❌ *Failed to record order for ${companyName}.*\n\nReason: ${inqUpdErr.message || 'Database write error'}. Please try again.`;
+          }
         } else {
-          const { data: inqRow } = await supabase
+          const { data: inqRow, error: inqErr } = await supabase
             .from('inquiries')
             .insert({
               source_channel: 'WhatsApp',
@@ -4220,7 +4243,12 @@ async function executeAction(action, draft, senderPhone) {
             })
             .select()
             .single();
-          if (inqRow) finalInquiryId = inqRow.id;
+
+          if (inqErr || !inqRow) {
+            console.error('[CatalogFlow] Order inquiry insert error:', inqErr);
+            return `❌ *Failed to record order for ${companyName}.*\n\nReason: ${inqErr?.message || 'Database write error'}. Please try again.`;
+          }
+          finalInquiryId = inqRow.id;
         }
 
         // 3. Update or Insert inquiry_items
@@ -4260,7 +4288,11 @@ async function executeAction(action, draft, senderPhone) {
               inquiry_type: 'purchase_order',
             })
             .eq('id', finalDealId);
-          if (updErr) console.error('[CatalogFlow] Order deal update error:', updErr);
+
+          if (updErr) {
+            console.error('[CatalogFlow] Order deal update error:', updErr);
+            return `❌ *Failed to record order for ${companyName}.*\n\nReason: ${updErr.message || 'Database write error'}. Please try again.`;
+          }
         } else {
           const { data: newDealRow, error: dealErr } = await supabase
             .from('deals')
@@ -4283,8 +4315,11 @@ async function executeAction(action, draft, senderPhone) {
             .select()
             .single();
 
-          if (dealErr) console.error('[CatalogFlow] Order deal insert error:', dealErr);
-          if (newDealRow) finalDealId = newDealRow.id;
+          if (dealErr || !newDealRow) {
+            console.error('[CatalogFlow] Order deal insert error:', dealErr);
+            return `❌ *Failed to record order for ${companyName}.*\n\nReason: ${dealErr?.message || 'Database write error'}. Please try again.`;
+          }
+          finalDealId = newDealRow.id;
         }
 
         // 5. Update or Insert deal_items (Crucial for Orders line items in frontend)
@@ -4304,7 +4339,7 @@ async function executeAction(action, draft, senderPhone) {
           await supabase.from('deal_items').insert(itemsPayload);
         }
 
-        // 4. Log KRA 1 (Won Deal)
+        // 6. Log KRA 1 (Won Deal)
         await supabase.from('kra_logs').insert({
           salesperson_phone: senderPhone,
           kra_number: 1,
@@ -4317,7 +4352,7 @@ async function executeAction(action, draft, senderPhone) {
           created_at: new Date().toISOString(),
         });
 
-        // 5. Log to activity_logs
+        // 7. Log to activity_logs
         try {
           logBotActivity({
             salesperson_phone: senderPhone,
@@ -4539,6 +4574,9 @@ async function executeAction(action, draft, senderPhone) {
           return `❌ Could not find an existing order or inquiry matching ${missingIdentifier}.\n\nPlease check the Inquiry ID or PO Number and try again.`;
         }
 
+        const displayPo = deal.po_number || rawPo || 'N/A';
+        const displayCust = deal.customer_name || draft.company_name || 'Customer';
+
         const updates = draft.updates || {};
         const dealUpdates = {};
 
@@ -4605,23 +4643,32 @@ async function executeAction(action, draft, senderPhone) {
               }
               const itAmt = itQty > 0 && itRate > 0 ? itQty * itRate : 0;
               totalAmount += itAmt;
-              await supabase.from('deal_items').update({
+              const { error: dItemErr } = await supabase.from('deal_items').update({
                 rate: itRate,
                 quantity: itQty,
                 amount: itAmt,
               }).eq('id', currentItem.id);
+
+              if (dItemErr) {
+                console.error('[CatalogFlow] Deal item update error in UPDATE_ORDER:', dItemErr);
+                return `❌ *Failed to update order ${displayPo} for ${displayCust}.*\n\nReason: ${dItemErr.message || 'Database write error'}. Please try again.`;
+              }
             }
             if (totalAmount > 0) dealUpdates.total_amount = totalAmount;
           }
         }
 
         if (Object.keys(dealUpdates).length > 0) {
-          await supabase.from('deals').update(dealUpdates).eq('id', deal.id);
+          const { error: dealUpdErr } = await supabase.from('deals').update(dealUpdates).eq('id', deal.id);
+          if (dealUpdErr) {
+            console.error('[CatalogFlow] Deal update error in UPDATE_ORDER:', dealUpdErr);
+            return `❌ *Failed to update order ${displayPo} for ${displayCust}.*\n\nReason: ${dealUpdErr.message || 'Database write error'}. Please try again.`;
+          }
         }
 
         // Synchronize inquiries table (ai_extraction_json AND raw_text)
         if (deal.inquiry_id) {
-          const { data: inqRow } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status').eq('id', deal.inquiry_id).single();
+          const { data: inqRow, error: fetchInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status').eq('id', deal.inquiry_id).single();
           if (inqRow) {
             const aiJson = inqRow.ai_extraction_json || {};
             if (rawPo) aiJson.po_number = rawPo;
@@ -4669,13 +4716,16 @@ async function executeAction(action, draft, senderPhone) {
             } else if (dealUpdates.stage) {
               inqPayload.status = dealUpdates.stage;
             }
-            await supabase.from('inquiries').update(inqPayload).eq('id', deal.inquiry_id);
+            const { error: inqUpdErr } = await supabase.from('inquiries').update(inqPayload).eq('id', deal.inquiry_id);
+            if (inqUpdErr) {
+              console.error('[CatalogFlow] Inquiries update error in UPDATE_ORDER:', inqUpdErr);
+              return `❌ *Failed to update order ${displayPo} for ${displayCust}.*\n\nReason: ${inqUpdErr.message || 'Database write error'}. Please try again.`;
+            }
           }
         }
 
-        const displayPo = dealUpdates.po_number || deal.po_number || rawPo || 'N/A';
+        const finalDisplayPo = dealUpdates.po_number || deal.po_number || rawPo || 'N/A';
         const displayInq = `INQ-${(deal.id || deal.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
-        const displayCust = deal.customer_name || draft.company_name || 'Customer';
         const displayTotal = dealUpdates.total_amount || deal.total_amount || 0;
         const displayLoc = dealUpdates.delivery_location || deal.delivery_location;
         const displayPayment = dealUpdates.payment_terms || deal.payment_terms;
@@ -4685,7 +4735,7 @@ async function executeAction(action, draft, senderPhone) {
         try {
           logBotActivity({
             salesperson_phone: senderPhone,
-            description: `Order ${displayPo} updated for ${displayCust}${dealUpdates.stage ? ` (Stage: ${dealUpdates.stage})` : ''}`,
+            description: `Order ${finalDisplayPo} updated for ${displayCust}${dealUpdates.stage ? ` (Stage: ${dealUpdates.stage})` : ''}`,
             module: 'Orders',
             customer_name: displayCust,
             entity_id: deal.id,
@@ -4700,7 +4750,7 @@ async function executeAction(action, draft, senderPhone) {
         return `✅ *Order Updated Successfully!*\n\n` +
           `• *Inquiry ID:* ${displayInq}\n` +
           `• *Customer / Company:* ${displayCust}\n` +
-          `• *PO Number:* ${displayPo}\n` +
+          `• *PO Number:* ${finalDisplayPo}\n` +
           (displayPoDate ? `• *PO Date:* ${displayPoDate}\n` : '') +
           (displayLoc ? `• *Delivery Location:* ${displayLoc}\n` : '') +
           (displayPayment ? `• *Payment Terms:* ${displayPayment}\n` : '') +
@@ -4761,7 +4811,11 @@ async function executeAction(action, draft, senderPhone) {
           delete visitPayload.follow_up_date;
           delete visitPayload.follow_up_status;
           delete visitPayload.employee_id;
-          await supabase.from('customer_visits').insert(visitPayload);
+          const { error: fbVisErr } = await supabase.from('customer_visits').insert(visitPayload);
+          if (fbVisErr) {
+            console.error('[CatalogFlow] Visit fallback insert error:', fbVisErr.message);
+            return `❌ *Failed to log field visit for ${companyName}.*\n\nReason: ${fbVisErr.message || 'Database write error'}. Please try again.`;
+          }
         }
 
         // 2. Log KRA 9 (Site Visit)
@@ -4929,6 +4983,8 @@ async function executeAction(action, draft, senderPhone) {
         if (newLocation) visitUpdates.customer_address = newLocation;
         if (updates.visit_date) visitUpdates.visited_at = parseDDMMYYYYtoISO(updates.visit_date);
 
+        const resolvedCust = targetVisit ? targetVisit.customer_name : (draft.company_name || 'Customer');
+
         if (Object.keys(visitUpdates).length > 0) {
           const { error: updErr } = await supabase.from('customer_visits').update(visitUpdates).eq('id', targetVisit.id);
           if (updErr) {
@@ -4937,7 +4993,11 @@ async function executeAction(action, draft, senderPhone) {
             delete visitUpdates.follow_up_date;
             delete visitUpdates.follow_up_status;
             delete visitUpdates.follow_up_completed_at;
-            await supabase.from('customer_visits').update(visitUpdates).eq('id', targetVisit.id);
+            const { error: fbUpdErr } = await supabase.from('customer_visits').update(visitUpdates).eq('id', targetVisit.id);
+            if (fbUpdErr) {
+              console.error('[CatalogFlow] Visit fallback update error:', fbUpdErr.message);
+              return `❌ *Failed to update customer visit for ${resolvedCust}.*\n\nReason: ${fbUpdErr.message || 'Database write error'}. Please try again.`;
+            }
           }
 
           // Sync customer master profile if contact details changed
@@ -4952,8 +5012,6 @@ async function executeAction(action, draft, senderPhone) {
               .ilike('customer_name', `%${targetVisit.customer_name}%`);
           }
         }
-
-        const resolvedCust = targetVisit ? targetVisit.customer_name : (draft.company_name || 'Customer');
 
         let updatesSummary = '';
         if (visitUpdates.person_met) updatesSummary += `• *Person Met:* ${visitUpdates.person_met}\n`;
@@ -5036,7 +5094,10 @@ async function executeAction(action, draft, senderPhone) {
           .select()
           .single();
 
-        if (custErr) console.error('[CatalogFlow] Customer insert error:', custErr);
+        if (custErr || !newCust) {
+          console.error('[CatalogFlow] Customer insert error:', custErr);
+          return `❌ *Failed to add customer ${companyName}.*\n\nReason: ${custErr?.message || 'Database write error'}. Please try again.`;
+        }
 
         // 3. Log KRA 2 (New Customer Acquisition)
         await supabase.from('kra_logs').insert({
@@ -5069,15 +5130,13 @@ async function executeAction(action, draft, senderPhone) {
             description: `New customer acquired: ${companyName}${contactPerson ? ` (${contactPerson})` : ''}`,
             module: 'Customers',
             customer_name: companyName,
-            entity_id: newCust?.id,
+            entity_id: newCust.id,
             entity_type: 'customer',
             action_type: 'customer_created',
           });
         } catch (actErr) {
           console.warn('[CatalogFlow] Activity log notice for LOG_NEW_CUSTOMER:', actErr?.message);
         }
-
-        const custId = newCust ? newCust.id : '';
 
         return `🎉 *New Customer Successfully Added!*\n\n` +
           `• *Company Name:* ${companyName}\n` +
@@ -5143,7 +5202,10 @@ async function executeAction(action, draft, senderPhone) {
           sla_due_at: slaDueAt,
         });
 
-        if (cmpErr) console.error('[CatalogFlow] Complaint insert error:', cmpErr);
+        if (cmpErr) {
+          console.error('[CatalogFlow] Complaint insert error:', cmpErr);
+          return `❌ *Failed to log complaint for ${companyName}.*\n\nReason: ${cmpErr.message || 'Database write error'}. Please try again.`;
+        }
 
         // 2. Log KRA 7 (Quality Complaint)
         await supabase.from('kra_logs').insert({
@@ -5234,7 +5296,7 @@ async function executeAction(action, draft, senderPhone) {
 
         if (updateErr) {
           console.error('[CatalogFlow] Supabase complaint update error:', updateErr);
-          return `❌ Failed to update complaint: ${updateErr.message}`;
+          return `❌ *Failed to update complaint for ${matchedCmp.customer_name}.*\n\nReason: ${updateErr.message || 'Database write error'}. Please try again.`;
         }
 
         // Log to activity_logs

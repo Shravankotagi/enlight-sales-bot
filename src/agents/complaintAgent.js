@@ -565,10 +565,15 @@ async function processSingleComplaint(data, originalText, senderPhone) {
         updatePayload.affected_product = updatedProduct;
       }
 
-      await supabase
+      const { error: cmpUpdErr } = await supabase
         .from('complaints')
         .update(updatePayload)
         .eq('id', openComplaint.id);
+
+      if (cmpUpdErr) {
+        console.error('[complaintAgent] Error updating complaint:', cmpUpdErr);
+        return `❌ *Failed to Resolve Complaint*\n\nCould not update complaint status for *${finalCustomerName}* due to a database error: ${cmpUpdErr.message || JSON.stringify(cmpUpdErr)}. Please try again.`;
+      }
 
       const alreadyLogged = await isKRA8AlreadyLogged(senderPhone, finalCustomerName);
       if (!alreadyLogged) {

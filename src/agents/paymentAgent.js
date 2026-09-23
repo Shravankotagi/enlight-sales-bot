@@ -275,7 +275,7 @@ async function upsertPaymentTracking({
       finalStatus = finalOutstanding <= 0 ? 'collected' : 'partial';
     }
 
-    await supabase
+    const { error: pUpdErr } = await supabase
       .from('payment_tracking')
       .update({
         invoice_amount:   finalInvoiceAmount > 0 ? finalInvoiceAmount : null,
@@ -287,6 +287,11 @@ async function upsertPaymentTracking({
         updated_at:       new Date().toISOString(),
       })
       .eq('id', existing.id);
+
+    if (pUpdErr) {
+      console.error('[paymentAgent] Error updating payment_tracking:', pUpdErr);
+      throw new Error(`Database write error updating payment: ${pUpdErr.message || JSON.stringify(pUpdErr)}`);
+    }
 
   } else {
     // --- INSERT new row ---
@@ -309,7 +314,7 @@ async function upsertPaymentTracking({
       finalStatus        = 'partial';
     }
 
-    await supabase.from('payment_tracking').insert({
+    const { error: pInsErr } = await supabase.from('payment_tracking').insert({
       customer_name:     customerName,
       salesperson_phone: senderPhone,
       invoice_amount:    finalInvoiceAmount > 0 ? finalInvoiceAmount : null,
@@ -320,6 +325,11 @@ async function upsertPaymentTracking({
       paid_date:         finalStatus === 'collected' ? new Date().toISOString().split('T')[0] : null,
       created_at:        new Date().toISOString(),
     });
+
+    if (pInsErr) {
+      console.error('[paymentAgent] Error inserting payment_tracking:', pInsErr);
+      throw new Error(`Database write error inserting payment: ${pInsErr.message || JSON.stringify(pInsErr)}`);
+    }
   }
 
   // Auto-resolve any pending follow-up tasks for this customer

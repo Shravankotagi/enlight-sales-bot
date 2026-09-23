@@ -154,10 +154,15 @@ async function processCustomerMessage(text, senderPhone) {
           if (payload.newPayload?.contact_person) updateData.contact_person = payload.newPayload.contact_person;
           if (payload.newPayload?.order_frequency_days) updateData.avg_order_frequency_days = Number(payload.newPayload.order_frequency_days);
 
-          await supabase
+          const { error: updErr } = await supabase
             .from('recurring_customers')
             .update(updateData)
             .eq('id', payload.existingId);
+
+          if (updErr) {
+            console.error('[customerAgent] Error updating recurring_customers:', updErr);
+            return `❌ *Update Failed*\n\nCould not link customer *${payload.existingCustomerName}* due to a database error: ${updErr.message || JSON.stringify(updErr)}. Please try again.`;
+          }
 
           // Log KRA 2
           const alreadyLogged = await isKRA2AlreadyLogged(senderPhone, payload.existingCustomerName);
@@ -254,10 +259,15 @@ async function processCustomerMessage(text, senderPhone) {
           updateFields.assigned_salesperson_phone = senderPhone;
         }
 
-        await supabase
+        const { error: updErr } = await supabase
           .from('recurring_customers')
           .update(updateFields)
           .eq('id', exactMatch.id);
+
+        if (updErr) {
+          console.error('[customerAgent] Error updating recurring_customers:', updErr);
+          return `❌ *Update Failed*\n\nCould not update customer profile for *${exactMatch.customer_name}* due to a database error: ${updErr.message || JSON.stringify(updErr)}. Please try again.`;
+        }
 
         return `✅ *Customer Profile Updated!*\n\n` +
           `Company: *${exactMatch.customer_name}* is already in your account.\n` +

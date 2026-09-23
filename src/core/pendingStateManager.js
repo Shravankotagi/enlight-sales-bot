@@ -79,7 +79,11 @@ async function handlePendingSessionState(rawText, senderPhone) {
       dealUpdatePayload.total_amount = dealAmount;
     }
 
-    await supabase.from('deals').update(dealUpdatePayload).eq('id', dealId);
+    const { error: lostErr } = await supabase.from('deals').update(dealUpdatePayload).eq('id', dealId);
+    if (lostErr) {
+      console.error('[PendingState] Mark lost error:', lostErr);
+      return `❌ Failed to mark deal as lost for ${customerName}: ${lostErr.message}. Please try again.`;
+    }
 
     await supabase.from('kra_logs').insert({
       salesperson_phone: senderPhone,
@@ -128,7 +132,7 @@ async function handlePendingSessionState(rawText, senderPhone) {
         targetPoNumber = `PO-${todayStr}-${randomNum}`;
       }
 
-      await supabase
+      const { error: wonErr } = await supabase
         .from('deals')
         .update({
           stage: 'won',
@@ -136,6 +140,11 @@ async function handlePendingSessionState(rawText, senderPhone) {
           po_number: targetPoNumber,
         })
         .eq('id', dealId);
+
+      if (wonErr) {
+        console.error('[PendingState] Mark won error:', wonErr);
+        return `❌ Failed to mark deal as won for ${customerName}: ${wonErr.message}. Please try again.`;
+      }
 
       await saveActiveSession(senderPhone, customerName, 'general');
 
