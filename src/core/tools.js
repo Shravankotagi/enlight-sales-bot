@@ -251,7 +251,7 @@ function createTools(senderPhone, rawUserText = '') {
         date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
         customer_name_search: z.string().optional().nullable().describe('Optional search term for customer or company name.'),
         mode: z.string().optional().nullable().describe('Query mode: "list", "conversion_breakdown", "rep_conversion", "open_inquiries_dormant_buyers", "month_comparison", "monthly_summary", "at_risk_inquiries", "highest_tonnage", "channel_breakdown".'),
-        limit: z.number().optional().nullable().describe('Maximum number of inquiries to return (default: 20).'),
+        limit: z.number().optional().nullable().describe('Maximum number of inquiries to return (default: 8).'),
       }),
     }
   );
@@ -268,15 +268,15 @@ function createTools(senderPhone, rawUserText = '') {
     },
     {
       name: 'get_visits',
-      description: `Retrieves customer site and field visit logs, visit outcomes (positive, neutral, negative), unvisited customers with no visits in a timeframe (mode: "not_visited" with date_range: "last_30_days"), location filtering (e.g. "Mumbai", "Pune", "Nashik"), salesperson visit leaderboard, week-over-week visit comparison, duplicate visits, visits missing location or contact person, and prospective customers who have visits logged but no orders yet (mode: "visits_no_orders").`,
+      description: `Retrieves customer site and field visit logs, visit outcomes (positive, neutral, negative), follow-ups due today (mode: "due_today"), overdue follow-ups (mode: "overdue"), pending follow-ups (mode: "pending_followup"), unvisited customers with no visits in a timeframe (mode: "not_visited" with date_range: "last_30_days"), location filtering (e.g. "Mumbai", "Pune", "Nashik"), salesperson visit leaderboard, week-over-week visit comparison, duplicate visits, visits missing location or contact person, and prospective customers who have visits logged but no orders yet (mode: "visits_no_orders").`,
       schema: z.object({
         customer_name_search: z.string().optional().nullable().describe('Optional search term for customer name.'),
         salesperson_name: z.string().optional().nullable().describe('Optional filter by salesperson name (e.g. "Max", "Rishabh Makwana").'),
         location: z.string().optional().nullable().describe('Optional filter by visit city or destination (e.g. "Nashik", "Pune", "Mumbai").'),
         outcome_filter: z.string().optional().nullable().describe('Optional filter by visit outcome: "positive", "neutral", "negative", "all".'),
         date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
-        mode: z.string().optional().nullable().describe('Query mode: "list", "not_visited", "rep_leaderboard", "week_comparison", "duplicates", "missing_location", "missing_contact_person", "pending_followup", "visits_no_orders". Use "not_visited" when user asks which customers haven\'t been visited in a timeframe.'),
-        limit: z.number().optional().nullable().describe('Maximum number of records to return (default: 20).'),
+        mode: z.string().optional().nullable().describe('Query mode: "list", "due_today", "overdue", "pending_followup", "not_visited", "rep_leaderboard", "week_comparison", "duplicates", "missing_location", "missing_contact_person", "visits_no_orders". Use "due_today" when user asks for visit follow-ups due today. Use "not_visited" when user asks which customers haven\'t been visited in a timeframe.'),
+        limit: z.number().optional().nullable().describe('Maximum number of records to return (default: 8).'),
       }),
     }
   );
@@ -302,7 +302,7 @@ function createTools(senderPhone, rawUserText = '') {
         status_filter: z.string().optional().nullable().describe('Optional status filter: "open", "pending", "resolved", "reopened", "closed", "all".'),
         date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
         mode: z.string().optional().nullable().describe('Query mode: "list", "longest_open", "type_breakdown", "open_complaints_with_orders", "rep_complaints", "product_category_breakdown", "visit_correlation". Use "longest_open" when the user asks which complaint is open the longest or for the oldest unresolved complaint.'),
-        limit: z.number().optional().nullable().describe('Maximum number of complaints to return (default: 20).'),
+        limit: z.number().optional().nullable().describe('Maximum number of complaints to return (default: 8).'),
       }),
     }
   );
@@ -325,7 +325,7 @@ function createTools(senderPhone, rawUserText = '') {
         segment_filter: z.string().optional().nullable().describe('Optional segment filter: "all", "key_account", "growth", "new".'),
         date_range: z.string().optional().nullable().describe('Optional date filter for when customers were added/created: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
         mode: z.string().optional().nullable().describe('Query mode: "directory", "segmentation", "zero_orders_active".'),
-        limit: z.number().optional().nullable().describe('Maximum number of customer records (default: 50).'),
+        limit: z.number().optional().nullable().describe('Maximum number of customer records (default: 8).'),
       }),
     }
   );
@@ -350,7 +350,7 @@ function createTools(senderPhone, rawUserText = '') {
         delivery_location: z.string().optional().nullable().describe('Optional delivery destination city.'),
         date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
         mode: z.string().optional().nullable().describe('Query mode: "list", "highest_tonnage", "invalid_delivery_locations".'),
-        limit: z.number().optional().nullable().describe('Maximum number of deals to return (default: 20).'),
+        limit: z.number().optional().nullable().describe('Maximum number of deals to return (default: 8).'),
       }),
     }
   );
@@ -370,7 +370,7 @@ function createTools(senderPhone, rawUserText = '') {
       description: `Retrieves recurring customer reorder predictions, list of customers due for repeat orders, and average reorder cycle (cadence) analytics across all tracked customer accounts.`,
       schema: z.object({
         mode: z.string().optional().nullable().describe('Query mode: "list", "average_cycle" (calculates average reorder cycle and cadence distribution across all tracked accounts).'),
-        max_results: z.number().optional().nullable().describe('Maximum number of records to return (default: 20).'),
+        max_results: z.number().optional().nullable().describe('Maximum number of records to return (default: 8).'),
       }),
     }
   );

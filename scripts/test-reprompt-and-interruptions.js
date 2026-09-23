@@ -112,14 +112,14 @@ async function runComprehensiveInterruptionAudit() {
   // ─────────────────────────────────────────────────────────────────────────────
   console.log('\n--- SECTION 3: Mid-Flow Complaint Resolution & Resumption ---');
 
-  // Create a dummy open complaint in Supabase
-  const dummyCust = `Tech Ind Test ${Date.now().toString().slice(-4)}`;
+  // Create a dummy open complaint in Supabase for recognized customer
+  const dummyCust = 'Apex Precision Ltd';
   const { data: dummyCmp } = await supabase.from('complaints').insert({
-    reported_by: testPhone,
+    reported_by: '+918262937458',
     customer_name: dummyCust,
     description: 'Defective test sheet with surface damage',
-    severity: 'medium',
-    status: 'pending',
+    complaint_type: 'Quality Defect',
+    status: 'open',
     reported_at: new Date().toISOString(),
   }).select().single();
 

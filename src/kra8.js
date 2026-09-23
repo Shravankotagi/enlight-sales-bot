@@ -491,7 +491,7 @@ async function handleComplaintResolution(text, senderPhone) {
       .from('complaints')
       .select('*')
       .in('reported_by', phoneVariants)
-      .not('status', 'in', '("resolved","closed")')
+      .in('status', ['open', 'pending', 'reported', 'reopened'])
       .is('resolved_at', null)
       .order('reported_at', { ascending: false });
 
@@ -561,7 +561,7 @@ async function handleComplaintResolution(text, senderPhone) {
           .from('complaints')
           .select('*')
           .in('reported_by', phoneVariants)
-          .not('status', 'in', '("resolved","closed")')
+          .in('status', ['open', 'pending', 'reported', 'reopened'])
           .is('resolved_at', null)
           .or(`customer_name.ilike.%${customerKeyword}%,description.ilike.%${customerKeyword}%`)
           .order('reported_at', { ascending: false })

@@ -1,6 +1,35 @@
 const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
+const { ENLIGHT_LOGO_BASE64 } = require('./logoBase64');
+
+function getCompanyLogoBuffer() {
+  const possiblePaths = [
+    path.join(process.cwd(), 'assets', 'logo.png'),
+    path.join(process.cwd(), 'assets', 'logo.jpg'),
+    path.join(process.cwd(), 'bot', 'assets', 'logo.png'),
+    path.join(process.cwd(), 'backend', 'assets', 'logo.png'),
+    path.join(__dirname, '../../assets/logo.png'),
+    path.join(__dirname, '../../../assets/logo.png'),
+    path.join(__dirname, '../../../backend/assets/logo.png'),
+    'd:/Enlight sales/backend/assets/logo.png',
+    'd:/Enlight sales/bot/assets/logo.png',
+    'd:/Enlight sales/assets/logo.png',
+  ];
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      try {
+        return fs.readFileSync(p);
+      } catch {}
+    }
+  }
+  if (ENLIGHT_LOGO_BASE64) {
+    try {
+      return Buffer.from(ENLIGHT_LOGO_BASE64, 'base64');
+    } catch {}
+  }
+  return null;
+}
 
 function getCompanyLogoPath() {
   const possiblePaths = [
@@ -13,6 +42,7 @@ function getCompanyLogoPath() {
     path.join(__dirname, '../../../backend/assets/logo.png'),
     'd:/Enlight sales/backend/assets/logo.png',
     'd:/Enlight sales/bot/assets/logo.png',
+    'd:/Enlight sales/assets/logo.png',
   ];
   for (const p of possiblePaths) {
     if (fs.existsSync(p)) return p;
@@ -168,10 +198,10 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       const paymentTerms = details.paymentTerms || details.payment_terms || '30 Days Credit';
 
       // ================= PAGE 1 =================
-      const logoPath = getCompanyLogoPath();
-      if (logoPath && fs.existsSync(logoPath)) {
+      const logoBuffer = getCompanyLogoBuffer();
+      if (logoBuffer) {
         try {
-          doc.image(logoPath, leftX, 40, { width: 140 });
+          doc.image(logoBuffer, leftX, 40, { width: 140 });
         } catch {
           doc.fillColor('#0F172A').font(fontBold).fontSize(16).text('ENLIGHT METALS', leftX, 40);
         }

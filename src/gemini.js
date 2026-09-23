@@ -14,61 +14,86 @@ async function callLightweightModel(prompt) {
 }
 
 const EXTRACTION_PROMPT = `
-You are an expert document parser for Enlight Metals, an Indian B2B metal distributor.
-Input is a photo, PDF, or text of a business document - either a PURCHASE ORDER (PO) or a MATERIAL REQUIREMENT/INQUIRY/RFQ.
+You are an expert OCR & document parser for Enlight Metals Private Limited, a premier Indian B2B metal & steel distributor.
+Input is a photo, PDF, scanned copy, or text of a business document - typically a PURCHASE ORDER (PO), MATERIAL REQUIREMENT, INQUIRY, or RFQ formatted in Tally ERP, Busy, SAP, or custom steel ERP formats.
 
 ════════════════════════════════════════════════════
-🔴 RULE #1 - PO vs INQUIRY (MOST IMPORTANT RULE):
+🔴 RULE #1 - DOCUMENT TYPE & PO NUMBER RECOGNITION:
 ════════════════════════════════════════════════════
 
-STEP 1: Scan the ENTIRE document for a field explicitly labeled:
-  "PO No", "P.O. No", "PO Number", "Purchase Order No", "Purchase Order Number", "PO Ref", "P.O. Ref", "Order No."
+STEP 1: Scan the document header and tables for standard ERP PO identifiers:
+  "Voucher No.", "PO No", "P.O. No", "PO Number", "Purchase Order No", "Purchase Order Number", "Reference No. & Date", "Order No."
+  (e.g., "PO/26-27/63", "PO-26-27-00718", "PO No: 471", "EMP/PO/2026/089").
 
-STEP 2A - If such a label EXISTS and has a value (e.g. "PO No: 471" or "PO-26-27-00718"):
+STEP 2A - If an explicit PO / Voucher number is present:
   → Set inquiry_type: "purchase_order"
-  → Set po_number: "<that exact value>"
-  → This is a CONFIRMED PURCHASE ORDER.
+  → Set po_number: "<exact PO / Voucher string, e.g. 'PO/26-27/63'>"
+  → Extract po_date from "Dated" or "Date" field (e.g., "12-Sep-26" → "2026-09-12").
 
-STEP 2B - If NO such label exists, OR the document says "Inquiry", "RFQ", "Quotation Request", "Material Requirement":
+STEP 2B - If NO PO/Voucher label exists, OR document states "Inquiry", "RFQ", "Quotation Request", "Material Requirement":
   → Set inquiry_type: "inquiry"
   → Set po_number: null
-  → This is an INQUIRY/RFQ, NOT a purchase order.
 
-⚠️  IMPORTANT: "Ref No", "Inquiry Ref", "Quotation Ref", "Our Ref", "Your Ref", "PR No." are NOT PO numbers.
-    Only fields explicitly labeled PO No / Purchase Order No / Order No qualify.
-    When in doubt → inquiry_type: "inquiry", po_number: null.
+⚠️ "Inquiry Ref", "Quotation Ref", "Our Ref", "PR No." without PO context are RFQs/Inquiries.
 
 ════════════════════════════════════════════════════
-🔴 RULE #2 - CUSTOMER / COMPANY NAME vs ADDRESS:
+🔴 RULE #2 - SUPPLIER vs BUYER IDENTIFICATION:
 ════════════════════════════════════════════════════
 
-1. CUSTOMER COMPANY NAME (customer.name):
-   - In Purchase Orders, the Customer is the BUYER who issued the PO (found under "Invoice To:", "Bill To:", "Buyer:", "Customer:", "M/s:").
-   - The Customer Name is STRICTLY the Legal Company / Enterprise Name on the FIRST line under "Invoice To:" (e.g. "SB Scafform Technovert Pvt. Ltd.", "ABC Fabricators Pvt. Ltd.").
-   - ⚠️ CRITICAL: NEVER include the building name, commercial complex, industrial estate, plot number, road, or city name in the customer name!
-     * Example: "Akshar Business Park, Office No - 1068, 1st Floor, Turbhe Navi Mumbai" is the OFFICE/BUILDING ADDRESS, NOT the company name.
-     * Correct customer.name: "SB Scafform Technovert Pvt. Ltd."
-     * INCORRECT: "Akshar Technovart Pvt. Ltd." or "Akshar Business Park".
-   - ⚠️ CRITICAL: The Supplier / Seller is "Enlight Metals Private Limited" (our own company). NEVER set "Enlight Metals" as the customer.name!
+1. SUPPLIER / SELLER (Bill from / Supplier):
+   - "Enlight Metals Private Limited" (Shop No 606 Sn 272, Clover Hills Plaza, NIBM Undri Road, Pune - 411048, GSTIN: 27AAICE5263E1ZN) is OUR company (the supplier).
+   - ⚠️ CRITICAL: NEVER set "Enlight Metals" as the customer/buyer!
 
-2. CUSTOMER BILLING ADDRESS (customer.address):
-   - The street/building/city address under "Invoice To:" (e.g. "Akshar Business Park, Office No - 1068, 1st Floor, U - Wing Plot No - 03, Sector - 25, Turbhe, Navi Mumbai, PIN: 400703").
+2. BUYER / CUSTOMER (Invoice To / Bill To / Buyer / Customer / M/s):
+   - The Customer is the BUYER issuing this PO or Inquiry (e.g., "Suraj SIM Techno Works Pvt Ltd", "SB Scafform Technovert Pvt. Ltd.").
+   - customer.name: STRICTLY the legal company name.
+   - customer.address: Street/factory/office address (e.g., "Gut. No. 61/62/63, Shendurwada Road, Village Murmi, Dahegaon (B), Tq. Gangapur, Dist. CH.SAMBHAJINAGAR, Maharashtra - 431133").
+   - customer.gst: 15-character GSTIN under Invoice To (e.g., "27ABBCS1589F1Z7").
+   - customer.phone: Phone / contact number under Invoice To (e.g., "9371220090").
+   - customer.email: Email under Invoice To (e.g., "surajsimtechno123@gmail.com").
+   - customer.pan: PAN number if stated (e.g., "ABBCS1589F").
 
-3. CUSTOMER GSTIN (customer.gst):
-   - The 15-character GSTIN number belonging to the customer under "Invoice To:" (e.g. "27AARCS0956R1ZB").
+3. CONSIGNEE / SHIP-TO / DELIVERY LOCATION:
+   - Extract delivery_location STRICTLY from "Consignee (Ship to)" or "Delivery Address" or "Destination" or "Terms of Delivery".
+   - ⚠️ NEVER include Enlight Metals' supplier office address or PIN (411048) in delivery_location!
 
-4. DELIVERY LOCATION (delivery_location):
-   - In Purchase Orders, extract delivery_location STRICTLY from the "Delivery Address:" / "Ship To:" / "Consignee Address:" section.
-   - Format cleanly as the destination site/city (e.g. "Gat No / Plot No PAP V - 149/2, Village Vasuli, Taluka Khed, Pune, PIN: 410501").
-   - ⚠️ NEVER include Enlight Metals' supplier address, supplier PIN (411048), or billing office in the delivery_location!
+4. COMMERCIAL TERMS:
+   - payment_terms: Extract from "Mode/Terms of Payment" (e.g., "Pmt immediate after delivery", "30 Days Credit", "Advance against PI").
+   - delivery_terms: Extract from "Terms of Delivery" / "Remarks" (e.g., "Delivery at Suraj premises, TC & E-way bill required").
 
-5. LINE ITEMS & UNITS (line_items):
-   - Extract exact quantity and EXACT UOM (unit of measure) stated in the line item table.
-   - If the document table specifies UOM as "Kg" or "KG" and Qty "5000.0", set quantity: 5000 and unit: "KG".
-   - If the document table specifies UOM as "MT", "M.T", "Tons", or "Tonnes", set unit: "MT".
-   - If the document table specifies UOM as "PCS", "Nos", or "Sheets", set unit: "PCS" / "Nos" / "Sheets".
-   - ⚠️ CRITICAL: "HR Plate", "HR Sheet", "CR Coil", "MS Plate", "Angle", "Pipe" are MATERIAL/PRODUCT NAMES (sku_text), NOT units! Never set "Plates", "Coils", "Pipes" as the unit if the column or 'Per' column specifies "M.T", "MT", "KG", or numeric weights.
-   - NEVER convert unit to MT if the document table explicitly says Kg!
+════════════════════════════════════════════════════
+🔴 RULE #3 - STEEL LINE ITEM EXTRACTION & UOM RULES:
+════════════════════════════════════════════════════
+
+Standard Indian Steel ERP tables have columns like:
+[Sl No.] | [Description of Goods] | [Due on] | [Quantity] | [Rate] | [per / UOM] | [Amount]
+
+1. Description of Goods (sku_text & dimensions):
+   - Split product category and dimensions cleanly:
+     * "HR PLATE 05X1500X6300MM" → sku_text: "HR PLATE", dimensions: "05X1500X6300MM"
+     * "CR SHEET 1.20X1250X2500MM" → sku_text: "CR SHEET", dimensions: "1.20X1250X2500MM"
+     * "MS ANGLE 50X50X6MM" → sku_text: "MS ANGLE", dimensions: "50X50X6MM"
+     * "GI PIPE 2 INCH CLASS B" → sku_text: "GI PIPE", dimensions: "2 INCH CLASS B"
+     * "TMT 12MM FE550D" → sku_text: "TMT BAR", dimensions: "12MM", grade: "FE550D"
+
+2. Quantity & Unit of Measure (UOM):
+   - Extract numeric quantity strictly from "Quantity" column (e.g., "60.000 M.T" → quantity: 60.0).
+   - Extract unit strictly from the "Quantity" unit suffix or the "per" / "UOM" column:
+     * "M.T", "M.T.", "MT", "Ton", "Tons", "Tonne", "Tonnes", "MTS" → unit: "MT"
+     * "Kg", "KG", "KGS", "Kilograms" → unit: "KG"
+     * "Nos", "NOS", "No.", "PCS", "Pcs", "Pieces" → unit: "Nos" (or "PCS")
+     * "SHT", "Sheets" → unit: "Sheets" (only if unit rate is explicitly per sheet)
+   - ⚠️ CRITICAL NEGATIVE CONSTRAINT:
+     Words occurring in the product description like "PLATE", "SHEET", "COIL", "PIPE", "BEAM", "ANGLE", "CHANNEL" are PRODUCT NAMES (sku_text), NEVER UNITS!
+     If a row says "HR PLATE 05X1500X6300MM" with quantity "60.000 M.T" and per "M.T", the unit is STRICTLY "MT", NEVER "Plates"!
+
+3. Pricing (Pre-GST):
+   - rate: Unit rate before tax from "Rate" column (e.g., "63,100.00" → 63100).
+   - amount: Line total before tax from "Amount" column (e.g., "37,86,000.00" → 3786000).
+
+4. Due Date:
+   - Extract from "Due on" column (e.g., "13-Sep-26" → "2026-09-13").
+
 ════════════════════════════════════════════════════
 
 Extract the following into ONLY a JSON object (no prose, no markdown, no backticks):
@@ -78,7 +103,9 @@ Extract the following into ONLY a JSON object (no prose, no markdown, no backtic
     "name": "",
     "contact_person": "",
     "phone": "",
+    "email": "",
     "gst": "",
+    "pan": "",
     "address": "",
     "match_status": "matched|fuzzy|new"
   },
@@ -87,18 +114,21 @@ Extract the following into ONLY a JSON object (no prose, no markdown, no backtic
       "sku_text": "",
       "grade": "",
       "dimensions": "",
+      "hsn_code": "",
       "quantity": 0,
-      "unit": "MT|KG|PCS",
+      "unit": "MT|KG|PCS|Nos|Sheets",
       "rate": 0,
       "amount": 0,
+      "due_on": null,
       "confidence": 0.0
     }
   ],
   "po_number": null,
   "po_date": null,
   "delivery_location": "",
-  "delivery_date": "",
+  "delivery_date": null,
   "payment_terms": "",
+  "delivery_terms": "",
   "subtotal": 0,
   "basic_amount": 0,
   "sgst_amount": 0,
@@ -107,23 +137,54 @@ Extract the following into ONLY a JSON object (no prose, no markdown, no backtic
   "gst_amount": 0,
   "grand_total": 0,
   "total_amount": 0,
+  "remarks": "",
   "overall_confidence": 0.0,
   "inquiry_type": "purchase_order|inquiry|visiting_card|unknown"
 }
 
 Additional Rules:
-- Line Items: Extract each line item's quantity, unit rate, and line amount separately (these are always pre-GST values).
-- Subtotal / Basic Amount: Sum of line item amounts BEFORE GST. If the document shows a pre-tax total (e.g. "Total: ₹10,33,000.00"), use that exact pre-GST amount. NEVER store the PO Grand Total as subtotal or basic_amount!
-- GST Components: Extract SGST (e.g. 9%), CGST (e.g. 9%), IGST (e.g. 18%), and total GST amount as stated in the document.
-- Grand Total: The final GST-inclusive value stated in the PO document (e.g. "Grand Total: ₹12,18,940.00").
-- SKU text: preserve the customer's exact words in sku_text
-- If a field is absent return null - never invent values
-- DATE RULE: Current Year is 2026. Any date specifying month/day MUST ALWAYS use year 2026 (e.g. 2026-08-14).
-- CONFIDENCE RULE:
-  * 1.0 (100%) when quantity, product, unit, AND explicit rate/price per MT are stated.
-  * 0.75 - 0.85 when rate or customer details are missing.
-- Return ONLY the JSON object. No prose. No markdown. No backticks.
+- Basic Amount / Subtotal: Sum of line item amounts BEFORE GST.
+- GST Components: SGST, CGST, IGST if stated, or standard 18%.
+- Grand Total: Final PO amount including taxes.
+- Date Format: Always convert dates to ISO "YYYY-MM-DD" with Year 2026 (e.g., "12-Sep-26" → "2026-09-12").
+- Return ONLY the JSON object.
 `;
+
+function normalizeDateToIso(dateStr) {
+  if (!dateStr || typeof dateStr !== 'string') return null;
+  const s = dateStr.trim();
+  
+  // Format: 12-Sep-26, 12-Sep-2026, 12/Sep/26
+  const monthNames = {
+    jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+    jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
+  };
+  const dMmmY = s.match(/^(\d{1,2})[-/\s]([a-zA-Z]{3})[-/\s](\d{2,4})$/);
+  if (dMmmY) {
+    const day = dMmmY[1].padStart(2, '0');
+    const mon = monthNames[dMmmY[2].toLowerCase()] || '01';
+    let yr = dMmmY[3];
+    if (yr.length === 2) yr = '20' + yr;
+    return `${yr}-${mon}-${day}`;
+  }
+
+  // Format: 12/09/2026 or 12-09-2026 or 12.09.2026
+  const dmy = s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/);
+  if (dmy) {
+    const day = dmy[1].padStart(2, '0');
+    const mon = dmy[2].padStart(2, '0');
+    let yr = dmy[3];
+    if (yr.length === 2) yr = '20' + yr;
+    return `${yr}-${mon}-${day}`;
+  }
+
+  // ISO Format: 2026-09-12
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    return s;
+  }
+
+  return s;
+}
 
 function postProcessExtraction(parsed) {
   if (!parsed) return parsed;
@@ -135,28 +196,25 @@ function postProcessExtraction(parsed) {
     parsed.po_number !== 'None' &&
     String(parsed.po_number).trim().length > 2
   ) {
-    // Has a real PO number → this IS a purchase order, regardless of what model said
     parsed.inquiry_type = 'purchase_order';
   } else if (parsed.inquiry_type === 'purchase_order') {
-    // Model said purchase_order but no PO number found → revert to inquiry
     parsed.inquiry_type = 'inquiry';
     parsed.po_number = null;
     console.warn('[Gemini] postProcess: model set purchase_order but no po_number found - corrected to inquiry');
   }
 
-  // 1. Delivery Date Year Correction (Ensure 2026 or future year)
+  // 1. Date normalization (PO Date, Delivery Date)
+  if (parsed.po_date) {
+    parsed.po_date = normalizeDateToIso(parsed.po_date);
+  }
   if (parsed.delivery_date) {
-    const parts = parsed.delivery_date.split('-');
-    if (parts.length === 3 && parseInt(parts[0]) < 2026) {
-      parsed.delivery_date = `2026-${parts[1]}-${parts[2]}`;
-    }
+    parsed.delivery_date = normalizeDateToIso(parsed.delivery_date);
   }
 
   // 2. Customer Company Name vs Building/Address Cleanup
   if (parsed.customer && typeof parsed.customer === 'object') {
     let name = parsed.customer.name || parsed.customer_name || '';
     if (name) {
-      // Remove address keywords from company name if mistakenly included
       const addressPrefixRegex = /^(Akshar Business Park|Business Park|Office No|Plot No|Sector|Industrial Area|MIDC|Gat No|Survey No|Phase)[,\s\-]+/i;
       name = name.replace(addressPrefixRegex, '').trim();
 
@@ -168,9 +226,15 @@ function postProcessExtraction(parsed) {
       parsed.customer.name = name;
       parsed.customer_name = name;
     }
+    if (parsed.customer.phone && !parsed.customer_phone) {
+      parsed.customer_phone = parsed.customer.phone;
+    }
+    if (parsed.customer.gst && !parsed.customer_gst) {
+      parsed.customer_gst = parsed.customer.gst;
+    }
   }
 
-  // 3. Line Item Rate and Amount calculation (Always Pre-GST)
+  // 3. Line Items: Unit Normalization, Rate & Amount verification
   let totalCalculatedItemsAmount = 0;
   let hasMissingRate = false;
 
@@ -179,6 +243,32 @@ function postProcessExtraction(parsed) {
       const qty = Number(item.quantity || 0);
       let rate = Number(item.rate || 0);
       let amount = Number(item.amount || 0);
+      let rawUnit = String(item.unit || 'MT').trim();
+
+      // Normalize unit strings
+      const uUpper = rawUnit.toUpperCase();
+      if (['M.T', 'M.T.', 'MT', 'TON', 'TONS', 'TONNE', 'TONNES', 'MTS', 'T'].includes(uUpper)) {
+        item.unit = 'MT';
+      } else if (['KG', 'KGS', 'KILOGRAM', 'KILOGRAMS'].includes(uUpper)) {
+        item.unit = 'KG';
+      } else if (['NOS', 'NO', 'NO.', 'NUMBER', 'NUMBERS'].includes(uUpper)) {
+        item.unit = 'Nos';
+      } else if (['PCS', 'PC', 'PIECE', 'PIECES'].includes(uUpper)) {
+        item.unit = 'PCS';
+      }
+
+      // Safeguard: Protect against OCR hallucinating product category ('Plates', 'Sheets', 'Coils') as unit
+      if (
+        /^(?:plate|plates|sheet|sheets|coil|coils|beam|beams|channel|pipe|pipes|bar|bars)$/i.test(item.unit) &&
+        (rate > 1000 || /m\.?t/i.test(item.sku_text || '') || /m\.?t/i.test(item.dimensions || ''))
+      ) {
+        item.unit = 'MT';
+      }
+
+      // Normalize due_on date if present
+      if (item.due_on) {
+        item.due_on = normalizeDateToIso(item.due_on);
+      }
 
       if (qty > 0 && amount > 0 && rate === 0) {
         rate = Math.round(amount / qty);

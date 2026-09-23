@@ -532,9 +532,18 @@ function parseVisitRemarks(remarks) {
     .replace(/^[\s|]+|[\s|]+$/g, '')
     .trim();
 
+  let followUpDate = null;
+  const dateMatch =
+    remarks.match(/\[(?:FollowUpDate|Follow-?Up\s*Date):\s*([^\]]+)\]/i) ||
+    remarks.match(/(?:^|\||\n)\s*Follow-?up\s*Date:\s*([^|\]\n]+)/i);
+  if (dateMatch) {
+    followUpDate = dateMatch[1].trim();
+  }
+
   return {
     outcome,
     follow_up_action: followUpAction,
+    follow_up_date: followUpDate,
     follow_up_status: followUpStatus || (followUpAction ? (isCompleted ? 'completed' : 'pending') : null),
     requires_follow_up: requiresFollowUp,
     material_requirement: materialRequirement,
@@ -739,7 +748,7 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   const sourceChannelFilter = (args?.source_channel || '').toLowerCase().trim();
   const sourceTypeFilter = (args?.source_type || '').toLowerCase().trim();
   const sortBy = (args?.sort_by || '').toLowerCase().trim();
-  const limit = args?.recent_only ? 5 : Math.min(Math.max(Number(args?.limit) || 20, 1), 100);
+  const limit = args?.recent_only ? 5 : Math.min(Math.max(Number(args?.limit) || 8, 1), 8);
   const searchName = (args?.customer_name_search || args?.customer_name || args?.company_name || '').trim().toLowerCase();
   const dateRange = args?.date_range;
   const mode = (args?.mode || 'list').toLowerCase().trim();
@@ -1133,12 +1142,22 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
       return new Date(lastOrder) < thirtyDaysAgo;
     });
 
+    const totalDormant = dormantBuyerInquiries.length;
+    const displayDormant = dormantBuyerInquiries.slice(0, 8);
+    const hasMore = totalDormant > 8;
+
     return {
       data: {
-        dormant_buyer_inquiries_count: dormantBuyerInquiries.length,
-        dormant_buyer_inquiries: dormantBuyerInquiries.slice(0, 15),
+        dormant_buyer_inquiries_count: totalDormant,
+        total_records: totalDormant,
+        showing_count: displayDormant.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalDormant} inquiries from dormant buyers. Please navigate to the dashboard to view all ${totalDormant} records.`
+          : null,
+        dormant_buyer_inquiries: displayDormant,
       },
-      rowCount: dormantBuyerInquiries.length,
+      rowCount: totalDormant,
     };
   }
 
@@ -1249,7 +1268,7 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
         total_visits_this_month: totalVisits,
         total_complaints_this_month: totalComplaints,
         active_pipeline_deals: activePipelineDeals.length,
-        active_customer_accounts: activeCustCount || 72,
+        active_customer_accounts: activeCustCount || 0,
         summary: `Full monthly summary for ${now.toLocaleString('en-IN', { month: 'long' })} ${now.getFullYear()}: ${thisMonthInqs.length} Inquiries, ${thisMonthWon.length} Confirmed Orders, ${totalVisits} Customer Visits, and ${totalComplaints} Complaints.`,
       },
       rowCount: thisMonthInqs.length,
@@ -1329,10 +1348,14 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     .sort((a, b) => b.inquiry_count - a.inquiry_count)
     .slice(0, 5);
 
+  const totalCount = filtered.length;
+  const displayInquiries = filtered.slice(0, 8);
+  const hasMore = totalCount > 8;
+
   return {
     data: {
       summary: {
-        total_inquiries: filtered.length,
+        total_inquiries: totalCount,
         total_inquired_tonnage_mt: Math.round(totalTonnage * 1000) / 1000,
         total_tonnage_mt: Math.round(totalTonnage * 1000) / 1000,
         won_orders_count: wonCount,
@@ -1341,9 +1364,15 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
         ocr_document_count: ocrCount,
         top_customers: topCustomers,
       },
-      inquiries: filtered.slice(0, limit),
+      total_records: totalCount,
+      showing_count: displayInquiries.length,
+      has_more: hasMore,
+      dashboard_notice: hasMore
+        ? `Showing 8 of ${totalCount} inquiries. Please navigate to the dashboard to view all ${totalCount} records.`
+        : null,
+      inquiries: displayInquiries,
     },
-    rowCount: filtered.length,
+    rowCount: totalCount,
   };
 }
 
@@ -1359,7 +1388,7 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   const mode = (args?.mode || 'list').toLowerCase().trim();
   const missingLocation = Boolean(args?.missing_location || args?.missing_field === 'location');
   const missingContact = Boolean(args?.missing_contact_person || args?.missing_field === 'contact_person');
-  const limit = Math.min(Math.max(Number(args?.limit) || 20, 1), 100);
+  const limit = Math.min(Math.max(Number(args?.limit) || 8, 1), 8);
 
   // RBAC customer access check
   if (custFilter) {
@@ -1600,16 +1629,26 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     else if (effectiveDateRange === 'last_30_days') timeframeLabel = 'last 30 days';
     else timeframeLabel = effectiveDateRange;
 
+    const totalUnvisited = formattedUnvisited.length;
+    const displayUnvisited = formattedUnvisited.slice(0, 8);
+    const hasMore = totalUnvisited > 8;
+
     return {
       data: {
         timeframe: effectiveDateRange,
         timeframe_label: timeframeLabel,
-        total_unvisited_customers: formattedUnvisited.length,
+        total_unvisited_customers: totalUnvisited,
         total_active_accounts: uniqueCustRows.length,
-        summary: `Found ${formattedUnvisited.length} customer accounts who have NOT been visited in the ${timeframeLabel}.`,
-        customers: formattedUnvisited.slice(0, limit),
+        total_records: totalUnvisited,
+        showing_count: displayUnvisited.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalUnvisited} unvisited customer accounts. Please navigate to the dashboard to view all ${totalUnvisited} records.`
+          : null,
+        summary: `Found ${totalUnvisited} customer accounts who have NOT been visited in the ${timeframeLabel}.`,
+        customers: displayUnvisited,
       },
-      rowCount: formattedUnvisited.length,
+      rowCount: totalUnvisited,
     };
   }
 
@@ -1641,9 +1680,38 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     query = query.or(orParts.join(','));
   }
 
-  const { from, to } = parseDateFilter(dateRange);
-  if (from) query = query.gte('visited_at', from.toISOString());
-  if (to) query = query.lte('visited_at', to.toISOString());
+  const isFollowupQuery =
+    mode === 'due_today' ||
+    mode === 'pending_today' ||
+    mode === 'followups_due_today' ||
+    mode === 'due_today_followup' ||
+    mode === 'today_followup' ||
+    mode === 'follow_ups_due_today' ||
+    mode === 'overdue' ||
+    mode === 'overdue_followup' ||
+    mode === 'followups_overdue' ||
+    mode === 'overdue_followups' ||
+    mode === 'pending_followup' ||
+    mode === 'pending_follow_up' ||
+    mode === 'followup_pending' ||
+    mode === 'follow_up_pending' ||
+    mode === 'pending_followups' ||
+    mode === 'pending' ||
+    mode === 'follow_up' ||
+    mode === 'followup' ||
+    args?.due_today ||
+    args?.overdue ||
+    args?.pending_followup ||
+    args?.pending_follow_up ||
+    args?.requires_follow_up ||
+    args?.follow_up_filter ||
+    args?.follow_up_only;
+
+  if (!isFollowupQuery) {
+    const { from, to } = parseDateFilter(dateRange);
+    if (from) query = query.gte('visited_at', from.toISOString());
+    if (to) query = query.lte('visited_at', to.toISOString());
+  }
 
   const { data: rows, error } = await query;
   if (error) throw new Error(`get_visits error: ${error.message}`);
@@ -1655,6 +1723,9 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     if (e.id) empMap.set(e.id, e.name);
     if (e.employee_id) empMap.set(e.employee_id, e.name);
   });
+
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
   const materialized = (rows || []).map((r) => {
     const rawRemarks = r.remarks || r.discussion_remarks || '';
@@ -1682,6 +1753,65 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     const followUpStatus = isCompleted ? 'completed' : (followUp ? 'pending' : null);
     const requiresFollowUp = Boolean(followUp) && !isCompleted;
 
+    const rawFuDate = r.follow_up_date || parsed.follow_up_date || null;
+    let dueDateStr = null;
+    if (rawFuDate) {
+      const dClean = String(rawFuDate).trim();
+      if (dClean.includes('T')) {
+        dueDateStr = dClean.split('T')[0];
+      } else if (/^\d{4}-\d{2}-\d{2}$/.test(dClean)) {
+        dueDateStr = dClean;
+      } else {
+        const parsedD = new Date(dClean);
+        if (!isNaN(parsedD.getTime())) {
+          dueDateStr = parsedD.toISOString().split('T')[0];
+        }
+      }
+    }
+
+    let urgency = 'no_date';
+    let diffDays = null;
+    let relativeDueText = '';
+    let dueToday = false;
+    let isOverdue = false;
+
+    if (isCompleted) {
+      urgency = 'completed';
+      relativeDueText = 'Done';
+    } else if (dueDateStr) {
+      const [tY, tM, tD] = todayStr.split('-').map(Number);
+      const [dY, dM, dD] = dueDateStr.split('-').map(Number);
+      const todayDate = new Date(Date.UTC(tY, tM - 1, tD));
+      const targetDate = new Date(Date.UTC(dY, dM - 1, dD));
+      diffDays = Math.round((targetDate.getTime() - todayDate.getTime()) / (1000 * 60 * 60 * 24));
+
+      const formattedDueDate = targetDate.toLocaleDateString('en-IN', {
+        day: 'numeric',
+        month: 'short',
+        timeZone: 'UTC',
+      });
+
+      if (diffDays < 0) {
+        urgency = 'overdue';
+        isOverdue = true;
+        const absDays = Math.abs(diffDays);
+        relativeDueText = `${absDays === 1 ? '1 day overdue' : `${absDays} days overdue`} (${formattedDueDate})`;
+      } else if (diffDays === 0) {
+        urgency = 'today';
+        dueToday = true;
+        relativeDueText = `Due today (${formattedDueDate})`;
+      } else if (diffDays === 1) {
+        urgency = 'upcoming';
+        relativeDueText = `Due tomorrow (${formattedDueDate})`;
+      } else {
+        urgency = 'upcoming';
+        relativeDueText = `Due in ${diffDays} days (${formattedDueDate})`;
+      }
+    } else if (followUp) {
+      urgency = 'no_date';
+      relativeDueText = 'Pending (No date specified)';
+    }
+
     return {
       id: r.id,
       customer_name: r.customer_name || 'Unnamed Account',
@@ -1692,8 +1822,14 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
       location: loc,
       outcome: out,
       follow_up_action: followUp,
+      follow_up_date: dueDateStr,
       follow_up_status: followUpStatus,
       requires_follow_up: requiresFollowUp,
+      urgency,
+      diff_days: diffDays,
+      due_today: dueToday,
+      is_overdue: isOverdue,
+      relative_due_text: relativeDueText,
       material_requirement: r.material_requirement || r.requirement || parsed.material_requirement,
       remarks: parsed.clean_remarks || rawRemarks,
       created_at: r.created_at || r.visited_at,
@@ -1748,10 +1884,10 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     mode === 'wow' ||
     mode === 'week_over_week'
   ) {
-    const now = new Date();
-    const startOfThisWeek = new Date(now);
+    const nowD = new Date();
+    const startOfThisWeek = new Date(nowD);
     startOfThisWeek.setDate(startOfThisWeek.getDate() - 7);
-    const startOfLastWeek = new Date(now);
+    const startOfLastWeek = new Date(nowD);
     startOfLastWeek.setDate(startOfLastWeek.getDate() - 14);
 
     const thisWeek = materialized.filter((v) => new Date(v.created_at) >= startOfThisWeek);
@@ -1801,6 +1937,74 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     };
   }
 
+  // ── Mode: Due Today Follow-up Visits ─────────────────────────────────────
+  if (
+    mode === 'due_today' ||
+    mode === 'pending_today' ||
+    mode === 'followups_due_today' ||
+    mode === 'due_today_followup' ||
+    mode === 'today_followup' ||
+    mode === 'follow_ups_due_today' ||
+    args?.due_today ||
+    args?.follow_up_filter === 'due_today'
+  ) {
+    const dueTodayVisits = materialized.filter((v) => v.requires_follow_up && (v.urgency === 'today' || v.due_today));
+    const totalDueToday = dueTodayVisits.length;
+    const displayDueToday = dueTodayVisits.slice(0, 8);
+    const hasMore = totalDueToday > 8;
+
+    return {
+      data: {
+        total_due_today_followups: totalDueToday,
+        due_today_count: totalDueToday,
+        total_records: totalDueToday,
+        showing_count: displayDueToday.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalDueToday} visit follow-ups due today. Please navigate to the dashboard to view all ${totalDueToday} records.`
+          : null,
+        summary: totalDueToday > 0
+          ? `You have ${totalDueToday} visit follow-up${totalDueToday === 1 ? '' : 's'} due today.`
+          : 'No visit follow-ups are due today.',
+        visits: displayDueToday,
+      },
+      rowCount: totalDueToday,
+    };
+  }
+
+  // ── Mode: Overdue Follow-up Visits ─────────────────────────────────────────
+  if (
+    mode === 'overdue' ||
+    mode === 'overdue_followup' ||
+    mode === 'followups_overdue' ||
+    mode === 'overdue_followups' ||
+    args?.overdue ||
+    args?.follow_up_filter === 'overdue'
+  ) {
+    const overdueVisits = materialized.filter((v) => v.requires_follow_up && (v.urgency === 'overdue' || v.is_overdue));
+    const totalOverdue = overdueVisits.length;
+    const displayOverdue = overdueVisits.slice(0, 8);
+    const hasMore = totalOverdue > 8;
+
+    return {
+      data: {
+        total_overdue_followups: totalOverdue,
+        overdue_count: totalOverdue,
+        total_records: totalOverdue,
+        showing_count: displayOverdue.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalOverdue} overdue visit follow-ups. Please navigate to the dashboard to view all ${totalOverdue} records.`
+          : null,
+        summary: totalOverdue > 0
+          ? `You have ${totalOverdue} overdue visit follow-up${totalOverdue === 1 ? '' : 's'}.`
+          : 'No visit follow-ups are currently overdue.',
+        visits: displayOverdue,
+      },
+      rowCount: totalOverdue,
+    };
+  }
+
   // ── Mode: Pending Follow-up Visits ───────────────────────────────────────
   if (
     mode === 'pending_followup' ||
@@ -1814,16 +2018,39 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     args?.pending_followup ||
     args?.pending_follow_up ||
     args?.requires_follow_up ||
-    args?.follow_up_only
+    args?.follow_up_only ||
+    args?.follow_up_filter === 'pending' ||
+    args?.follow_up_filter === 'due'
   ) {
     const pending = materialized.filter((v) => v.requires_follow_up);
+    const dueTodayCount = pending.filter((v) => v.urgency === 'today' || v.due_today).length;
+    const overdueCount = pending.filter((v) => v.urgency === 'overdue' || v.is_overdue).length;
+
+    // Sort: overdue first, then due today, then upcoming, then no date
+    pending.sort((a, b) => {
+      const order = { overdue: 0, today: 1, upcoming: 2, no_date: 3, completed: 4 };
+      return (order[a.urgency] ?? 3) - (order[b.urgency] ?? 3);
+    });
+
+    const totalPending = pending.length;
+    const displayPending = pending.slice(0, 8);
+    const hasMore = totalPending > 8;
+
     return {
       data: {
-        total_pending_followup_visits: pending.length,
-        summary: `You have ${pending.length} visit${pending.length === 1 ? '' : 's'} with pending follow-up action.`,
-        visits: pending.slice(0, limit),
+        total_pending_followup_visits: totalPending,
+        due_today_count: dueTodayCount,
+        overdue_count: overdueCount,
+        total_records: totalPending,
+        showing_count: displayPending.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalPending} pending visit follow-ups. Please navigate to the dashboard to view all ${totalPending} records.`
+          : null,
+        summary: `You have ${totalPending} visit${totalPending === 1 ? '' : 's'} with pending follow-up action (${dueTodayCount} due today, ${overdueCount} overdue).`,
+        visits: displayPending,
       },
-      rowCount: pending.length,
+      rowCount: totalPending,
     };
   }
 
@@ -1864,35 +2091,65 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     });
 
     const prospects = Array.from(visitedMap.values());
+    const totalProspects = prospects.length;
+    const displayProspects = prospects.slice(0, 8);
+    const hasMore = totalProspects > 8;
+
     return {
       data: {
-        total_visited_customers_without_orders: prospects.length,
-        summary: `Found ${prospects.length} prospective customer account${prospects.length === 1 ? '' : 's'} with logged visits who have not placed any orders yet.`,
-        customers: prospects.slice(0, limit),
+        total_visited_customers_without_orders: totalProspects,
+        total_records: totalProspects,
+        showing_count: displayProspects.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalProspects} visited prospects without orders. Please navigate to the dashboard to view all ${totalProspects} records.`
+          : null,
+        summary: `Found ${totalProspects} prospective customer account${totalProspects === 1 ? '' : 's'} with logged visits who have not placed any orders yet.`,
+        customers: displayProspects,
       },
-      rowCount: prospects.length,
+      rowCount: totalProspects,
     };
   }
 
   // ── Mode: Missing Location / Contact ──────────────────────────────────────
   if (missingLocation) {
     const missing = materialized.filter((v) => !v.location || v.location === 'N/A');
+    const totalMissing = missing.length;
+    const displayMissing = missing.slice(0, 8);
+    const hasMore = totalMissing > 8;
+
     return {
       data: {
-        missing_location_count: missing.length,
-        visits: missing,
+        missing_location_count: totalMissing,
+        total_records: totalMissing,
+        showing_count: displayMissing.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalMissing} visits missing location. Please navigate to the dashboard to view all ${totalMissing} records.`
+          : null,
+        visits: displayMissing,
       },
-      rowCount: missing.length,
+      rowCount: totalMissing,
     };
   }
   if (missingContact) {
     const missing = materialized.filter((v) => !v.person_met || v.person_met === 'N/A');
+    const totalMissing = missing.length;
+    const displayMissing = missing.slice(0, 8);
+    const hasMore = totalMissing > 8;
+
     return {
       data: {
-        missing_contact_person_count: missing.length,
-        visits: missing,
+        missing_contact_person_count: totalMissing,
+        total_records: totalMissing,
+        showing_count: displayMissing.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalMissing} visits missing contact person. Please navigate to the dashboard to view all ${totalMissing} records.`
+          : null,
+        visits: displayMissing,
       },
-      rowCount: missing.length,
+      rowCount: totalMissing,
     };
   }
 
@@ -1912,23 +2169,33 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     if (v.requires_follow_up) fu++;
   });
 
+  const totalCount = filtered.length;
+  const displayVisits = filtered.slice(0, 8);
+  const hasMore = totalCount > 8;
+
   return {
     data: {
       summary: {
-        total_visits: filtered.length,
+        total_visits: totalCount,
         positive_outcomes: pos,
         neutral_outcomes: neu,
         negative_outcomes: neg,
-        unspecified_outcomes: filtered.length - (pos + neu + neg),
+        unspecified_outcomes: totalCount - (pos + neu + neg),
         follow_ups_logged: fu,
-        multiple_visits_for_customer: Boolean(custFilter && filtered.length > 1),
-        customer_visits_breakdown: custFilter && filtered.length > 1
+        multiple_visits_for_customer: Boolean(custFilter && totalCount > 1),
+        customer_visits_breakdown: custFilter && totalCount > 1
           ? filtered.map((v, i) => `${i + 1}. Date: ${v.visit_date}, Outcome: ${v.outcome || 'Not recorded'}, Person: ${v.person_met}`).join(' | ')
           : undefined,
       },
-      visits: filtered.slice(0, limit),
+      total_records: totalCount,
+      showing_count: displayVisits.length,
+      has_more: hasMore,
+      dashboard_notice: hasMore
+        ? `Showing 8 of ${totalCount} visits. Please navigate to the dashboard to view all ${totalCount} records.`
+        : null,
+      visits: displayVisits,
     },
-    rowCount: filtered.length,
+    rowCount: totalCount,
   };
 }
 
@@ -1942,7 +2209,7 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
   const poFilter = (args?.po_number || args?.po || '').trim().toLowerCase();
   const dateRange = args?.date_range;
   const mode = (args?.mode || 'list').toLowerCase().trim();
-  const limit = Math.min(Math.max(Number(args?.limit) || 20, 1), 100);
+  const limit = Math.min(Math.max(Number(args?.limit) || 8, 1), 8);
 
   if (custFilter) {
     const access = await verifyCustomerAccountAccess(custFilter, callerContext, supabaseAdmin);
@@ -2082,9 +2349,19 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
       ? 'N/A'
       : repDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 
+    const totalOpen = sortedOpen.length;
+    const displayOpen = sortedOpen.slice(0, 8);
+    const hasMore = totalOpen > 8;
+
     return {
       data: {
-        total_open_complaints: sortedOpen.length,
+        total_open_complaints: totalOpen,
+        total_records: totalOpen,
+        showing_count: displayOpen.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalOpen} open complaints. Please navigate to the dashboard to view all ${totalOpen} records.`
+          : null,
         longest_open_complaint: {
           customer_name: longest.customer_name,
           po_number: longest.po_number || 'N/A',
@@ -2099,9 +2376,9 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
           assigned_salesperson: longest.salesperson_name,
         },
         summary: `The complaint that has been open the longest in your portfolio is from ${longest.customer_name} on PO ${longest.po_number || 'N/A'} (${longest.product_name}), reported on ${dateFormatted} (open for ${daysOpen} days).`,
-        all_open_complaints_by_age: sortedOpen.slice(0, limit),
+        all_open_complaints_by_age: displayOpen,
       },
-      rowCount: sortedOpen.length,
+      rowCount: totalOpen,
     };
   }
 
@@ -2393,10 +2670,14 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
     if (c.sla_met_48h) slaC++;
   });
 
+  const totalCount = filtered.length;
+  const displayComplaints = filtered.slice(0, 8);
+  const hasMore = totalCount > 8;
+
   return {
     data: {
       summary: {
-        total_complaints: filtered.length,
+        total_complaints: totalCount,
         total_in_system: materialized.length,
         open_complaints: openC,
         resolved_complaints: resC,
@@ -2404,9 +2685,15 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
         reopened_complaints: reopC,
         sla_met_within_48h: slaC,
       },
-      complaints: filtered.slice(0, limit),
+      total_records: totalCount,
+      showing_count: displayComplaints.length,
+      has_more: hasMore,
+      dashboard_notice: hasMore
+        ? `Showing 8 of ${totalCount} complaints. Please navigate to the dashboard to view all ${totalCount} records.`
+        : null,
+      complaints: displayComplaints,
     },
-    rowCount: filtered.length,
+    rowCount: totalCount,
   };
 }
 
@@ -2418,7 +2705,7 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
   const healthFilter = (args?.health_filter || args?.health_status || '').trim().toLowerCase();
   const mode = (args?.mode || '').trim().toLowerCase();
   const dateRange = (args?.date_range || args?.date_filter || '').trim();
-  const limit = Math.min(Math.max(Number(args?.limit) || 50, 1), 100);
+  const limit = Math.min(Math.max(Number(args?.limit) || 8, 1), 8);
 
   // If customer_name is provided -> Specific Customer 360 Profile
   if (custName) {
@@ -2681,16 +2968,26 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
 
   if (isZeroOrdersMode) {
     const zeroOrders = dateFiltered.filter((c) => c.total_orders === 0 && c.is_active);
+    const totalZero = zeroOrders.length;
+    const displayZero = zeroOrders.slice(0, 8).map(({ _segRaw, _created_at_raw, ...cleanCust }) => ({
+      ...cleanCust,
+      health_status: 'Active (0 Orders)',
+    }));
+    const hasMore = totalZero > 8;
+
     return {
       data: {
-        total_customers_with_zero_orders_active: zeroOrders.length,
-        summary: `Found ${zeroOrders.length} active customer account${zeroOrders.length === 1 ? '' : 's'} with 0 recorded orders.`,
-        customers: zeroOrders.slice(0, limit).map(({ _segRaw, _created_at_raw, ...cleanCust }) => ({
-          ...cleanCust,
-          health_status: 'Active (0 Orders)',
-        })),
+        total_customers_with_zero_orders_active: totalZero,
+        total_records: totalZero,
+        showing_count: displayZero.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalZero} active accounts with 0 orders. Please navigate to the dashboard to view all ${totalZero} records.`
+          : null,
+        summary: `Found ${totalZero} active customer account${totalZero === 1 ? '' : 's'} with 0 recorded orders.`,
+        customers: displayZero,
       },
-      rowCount: zeroOrders.length,
+      rowCount: totalZero,
     };
   }
 
@@ -2733,12 +3030,22 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
     summaryObj.filtered_segment_count = finalCustomers.length;
   }
 
+  const totalCusts = finalCustomers.length;
+  const displayCusts = finalCustomers.slice(0, 8).map(({ _segRaw, _created_at_raw, ...cleanCust }) => cleanCust);
+  const hasMoreCusts = totalCusts > 8;
+
   return {
     data: {
       summary: summaryObj,
-      customers: finalCustomers.slice(0, limit).map(({ _segRaw, _created_at_raw, ...cleanCust }) => cleanCust),
+      total_records: totalCusts,
+      showing_count: displayCusts.length,
+      has_more: hasMoreCusts,
+      dashboard_notice: hasMoreCusts
+        ? `Showing 8 of ${totalCusts} customers. Please navigate to the dashboard to view all ${totalCusts} records.`
+        : null,
+      customers: displayCusts,
     },
-    rowCount: finalCustomers.length,
+    rowCount: totalCusts,
   };
 }
 
@@ -2750,7 +3057,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   const poFilter = (args?.po_number || args?.po || '').trim().toLowerCase();
   const locFilter = (args?.delivery_location || args?.location || args?.city || '').trim().toLowerCase();
   const dateRange = args?.date_range;
-  const limit = Math.min(Math.max(Number(args?.limit) || 20, 1), 100);
+  const limit = Math.min(Math.max(Number(args?.limit) || 8, 1), 8);
 
   if (custName) {
     const access = await verifyCustomerAccountAccess(custName, callerContext, supabaseAdmin);
@@ -2903,14 +3210,24 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
       const loc = (d.delivery_location || '').trim().toLowerCase();
       return !loc || loc === 'n/a' || loc === 'unknown' || loc === 'null' || loc === '123' || loc === 'qwq' || loc === 'test' || loc.length < 3 || /^\d+$/.test(loc);
     });
+    const totalInvalid = invalidDeals.length;
+    const displayInvalid = invalidDeals.slice(0, 8);
+    const hasMore = totalInvalid > 8;
+
     return {
       data: {
-        total_invalid_delivery_orders: invalidDeals.length,
-        summary: `Found ${invalidDeals.length} order(s) with an invalid, incomplete, or placeholder delivery location (e.g. "123", "qwq", or unassigned).`,
-        orders: invalidDeals.slice(0, limit),
-        deals: invalidDeals.slice(0, limit),
+        total_invalid_delivery_orders: totalInvalid,
+        total_records: totalInvalid,
+        showing_count: displayInvalid.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalInvalid} orders with invalid delivery locations. Please navigate to the dashboard to view all ${totalInvalid} records.`
+          : null,
+        summary: `Found ${totalInvalid} order(s) with an invalid, incomplete, or placeholder delivery location (e.g. "123", "qwq", or unassigned).`,
+        orders: displayInvalid,
+        deals: displayInvalid,
       },
-      rowCount: invalidDeals.length,
+      rowCount: totalInvalid,
     };
   }
 
@@ -2953,10 +3270,14 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
     stageCounts[d.stage] = (stageCounts[d.stage] || 0) + 1;
   });
 
+  const totalCount = filtered.length;
+  const displayDeals = filtered.slice(0, 8);
+  const hasMore = totalCount > 8;
+
   return {
     data: {
       summary: {
-        total_deals: filtered.length,
+        total_deals: totalCount,
         total_orders: wonCount,
         won_orders_count: wonCount,
         won_orders_total_value_inr: wonVal,
@@ -2965,9 +3286,15 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
         total_items_count: totalItems,
         by_stage: stageCounts,
       },
-      deals: filtered.slice(0, limit),
+      total_records: totalCount,
+      showing_count: displayDeals.length,
+      has_more: hasMore,
+      dashboard_notice: hasMore
+        ? `Showing 8 of ${totalCount} deals/orders. Please navigate to the dashboard to view all ${totalCount} records.`
+        : null,
+      deals: displayDeals,
     },
-    rowCount: filtered.length,
+    rowCount: totalCount,
   };
 }
 
@@ -2975,7 +3302,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
 
 async function executeGetReorderQueue(args, callerContext, supabaseAdmin = supabase) {
   const mode = (args?.mode || 'list').toLowerCase().trim();
-  const limit = Math.min(Math.max(Number(args?.max_results || args?.limit) || 20, 1), 100);
+  const limit = Math.min(Math.max(Number(args?.max_results || args?.limit) || 8, 1), 8);
 
   let query = supabaseAdmin
     .from('recurring_customers')
@@ -3044,7 +3371,7 @@ async function executeGetReorderQueue(args, callerContext, supabaseAdmin = supab
     };
   });
 
-  const avgCycle = rawList.length > 0 ? Math.round((totalCycleDays / rawList.length) * 10) / 10 : 30.3;
+  const avgCycle = rawList.length > 0 ? Math.round((totalCycleDays / rawList.length) * 10) / 10 : 0;
 
   if (
     mode === 'average_cycle' ||
@@ -3057,17 +3384,23 @@ async function executeGetReorderQueue(args, callerContext, supabaseAdmin = supab
     return {
       data: {
         total_tracked_customers: rawList.length,
-        average_reorder_cycle_days: `${avgCycle} days (~30 days / 1 month)`,
+        average_reorder_cycle_days: `${avgCycle} days`,
         cadence_distribution: {
           '30_day_cycle': `${cycleDistribution['30_days']} accounts (${Math.round((cycleDistribution['30_days'] / (rawList.length || 1)) * 1000) / 10}%)`,
           '45_day_cycle': `${cycleDistribution['45_days']} accounts`,
           '25_day_cycle': `${cycleDistribution['25_days']} accounts`,
         },
-        summary: `The average reorder cycle across all ${rawList.length} tracked customer accounts is ${avgCycle} days (~30 days).`,
+        summary: rawList.length > 0
+          ? `The average reorder cycle across all ${rawList.length} tracked customer accounts is ${avgCycle} days.`
+          : 'No recurring customer accounts found.',
       },
       rowCount: rawList.length,
     };
   }
+
+  const totalQueue = queue.length;
+  const displayQueue = queue.slice(0, 8);
+  const hasMore = totalQueue > 8;
 
   return {
     data: {
@@ -3077,9 +3410,15 @@ async function executeGetReorderQueue(args, callerContext, supabaseAdmin = supab
         overdue_customers_count: overdueCount,
         due_soon_customers_count: dueSoonCount,
       },
-      reorder_queue: queue.slice(0, limit),
+      total_records: totalQueue,
+      showing_count: displayQueue.length,
+      has_more: hasMore,
+      dashboard_notice: hasMore
+        ? `Showing 8 of ${totalQueue} accounts in reorder queue. Please navigate to the dashboard to view all ${totalQueue} records.`
+        : null,
+      reorder_queue: displayQueue,
     },
-    rowCount: queue.length,
+    rowCount: totalQueue,
   };
 }
 
@@ -3150,14 +3489,24 @@ async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supab
     };
   });
 
+  const totalDeals = rows.length;
+  const displayDeals = formattedDeals.slice(0, 8);
+  const hasMoreDeals = totalDeals > 8;
+
   return {
     data: {
-      total_deals_count: rows.length,
+      total_deals_count: totalDeals,
+      total_records: totalDeals,
+      showing_count: displayDeals.length,
+      has_more: hasMoreDeals,
+      dashboard_notice: hasMoreDeals
+        ? `Showing 8 of ${totalDeals} deals. Please navigate to the dashboard to view all ${totalDeals} records.`
+        : null,
       grand_total_pipeline_value_inr: grandTotal,
       stage_breakdown: stageStats,
-      recent_deals: formattedDeals,
+      recent_deals: displayDeals,
     },
-    rowCount: rows.length,
+    rowCount: totalDeals,
   };
 }
 
@@ -3212,12 +3561,23 @@ async function executeGetChurnRadar(args, callerContext, supabaseAdmin = supabas
     };
   });
 
+  const atRiskAccounts = accounts.filter((a) => a.risk_level !== 'low');
+  const totalAtRisk = atRiskAccounts.length;
+  const displayAtRisk = atRiskAccounts.slice(0, 8);
+  const hasMoreAtRisk = totalAtRisk > 8;
+
   return {
     data: {
       total_accounts_assessed: accounts.length,
       high_risk_count: highRisk,
       medium_risk_count: medRisk,
-      at_risk_accounts: accounts.filter((a) => a.risk_level !== 'low'),
+      total_records: totalAtRisk,
+      showing_count: displayAtRisk.length,
+      has_more: hasMoreAtRisk,
+      dashboard_notice: hasMoreAtRisk
+        ? `Showing 8 of ${totalAtRisk} at-risk accounts. Please navigate to the dashboard to view all ${totalAtRisk} records.`
+        : null,
+      at_risk_accounts: displayAtRisk,
       summary: `Assessed ${accounts.length} accounts. ${highRisk} high risk (churning), ${medRisk} medium risk (at-risk).`,
     },
     rowCount: accounts.length,
@@ -3263,7 +3623,7 @@ async function executeGetLossAnalytics(args, callerContext, supabaseAdmin = supa
     .map(([reason, count]) => ({ reason, count }))
     .sort((a, b) => b.count - a.count);
 
-  const formattedDeals = rows.slice(0, 10).map((d) => {
+  const formattedDeals = rows.map((d) => {
     const rawId = d.id || d.inquiry_id || '';
     const shortId = `INQ-${rawId.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     return {
@@ -3276,14 +3636,24 @@ async function executeGetLossAnalytics(args, callerContext, supabaseAdmin = supa
     };
   });
 
+  const totalLost = rows.length;
+  const displayLost = formattedDeals.slice(0, 8);
+  const hasMoreLost = totalLost > 8;
+
   return {
     data: {
-      total_lost_deals: rows.length,
+      total_lost_deals: totalLost,
+      total_records: totalLost,
+      showing_count: displayLost.length,
+      has_more: hasMoreLost,
+      dashboard_notice: hasMoreLost
+        ? `Showing 8 of ${totalLost} lost deals. Please navigate to the dashboard to view all ${totalLost} records.`
+        : null,
       total_lost_revenue_inr: totalLostVal,
       top_loss_reasons: topReasons,
-      lost_deals: formattedDeals,
+      lost_deals: displayLost,
     },
-    rowCount: rows.length,
+    rowCount: totalLost,
   };
 }
 
@@ -3317,7 +3687,7 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
     .select('id, inquiry_id, customer_name, stage, status, total_amount, po_number, created_at, deal_items(sku_text, quantity, unit)')
     .ilike('customer_name', `%${companyName}%`)
     .order('created_at', { ascending: false })
-    .limit(10);
+    .limit(20);
 
   if (error) throw new Error(`get_deal_ids error: ${error.message}`);
 
@@ -3338,13 +3708,23 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
     };
   });
 
+  const totalInquiries = rows.length;
+  const displayInquiries = rows.slice(0, 8);
+  const hasMoreInquiries = totalInquiries > 8;
+
   return {
     data: {
       company_name: companyName,
-      inquiries_count: rows.length,
-      inquiries: rows,
+      inquiries_count: totalInquiries,
+      total_records: totalInquiries,
+      showing_count: displayInquiries.length,
+      has_more: hasMoreInquiries,
+      dashboard_notice: hasMoreInquiries
+        ? `Showing 8 of ${totalInquiries} inquiry records for ${companyName}. Please navigate to the dashboard to view all ${totalInquiries} records.`
+        : null,
+      inquiries: displayInquiries,
     },
-    rowCount: rows.length,
+    rowCount: totalInquiries,
   };
 }
 
