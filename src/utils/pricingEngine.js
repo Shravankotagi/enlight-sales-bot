@@ -379,6 +379,93 @@ function calculatePricingSummary(input, options = {}) {
 }
 
 /**
+ * Calculates converted total tonnage in MT across all line items with precision and transparency.
+ * RULE:
+ * - If all line items have the SAME unit: directly sum their quantities (e.g. 60 MT + 60 MT = 120 MT).
+ * - If line items have DIFFERENT units: convert each item to MT and sum into total MT.
+ */
+function calculateTotalTonnageMt(lineItems) {
+  if (!Array.isArray(lineItems) || lineItems.length === 0) {
+    return { totalMt: 0, hasUnconvertible: false, formattedText: '0.00 MT' };
+  }
+
+  const validItems = lineItems.filter(i => {
+    const q = Number(i.quantity ?? i.quantity_mt ?? i.qty ?? 0);
+    return !isNaN(q) && q > 0;
+  });
+
+  if (validItems.length === 0) {
+    return { totalMt: 0, hasUnconvertible: false, formattedText: '0.00 MT' };
+  }
+
+  const units = validItems.map(i => normalizeUnit(i.unit || 'MT'));
+  const uniqueUnits = Array.from(new Set(units));
+  const isSameUnit = uniqueUnits.length === 1;
+  const commonUnit = isSameUnit ? uniqueUnits[0] : null;
+
+  if (isSameUnit && commonUnit) {
+    const totalSum = validItems.reduce(
+      (sum, i) => sum + (Number(i.quantity ?? i.quantity_mt ?? i.qty ?? 0) || 0),
+      0
+    );
+    const roundedQty = Math.round(totalSum * 1000) / 1000;
+    const formattedQty = roundedQty.toLocaleString('en-IN', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 3,
+    });
+
+    if (commonUnit === 'MT') {
+      return {
+        totalMt: roundedQty,
+        hasUnconvertible: false,
+        formattedText: `${formattedQty} MT`,
+      };
+    }
+
+    if (commonUnit === 'KG') {
+      const mtVal = Math.round((totalSum / 1000) * 1000) / 1000;
+      return {
+        totalMt: mtVal,
+        hasUnconvertible: false,
+        formattedText: `${formattedQty} KG (${mtVal.toLocaleString('en-IN', { maximumFractionDigits: 3 })} MT)`,
+      };
+    }
+
+    return {
+      totalMt: roundedQty,
+      hasUnconvertible: false,
+      formattedText: `${formattedQty} ${commonUnit}`,
+    };
+  }
+
+  let totalMt = 0;
+  let hasUnconvertible = false;
+  const unconvertibleItems = [];
+
+  for (const item of validItems) {
+    const mt = convertLineItemToMt(item);
+    if (mt !== null && !isNaN(mt)) {
+      totalMt += mt;
+    } else {
+      hasUnconvertible = true;
+      unconvertibleItems.push(`${item.quantity} ${item.unit}`);
+    }
+  }
+
+  const roundedMt = Math.round(totalMt * 1000) / 1000;
+  const formattedMtStr = roundedMt.toLocaleString('en-IN', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 3,
+  });
+
+  return {
+    totalMt: roundedMt,
+    hasUnconvertible,
+    formattedText: `${formattedMtStr} MT`,
+  };
+}
+
+/**
  * Formats a number to Indian currency string (e.g. 1,23,456.78).
  */
 function formatIndianCurrency(num, includeDecimals = false) {
@@ -457,4 +544,5 @@ module.exports = {
   calculateGrandTotal,
   calculatePricingSummary,
   calculateQuotationBreakdown,
+  calculateTotalTonnageMt,
 };
