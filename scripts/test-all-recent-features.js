@@ -217,7 +217,82 @@ async function runComprehensiveAudit() {
   );
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 7. CLEANUP & FINAL TEST SUMMARY
+  // 7. VERIFY COMPLAINT PO AUTO-FETCH & RESOLUTION
+  // ─────────────────────────────────────────────────────────────────────────────
+  console.log('\n--- SECTION 7: Complaint PO Auto-Fetch & Resolution ---');
+
+  const testPoPhone = '8262937458';
+  const testPoNumber = 'PO-20260923-9085';
+
+  // Ensure test deal exists in won stage
+  await supabase.from('deals').delete().eq('po_number', testPoNumber);
+  await supabase.from('complaints').delete().eq('po_number', testPoNumber);
+
+  const { data: testDeal, error: dealErr } = await supabase.from('deals').insert({
+    customer_name: 'Shiv Steel',
+    po_number: testPoNumber,
+    stage: 'won',
+    total_amount: 236000,
+    delivery_location: 'Mumbai',
+    payment_terms: '10 Days',
+    salesperson_phone: testPoPhone,
+    created_at: new Date().toISOString()
+  }).select().single();
+
+  if (dealErr) {
+    console.error('Error creating test deal:', dealErr);
+  }
+
+  const testDealId = testDeal ? testDeal.id : null;
+
+  if (testDealId) {
+    await supabase.from('deal_items').insert({
+      deal_id: testDealId,
+      sku_text: 'HR Sheet',
+      dimensions: '2.50 mm',
+      quantity: 15,
+      unit: 'MT',
+      rate: 55000,
+      amount: 200000
+    });
+  }
+
+  // Step 1: User selects option 8 (Log Customer Complaint)
+  await saveActiveSession(testPoPhone, 'Unknown', 'general');
+  const compStep1 = await handleCatalogFlow('8', testPoPhone);
+  assert('7.1 Menu option 8 starts LOG_COMPLAINT flow',
+    compStep1.handled === true && compStep1.reply.includes('Log Customer Complaint'),
+    compStep1.reply
+  );
+
+  // Step 2: User provides PO number and complaint details without company name
+  const compStep2 = await handleCatalogFlow('For this PO - PO: PO-20260923-9085 log a complaint about HR sheet was damaged', testPoPhone);
+  assert('7.2 Auto-fetches customer and order details from PO number without asking company name',
+    compStep2.handled === true &&
+    compStep2.reply.includes('Shiv Steel') &&
+    compStep2.reply.includes('PO-20260923-9085') &&
+    compStep2.reply.includes('HR Sheet') &&
+    !compStep2.reply.includes('Please provide the remaining mandatory details') &&
+    compStep2.interactiveButtons && compStep2.interactiveButtons.length > 0,
+    compStep2.reply
+  );
+
+  // Step 3: User confirms with "yes"
+  const compStep3 = await handleCatalogFlow('yes', testPoPhone);
+  assert('7.3 Complaint saved successfully with auto-fetched customer and deal details',
+    compStep3.handled === true &&
+    compStep3.reply.includes('Customer Complaint Logged Successfully!') &&
+    compStep3.reply.includes('Shiv Steel'),
+    compStep3.reply
+  );
+
+  // Clean up test data
+  await supabase.from('complaints').delete().eq('po_number', testPoNumber);
+  if (testDealId) await supabase.from('deal_items').delete().eq('deal_id', testDealId);
+  await supabase.from('deals').delete().eq('po_number', testPoNumber);
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 8. CLEANUP & FINAL TEST SUMMARY
   // ─────────────────────────────────────────────────────────────────────────────
   await saveActiveSession(testPhone, 'Unknown', 'general');
 

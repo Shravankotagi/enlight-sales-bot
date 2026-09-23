@@ -1380,13 +1380,16 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     }
   }
 
-  // Fallback PO number extraction for LOG_ORDER / UPDATE_ORDER
-  if (!merged.po_number && ['LOG_ORDER', 'UPDATE_ORDER'].includes(action)) {
+  // Fallback PO number extraction for LOG_ORDER / UPDATE_ORDER / LOG_COMPLAINT / UPDATE_COMPLAINT
+  if (!merged.po_number && ['LOG_ORDER', 'UPDATE_ORDER', 'LOG_COMPLAINT', 'UPDATE_COMPLAINT'].includes(action)) {
     const poMatch = userInput.match(/\b(?:PO[-_:#\s]*([A-Za-z0-9_-]+)|(?:po\s*number|po\s*no\.?|po#)[\s:=-]*([A-Za-z0-9_-]+))\b/i);
     if (poMatch) {
       const candidate = (poMatch[1] || poMatch[2] || '').trim();
       if (candidate && !/^(?:date|for|to|is|with|number|no|details?)$/i.test(candidate)) {
         merged.po_number = candidate.toUpperCase().startsWith('PO') ? candidate.toUpperCase() : `PO-${candidate.toUpperCase()}`;
+        if (['LOG_COMPLAINT', 'UPDATE_COMPLAINT'].includes(action) && !merged.linked_inquiry_or_po) {
+          merged.linked_inquiry_or_po = merged.po_number;
+        }
       }
     }
   }
@@ -2242,9 +2245,29 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
 
 async function checkOrdersForComplaint(action, draft, senderPhone, originalText = '') {
   if (action !== 'LOG_COMPLAINT') return { handled: false, needsDisambiguation: false };
-  if (!draft || !draft.company_name) return { handled: false, needsDisambiguation: false };
+  if (!draft) return { handled: false, needsDisambiguation: false };
 
-  const companyName = String(draft.company_name).trim();
+  const companyName = String(draft.company_name || '').trim();
+  let rawRef = (draft.linked_inquiry_or_po || draft.po_number || draft.deal_id || draft.inquiry_id || '').trim();
+
+  // If no reference in draft, inspect originalText for PO or Inquiry ID pattern
+  if (!rawRef && originalText) {
+    const poM = originalText.match(/\b(?:PO[-_:#\s]*([A-Za-z0-9_-]+)|(?:po\s*number|po\s*no\.?|po#)[\s:=-]*([A-Za-z0-9_-]+))\b/i);
+    if (poM) {
+      const cand = (poM[1] || poM[2] || '').trim();
+      if (cand && !/^(?:date|for|to|is|with|number|no|details?)$/i.test(cand)) {
+        rawRef = cand.toUpperCase().startsWith('PO') ? cand.toUpperCase() : `PO-${cand.toUpperCase()}`;
+      }
+    }
+    if (!rawRef) {
+      const inqM = originalText.match(/\b(?:INQ|DEAL)-[A-Z0-9]+\b|#INQ-[A-Z0-9]+/i);
+      if (inqM) rawRef = inqM[0].replace(/^#/, '').trim().toUpperCase();
+    }
+  }
+
+  // If neither company name nor PO/Inquiry reference is present, mandatory fields check will handle it
+  if (!companyName && !rawRef) return { handled: false, needsDisambiguation: false };
+
   const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants } = require('../supabase');
   const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
 
@@ -2252,9 +2275,12 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
   let dealsQuery = supabase
     .from('deals')
     .select('id, inquiry_id, customer_name, po_number, stage, total_amount, delivery_location, payment_terms, created_at, salesperson_phone')
-    .ilike('customer_name', `%${companyName}%`)
     .eq('stage', 'won')
     .order('created_at', { ascending: false });
+
+  if (companyName) {
+    dealsQuery = dealsQuery.ilike('customer_name', `%${companyName}%`);
+  }
 
   if (scope.phones !== null) {
     const targetPhones = expandPhoneVariants(scope.phones);
@@ -2265,18 +2291,30 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
     }
   }
 
-  const { data: deals } = dealsQuery ? await dealsQuery : { data: [] };
+  const { data: deals } = dealsQuery ? await dealsQuery.limit(500) : { data: [] };
   const wonDeals = deals || [];
 
   if (wonDeals.length === 0) {
-    const reply = `⚠️ *No Confirmed Orders Found for ${companyName}*\n\n` +
-      `A complaint can only be raised against an existing delivered order in the Orders module. Please verify the customer name or ensure an order has been marked as won.`;
-    return {
-      handled: true,
-      status: 'NO_ORDERS',
-      reply,
-      draft,
-    };
+    if (companyName) {
+      const reply = `⚠️ *No Confirmed Orders Found for ${companyName}*\n\n` +
+        `A complaint can only be raised against an existing delivered order in the Orders module. Please verify the customer name or ensure an order has been marked as won.`;
+      return {
+        handled: true,
+        status: 'NO_ORDERS',
+        reply,
+        draft,
+      };
+    } else {
+      const reply = `❌ *Order / PO Not Found in Orders Module*\n\n` +
+        `Order / PO *"${rawRef}"* was not found among confirmed orders in the Orders module.\n\n` +
+        `👉 Please verify the PO Number or Inquiry ID, or provide the Customer Name.`;
+      return {
+        handled: true,
+        status: 'ORDER_NOT_FOUND',
+        reply,
+        draft,
+      };
+    }
   }
 
   // Fetch line items for these won deals
@@ -2337,8 +2375,6 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
   };
 
   // Check if candidate PO or Inquiry ID was specified in user text or draft
-  const rawRef = (draft.linked_inquiry_or_po || draft.po_number || draft.deal_id || '').trim();
-
   if (rawRef) {
     const cleanInput = rawRef.replace(/^(?:PO|Purchase\s*Order|INQ|DEAL)[\s#:-]*/i, '').replace(/^#+/, '').trim().toUpperCase();
 
@@ -2358,6 +2394,7 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
     });
 
     if (matched) {
+      draft.company_name = matched.customer_name;
       draft.deal_id = matched.id;
       draft.po_number = matched.po_number || null;
       draft.linked_inquiry_or_po = matched.po_number ? `PO: ${matched.po_number} (${matched.deal_code})` : matched.deal_code;
@@ -2372,28 +2409,40 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
       return { handled: false, needsDisambiguation: false, draft };
     } else {
       // Specified PO or Inquiry not found among won orders
-      const availableList = enrichedDeals.map(formatOrderCandidate).join('\n\n');
+      if (companyName) {
+        const availableList = enrichedDeals.map(formatOrderCandidate).join('\n\n');
+        const reply = `❌ *Order / PO Not Found in Orders Module*\n\n` +
+          `Customer: *${companyName}*\n` +
+          `Order / PO *"${rawRef}"* was not found among confirmed orders for ${companyName}.\n\n` +
+          `*Available Confirmed Orders for ${companyName}:*\n\n` +
+          `${availableList}\n\n` +
+          `👉 Please reply with a valid *PO Number* or *Inquiry ID* from the list above.`;
 
-      const reply = `❌ *Order / PO Not Found in Orders Module*\n\n` +
-        `Customer: *${companyName}*\n` +
-        `Order / PO *"${rawRef}"* was not found among confirmed orders for ${companyName}.\n\n` +
-        `*Available Confirmed Orders for ${companyName}:*\n\n` +
-        `${availableList}\n\n` +
-        `👉 Please reply with a valid *PO Number* or *Inquiry ID* from the list above.`;
-
-      draft._order_candidates = enrichedDeals;
-      return {
-        handled: true,
-        status: 'ORDER_NOT_FOUND',
-        reply,
-        draft,
-      };
+        draft._order_candidates = enrichedDeals;
+        return {
+          handled: true,
+          status: 'ORDER_NOT_FOUND',
+          reply,
+          draft,
+        };
+      } else {
+        const reply = `❌ *Order / PO Not Found in Orders Module*\n\n` +
+          `Order / PO *"${rawRef}"* was not found among confirmed orders in the Orders module.\n\n` +
+          `👉 Please verify the PO Number or Inquiry ID, or provide the Customer Name.`;
+        return {
+          handled: true,
+          status: 'ORDER_NOT_FOUND',
+          reply,
+          draft,
+        };
+      }
     }
   }
 
   // If no reference was specified by user:
   if (enrichedDeals.length === 1) {
     const singleDeal = enrichedDeals[0];
+    draft.company_name = singleDeal.customer_name;
     draft.deal_id = singleDeal.effective_deal_id || singleDeal.inquiry_id || singleDeal.id;
     draft.po_number = singleDeal.po_number || null;
     draft.linked_inquiry_or_po = singleDeal.po_number ? `PO: ${singleDeal.po_number} (${singleDeal.deal_code})` : singleDeal.deal_code;
@@ -2411,7 +2460,7 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
   // Multiple won orders exist and no specific PO/INQ was provided -> Multi-Order Disambiguation
   const orderList = enrichedDeals.map(formatOrderCandidate).join('\n\n');
 
-  const prompt = `⚠️ *Multiple Confirmed Orders Found for ${companyName}:*\n\n` +
+  const prompt = `⚠️ *Multiple Confirmed Orders Found for ${companyName || 'this customer'}:*\n\n` +
     `Please specify which order or PO this complaint is about:\n\n` +
     `${orderList}\n\n` +
     `👉 Reply with the *Number* (1–${enrichedDeals.length}) or the *Inquiry ID* / *PO Number*.`;
@@ -7704,6 +7753,24 @@ async function handleCatalogFlow(rawText, senderPhone) {
         return { handled: true, reply: cmpCheck.reply };
       }
       if (cmpCheck && cmpCheck.draft) Object.assign(updatedDraft, cmpCheck.draft);
+    }
+
+    // 4. LOG_COMPLAINT candidate check & PO / Order auto-resolution
+    if (action === 'LOG_COMPLAINT' && (updatedDraft.linked_inquiry_or_po || updatedDraft.po_number || updatedDraft.company_name || /\b(?:PO[-_:#\s]*[A-Za-z0-9_-]+|INQ-[A-Z0-9]+)\b/i.test(text))) {
+      const ordCheck = await checkOrdersForComplaint(action, updatedDraft, senderPhone, text);
+      if (ordCheck && ordCheck.handled) {
+        await recordSessionMessage(senderPhone, 'assistant', ordCheck.reply, {
+          action_type: action,
+          customer_name: updatedDraft.company_name,
+        });
+        if (ordCheck.status === 'MULTIPLE_ORDERS' || ordCheck.status === 'ORDER_NOT_FOUND') {
+          await saveActiveSession(senderPhone, (ordCheck.draft?.company_name || updatedDraft.company_name || 'Customer'), `catalog_flow|${action}|${JSON.stringify(ordCheck.draft || updatedDraft)}`);
+        } else {
+          await saveActiveSession(senderPhone, 'Unknown', 'general');
+        }
+        return { handled: true, reply: ordCheck.reply };
+      }
+      if (ordCheck && ordCheck.draft) Object.assign(updatedDraft, ordCheck.draft);
     }
 
     const missing = validateMandatoryFields(action, updatedDraft);
