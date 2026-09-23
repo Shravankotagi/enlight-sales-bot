@@ -160,50 +160,76 @@ function getPostActivityButtons(action) {
 function isDiscardOrCancelIntent(text) {
   if (!text || typeof text !== 'string') return false;
   const clean = text.toLowerCase().trim().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ');
-  if (
-    clean === 'btn_confirm_cancel' ||
-    clean === 'btn_cust_no' ||
-    clean === 'btn_flow_discard' ||
-    clean === 'cancel' ||
-    clean === 'discard' ||
-    clean === 'discard activity' ||
-    clean === 'cancel activity' ||
-    clean === 'discard complaint' ||
-    clean === 'cancel complaint' ||
-    clean === 'discard order' ||
-    clean === 'cancel order' ||
-    clean === 'discard inquiry' ||
-    clean === 'cancel inquiry' ||
-    clean === 'discard visit' ||
-    clean === 'cancel visit' ||
-    clean === 'stop' ||
-    clean === 'exit' ||
-    clean === 'quit' ||
-    clean === 'abort' ||
-    clean === 'drop' ||
-    clean === 'skip' ||
-    clean === 'skip remaining' ||
-    clean === 'discard remaining' ||
-    clean === 'cancel remaining' ||
-    clean === 'finish' ||
-    clean === 'done' ||
-    clean === 'nahi' ||
-    clean === 'galat' ||
-    clean === 'no' ||
-    clean === 'no cancel' ||
-    clean === 'discard draft' ||
-    clean === 'cancel draft'
-  ) {
+
+  // 1. Exact button IDs & single-phrase control commands
+  const exactCancelWords = new Set([
+    'btn_confirm_cancel',
+    'btn_cust_no',
+    'btn_flow_discard',
+    'cancel',
+    'discard',
+    'stop',
+    'exit',
+    'quit',
+    'abort',
+    'drop',
+    'skip',
+    'nahi',
+    'galat',
+    'no',
+    'no cancel',
+    'discard draft',
+    'cancel draft',
+    'discard activity',
+    'cancel activity',
+    'discard complaint',
+    'cancel complaint',
+    'discard order',
+    'cancel order',
+    'discard inquiry',
+    'cancel inquiry',
+    'discard visit',
+    'cancel visit',
+    'cancel logging',
+    'discard logging',
+    'skip remaining',
+    'discard remaining',
+    'cancel remaining',
+    'cancel this',
+    'discard this',
+    'cancel it',
+    'discard it',
+    'cancel now',
+    'discard now',
+    'mat karo',
+    'nahi chahiye',
+    'nahi karna',
+    'cancel kar do',
+    'discard kar do',
+    'cancel karo',
+    'discard karo',
+  ]);
+
+  if (exactCancelWords.has(clean)) {
     return true;
   }
-  if (
-    /\b(?:cancel|discard|stop|abort|drop|quit|clear|skip)\b.*?\b(?:inquiry|logging|order|draft|visit|complaint|flow|session|process|this|task|entry|activity|remaining|creation|form|record|customer|acquisition)\b/i.test(clean) ||
-    /\b(?:cancel|discard|stop|abort|drop|quit|clear|skip)\s+(?:it|this|that|all|now|please|logging|activity|remaining)\b/i.test(clean) ||
-    /^(?:cancel|discard|stop|abort|quit|drop|skip)\s+/i.test(clean) ||
-    /\b(?:don'?t\s+want|do\s+not\s+want|never\s+mind|mat\s+karo|nahi\s+chahiye|cancel\s+kar\s+do|discard\s+kar\s+do|cancel\s+karo|discard\s+karo)\b/i.test(clean)
-  ) {
-    return true;
+
+  // 2. Strict start-to-end command patterns (where the entire intent of the message is cancellation)
+  const fullCommandPatterns = [
+    /^(?:please\s+)?(?:cancel|discard|abort|drop|stop|quit|clear)\s+(?:this\s+)?(?:draft|inquiry|order|visit|complaint|flow|activity|form|session|process|entry|logging|creation|action)\s*$/i,
+    /^(?:please\s+)?(?:cancel|discard|abort|drop|stop|quit)\s+(?:it|this|that|all|now|please)\s*$/i,
+    /^(?:i\s+)?(?:don\s*t|dont|do\s+not)\s+want\s+to\s+(?:log|create|save|record|continue|proceed|enter)(?:\s+(?:this|it|anymore))?\s*$/i,
+    /^(?:never\s+mind|leave\s+it|forget\s+it|drop\s+it)\s*$/i,
+    /^(?:cancel|discard)\s+kar\s*(?:do|de|diya|dena)?\s*$/i,
+    /^(?:mat\s+karo|nahi\s+karna\s+hai|nahi\s+chahiye|band\s+karo)\s*$/i,
+  ];
+
+  for (const pattern of fullCommandPatterns) {
+    if (pattern.test(clean)) {
+      return true;
+    }
   }
+
   return false;
 }
 
@@ -6973,8 +6999,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
     if (isStageUpdatePrompt(text)) {
       return await handleMidFlowStageUpdate(text, senderPhone, 'catalog_implicit_cust_collect', originalAction, custDraft);
     }
-    if (await isMidFlowReadQuery(text)) {
+
+    const intentResult = await classifyActiveSessionIntent('LOG_NEW_CUSTOMER', text);
+    if (intentResult.classification === 'RETRIEVAL_QUERY') {
       return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_implicit_cust_collect', originalAction, custDraft);
+    }
+    if (intentResult.classification === 'DIFFERENT_ACTIVITY') {
+      console.log(`[CatalogFlow] Strict activity scope guard in customer collect: active=LOG_NEW_CUSTOMER, incoming=${intentResult.targetAction}`);
+      const outOfScopeRes = buildOutOfScopeActivityResponse('LOG_NEW_CUSTOMER', intentResult.targetAction);
+      await recordSessionMessage(senderPhone, 'assistant', outOfScopeRes.reply, { action_type: 'OUT_OF_SCOPE_REDIRECT' });
+      return outOfScopeRes;
     }
 
     const updatedCustDraft = await extractFieldsWithLLM('LOG_NEW_CUSTOMER', text, custDraft);
