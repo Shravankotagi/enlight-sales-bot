@@ -758,7 +758,7 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     .select('id, sender_name, sender_phone, raw_text, inquiry_type, status, source_channel, media_urls, overall_confidence, ai_extraction_json, created_at, salesperson_phone, employee_id')
     .order('created_at', { ascending: false });
 
-  const dealsQuery = supabaseAdmin
+  let dealsQuery = supabaseAdmin
     .from('deals')
     .select('id, inquiry_id, stage, status, customer_name, customer_phone, po_number, total_amount, salesperson_phone, employee_id, created_at, won_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)');
 
@@ -767,16 +767,19 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     const rawPhone = callerContext.phone || '';
     const cleanPhone = rawPhone.replace(/\D/g, '').slice(-10);
     const empId = callerContext.employeeId;
-    const orParts = [];
+    const orPartsInq = [];
+    const orPartsDeals = [];
 
     if (cleanPhone) {
-      orParts.push(`salesperson_phone.ilike.%${cleanPhone}%`, `sender_phone.ilike.%${cleanPhone}%`);
+      orPartsInq.push(`salesperson_phone.ilike.%${cleanPhone}%`, `sender_phone.ilike.%${cleanPhone}%`);
+      orPartsDeals.push(`salesperson_phone.ilike.%${cleanPhone}%`);
     }
     if (empId) {
-      orParts.push(`employee_id.eq.${empId}`);
+      orPartsInq.push(`employee_id.eq.${empId}`);
+      orPartsDeals.push(`employee_id.eq.${empId}`);
     }
 
-    if (orParts.length === 0) {
+    if (orPartsInq.length === 0) {
       return {
         data: {
           notFound: true,
@@ -795,18 +798,26 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
       };
     }
 
-    inqQuery = inqQuery.or(orParts.join(','));
+    inqQuery = inqQuery.or(orPartsInq.join(','));
+    if (orPartsDeals.length > 0) {
+      dealsQuery = dealsQuery.or(orPartsDeals.join(','));
+    } else {
+      dealsQuery = dealsQuery.eq('id', '00000000-0000-0000-0000-000000000000');
+    }
   } else if (isManagerRole(callerContext.role)) {
     const { phoneSuffixes, employeeIds } = await getSubordinateSalespersons(callerContext, supabaseAdmin);
-    const orParts = [];
+    const orPartsInq = [];
+    const orPartsDeals = [];
     phoneSuffixes.forEach((p) => {
-      orParts.push(`salesperson_phone.ilike.%${p}%`, `sender_phone.ilike.%${p}%`);
+      orPartsInq.push(`salesperson_phone.ilike.%${p}%`, `sender_phone.ilike.%${p}%`);
+      orPartsDeals.push(`salesperson_phone.ilike.%${p}%`);
     });
     employeeIds.forEach((id) => {
-      orParts.push(`employee_id.eq.${id}`);
+      orPartsInq.push(`employee_id.eq.${id}`);
+      orPartsDeals.push(`employee_id.eq.${id}`);
     });
 
-    if (orParts.length === 0) {
+    if (orPartsInq.length === 0) {
       return {
         summary: {
           total_inquiries: 0,
@@ -821,7 +832,12 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
       };
     }
 
-    inqQuery = inqQuery.or(orParts.join(','));
+    inqQuery = inqQuery.or(orPartsInq.join(','));
+    if (orPartsDeals.length > 0) {
+      dealsQuery = dealsQuery.or(orPartsDeals.join(','));
+    } else {
+      dealsQuery = dealsQuery.eq('id', '00000000-0000-0000-0000-000000000000');
+    }
   }
 
   const { from, to } = parseDateFilter(dateRange);
@@ -1080,6 +1096,25 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     mode === 'rep_leaderboard' ||
     mode === 'rep_rankings'
   ) {
+    if (isSalespersonRole(callerContext.role)) {
+      const wonCount = materialized.filter((m) => m.deal_stage === 'won' || m.status === 'won' || Boolean(m.po_number)).length;
+      const totalCount = materialized.length;
+      const rate = totalCount > 0 ? `${Math.round((wonCount / totalCount) * 1000) / 10}%` : '0%';
+      return {
+        data: {
+          role_restricted: true,
+          message: 'Team conversion leaderboards and peer comparisons are restricted under Role-Based Access Control (RBAC) to Sales Managers and Admins. You can only view your own conversion metrics.',
+          personal_metrics: {
+            total_inquiries: totalCount,
+            converted_orders: wonCount,
+            personal_conversion_rate: rate,
+          },
+          summary: `You have converted ${wonCount} out of ${totalCount} assigned inquiries (${rate} conversion rate). Cross-rep leaderboards and peer comparisons are restricted to Sales Managers and Admins under RBAC.`,
+        },
+        rowCount: 1,
+      };
+    }
+
     const { data: allEmployees } = await supabaseAdmin.from('employees').select('id, employee_id, phone, name, role').eq('is_active', true);
     const repMap = new Map();
 
@@ -1128,7 +1163,19 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     mode === 'inactive_buyers'
   ) {
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const { data: recCusts } = await supabaseAdmin.from('recurring_customers').select('customer_name, last_order_date, is_active').eq('is_active', true);
+    let recCustQuery = supabaseAdmin.from('recurring_customers').select('customer_name, last_order_date, is_active').eq('is_active', true);
+    if (isSalespersonRole(callerContext.role)) {
+      const rawPhone = callerContext.phone || '';
+      const cleanPhone = rawPhone.replace(/\D/g, '').slice(-10);
+      if (cleanPhone) recCustQuery = recCustQuery.ilike('assigned_salesperson_phone', `%${cleanPhone}%`);
+    } else if (isManagerRole(callerContext.role)) {
+      const { phoneSuffixes } = await getSubordinateSalespersons(callerContext, supabaseAdmin);
+      if (phoneSuffixes.length > 0) {
+        recCustQuery = recCustQuery.or(phoneSuffixes.map((p) => `assigned_salesperson_phone.ilike.%${p}%`).join(','));
+      }
+    }
+
+    const { data: recCusts } = await recCustQuery;
     const lastOrderMap = new Map();
     (recCusts || []).forEach((c) => {
       if (c.customer_name) lastOrderMap.set(cleanLegalSuffixes(c.customer_name), c.last_order_date);
@@ -1843,6 +1890,25 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     mode === 'leaderboard' ||
     mode === 'top_reps'
   ) {
+    if (isSalespersonRole(callerContext.role)) {
+      const myVisits = materialized.length;
+      const myPositive = materialized.filter((v) => v.outcome === 'positive').length;
+      const myFollowUps = materialized.filter((v) => v.requires_follow_up).length;
+      return {
+        data: {
+          role_restricted: true,
+          message: 'Team visit leaderboards and peer comparisons are restricted under Role-Based Access Control (RBAC) to Sales Managers and Admins. You can only view your own visit metrics.',
+          personal_metrics: {
+            total_visits: myVisits,
+            positive_outcomes: myPositive,
+            pending_follow_ups: myFollowUps,
+          },
+          summary: `You have logged ${myVisits} visits (${myPositive} positive, ${myFollowUps} pending follow-ups). Cross-rep leaderboards and peer comparisons are restricted to Sales Managers and Admins under RBAC.`,
+        },
+        rowCount: 1,
+      };
+    }
+
     const repStats = {};
     materialized.forEach((v) => {
       const rep = v.salesperson_name;
@@ -2436,10 +2502,28 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
     mode === 'complaint_order_cross' ||
     mode === 'open_complaints_recent_orders'
   ) {
-    const { data: wonDeals } = await supabaseAdmin
+    let dealsQuery = supabaseAdmin
       .from('deals')
-      .select('customer_name, po_number, stage, created_at, won_at')
+      .select('customer_name, po_number, stage, created_at, won_at, salesperson_phone, employee_id')
       .or('stage.eq.won,po_number.not.is.null');
+
+    if (isSalespersonRole(callerContext.role)) {
+      const rawPhone = callerContext.phone || '';
+      const cleanPhone = rawPhone.replace(/\D/g, '').slice(-10);
+      const empId = callerContext.employeeId;
+      const orParts = [];
+      if (cleanPhone) orParts.push(`salesperson_phone.ilike.%${cleanPhone}%`);
+      if (empId) orParts.push(`employee_id.eq.${empId}`);
+      if (orParts.length > 0) dealsQuery = dealsQuery.or(orParts.join(','));
+    } else if (isManagerRole(callerContext.role)) {
+      const { phoneSuffixes, employeeIds } = await getSubordinateSalespersons(callerContext, supabaseAdmin);
+      const orParts = [];
+      phoneSuffixes.forEach((p) => orParts.push(`salesperson_phone.ilike.%${p}%`));
+      employeeIds.forEach((id) => orParts.push(`employee_id.eq.${id}`));
+      if (orParts.length > 0) dealsQuery = dealsQuery.or(orParts.join(','));
+    }
+
+    const { data: wonDeals } = await dealsQuery;
 
     const wonCustSet = new Set((wonDeals || []).map((d) => cleanLegalSuffixes(d.customer_name)));
     const openComplaints = materialized.filter((c) => c.status !== 'resolved' && c.status !== 'closed');
@@ -2488,6 +2572,25 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
     mode === 'rep_comparison' ||
     mode === 'salesperson_leaderboard'
   ) {
+    if (isSalespersonRole(callerContext.role)) {
+      const myComplaints = materialized.length;
+      const myOpen = materialized.filter((c) => c.status !== 'resolved' && c.status !== 'closed').length;
+      const myResolved = materialized.filter((c) => c.status === 'resolved' || c.status === 'closed').length;
+      return {
+        data: {
+          role_restricted: true,
+          message: 'Team complaint breakdowns and peer comparisons are restricted under Role-Based Access Control (RBAC) to Sales Managers and Admins. You can only view your own complaints.',
+          personal_metrics: {
+            total_complaints: myComplaints,
+            open_complaints: myOpen,
+            resolved_complaints: myResolved,
+          },
+          summary: `You have ${myComplaints} complaints logged for your assigned accounts (${myOpen} open, ${myResolved} resolved). Cross-rep leaderboards and peer comparisons are restricted to Sales Managers and Admins under RBAC.`,
+        },
+        rowCount: 1,
+      };
+    }
+
     const repStats = {};
     materialized.forEach((c) => {
       const rep = c.salesperson_name;
@@ -3429,12 +3532,47 @@ async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supab
     .from('deals')
     .select('id, inquiry_id, customer_name, customer_phone, total_amount, stage, status, po_number, salesperson_phone, employee_id, created_at');
 
-  if (isManagerRole(callerContext.role)) {
+  let isCallerSalesperson = false;
+  if (isSalespersonRole(callerContext.role)) {
+    isCallerSalesperson = true;
+    const rawPhone = callerContext.phone || '';
+    const cleanPhone = rawPhone.replace(/\D/g, '').slice(-10);
+    const empId = callerContext.employeeId;
+    const orParts = [];
+    if (cleanPhone) orParts.push(`salesperson_phone.ilike.%${cleanPhone}%`);
+    if (empId) orParts.push(`employee_id.eq.${empId}`);
+    if (orParts.length === 0) {
+      return {
+        data: {
+          total_deals_count: 0,
+          grand_total_pipeline_value_inr: 0,
+          stage_breakdown: {},
+          recent_deals: [],
+          role_restricted: true,
+          message: 'Access denied. Team-wide pipeline visibility is restricted to Sales Managers and Admins under RBAC.',
+        },
+        rowCount: 0,
+      };
+    }
+    query = query.or(orParts.join(','));
+  } else if (isManagerRole(callerContext.role)) {
     const { employeeIds, phoneSuffixes } = await getSubordinateSalespersons(callerContext, supabaseAdmin);
     const orParts = [];
     phoneSuffixes.forEach((p) => orParts.push(`salesperson_phone.ilike.%${p}%`));
     employeeIds.forEach((id) => orParts.push(`employee_id.eq.${id}`));
-    if (orParts.length > 0) query = query.or(orParts.join(','));
+    if (orParts.length > 0) {
+      query = query.or(orParts.join(','));
+    } else {
+      return {
+        data: {
+          total_deals_count: 0,
+          grand_total_pipeline_value_inr: 0,
+          stage_breakdown: {},
+          recent_deals: [],
+        },
+        rowCount: 0,
+      };
+    }
   }
 
   if (args?.stage_filter) {
@@ -3459,7 +3597,7 @@ async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supab
   const { data: deals, error } = await query.order('created_at', { ascending: false });
   if (error) throw new Error(`get_team_pipeline error: ${error.message}`);
 
-  const rows = deals || [];
+  const rows = (deals || []).filter((d) => !/^test\s+(industries|customer|corp|company)\b/i.test(d.customer_name || ''));
   let grandTotal = 0;
   const stageStats = {};
 
@@ -3505,6 +3643,10 @@ async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supab
       grand_total_pipeline_value_inr: grandTotal,
       stage_breakdown: stageStats,
       recent_deals: displayDeals,
+      ...(isCallerSalesperson ? {
+        role_restricted: true,
+        notice: 'Team-wide aggregated pipeline is restricted under RBAC to Sales Managers and Admins. Displaying your personal deals pipeline.',
+      } : {}),
     },
     rowCount: totalDeals,
   };
@@ -3682,12 +3824,30 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
     };
   }
 
-  const { data: deals, error } = await supabaseAdmin
+  let dealsQuery = supabaseAdmin
     .from('deals')
-    .select('id, inquiry_id, customer_name, stage, status, total_amount, po_number, created_at, deal_items(sku_text, quantity, unit)')
+    .select('id, inquiry_id, customer_name, stage, status, total_amount, po_number, created_at, salesperson_phone, employee_id, deal_items(sku_text, quantity, unit)')
     .ilike('customer_name', `%${companyName}%`)
     .order('created_at', { ascending: false })
     .limit(20);
+
+  if (isSalespersonRole(callerContext.role)) {
+    const rawPhone = callerContext.phone || '';
+    const cleanPhone = rawPhone.replace(/\D/g, '').slice(-10);
+    const empId = callerContext.employeeId;
+    const orParts = [];
+    if (cleanPhone) orParts.push(`salesperson_phone.ilike.%${cleanPhone}%`);
+    if (empId) orParts.push(`employee_id.eq.${empId}`);
+    if (orParts.length > 0) dealsQuery = dealsQuery.or(orParts.join(','));
+  } else if (isManagerRole(callerContext.role)) {
+    const { phoneSuffixes, employeeIds } = await getSubordinateSalespersons(callerContext, supabaseAdmin);
+    const orParts = [];
+    phoneSuffixes.forEach((p) => orParts.push(`salesperson_phone.ilike.%${p}%`));
+    employeeIds.forEach((id) => orParts.push(`employee_id.eq.${id}`));
+    if (orParts.length > 0) dealsQuery = dealsQuery.or(orParts.join(','));
+  }
+
+  const { data: deals, error } = await dealsQuery;
 
   if (error) throw new Error(`get_deal_ids error: ${error.message}`);
 

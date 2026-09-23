@@ -215,8 +215,8 @@ Return ONLY the JSON object.
 const PRODUCT_FAMILIES = {
   // Flat Steel
   hr_coil: ['hr coil', 'hot rolled coil', 'hr strip', 'e350 hr', 'sailma', 'hot rolled slit', 'hr slit coil'],
-  hr_sheet: ['hr sheet', 'hot rolled sheet', 'ms sheet'],
-  hr_plate: ['hr plate', 'hot rolled plate', 'ms plate', 'ms plates', 'boiler plate', 'bq plate', 'hardox', 'e350 plate'],
+  hr_sheet: ['hr sheet', 'hot rolled sheet'],
+  hr_plate: ['hr plate', 'hot rolled plate', 'boiler plate', 'bq plate', 'hardox', 'e350 plate'],
   hrpo_coil: ['hrpo coil', 'pickled and oiled coil', 'pickled & oiled coil', 'hrpo slit'],
   hrpo_sheet: ['hrpo sheet', 'pickled and oiled sheet', 'pickled & oiled sheet', 'hrpo'],
   cr_coil: ['cr coil', 'cold rolled coil', 'cr slit coil', 'crca coil', 'cr strip', 'cr2', 'cr1', 'edd cr'],
@@ -238,7 +238,7 @@ const PRODUCT_FAMILIES = {
   ms_beam: ['beam', 'ms beam', 'ismb', 'joist', 'i-beam', 'h-beam', 'girder', 'npb', 'wpb', 'uc', 'ub', 'column'],
 
   // Pipes and Tubes
-  ms_round_pipe: ['ms round pipe', 'round pipe', 'erw pipe', 'seamless pipe', 'ms pipe', 'gi pipe', 'round tube', 'pipe', 'tube'],
+  ms_round_pipe: ['ms round pipe', 'round pipe', 'erw pipe', 'seamless pipe', 'gi pipe', 'round tube'],
   ms_square_pipe: ['ms square pipe', 'square pipe', 'box pipe', 'shs', 'square tube', 'gp square pipe'],
   ms_rectangular_tube: ['ms rectangular tube', 'rectangular pipe', 'rectangular tube', 'rhs', 'box tube'],
 
@@ -264,14 +264,14 @@ const KNOWN_CATALOG_PRODUCTS = [
   { name: 'Galvalume Coil', regex: /\b(galvalume\s*coil|gl\s*coil)\b/i },
   { name: 'Chequered Coil', regex: /\b(chequered\s*coil|checkered\s*coil)\b/i },
   { name: 'Chequered Sheet', regex: /\b(chequered|checkered)\s*(?:plate|sheet|coil)?\b/i },
-  { name: 'MS Plate', regex: /\b(ms\s*plate|plates|bq\s*plate|boiler\s*plate|hardox)\b/i },
+  { name: 'MS Plate', regex: /\b(ms\s*plate|bq\s*plate|boiler\s*plate|hardox)\b/i },
   { name: 'MS Sheet', regex: /\b(ms\s*sheet)\b/i },
   { name: 'MS Round Bar', regex: /\b(round\s*bar|bright\s*bar|en8|en19|round\s*rod)\b/i },
   { name: 'MS Flat Bar', regex: /\b(flat\s*bar|ms\s*flat|patti|flats)\b/i },
   { name: 'MS Square Bar', regex: /\b(square\s*bar|sq\s*bar|square\s*rod)\b/i },
   { name: 'MS Square Pipe', regex: /\b(square\s*pipe|box\s*pipe|shs|square\s*tube|box\s*section)\b/i },
   { name: 'MS Rectangular Tube', regex: /\b(rectangular\s*pipe|rhs|rectangular\s*tube)\b/i },
-  { name: 'MS Round Pipe', regex: /\b(round\s*pipe|erw\s*pipe|seamless\s*pipe|ms\s*pipe|pipe|tube)\b/i },
+  { name: 'MS Round Pipe', regex: /\b(round\s*pipe|erw\s*pipe|seamless\s*pipe|ms\s*round\s*pipe|round\s*tube)\b/i },
   { name: 'MS Angle', regex: /\b(angle|angles|equal\s*angle|unequal\s*angle|l-angle|isa)\b/i },
   { name: 'MS Beam', regex: /\b(beam|beams|ismb|joist|i-beam|h-beam|girder|npb|wpb)\b/i },
   { name: 'MS Channel', regex: /\b(channel|channels|ismc|c-channel)\b/i },

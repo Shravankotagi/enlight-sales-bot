@@ -905,7 +905,7 @@ LOG_INQUIRY:
   "additional_notes": "<any extra notes if mentioned, else null>",
   "line_items": [
     {
-      "sku_text": "<Core metal product name and gauge/thickness e.g. 'MS Sheet 5MM', 'CR Sheet 1.00MM', 'HR Coil 3.15MM'>",
+      "sku_text": "<Literal product name mentioned by user e.g. 'Sheet', 'CR Sheet', 'HR Coil', 'MS Angle', 'Pipe', 'TMT Bar'>",
       "description": "<Full product text e.g. 'MS Sheet 5MM THK (1250 x 2500)'>",
       "dimensions": "<Dimensions / specifications e.g. '1250 x 2500', '1000 x 2000 mm'>",
       "spec": "<Dimensions / specifications>",
@@ -1136,16 +1136,14 @@ Output an 'entries' array containing a separate object for EACH individual custo
 If only a single company is mentioned or if filling missing fields for an existing draft, return the top-level fields (e.g. company_name, person_met, contact_phone, etc.) and do NOT output an entries array.
 8. In LOG_ORDER: If the user provides an Inquiry ID (e.g. INQ-F4D982 or 'regarding inquiry INQ-F4D982'), extract the inquiry ID into 'inquiry_id'.
 9. In UPDATE_ORDER: If the user provides an Inquiry ID (e.g. INQ-936C7B, INQ-3C86DE) and asks to attach/set/update a PO number (e.g. 'attach PO-2026-8899 to INQ-936C7B' or 'INQ-936C7B PO is PO-2026-8899'), extract the inquiry ID into 'inquiry_id' and the PO number into 'po_number' and 'updates.po_number'.
-10. OFFICIAL PRODUCT CATALOG RULES:
-The product catalog strictly contains the following 22 products across 4 categories:
-• Flat Steel: HR Coil, HR Sheet, HR Plate, HRPO Coil, HRPO Sheet, CR Coil, CR Sheet, GP Coil, GP Sheet, Galvalume Coil, Galvalume Sheet, Chequered Coil, Chequered Sheet
-• Structural Steel: MS Round Bar, MS Flat Bar, MS Square Bar, TMT Bar, MS Angle, MS Channel, MS Beam
-• Pipes and Tubes: MS Round Pipe, MS Square Pipe, MS Rectangular Tube
-• Value Added Products: Slotted Angle, Solar Mounting Structure, Cable Tray – Perforated, Cable Tray – Ladder, GI Earthing Strip
-
-For all activities (LOG_INQUIRY, LOG_ORDER, LOG_COMPLAINT):
-- "sku_text" / "affected_product": Must match one of the 22 official catalog product names above.
-- Do NOT extract generic phrases (e.g. '2 coils', 'steel material', 'damaged material', 'goods') as product names.
+10. PRODUCT EXTRACTION & CATALOG INTEGRITY RULES (CRITICAL):
+- Extract the EXACT, LITERAL product term mentioned by the user (e.g. 'Sheet', 'Coil', 'Plate', 'Pipe', 'Tube', 'MS Sheet', 'HR Sheet', 'CR Coil', 'MS Angle', 'TMT Bar').
+- ZERO FABRICATION / ZERO AUTO-CONVERSION: NEVER guess, assume, or auto-convert generic or ambiguous words (e.g. 'sheet', 'coil', 'plate', 'pipe', 'tube', 'bar', 'rod') to a specific catalog variant.
+  - If the user says "sheet", extract sku_text as "Sheet" (NEVER auto-convert "sheet" to "HR Sheet" or "CR Sheet").
+  - If the user says "coil", extract sku_text as "Coil" (NEVER auto-convert "coil" to "HR Coil").
+  - If the user says "plate", extract sku_text as "Plate" (NEVER auto-convert "plate" to "HR Plate").
+  - If the user says "pipe", extract sku_text as "Pipe" (NEVER auto-convert "pipe" to "MS Round Pipe").
+  The backend validation engine will automatically detect generic/ambiguous terms and ask the user to clarify the exact catalog variant.
 - In LOG_COMPLAINT: if no official catalog product name is mentioned, leave 'affected_product' as null so the system automatically resolves it from the linked Order / PO!
 - "dimensions" / "spec": Extract thickness, gauge, width, and size (e.g. '8mm', '1250 x 2500', '50x50x6').
 
@@ -1978,6 +1976,35 @@ async function validateOrderInquiryStage(draft, senderPhone) {
 }
 
 // ── STRICT PRODUCT CATALOG VERIFICATION ──────────────────────────────────────
+
+function resolveClarifiedProduct(userInput, invalidProduct) {
+  const clean = (userInput || '').trim();
+  const numMatch = clean.match(/^(?:option\s*|#\s*)?([1-6])\b/i);
+  const pLower = String(invalidProduct || '').toLowerCase();
+
+  const sheetOptions = ['HR Sheet', 'CR Sheet', 'HRPO Sheet', 'GP Sheet', 'Galvalume Sheet', 'Chequered Sheet'];
+  const coilOptions = ['HR Coil', 'CR Coil', 'HRPO Coil', 'GP Coil', 'Galvalume Coil', 'Chequered Coil'];
+  const plateOptions = ['HR Plate', 'HR Sheet', 'Chequered Sheet'];
+  const pipeOptions = ['MS Round Pipe', 'MS Square Pipe', 'MS Rectangular Tube'];
+  const barOptions = ['MS Round Bar', 'MS Flat Bar', 'MS Square Bar', 'TMT Bar'];
+
+  let targetList = [];
+  if (pLower.includes('sheet')) targetList = sheetOptions;
+  else if (pLower.includes('coil')) targetList = coilOptions;
+  else if (pLower.includes('plate')) targetList = plateOptions;
+  else if (pLower.includes('pipe') || pLower.includes('tube')) targetList = pipeOptions;
+  else if (pLower.includes('bar') || pLower.includes('rod') || pLower.includes('sariya')) targetList = barOptions;
+
+  if (numMatch && targetList.length > 0) {
+    const idx = parseInt(numMatch[1], 10) - 1;
+    if (targetList[idx]) return targetList[idx];
+  }
+
+  const norm = normalizeProductToCatalog(clean);
+  if (norm.isValid) return norm.catalogName;
+
+  return null;
+}
 
 function validateDraftProducts(action, draft) {
   if (!draft || !['LOG_INQUIRY', 'UPDATE_INQUIRY', 'LOG_ORDER', 'UPDATE_ORDER'].includes(action)) {
@@ -7380,6 +7407,31 @@ async function handleCatalogFlow(rawText, senderPhone) {
       }
     }
 
+    // Check if user is clarifying an ambiguous/invalid product from prior prompt
+    const existingProdCheck = validateDraftProducts(action, existingDraft);
+    if (!existingProdCheck.isValid && existingProdCheck.invalidProducts.length > 0) {
+      const resolvedProd = resolveClarifiedProduct(text, existingProdCheck.invalidProducts[0]);
+      if (resolvedProd) {
+        if (Array.isArray(existingDraft.line_items) && existingDraft.line_items.length > 0) {
+          existingDraft.line_items.forEach((it) => {
+            const itNorm = normalizeProductToCatalog(it.sku_text, it.dimensions);
+            if (!itNorm.isValid) {
+              it.sku_text = resolvedProd;
+              it.description = resolvedProd;
+              it.is_valid_catalog = true;
+            }
+          });
+        }
+        if (existingDraft.product_description) {
+          const invRegex = new RegExp(existingProdCheck.invalidProducts[0], 'gi');
+          existingDraft.product_description = existingDraft.product_description.replace(invRegex, resolvedProd);
+        }
+        if (existingDraft.affected_product) {
+          existingDraft.affected_product = resolvedProd;
+        }
+      }
+    }
+
     // Extract fields from user message
     const isPureCandidateSelection = (candidateResolved || inquiryCandidateResolved || orderCandidateResolved) && isPureOptionSelectorOnly(text);
 
@@ -7641,4 +7693,6 @@ module.exports = {
   restoreInterruptedFlow,
   handleMidFlowStageUpdate,
   classifyActiveSessionIntent,
+  validateDraftProducts,
+  resolveClarifiedProduct,
 };
