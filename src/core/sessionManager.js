@@ -628,7 +628,7 @@ async function searchDatabaseForOption10(senderPhone, queryText) {
     if (matchedDeals && matchedDeals.length > 0) {
       contextBlock += `### Matched Inquiries & Orders:\n`;
       matchedDeals.forEach(d => {
-        const hex = (d.id || d.inquiry_id || '').replace(/-/g, '').slice(0, 6).toUpperCase();
+        const hex = (d.inquiry_id || d.id || '').replace(/-/g, '').slice(0, 6).toUpperCase();
         const cleanCode = hex ? `INQ-${hex}` : 'INQ';
         const items = (d.deal_items || []).map(i => `${i.sku_text || 'Product'}${i.dimensions ? ` (${i.dimensions})` : ''} - ${i.quantity || 0} ${i.unit || 'MT'}${i.rate ? ` @ ₹${i.rate}/MT` : ''}`).join('; ');
         const dateStr = d.created_at ? d.created_at.slice(0, 10) : 'Recent';

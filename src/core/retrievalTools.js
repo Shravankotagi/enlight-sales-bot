@@ -922,7 +922,7 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
       }
     }
 
-    const shortId = `INQ-${(linkedDeal?.id || row.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    const shortId = `INQ-${(row.id || linkedDeal?.inquiry_id || linkedDeal?.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     const rawSrc = (row.source_channel || '').toLowerCase();
     const isDoc = rawSrc.includes('image') || rawSrc.includes('po') || rawSrc.includes('ocr') || (row.media_urls && row.media_urls.length > 0);
     const channelDisplay = isDoc ? 'ocr_document' : (rawSrc.includes('whatsapp') ? 'whatsapp_text' : (rawSrc.includes('dashboard') ? 'web_dashboard' : 'whatsapp_text'));
@@ -3208,7 +3208,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   if (error) throw new Error(`get_my_open_deals error: ${error.message}`);
 
   const materialized = (rows || []).map((d) => {
-    const shortId = `INQ-${(d.id || d.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    const shortId = `INQ-${(d.inquiry_id || d.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     const normStage = normalizeDealStage(d.stage);
     return {
       inquiry_id: shortId,
@@ -3249,7 +3249,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
 
       if (globalPoDeals && globalPoDeals.length > 0) {
         filtered = globalPoDeals.map((d) => {
-          const shortId = `INQ-${(d.id || d.inquiry_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+          const shortId = `INQ-${(d.inquiry_id || d.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
           const normStage = normalizeDealStage(d.stage);
           return {
             inquiry_id: shortId,
@@ -3611,7 +3611,7 @@ async function executeGetTeamPipeline(args, callerContext, supabaseAdmin = supab
   });
 
   const formattedDeals = rows.slice(0, 15).map((d) => {
-    const rawId = d.id || d.inquiry_id || '';
+    const rawId = d.inquiry_id || d.id || '';
     const shortId = `INQ-${rawId.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     return {
       inquiry_id: shortId,
@@ -3766,7 +3766,7 @@ async function executeGetLossAnalytics(args, callerContext, supabaseAdmin = supa
     .sort((a, b) => b.count - a.count);
 
   const formattedDeals = rows.map((d) => {
-    const rawId = d.id || d.inquiry_id || '';
+    const rawId = d.inquiry_id || d.id || '';
     const shortId = `INQ-${rawId.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     return {
       inquiry_id: shortId,
@@ -3854,7 +3854,7 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
   const rows = (deals || [])
     .filter((d) => !/^test\s+(industries|customer|corp|company)\b/i.test(d.customer_name || ''))
     .map((d) => {
-    const rawId = d.id || d.inquiry_id || '';
+    const rawId = d.inquiry_id || d.id || '';
     const formattedCode = `INQ-${rawId.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     return {
       inquiry_id: formattedCode,

@@ -805,7 +805,7 @@ Return ONLY the company name or "NONE":`;
     }
 
     const dealCards = deals.map((d, i) => {
-      const rawInq = d.id || d.inquiry_id || 'UNKNOWN';
+      const rawInq = d.inquiry_id || d.id || 'UNKNOWN';
       const cleanNum = rawInq.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').substring(0, 6).toUpperCase();
       const dealCode = `INQ-${cleanNum}`;
       const stageStr = (d.stage || 'new_inquiry').toUpperCase();

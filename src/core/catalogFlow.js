@@ -2588,11 +2588,11 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
       if (dId.startsWith(cleanInqId) || inqId.startsWith(cleanInqId) || (cleanInqId.length >= 4 && (dId.includes(cleanInqId) || inqId.includes(cleanInqId)))) {
         const stage = (d.stage || 'new_inquiry').toLowerCase();
-        const displayId = `INQ-${(d.id || d.inquiry_id).slice(0, 6).toUpperCase()}`;
+        const displayId = `INQ-${(d.inquiry_id || d.id).slice(0, 6).toUpperCase()}`;
         matchedCandidates.push({
-          id: d.id || d.inquiry_id,
+          id: d.inquiry_id || d.id,
           deal_id: d.id,
-          inquiry_id: d.inquiry_id,
+          inquiry_id: d.inquiry_id || d.id,
           displayId,
           company_name: d.customer_name || 'Customer',
           stage,
@@ -2648,11 +2648,11 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
         if (dId.startsWith(cleanInqId) || inqId.startsWith(cleanInqId) || (cleanInqId.length >= 4 && (dId.includes(cleanInqId) || inqId.includes(cleanInqId)))) {
           const stage = (d.stage || 'new_inquiry').toLowerCase();
-          const displayId = `INQ-${(d.id || d.inquiry_id).slice(0, 6).toUpperCase()}`;
+          const displayId = `INQ-${(d.inquiry_id || d.id).slice(0, 6).toUpperCase()}`;
           matchedCandidates.push({
-            id: d.id || d.inquiry_id,
+            id: d.inquiry_id || d.id,
             deal_id: d.id,
-            inquiry_id: d.inquiry_id,
+            inquiry_id: d.inquiry_id || d.id,
             displayId,
             company_name: d.customer_name || 'Customer',
             stage,
@@ -2713,7 +2713,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       if (isCustomerMatch(companyName, null, candidateName, inq.sender_phone)) {
         const linkedDeal = dealMapByInqId.get(inq.id);
         const stage = (linkedDeal?.stage || inq.status || 'new_inquiry').toLowerCase();
-        const displayId = `INQ-${(linkedDeal?.id || inq.id).slice(0, 6).toUpperCase()}`;
+        const displayId = `INQ-${(inq.id || linkedDeal?.id).slice(0, 6).toUpperCase()}`;
         matchedCandidates.push({
           id: inq.id,
           deal_id: linkedDeal?.id || null,
@@ -2738,11 +2738,11 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       if (seenKeys.has(d.id) || (d.inquiry_id && seenKeys.has(d.inquiry_id))) return;
       if (isCustomerMatch(companyName, null, d.customer_name, d.customer_phone)) {
         const stage = (d.stage || 'new_inquiry').toLowerCase();
-        const displayId = `INQ-${(d.id || d.inquiry_id).slice(0, 6).toUpperCase()}`;
+        const displayId = `INQ-${(d.inquiry_id || d.id).slice(0, 6).toUpperCase()}`;
         matchedCandidates.push({
-          id: d.id || d.inquiry_id,
+          id: d.inquiry_id || d.id,
           deal_id: d.id,
-          inquiry_id: d.inquiry_id,
+          inquiry_id: d.inquiry_id || d.id,
           displayId,
           company_name: d.customer_name || companyName,
           stage,
@@ -2838,6 +2838,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
   if (editable.length === 1) {
     const single = editable[0];
     draft.inquiry_id = single.inquiry_id || single.id;
+    draft.deal_id = single.deal_id || null;
     draft.company_name = single.company_name;
     draft._inquiry_display_id = single.displayId;
 
@@ -4093,13 +4094,28 @@ async function executeAction(action, draft, senderPhone) {
         }
 
         // Synchronize inquiries table (ai_extraction_json AND raw_text)
-        const targetInqId = deal.inquiry_id || deal.id;
+        let targetInqId = deal.inquiry_id || deal.id;
+        let inqRow = null;
         if (targetInqId) {
-          const { data: inqRow, error: fetchInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status').eq('id', targetInqId).single();
-          if (fetchInqErr) {
-            console.warn('[CatalogFlow] Fetch inquiry warning (will attempt direct update):', fetchInqErr.message);
+          const { data: directInq, error: fetchInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status').eq('id', targetInqId).single();
+          if (!fetchInqErr && directInq) {
+            inqRow = directInq;
           }
-          if (inqRow) {
+        }
+        if (!inqRow && cleanId) {
+          const { data: matchedInqs } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status').order('created_at', { ascending: false }).limit(500);
+          if (matchedInqs) {
+            inqRow = matchedInqs.find(i => (i.id || '').replace(/-/g, '').toUpperCase().startsWith(cleanId) || (i.id || '').replace(/-/g, '').toUpperCase().includes(cleanId)) || null;
+            if (inqRow) {
+              targetInqId = inqRow.id;
+              if (deal.id && deal.inquiry_id !== inqRow.id) {
+                await supabase.from('deals').update({ inquiry_id: inqRow.id }).eq('id', deal.id);
+                deal.inquiry_id = inqRow.id;
+              }
+            }
+          }
+        }
+        if (targetInqId && inqRow) {
             const aiJson = inqRow.ai_extraction_json || {};
             if (updates.payment_terms) {
               aiJson.payment_terms = updates.payment_terms;
@@ -4201,7 +4217,6 @@ async function executeAction(action, draft, senderPhone) {
               }
             }
           }
-        }
 
         let fieldsSummary = '';
         if (updates.delivery_location) fieldsSummary += `• *Delivery Location:* ${updates.delivery_location}\n`;

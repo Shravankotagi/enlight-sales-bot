@@ -1386,11 +1386,15 @@ function isInvalidCustomerName(name) {
 
 function getDealCode(deal) {
   if (!deal) return 'INQ-UNKNOWN';
+  if (deal.inquiry_id) {
+    const inqCode = deal.inquiry_id.replace(/-/g, '').substring(0, 6).toUpperCase();
+    return `INQ-${inqCode}`;
+  }
   if (deal.deal_number) {
     const cleanNum = deal.deal_number.replace(/^#?(?:DEAL|INQ)-?/i, '');
     return `INQ-${cleanNum}`;
   }
-  const code = (deal.id || '').substring(0, 6).toUpperCase();
+  const code = (deal.id || '').replace(/-/g, '').substring(0, 6).toUpperCase();
   return `INQ-${code}`;
 }
 
@@ -4083,9 +4087,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
       if (explicitPo && explicitPo !== 'null' && explicitPo !== 'None' && String(explicitPo).trim().length >= 2) {
         poNumber = String(explicitPo).trim();
       } else {
+        const targetInqRef = existingDeal?.inquiry_id || dealId;
         const pendingPayload = {
           dealId,
-          dealCode: dealId ? `INQ-${dealId.substring(0, 6).toUpperCase()}` : null,
+          dealCode: targetInqRef ? `INQ-${targetInqRef.replace(/-/g, '').substring(0, 6).toUpperCase()}` : null,
           customerName: finalCustomerName,
           totalAmount: dealAmount,
         };
