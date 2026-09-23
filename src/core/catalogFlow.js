@@ -1320,6 +1320,32 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     }
   }
 
+  // Fallback payment_terms extraction for LOG_INQUIRY / LOG_ORDER / UPDATE_INQUIRY / UPDATE_ORDER
+  if (!merged.payment_terms && ['LOG_INQUIRY', 'LOG_ORDER', 'UPDATE_INQUIRY', 'UPDATE_ORDER'].includes(action)) {
+    const payMatch = userInput.match(/\b(\d+\s*days?(?:\s*(?:credit|terms?|net|advance))?|100%\s*advance|advance|immediate|pdc|lc|cad|credit|online|rtgs|neft|against\s+delivery|cash\s+on\s+delivery|cod)\b/i);
+    if (payMatch) {
+      merged.payment_terms = payMatch[0].trim();
+    }
+  }
+
+  // Fallback contact_person and mobile_number for LOG_NEW_CUSTOMER / LOG_VISIT / UPDATE_VISIT
+  if (['LOG_NEW_CUSTOMER', 'LOG_VISIT', 'UPDATE_VISIT'].includes(action)) {
+    if (!merged.mobile_number && !merged.contact_phone) {
+      const phoneMatch = userInput.match(/\b([6-9]\d{9})\b/);
+      if (phoneMatch) {
+        merged.mobile_number = phoneMatch[1];
+        if (action.includes('VISIT')) merged.contact_phone = phoneMatch[1];
+      }
+    }
+    if (!merged.contact_person && !merged.person_met) {
+      const namePhoneMatch = userInput.match(/^([a-zA-Z\s]{2,40})[,\s]+([6-9]\d{9})/);
+      if (namePhoneMatch) {
+        merged.contact_person = namePhoneMatch[1].trim();
+        if (action.includes('VISIT')) merged.person_met = namePhoneMatch[1].trim();
+      }
+    }
+  }
+
   // Update normalization for edit workflows
   if (action === 'UPDATE_ORDER') {
     if (!merged.updates) merged.updates = {};
@@ -5428,6 +5454,40 @@ async function handleMidFlowRetrievalQuery(text, senderPhone, activeState, actio
 }
 
 /**
+ * Handles a complaint resolution request mid-flow without dropping or wiping the active catalog state.
+ * Executes the complaint resolution in Supabase via handleComplaintResolution (kra8.js), logs it,
+ * and appends the resume prompt with Yes/No quick action buttons.
+ */
+async function handleMidFlowComplaintResolution(text, senderPhone, activeState, action, draft) {
+  const { handleComplaintResolution } = require('../kra8');
+  const resolutionReply = await handleComplaintResolution(text, senderPhone);
+
+  const actionDisplayName = getModuleDisplayName(action);
+  const companyLabel = draft?.company_name ? ` for *${draft.company_name}*` : '';
+  const resumeMsg = `You were in the middle of ${getActionFriendlyName(action)}${companyLabel} — do you want to continue?`;
+  const combinedReply = `${resolutionReply}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
+
+  await recordSessionMessage(senderPhone, 'user', text);
+  await recordSessionMessage(senderPhone, 'assistant', combinedReply, {
+    action_type: action,
+    customer_name: draft?.company_name || null,
+  });
+
+  await saveActiveSession(
+    senderPhone,
+    draft?.company_name || 'Customer',
+    `catalog_resume_ask|${activeState}|${action}|${JSON.stringify(draft || {})}`
+  );
+
+  return {
+    handled: true,
+    reply: combinedReply,
+    interactiveType: 'buttons',
+    interactiveButtons: RESUME_QUERY_BUTTONS,
+  };
+}
+
+/**
  * Handles a stage update request mid-flow without dropping or corrupting the active catalog state.
  * Executes the stage update directly against deals and inquiries tables in Supabase with pipeline validation,
  * confirms the update, and appends the resume prompt with Yes/No quick action buttons.
@@ -6152,6 +6212,21 @@ async function classifyActiveSessionIntent(activeActivity, text) {
     return { classification: 'SAME_ACTIVITY' };
   }
 
+  // 3. Pure payment terms, credit terms, or durations (e.g. "45 days", "30 days credit", "advance", "online", "50 days term")
+  if (/^\s*(?:\d+\s*(?:days?|din|months?|weeks?)(?:\s*(?:credit|term|terms|advance|net|payment|after\s+delivery))?|100%\s*advance|advance|immediate|pdc|lc|cad|credit|online|rtgs|neft|against\s+delivery|cash\s+on\s+delivery|cod)\s*$/i.test(trimmed)) {
+    return { classification: 'SAME_ACTIVITY' };
+  }
+
+  // 4. Shorthand customer contact inputs (e.g. "tarak mehta,8945561223" or "Rajesh Sharma 9820123456")
+  if (/^[a-zA-Z\s]{2,40}[,\s]+[6-9]\d{9}$/i.test(trimmed)) {
+    return { classification: 'SAME_ACTIVITY' };
+  }
+
+  // 5. Pure numeric quantities / rates / dimensions
+  if (/^\s*₹?\s*\d+(?:,\d+)*(?:\.\d+)?\s*(?:\/\s*mt|\/\s*ton|\/\s*kg|per\s*mt|per\s*ton|mt|ton|tons|tonne|kg|pcs|nos|pieces|mm)?\s*$/i.test(trimmed)) {
+    return { classification: 'SAME_ACTIVITY' };
+  }
+
   const currentFamily = getModuleFamily(activeActivity);
   const activityDisplayName = getModuleDisplayName(activeActivity);
 
@@ -6167,7 +6242,7 @@ Classify this incoming message:
 - If this message is logging a new customer inquiry, requirement, or RFQ -> DIFFERENT_ACTIVITY:LOG_INQUIRY
 - If this message is onboarding a new customer profile -> DIFFERENT_ACTIVITY:LOG_NEW_CUSTOMER
 - If this message is logging a customer field visit / client meeting -> DIFFERENT_ACTIVITY:LOG_VISIT
-- If this message provides field details (person met, location, meeting remarks, visit date, outcome, company name, rate, tonnage, quantity) for the active [${activeActivity}] (${activityDisplayName}) form -> SAME_ACTIVITY
+- If this message provides field details (payment terms e.g. "45 days" / "advance", delivery location e.g. "Mumbai" / "Kolhapur", person met, contact phone, meeting remarks, visit date, outcome, company name, rate, tonnage, quantity, notes, make) for the active [${activeActivity}] (${activityDisplayName}) form -> SAME_ACTIVITY
 - If this message is asking a read-only data query or search (asking for rates, checking status, listing inquiries, checking orders) -> RETRIEVAL_QUERY
 
 Respond strictly with ONLY the classification label on a single line, nothing else. Valid responses:
@@ -6391,29 +6466,33 @@ async function handleCatalogFlow(rawText, senderPhone) {
   }
 
   // ── 2b. ACTIVE SESSION SCOPE GUARD (AI INTENT CLASSIFICATION) ──────────────
-  if (hasActiveCatalogSession && !lastIntent.startsWith('catalog_resume_ask|')) {
+  if (
+    hasActiveCatalogSession &&
+    !lastIntent.startsWith('catalog_resume_ask|') &&
+    !lastIntent.startsWith('catalog_implicit_cust_ask|') &&
+    !lastIntent.startsWith('catalog_implicit_cust_collect|')
+  ) {
     const cleanInput = text.toLowerCase().replace(/[^a-z0-9\s_/]/g, ' ').replace(/\s+/g, ' ').trim();
     const parts = lastIntent.split('|');
     const activeState = parts[0];
     const currentAction = parts[1];
     const currentDraft = safeParseJSON(parts.slice(2).join('|'), {});
 
-    const isCustAskState = lastIntent.startsWith('catalog_implicit_cust_ask|') || lastIntent.startsWith('catalog_implicit_cust_collect|');
+    // Check if user is resolving a complaint mid-flow
+    const { isComplaintResolution } = require('../kra8');
+    if (isComplaintResolution(text)) {
+      return await handleMidFlowComplaintResolution(text, senderPhone, activeState, currentAction, currentDraft);
+    }
 
     const isControlReply =
       isDiscardOrCancelIntent(text) ||
       isDiscardOrCancelIntent(cleanInput) ||
-      (isCustAskState
-        ? [
-            'yes', 'y', 'haan', 'ha', 'sahi hai', 'btn_cust_yes', 'yes add customer', 'yes, add customer', 'confirm', 'add',
-            'no', 'n', 'nahi', 'wrong', 'galat', 'cancel', 'discard', 'stop', 'exit', 'quit', 'btn_cust_no', 'no / cancel', 'no/cancel', 'no cancel'
-          ].includes(cleanInput)
-        : [
-            'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure', 'save / yes', 'save/yes', 'save yes',
-            'edit', 'change', '2', 'edit details',
-            'cancel', 'discard', 'no', 'n', '3', 'stop', 'exit', 'quit', 'nahi', 'wrong', 'galat',
-            'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel'
-          ].includes(cleanInput));
+      [
+        'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure', 'save / yes', 'save/yes', 'save yes',
+        'edit', 'change', '2', 'edit details',
+        'cancel', 'discard', 'no', 'n', '3', 'stop', 'exit', 'quit', 'nahi', 'wrong', 'galat',
+        'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel'
+      ].includes(cleanInput);
 
     if (!isControlReply) {
       // AI Intent Classifier: Classify every non-control incoming message against active session
@@ -6430,7 +6509,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
       if (intentResult.classification === 'DIFFERENT_ACTIVITY') {
         console.log(`[CatalogFlow] Strict activity scope guard: active=${currentAction}, incoming=${intentResult.targetAction}`);
-        return buildOutOfScopeActivityResponse(currentAction, intentResult.targetAction);
+        await recordSessionMessage(senderPhone, 'user', text);
+        const outOfScopeRes = buildOutOfScopeActivityResponse(currentAction, intentResult.targetAction);
+        await recordSessionMessage(senderPhone, 'assistant', outOfScopeRes.reply, { action_type: 'OUT_OF_SCOPE_REDIRECT' });
+        // NOTE: Session state remains 100% intact in the background. DO NOT overwrite or finalize!
+        return outOfScopeRes;
       }
       // If SAME_ACTIVITY, proceed into the flow below!
     }
@@ -6502,7 +6585,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
       };
     }
 
-    // 3. User asks ANOTHER stage update or retrieval query mid-resume
+    // 3. User asks mid-resume complaint resolution, stage update, or retrieval query
+    const { isComplaintResolution } = require('../kra8');
+    if (isComplaintResolution(text)) {
+      return await handleMidFlowComplaintResolution(text, senderPhone, interruptedState, action, draft);
+    }
     if (isStageUpdatePrompt(text)) {
       return await handleMidFlowStageUpdate(text, senderPhone, interruptedState, action, draft);
     }
@@ -6524,8 +6611,22 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
 
-    // User confirmed YES (This is a new customer)
+    // Check mid-flow interruptions
+    const { isComplaintResolution } = require('../kra8');
+    if (isComplaintResolution(text)) {
+      return await handleMidFlowComplaintResolution(text, senderPhone, 'catalog_implicit_cust_ask', originalAction, originalDraft);
+    }
+    if (isStageUpdatePrompt(text)) {
+      return await handleMidFlowStageUpdate(text, senderPhone, 'catalog_implicit_cust_ask', originalAction, originalDraft);
+    }
+    if (await isMidFlowReadQuery(text)) {
+      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_implicit_cust_ask', originalAction, originalDraft);
+    }
+
+    // User confirmed YES (This is a new customer) or provided customer details
+    const isDirectCustDetails = /\b[6-9]\d{9}\b/.test(text) || (cleanInput.includes('yes') && text.length > 5);
     if (
+      isDirectCustDetails ||
       cleanInput === 'btn_cust_yes' ||
       cleanInput === 'yes, add customer' ||
       cleanInput === 'yes' ||
@@ -6540,7 +6641,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
       cleanInput === 'new customer' ||
       cleanInput === 'add'
     ) {
-      const custDraft = {
+      let custDraft = {
         action: 'LOG_NEW_CUSTOMER',
         company_name: unrecognizedName,
         contact_person: originalDraft.person_met || originalDraft.contact_person || null,
@@ -6552,10 +6653,14 @@ async function handleCatalogFlow(rawText, senderPhone) {
         _parentDraft: originalDraft,
       };
 
+      if (isDirectCustDetails) {
+        custDraft = await extractFieldsWithLLM('LOG_NEW_CUSTOMER', text, custDraft);
+      }
+
       const custMissing = validateMandatoryFields('LOG_NEW_CUSTOMER', custDraft);
 
       if (custMissing.length === 0) {
-        // All customer mandatory fields already supplied (e.g. from field visit)
+        // All customer mandatory fields already supplied (e.g. from field visit or direct input)
         await executeAction('LOG_NEW_CUSTOMER', custDraft, senderPhone);
 
         forwardCustomerDetailsToParentDraft(originalAction, originalDraft, custDraft);
@@ -6707,6 +6812,18 @@ async function handleCatalogFlow(rawText, senderPhone) {
       await finalizeCurrentSession(senderPhone, `Discarded customer onboarding flow`);
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return { handled: true, reply: cancelReply };
+    }
+
+    // Check mid-flow interruptions
+    const { isComplaintResolution } = require('../kra8');
+    if (isComplaintResolution(text)) {
+      return await handleMidFlowComplaintResolution(text, senderPhone, 'catalog_implicit_cust_collect', originalAction, custDraft);
+    }
+    if (isStageUpdatePrompt(text)) {
+      return await handleMidFlowStageUpdate(text, senderPhone, 'catalog_implicit_cust_collect', originalAction, custDraft);
+    }
+    if (await isMidFlowReadQuery(text)) {
+      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_implicit_cust_collect', originalAction, custDraft);
     }
 
     const updatedCustDraft = await extractFieldsWithLLM('LOG_NEW_CUSTOMER', text, custDraft);

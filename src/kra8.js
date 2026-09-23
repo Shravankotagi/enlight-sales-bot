@@ -483,10 +483,14 @@ async function handleComplaintResolution(text, senderPhone) {
     const matchedAction = resolutionActions.find(a => upper.startsWith(a)) || 'RESOLVED';
 
     // 1. Fetch all OPEN complaints for this salesperson
+    const phoneClean = String(senderPhone || '').replace(/\D/g, '');
+    const phone10 = phoneClean.slice(-10);
+    const phoneVariants = Array.from(new Set([senderPhone, phoneClean, phone10, `91${phone10}`, `+91${phone10}`])).filter(Boolean);
+
     const { data: openComplaints } = await supabase
       .from('complaints')
       .select('*')
-      .eq('reported_by', senderPhone)
+      .in('reported_by', phoneVariants)
       .not('status', 'in', '("resolved","closed")')
       .is('resolved_at', null)
       .order('reported_at', { ascending: false });
@@ -556,7 +560,7 @@ async function handleComplaintResolution(text, senderPhone) {
         const { data: complaints } = await supabase
           .from('complaints')
           .select('*')
-          .eq('reported_by', senderPhone)
+          .in('reported_by', phoneVariants)
           .not('status', 'in', '("resolved","closed")')
           .is('resolved_at', null)
           .or(`customer_name.ilike.%${customerKeyword}%,description.ilike.%${customerKeyword}%`)

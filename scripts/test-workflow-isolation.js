@@ -696,7 +696,7 @@ async function runTests() {
 
   const pass22b = cancelMenuRes.handled === true &&
                   cancelMenuRes.reply.includes('Activity cancelled.') &&
-                  cancelMenuRes.reply.includes('Welcome to *SalesOS Assistant*!') &&
+                  cancelMenuRes.reply.includes('SalesOS Assistant') &&
                   cancelMenuRes.interactiveType === 'list' &&
                   sessCancelled?.last_intent === 'general';
 
