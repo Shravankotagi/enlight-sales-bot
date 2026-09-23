@@ -39,6 +39,48 @@ function isComplaintResolution(text) {
          upper === 'CLOSE';
 }
 
+/**
+ * Validates whether user-provided resolution notes contain real substantive details
+ * or are just command filler phrases / generic status words / reference IDs.
+ */
+function isInvalidOrGenericResolutionNotes(notes, customerName = '') {
+  if (!notes || typeof notes !== 'string') return true;
+  let clean = notes.trim().toLowerCase();
+
+  // 1. Strip customer name if provided
+  if (customerName) {
+    const escaped = customerName.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    clean = clean.replace(new RegExp(escaped, 'g'), ' ');
+  }
+
+  // 2. Strip PO numbers, Inquiry IDs, Deal IDs, Complaint IDs, and hex codes
+  clean = clean.replace(/\b(?:po|inq|deal|vis|cmp)[-_:#\s]*[a-z0-9_-]+\b/gi, ' ');
+  clean = clean.replace(/\b[a-f0-9]{6,36}\b/gi, ' ');
+
+  // 3. Strip common command verbs and transition phrases
+  clean = clean.replace(/\b(?:please|kindly|i\s+want\s+to|want\s+to|can\s+you|help\s+me\s+to)\b/gi, ' ');
+  clean = clean.replace(/\b(?:update|updating|change|changing|modify|modifying|set|setting|mark|marking|make|making|put|putting)\b/gi, ' ');
+  clean = clean.replace(/\b(?:resolve|resolved|resolving|close|closed|closing|fix|fixed|fixing|reopen|reopened)\b/gi, ' ');
+
+  // 4. Strip entity nouns and common typos (complaint, compliant, ticket, issue, order, po, status)
+  clean = clean.replace(/\b(?:complaints?|compliants?|complains?|issues?|tickets?|orders?|pos?|inquir(?:y|ies)|enquir(?:y|ies)|records?)\b/gi, ' ');
+  clean = clean.replace(/\b(?:status|stage|header|fields?|notes?|details?)\b/gi, ' ');
+  clean = clean.replace(/\b(?:last|latest|previous|open)\b/gi, ' ');
+
+  // 5. Strip pronouns, prepositions, articles, conjunctions
+  clean = clean.replace(/\b(?:this|that|these|those|the|a|an|my|our|your|it|its|all)\b/gi, ' ');
+  clean = clean.replace(/\b(?:of|for|about|on|in|at|to|from|with|by|as|and|or|is|was|are|been)\b/gi, ' ');
+
+  // 6. Clean whitespace and non-alphanumeric chars
+  clean = clean.replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+
+  // 7. Check if anything substantial remains
+  if (!clean || clean.length < 3) return true;
+  if (/^(?:done|ok|yes|haan|sahi|fine|good|ho gaya|sorted|settled|cleared|completed)$/i.test(clean)) return true;
+
+  return false;
+}
+
 // Extract complaint details using Google Gemini
 // Smart regex fallback to extract customer/company name from complaint description
 function fallbackExtractCustomerName(text) {
@@ -538,23 +580,23 @@ async function handleComplaintResolution(text, senderPhone) {
     if (complaint) {
       customerKeyword = complaint.customer_name || fallbackExtractCustomerName(complaint.description) || 'Customer';
       let tempResolution = text;
-      const regexAction = new RegExp(`^${matchedAction}\\s*(complaint|issue|problem|ticket)*\\s*(for|about|of|on)*\\s*`, 'i');
+      const regexAction = new RegExp(`^${matchedAction}\\s*(?:complaint|issue|problem|ticket|the\\s+complaint|my\\s+complaint|last\\s+complaint|my\\s+last\\s+complaint)*\\s*(?:for|about|of|on|regarding)*\\s*`, 'i');
       tempResolution = tempResolution.replace(regexAction, '');
       
       if (complaint.customer_name && tempResolution.toLowerCase().includes(complaint.customer_name.toLowerCase())) {
-        tempResolution = tempResolution.replace(new RegExp(complaint.customer_name, 'gi'), '');
+        tempResolution = tempResolution.replace(new RegExp(complaint.customer_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '');
       }
-      resolution = tempResolution.replace(/^[\s:,\-]+/, '').trim() || 'Resolved';
+      resolution = tempResolution.replace(/^[\s:,\-]+/, '').replace(/[\s:,\-]+$/, '').trim();
     } else {
       // FALLBACK: Clean action and filler words to extract customer keyword and resolution
       let cleanText = text;
       const regexPrefix = /^(resolved complaint for|resolve complaint for|resolved complaint|resolve complaint|resolved for|resolve for|resolved|resolve|closed|close|fixed|fix)\s+/i;
       cleanText = cleanText.replace(regexPrefix, '');
-      cleanText = cleanText.replace(/^(customer|client|company)\s+/i, '');
+      cleanText = cleanText.replace(/^(?:customer|client|company|the\s+customer|the\s+company)\s+/i, '');
 
       const parts = cleanText.split(/[\s:,\-]+/);
       customerKeyword = parts[0] || '';
-      resolution = cleanText.replace(new RegExp(`^${customerKeyword}`, 'i'), '').replace(/^[\s:,\-]+/, '').trim() || 'Resolved';
+      resolution = cleanText.replace(new RegExp(`^${customerKeyword}`, 'i'), '').replace(/^[\s:,\-]+/, '').replace(/[\s:,\-]+$/, '').trim();
 
       if (customerKeyword && customerKeyword.length > 2) {
         const { data: complaints } = await supabase
@@ -575,13 +617,17 @@ async function handleComplaintResolution(text, senderPhone) {
       return `⚠️ *Resolution Update Declined*\n\nCould not find an active open complaint matching *"${customerKeyword || 'this customer'}"*.\n\nPlease check the dashboard to verify the customer name or if the complaint was already marked as resolved.`;
     }
 
-    const reportedAt = new Date(complaint.reported_at);
-    const resolvedAt = new Date();
-    const resolutionHrs = Math.round(
-      (resolvedAt - reportedAt) / (1000 * 60 * 60)
-    );
-
     const resolvedCustomerName = complaint.customer_name || fallbackExtractCustomerName(complaint.description) || customerKeyword || 'Customer';
+
+    if (isInvalidOrGenericResolutionNotes(resolution, resolvedCustomerName)) {
+      return `ℹ️ *Resolution Notes Required for ${resolvedCustomerName}*\n\n` +
+        `Please provide the resolution details (e.g. replacement material dispatched / credit note issued / commercial settlement).\n\n` +
+        `Example: _"Resolved complaint for ${resolvedCustomerName} - replacement 10 MT plates dispatched and accepted."_`;
+    }
+
+    const resolvedAt = new Date();
+    const reportedAt = new Date(complaint.reported_at || complaint.created_at || Date.now());
+    const resolutionHrs = Math.max(1, Math.round((resolvedAt.getTime() - reportedAt.getTime()) / (1000 * 60 * 60)));
 
     // Mark the matched complaint resolved
     await supabase
@@ -715,6 +761,7 @@ async function getComplaintSummary(scopeOrPhone) {
 module.exports = {
   isComplaintReport,
   isComplaintResolution,
+  isInvalidOrGenericResolutionNotes,
   handleComplaintLog,
   handleComplaintResolution,
   checkComplaints,

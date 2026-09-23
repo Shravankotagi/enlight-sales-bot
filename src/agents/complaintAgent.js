@@ -521,9 +521,9 @@ async function processSingleComplaint(data, originalText, senderPhone) {
   if (data.action === 'resolve') {
     const openComplaint = await getOpenComplaint(finalCustomerName, senderPhone, data.deal_id);
 
+    const { isInvalidOrGenericResolutionNotes } = require('../kra8');
     let resolutionNotes = (data.description || '').trim();
-    const isGenericResolveText = /^(resolved|resolve|issue sorted|fixed|done|ho gaya|settled)$/i.test(resolutionNotes);
-    if (!resolutionNotes || isGenericResolveText) {
+    if (isInvalidOrGenericResolutionNotes(resolutionNotes, finalCustomerName)) {
       return `ℹ️ *Resolution Notes Required for ${finalCustomerName}*\n\n` +
         `Please provide the resolution details (e.g. replacement material dispatched / commercial settlement).\n` +
         `Example: _"Resolved complaint for ${finalCustomerName} - replacement 10 MT plates dispatched and accepted."_`;

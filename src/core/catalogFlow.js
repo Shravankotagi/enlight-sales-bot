@@ -1177,6 +1177,10 @@ If only a single company is mentioned or if filling missing fields for an existi
 - Users CANNOT directly modify or override the total order value at the header level.
 - If the user asks to change the total value or money directly (e.g. 'Change the total Value from 2,36,000 to 2,50,000' or 'update total amount to 2,50,000'), do NOT put 'total_amount' or 'total_value' into updates, and do NOT create a line item update with only amount.
 - You MUST still extract any other valid updates mentioned in the message (e.g. payment_terms, delivery_location, po_date, delivery_date, status, po_number, or specific line item rate/qty changes).
+12. UPDATE_COMPLAINT RESOLUTION NOTES (CRITICAL):
+- In UPDATE_COMPLAINT, 'updates.resolution_notes' MUST strictly contain ONLY actual details describing how the issue was resolved (e.g. 'replacement 10 MT plates dispatched and accepted', 'credit note CN-102 issued for ₹20,000', 'commercial discount of ₹500/MT approved').
+- NEVER put the user's action command, request text, or phrase (e.g. 'update this po PO: PO-20260923-9085 compliant and mark it resolved', 'mark as resolved', 'resolve my last complaint', 'close the complaint') into 'updates.resolution_notes'.
+- If the user only commands to resolve/mark resolved/close the complaint without providing specific resolution notes, set 'updates.status' to 'Resolved', but leave 'updates.resolution_notes' as null!
 `;
 
   const userPrompt = `Existing Active Draft:
@@ -1445,12 +1449,28 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.visit_date && !merged.updates.visit_date) merged.updates.visit_date = normalizeDateToDDMMYYYY(newExtracted.visit_date);
     if (newExtracted.meeting_remarks && !merged.updates.meeting_remarks) merged.updates.meeting_remarks = newExtracted.meeting_remarks;
     if (newExtracted.followup_action && !merged.updates.followup_action) merged.updates.followup_action = newExtracted.followup_action;
-    if (newExtracted.follow_up_action && !merged.updates.followup_action) merged.updates.followup_action = newExtracted.follow_up_action;
-    if (newExtracted.status && !merged.updates.status) merged.updates.status = newExtracted.status;
   } else if (action === 'UPDATE_COMPLAINT') {
+    const { isInvalidOrGenericResolutionNotes } = require('../kra8');
     if (!merged.updates) merged.updates = {};
+    if (newExtracted.updates) {
+      Object.assign(merged.updates, newExtracted.updates);
+    }
     if (newExtracted.status && !merged.updates.status) merged.updates.status = newExtracted.status;
     if (newExtracted.resolution_notes && !merged.updates.resolution_notes) merged.updates.resolution_notes = newExtracted.resolution_notes;
+    if (newExtracted.complaint_type && !merged.updates.complaint_type) merged.updates.complaint_type = newExtracted.complaint_type;
+    if (newExtracted.complaint_description && !merged.updates.complaint_description) merged.updates.complaint_description = newExtracted.complaint_description;
+    if (newExtracted.corrective_action && !merged.updates.corrective_action) merged.updates.corrective_action = newExtracted.corrective_action;
+
+    // Direct resolution note fallback if user supplied notes as free text
+    if (!merged.updates.resolution_notes && merged.updates.status && ['resolved', 'closed'].includes(String(merged.updates.status).toLowerCase())) {
+      if (!isInvalidOrGenericResolutionNotes(userInput, merged.company_name)) {
+        merged.updates.resolution_notes = userInput.trim();
+      }
+    }
+
+    if (merged.updates.resolution_notes && isInvalidOrGenericResolutionNotes(merged.updates.resolution_notes, merged.company_name)) {
+      delete merged.updates.resolution_notes;
+    }
   }
 
   return merged;
@@ -1657,13 +1677,21 @@ function validateMandatoryFields(action, draft) {
       break;
 
     case 'UPDATE_COMPLAINT': {
+      const { isInvalidOrGenericResolutionNotes } = require('../kra8');
       const hasCmpRef = Boolean(draft.linked_inquiry_or_po || draft.company_name || draft.complaint_id);
       if (!hasCmpRef) {
         missing.push('Customer Name OR Linked PO Number / Inquiry ID');
       }
       const cmpUpdates = draft.updates || {};
       const hasCmpUpdate = Object.values(cmpUpdates).some(v => v !== null && v !== undefined && v !== '');
-      if (!hasCmpUpdate) missing.push('At least one field to update (e.g. Complaint Type, Status, Description, Resolution Notes)');
+      if (!hasCmpUpdate) {
+        missing.push('At least one field to update (e.g. Complaint Type, Status, Description, Resolution Notes)');
+      }
+      if (cmpUpdates.status && ['resolved', 'closed'].includes(String(cmpUpdates.status).toLowerCase())) {
+        if (isInvalidOrGenericResolutionNotes(cmpUpdates.resolution_notes, draft.company_name)) {
+          missing.push('Resolution Notes');
+        }
+      }
       break;
     }
   }
@@ -5352,11 +5380,45 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.complaint_description) cmpUpdates.description = updates.complaint_description;
         if (updates.corrective_action) cmpUpdates.corrective_action = updates.corrective_action;
         if (updates.resolution_notes) cmpUpdates.resolution_notes = updates.resolution_notes;
+        const isResolved = updates.status && ['resolved', 'closed'].includes(String(updates.status).toLowerCase());
         if (updates.status) {
-          const st = updates.status.toLowerCase();
+          const st = String(updates.status).toLowerCase();
           cmpUpdates.status = st;
-          if (st === 'resolved' || st === 'closed') {
-            cmpUpdates.resolved_at = new Date().toISOString();
+          if (isResolved) {
+            const { isInvalidOrGenericResolutionNotes } = require('../kra8');
+            if (isInvalidOrGenericResolutionNotes(updates.resolution_notes, matchedCmp.customer_name)) {
+              return `⚠️ *Resolution Notes Required for ${matchedCmp.customer_name}*\n\nA complaint cannot be marked as resolved without providing resolution notes. Please provide the resolution details first.`;
+            }
+            const now = new Date();
+            cmpUpdates.resolved_at = now.toISOString();
+            const reportedAt = new Date(matchedCmp.reported_at || matchedCmp.created_at || Date.now());
+            const resolutionHrs = Math.max(1, Math.round((now.getTime() - reportedAt.getTime()) / (1000 * 60 * 60)));
+            cmpUpdates.resolution_time_hrs = resolutionHrs;
+            cmpUpdates.escalated = resolutionHrs > 48;
+
+            // Log to kra_logs (KRA 8)
+            try {
+              await supabase.from('kra_logs').insert({
+                salesperson_phone: senderPhone,
+                kra_number: 8,
+                kra_type: 'complaint_resolved',
+                description: `Complaint Resolved: ${matchedCmp.customer_name} (${resolutionHrs}h - ${resolutionHrs <= 48 ? 'Within SLA ✅' : 'SLA BREACHED ⚠️'})`,
+                customer_name: matchedCmp.customer_name,
+                month: now.getMonth() + 1,
+                year: now.getFullYear(),
+                created_at: now.toISOString(),
+              });
+            } catch (kraErr) {
+              console.warn('[CatalogFlow] KRA8 logging notice:', kraErr.message);
+            }
+
+            // Auto-resolve follow-up tasks
+            try {
+              const { resolveCustomerFollowupTasks } = require('../kra3');
+              await resolveCustomerFollowupTasks(matchedCmp.customer_name, senderPhone, 'complaint_resolved', matchedCmp.deal_id);
+            } catch (rErr) {
+              console.warn('[CatalogFlow] Follow-up auto-resolution notice:', rErr.message);
+            }
           }
         }
 
@@ -5393,6 +5455,21 @@ async function executeAction(action, draft, senderPhone) {
           : matchedCmp.deal_id
           ? `INQ-${cleanCmpCode}`
           : '';
+
+        if (isResolved) {
+          const resolutionHrs = cmpUpdates.resolution_time_hrs || 1;
+          const isSlaCompliant = resolutionHrs <= 48;
+          return `✅ *Customer Complaint Resolved Successfully!*\n\n` +
+            `• *Customer / Company:* ${matchedCmp.customer_name}\n` +
+            (linkedOrderRef ? `• *Linked Order / Ref:* ${linkedOrderRef}\n` : '') +
+            `• *Product / Material:* ${matchedCmp.product_name || matchedCmp.affected_product || 'Steel Material'}\n` +
+            `• *Complaint Type:* ${cmpUpdates.complaint_type || matchedCmp.complaint_type || 'Quality Defect'}\n` +
+            `• *Status:* ${updates.status || 'Resolved'}\n` +
+            `• *Resolution Notes:* ${cmpUpdates.resolution_notes || 'Resolved'}\n` +
+            `• *Resolution Time:* ${resolutionHrs} Hours\n` +
+            `• *SLA Target (48h):* ${isSlaCompliant ? '✅ Achieved - Within SLA Target!' : '⚠️ Breached - Escalated!'}\n\n` +
+            `Updated details saved to Customer Complaints Card! ✅`;
+        }
 
         let fieldsSummary = '';
         if (cmpUpdates.complaint_type) fieldsSummary += `• *Complaint Type:* ${cmpUpdates.complaint_type}\n`;
@@ -5626,7 +5703,23 @@ async function handleMidFlowComplaintResolution(text, senderPhone, activeState, 
   const { handleComplaintResolution } = require('../kra8');
   const resolutionReply = await handleComplaintResolution(text, senderPhone);
 
-  const actionDisplayName = getModuleDisplayName(action);
+  // If the user was already in a complaint flow, finalize cleanly without resume prompt
+  if (action === 'UPDATE_COMPLAINT' || action === 'LOG_COMPLAINT') {
+    await recordSessionMessage(senderPhone, 'user', text);
+    await recordSessionMessage(senderPhone, 'assistant', resolutionReply, {
+      action_type: action,
+      customer_name: draft?.company_name || null,
+    });
+    await finalizeCurrentSession(senderPhone, 'Complaint resolved directly', { action_type: action });
+    await saveActiveSession(senderPhone, 'Unknown', 'general');
+    return {
+      handled: true,
+      reply: resolutionReply,
+      interactiveType: 'buttons',
+      interactiveButtons: getPostActivityButtons(action),
+    };
+  }
+
   const companyLabel = draft?.company_name ? ` for *${draft.company_name}*` : '';
   const resumeMsg = `You were in the middle of ${getActionFriendlyName(action)}${companyLabel} — do you want to continue?`;
   const combinedReply = `${resolutionReply}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
@@ -6644,7 +6737,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // Check if user is resolving a complaint mid-flow
     const { isComplaintResolution } = require('../kra8');
-    if (isComplaintResolution(text)) {
+    if (isComplaintResolution(text) && currentAction !== 'UPDATE_COMPLAINT' && currentAction !== 'LOG_COMPLAINT') {
       return await handleMidFlowComplaintResolution(text, senderPhone, activeState, currentAction, currentDraft);
     }
 
@@ -6751,7 +6844,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // 3. User asks mid-resume complaint resolution, stage update, or retrieval query
     const { isComplaintResolution } = require('../kra8');
-    if (isComplaintResolution(text)) {
+    if (isComplaintResolution(text) && action !== 'UPDATE_COMPLAINT' && action !== 'LOG_COMPLAINT') {
       return await handleMidFlowComplaintResolution(text, senderPhone, interruptedState, action, draft);
     }
     if (isStageUpdatePrompt(text)) {
@@ -6777,7 +6870,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // Check mid-flow interruptions
     const { isComplaintResolution } = require('../kra8');
-    if (isComplaintResolution(text)) {
+    if (isComplaintResolution(text) && originalAction !== 'UPDATE_COMPLAINT' && originalAction !== 'LOG_COMPLAINT') {
       return await handleMidFlowComplaintResolution(text, senderPhone, 'catalog_implicit_cust_ask', originalAction, originalDraft);
     }
     if (isStageUpdatePrompt(text)) {
@@ -6980,7 +7073,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     // Check mid-flow interruptions
     const { isComplaintResolution } = require('../kra8');
-    if (isComplaintResolution(text)) {
+    if (isComplaintResolution(text) && originalAction !== 'UPDATE_COMPLAINT' && originalAction !== 'LOG_COMPLAINT') {
       return await handleMidFlowComplaintResolution(text, senderPhone, 'catalog_implicit_cust_collect', originalAction, custDraft);
     }
     if (isStageUpdatePrompt(text)) {
