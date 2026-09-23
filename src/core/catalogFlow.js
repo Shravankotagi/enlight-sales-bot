@@ -1146,7 +1146,11 @@ If only a single company is mentioned or if filling missing fields for an existi
   The backend validation engine will automatically detect generic/ambiguous terms and ask the user to clarify the exact catalog variant.
 - In LOG_COMPLAINT: if no official catalog product name is mentioned, leave 'affected_product' as null so the system automatically resolves it from the linked Order / PO!
 - "dimensions" / "spec": Extract thickness, gauge, width, and size (e.g. '8mm', '1250 x 2500', '50x50x6').
-
+11. TOTAL ORDER VALUE / DIRECT MONEY MODIFICATION (CRITICAL):
+- In UPDATE_ORDER: Total order value (or total money / total amount / grand total) is a computed calculation derived strictly from line item rates, quantities, and taxes.
+- Users CANNOT directly modify or override the total order value at the header level.
+- If the user asks to change the total value or money directly (e.g. 'Change the total Value from 2,36,000 to 2,50,000' or 'update total amount to 2,50,000'), do NOT put 'total_amount' or 'total_value' into updates, and do NOT create a line item update with only amount.
+- You MUST still extract any other valid updates mentioned in the message (e.g. payment_terms, delivery_location, po_date, delivery_date, status, po_number, or specific line item rate/qty changes).
 `;
 
   const userPrompt = `Existing Active Draft:
@@ -1176,6 +1180,35 @@ User Message:
   return existingDraft;
 }
 
+const TOTAL_VALUE_PERMISSION_NOTICE = '⚠️ *Permission Notice:* You do not have permission to directly change the Total Order Value. Total value is calculated automatically from individual line item quantities and rates. To adjust the total value, please update individual line item rates or quantities.';
+
+function detectTotalValueUpdateAttempt(text, extractedData) {
+  if (text && typeof text === 'string') {
+    const clean = text.trim();
+    if (
+      /\b(?:change|update|set|modify|make|edit|increase|decrease|reduce|fix)\b.*?\b(?:total\s*(?:order\s*)?(?:value|amount|price)|order\s*(?:value|amount)|grand\s*total|money)\b/i.test(clean) ||
+      /\b(?:total\s*(?:order\s*)?(?:value|amount|price)|order\s*(?:value|amount)|grand\s*total|money)\b.*?\b(?:change|update|set|modify|from|to|is|=|karo|badlo)\b/i.test(clean) ||
+      /\btotal\s+(?:value|amount)\s+(?:from\s+[\d,.]+\s+)?to\s+[\d,.]+/i.test(clean) ||
+      /\b(?:change|update|set|modify)\s+(?:the\s+)?total\s+(?:value|amount)\b/i.test(clean)
+    ) {
+      return true;
+    }
+  }
+
+  if (extractedData?.updates && (extractedData.updates.total_amount || extractedData.updates.total_value || extractedData.updates.grand_total)) {
+    return true;
+  }
+
+  if (Array.isArray(extractedData?.line_item_updates)) {
+    const spuriousAmountUpdate = extractedData.line_item_updates.some(item => 
+      item && item.amount && !item.rate && !item.quantity && !item.item_reference && !item.description && !item.sku_text
+    );
+    if (spuriousAmountUpdate) return true;
+  }
+
+  return false;
+}
+
 // ── MERGE DRAFT HELPER ───────────────────────────────────────────────────────
 
 function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
@@ -1192,6 +1225,9 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
         merged.updates = merged.updates || {};
         for (const [uKey, uVal] of Object.entries(val)) {
           if (uVal !== null && uVal !== undefined && uVal !== '') {
+            if (action === 'UPDATE_ORDER' && (uKey === 'total_amount' || uKey === 'total_value' || uKey === 'grand_total' || uKey === 'amount')) {
+              continue;
+            }
             merged.updates[uKey] = uVal;
           }
         }
@@ -1229,8 +1265,19 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
           }
         }
       } else if (key === 'line_item_updates' && Array.isArray(val)) {
-        if (val.length > 0) {
-          merged.line_item_updates = val;
+        let validUpdates = val;
+        if (action === 'UPDATE_ORDER') {
+          validUpdates = val.filter(item => {
+            if (!item) return false;
+            // Reject items where only amount is given without any item reference, product, rate, or quantity
+            if (item.amount && !item.rate && !item.quantity && !item.item_reference && !item.description && !item.sku_text) {
+              return false;
+            }
+            return Boolean(item.item_reference || item.description || item.sku_text || item.rate || item.quantity || item.spec || item.dimensions);
+          });
+        }
+        if (validUpdates.length > 0) {
+          merged.line_item_updates = validUpdates;
           if (merged.updates) {
             delete merged.updates.rate;
             delete merged.updates.product_description;
@@ -1394,10 +1441,17 @@ function mergeDraft(action, baseDraft, newExtracted, userInput = '') {
       merged._totalCount = baseDraft._totalCount || (merged._queue.length + 1);
       merged._currentIndex = baseDraft._currentIndex || 1;
     }
+    if (action === 'UPDATE_ORDER' && detectTotalValueUpdateAttempt(userInput, newExtracted)) {
+      merged._permissionNotice = TOTAL_VALUE_PERMISSION_NOTICE;
+    }
     return merged;
   }
 
-  return mergeSingleDraft(action, baseDraft, newExtracted, userInput);
+  const merged = mergeSingleDraft(action, baseDraft, newExtracted, userInput);
+  if (action === 'UPDATE_ORDER' && detectTotalValueUpdateAttempt(userInput, newExtracted)) {
+    merged._permissionNotice = TOTAL_VALUE_PERMISSION_NOTICE;
+  }
+  return merged;
 }
 
 // ── FORWARD CUSTOMER DETAILS TO PARENT DRAFT ──────────────────────────────
@@ -3002,7 +3056,11 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
 
   if (!hasUpdates) {
     const displayInq = deal.inquiry_id ? `INQ-${deal.inquiry_id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : `INQ-${deal.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
-    const prompt = `✏️ *Order / Inquiry Found for ${deal.customer_name}:*\n\n` +
+    let prompt = '';
+    if (draft._permissionNotice) {
+      prompt += `${draft._permissionNotice}\n\n`;
+    }
+    prompt += `✏️ *Order / Inquiry Found for ${deal.customer_name}:*\n\n` +
       `• *Inquiry ID:* ${displayInq}\n` +
       `• *PO Number:* ${deal.po_number || 'Not Attached Yet'}\n` +
       `• *Stage:* ${deal.stage || 'Won'}\n` +
@@ -3093,7 +3151,11 @@ async function checkComplaintsForUpdate(action, draft, senderPhone, originalText
 
 function buildConfirmationSummary(action, draft) {
   const indexTag = draft._totalCount && draft._totalCount > 1 ? ` (${draft._currentIndex || 1} of ${draft._totalCount}: ${draft.company_name || 'Item'})` : '';
-  let summary = `✅ *Here's what I've captured${indexTag}:*\n\n`;
+  let summary = '';
+  if (draft._permissionNotice) {
+    summary += `${draft._permissionNotice}\n\n`;
+  }
+  summary += `✅ *Here's what I've captured${indexTag}:*\n\n`;
 
   switch (action) {
     case 'LOG_INQUIRY': {
@@ -7205,7 +7267,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
       const missingList = missing.map((m) => `- **${m}**`).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
-      const askMissing = `Let's finish your ${actionName}${indexTag} first. Please provide the missing mandatory details:\n\n${missingList}`;
+      let askMissing = '';
+      if (updatedDraft._permissionNotice) {
+        askMissing += `${updatedDraft._permissionNotice}\n\n`;
+      }
+      askMissing += `Let's finish your ${actionName}${indexTag} first. Please provide the missing mandatory details:\n\n${missingList}`;
       await recordSessionMessage(senderPhone, 'assistant', askMissing, {
         action_type: action,
         customer_name: updatedDraft.company_name,
@@ -7596,7 +7662,11 @@ async function handleCatalogFlow(rawText, senderPhone) {
       const missingList = missing.map((m) => `- **${m}**`).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
-      const askMissing = `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
+      let askMissing = '';
+      if (updatedDraft._permissionNotice) {
+        askMissing += `${updatedDraft._permissionNotice}\n\n`;
+      }
+      askMissing += `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
       await recordSessionMessage(senderPhone, 'assistant', askMissing, {
         action_type: action,
         customer_name: updatedDraft.company_name,
