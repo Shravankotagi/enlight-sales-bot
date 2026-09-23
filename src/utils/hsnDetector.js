@@ -291,7 +291,7 @@ function normalizeProductToCatalog(productName, dimensions = null) {
   if (/\bsquare\s*(?:pipe|tube|tubing)\b|\bshs\b|\bbox\s*(?:pipe|tube|section)\b/i.test(combined) || (/\bsquare\b/i.test(p) && /\b(?:pipe|tube)\b/i.test(combined))) {
     return { isValid: true, catalogName: 'MS Square Pipe', category: 'Pipes and Tubes', hsnCode: '73063090' };
   }
-  if (/\b(?:round\s*pipe|erw\s*pipe|seamless\s*pipe|ms\s*pipe|gi\s*pipe|round\s*tube|ms\s*tube|pipe|tube)\b/i.test(combined)) {
+  if (/\b(?:round\s*pipe|erw\s*pipe|seamless\s*pipe|ms\s*pipe|gi\s*pipe|round\s*tube|ms\s*tube)\b/i.test(combined)) {
     return { isValid: true, catalogName: 'MS Round Pipe', category: 'Pipes and Tubes', hsnCode: '73063090' };
   }
 
@@ -412,57 +412,57 @@ function getUnknownProductClarificationMessage(invalidProductName) {
   if (pLower.includes('coil')) {
     return `⚠️ Product "${invalidProductName}" is not present in our product list.\n\n` +
       `Please confirm which coil product from our catalog you would like to log:\n` +
-      `• *HR Coil* (1.60 mm – 10.00+ mm)\n` +
-      `• *CR Coil* (0.30 mm – <3.00 mm)\n` +
-      `• *HRPO Coil* (1.60 mm – 12.00 mm)\n` +
-      `• *GP Coil* (0.30 mm – 3.00 mm)\n` +
-      `• *Galvalume Coil* (0.30 mm – 3.00 mm)\n` +
-      `• *Chequered Coil* (1.60 mm – 12.00 mm)\n\n` +
-      `Please reply with the confirmed product name (e.g. "HR Coil" or "CR Coil").`;
+      `1️⃣ *HR Coil* (1.60 mm – 10.00+ mm)\n` +
+      `2️⃣ *CR Coil* (0.30 mm – <3.00 mm)\n` +
+      `3️⃣ *HRPO Coil* (1.60 mm – 12.00 mm)\n` +
+      `4️⃣ *GP Coil* (0.30 mm – 3.00 mm)\n` +
+      `5️⃣ *Galvalume Coil* (0.30 mm – 3.00 mm)\n` +
+      `6️⃣ *Chequered Coil* (1.60 mm – 12.00 mm)\n\n` +
+      `Please reply with the confirmed product name (e.g. "HR Coil" or "CR Coil") or option number (1–6).`;
   }
 
   // Sheet suggestions
   if (pLower.includes('ms sheet') || (pLower.includes('sheet') && !pLower.includes('hr') && !pLower.includes('cr') && !pLower.includes('gp') && !pLower.includes('galvalume') && !pLower.includes('chequered') && !pLower.includes('hrpo'))) {
     return `⚠️ Product "${invalidProductName}" is not present in our product list.\n\n` +
       `Please confirm which sheet product from our catalog you would like to log:\n` +
-      `• *HR Sheet* (1.60 mm – <12.00 mm)\n` +
-      `• *CR Sheet* (0.30 mm – <3.00 mm)\n` +
-      `• *HRPO Sheet* (1.60 mm – 12.00 mm)\n` +
-      `• *GP Sheet* (0.30 mm – 3.00 mm)\n` +
-      `• *Galvalume Sheet* (0.30 mm – 3.00 mm)\n` +
-      `• *Chequered Sheet* (1.60 mm – 12.00 mm)\n\n` +
-      `Please reply with the confirmed product name (e.g. "HR Sheet" or "CR Sheet").`;
+      `1️⃣ *HR Sheet* (1.60 mm – <12.00 mm)\n` +
+      `2️⃣ *CR Sheet* (0.30 mm – <3.00 mm)\n` +
+      `3️⃣ *HRPO Sheet* (1.60 mm – 12.00 mm)\n` +
+      `4️⃣ *GP Sheet* (0.30 mm – 3.00 mm)\n` +
+      `5️⃣ *Galvalume Sheet* (0.30 mm – 3.00 mm)\n` +
+      `6️⃣ *Chequered Sheet* (1.60 mm – 12.00 mm)\n\n` +
+      `Please reply with the confirmed product name (e.g. "HR Sheet" or "CR Sheet") or option number (1–6).`;
   }
 
   // Plate suggestions
   if (pLower.includes('ms plate') || (pLower.includes('plate') && !pLower.includes('hr') && !pLower.includes('chequered'))) {
     return `⚠️ Product "${invalidProductName}" is not present in our product list.\n\n` +
       `Please confirm which product from our catalog you would like to log:\n` +
-      `• *HR Plate* (14.00 mm and above)\n` +
-      `• *HR Sheet* (4.75 mm – <12.00 mm)\n` +
-      `• *Chequered Sheet* (1.60 mm – 12.00 mm)\n\n` +
-      `Please reply with the confirmed product name (e.g. "HR Plate").`;
+      `1️⃣ *HR Plate* (14.00 mm and above)\n` +
+      `2️⃣ *HR Sheet* (4.75 mm – <12.00 mm)\n` +
+      `3️⃣ *Chequered Sheet* (1.60 mm – 12.00 mm)\n\n` +
+      `Please reply with the confirmed product name (e.g. "HR Plate") or option number (1–3).`;
   }
 
   // Pipes & Tubes
   if (pLower.includes('pipe') || pLower.includes('tube') || pLower.includes('tubing')) {
     return `⚠️ Product "${invalidProductName}" is not present in our product list.\n\n` +
       `Please confirm which pipe/tube product from our catalog you would like to log:\n` +
-      `• *MS Round Pipe* (NB 15–400 mm)\n` +
-      `• *MS Square Pipe* (Thickness 1–25 mm)\n` +
-      `• *MS Rectangular Tube* (Thickness 1–25 mm)\n\n` +
-      `Please reply with the confirmed product name (e.g. "MS Square Pipe").`;
+      `1️⃣ *MS Round Pipe* (NB 15–400 mm)\n` +
+      `2️⃣ *MS Square Pipe* (Thickness 1–25 mm)\n` +
+      `3️⃣ *MS Rectangular Tube* (Thickness 1–25 mm)\n\n` +
+      `Please reply with the confirmed product name (e.g. "MS Square Pipe") or option number (1–3).`;
   }
 
   // Bars & Rods
   if (pLower.includes('bar') || pLower.includes('rod') || pLower.includes('sariya')) {
     return `⚠️ Product "${invalidProductName}" is not present in our product list.\n\n` +
       `Please confirm which bar product from our catalog you would like to log:\n` +
-      `• *MS Round Bar* (6 mm – 75 mm)\n` +
-      `• *MS Flat Bar* (12×3 mm – 300×25 mm)\n` +
-      `• *MS Square Bar* (6 mm – 100 mm)\n` +
-      `• *TMT Bar* (8 mm – 40 mm)\n\n` +
-      `Please reply with the confirmed product name (e.g. "TMT Bar").`;
+      `1️⃣ *MS Round Bar* (6 mm – 75 mm)\n` +
+      `2️⃣ *MS Flat Bar* (12×3 mm – 300×25 mm)\n` +
+      `3️⃣ *MS Square Bar* (6 mm – 100 mm)\n` +
+      `4️⃣ *TMT Bar* (8 mm – 40 mm)\n\n` +
+      `Please reply with the confirmed product name (e.g. "TMT Bar") or option number (1–4).`;
   }
 
   return `⚠️ Product "${invalidProductName}" is not present in our product list.\n\n` +

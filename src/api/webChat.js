@@ -3,6 +3,8 @@ const router = express.Router();
 const { handleCatalogFlow } = require('../core/catalogFlow');
 const { runOrchestrator } = require('../core/orchestrator');
 const { getFullActiveSession, saveActiveSession, supabase } = require('../supabase');
+const { handlePendingSessionState } = require('../core/pendingStateManager');
+const { clearActiveSession } = require('../core/sessionManager');
 
 /**
  * Authentication middleware for Web Chat API.
@@ -104,198 +106,6 @@ function formatForWeb(text) {
 }
 
 /**
- * Handles active multi-turn session pending states (loss reason, payment confirmation, etc.)
- */
-async function handlePendingSessionState(rawText, senderPhone) {
-  const activeSession = await getFullActiveSession(senderPhone);
-  if (!activeSession || !activeSession.last_intent) return null;
-
-  const lastIntent = activeSession.last_intent;
-
-  // 1. Pending Loss Reason
-  if (lastIntent.startsWith('pending_loss_reason|')) {
-    const parts = lastIntent.split('|');
-    const dealId = parts[1];
-    const customerName = parts[2];
-
-    const MAP_REASONS = {
-      '1': 'Price',
-      '2': 'Credit terms',
-      '3': 'Delivery timeline',
-      '4': 'Material unavailable',
-      '5': 'Spec mismatch',
-      '6': 'Competitor relationship',
-      '7': 'Customer silent',
-      '8': 'Cancelled by customer',
-    };
-
-    const cleanInput = rawText.replace(/[️⃣\s]/g, '').trim();
-    let selectedReason = cleanInput;
-    if (MAP_REASONS[cleanInput]) {
-      selectedReason = MAP_REASONS[cleanInput];
-    } else {
-      const numMatch = cleanInput.match(/^([1-8])/);
-      if (numMatch && MAP_REASONS[numMatch[1]]) {
-        selectedReason = MAP_REASONS[numMatch[1]];
-      } else {
-        selectedReason = rawText;
-      }
-    }
-
-    let dealAmount = 0;
-    const { data: dealRow } = await supabase
-      .from('deals')
-      .select('total_amount, deal_items(amount, quantity, rate)')
-      .eq('id', dealId)
-      .limit(1);
-    if (dealRow && dealRow.length > 0) {
-      dealAmount = Number(dealRow[0].total_amount || 0);
-      if (dealAmount === 0 && dealRow[0].deal_items && dealRow[0].deal_items.length > 0) {
-        dealAmount = dealRow[0].deal_items.reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
-      }
-    }
-
-    await supabase
-      .from('deals')
-      .update({ stage: 'lost', lost_reason: selectedReason, ...(dealAmount > 0 ? { total_amount: dealAmount } : {}) })
-      .eq('id', dealId);
-
-    await supabase.from('kra_logs').insert({
-      salesperson_phone: senderPhone,
-      kra_number: 4,
-      kra_type: 'deal_lost',
-      value: dealAmount,
-      customer_name: customerName,
-      description: `Deal Lost: ${customerName} - Reason: ${selectedReason}`,
-      month: new Date().getMonth() + 1,
-      year: new Date().getFullYear(),
-    });
-
-    await saveActiveSession(senderPhone, customerName, 'general');
-
-    return `Deal Marked as LOST\n\n- Customer: ${customerName}\n- Stage: Closed Lost\n- Reason: ${selectedReason}\n\nUpdated Loss Analytics Dashboard!`;
-  }
-
-  // 2. Pending Payment Confirm
-  if (lastIntent.startsWith('pending_payment_confirm|')) {
-    const parts = lastIntent.split('|');
-    const dealId = parts[1];
-    const customerName = parts[2];
-    const amountPaid = Number(parts[3]);
-    const amountPending = Number(parts[4]);
-    const isFullPayment = parts[5] === 'true';
-
-    const cleanInput = rawText.replace(/[️⃣\s]/g, '').trim();
-
-    if (cleanInput === '2' || cleanInput.toLowerCase().includes('won')) {
-      const { data: existingDealRow } = await supabase
-        .from('deals')
-        .select('po_number')
-        .eq('id', dealId)
-        .limit(1);
-
-      let targetPoNumber = existingDealRow?.[0]?.po_number;
-      if (!targetPoNumber) {
-        const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-        const randomNum = Math.floor(1000 + Math.random() * 9000);
-        targetPoNumber = `PO-${todayStr}-${randomNum}`;
-      }
-
-      await supabase
-        .from('deals')
-        .update({
-          stage: 'won',
-          won_at: new Date().toISOString(),
-          po_number: targetPoNumber,
-        })
-        .eq('id', dealId);
-
-      await saveActiveSession(senderPhone, customerName, 'general');
-
-      const { processPaymentMessage } = require('../agents/paymentAgent');
-      const syntheticText =
-        `${customerName} paid ₹${amountPaid}` +
-        (amountPending > 0 ? ` outstanding ₹${amountPending}` : '') +
-        (isFullPayment ? ' full payment' : '');
-      const reply = await processPaymentMessage(syntheticText, senderPhone);
-
-      return `Deal Marked as WON & Payment Logged!\n\n` + reply;
-    }
-
-    if (cleanInput === '1' || cleanInput.toLowerCase().includes('yes')) {
-      await saveActiveSession(senderPhone, customerName, 'general');
-
-      const { processPaymentMessage } = require('../agents/paymentAgent');
-      const syntheticText =
-        `${customerName} paid ₹${amountPaid}` +
-        (amountPending > 0 ? ` outstanding ₹${amountPending}` : '') +
-        (isFullPayment ? ' full payment' : '');
-      const reply = await processPaymentMessage(syntheticText, senderPhone);
-
-      return reply;
-    }
-
-    return `Please reply 1 to log payment for the open deal, or 2 to mark the deal as Won first.`;
-  }
-
-  // 3. Pending Amount Confirm
-  if (lastIntent.startsWith('pending_amount_confirm|')) {
-    const parts = lastIntent.split('|');
-    const customerName = parts[1];
-    const amountPaid = Number(parts[2]);
-    const amountPending = Number(parts[3]);
-    const correctedPending = Number(parts[5]);
-
-    const cleanInput = rawText.replace(/[️⃣\s]/g, '').trim();
-    await saveActiveSession(senderPhone, customerName, 'general');
-
-    if (cleanInput === '3' || cleanInput.toLowerCase().includes('cancel')) {
-      return `Cancelled. Please resend the correct payment details when ready.`;
-    }
-
-    let finalPending = amountPending;
-    if (cleanInput === '1') {
-      finalPending = correctedPending;
-    }
-
-    const { processPaymentMessage } = require('../agents/paymentAgent');
-    const syntheticText =
-      `${customerName} paid ₹${amountPaid}` +
-      (finalPending > 0 ? ` outstanding ₹${finalPending}` : ' full payment');
-    const reply = await processPaymentMessage(syntheticText, senderPhone);
-    return reply;
-  }
-
-  // 4. Pending Unit Confirm
-  if (lastIntent.startsWith('pending_unit_confirm|')) {
-    const parts = lastIntent.split('|');
-    const customerName = parts[1];
-    const productName = parts[2];
-    const qtyNum = parts[3];
-
-    const cleanInput = rawText.trim();
-    const isNewInquiry = /\b(need|requires|new deal|inquiry|requirement|want|order)\b/i.test(cleanInput);
-
-    if (!isNewInquiry) {
-      await saveActiveSession(senderPhone, customerName, 'general');
-      const { processSalesMessage } = require('../agents/salesAgent');
-
-      if (cleanInput === '1' || cleanInput.toLowerCase().includes('yes')) {
-        const syntheticText = `${customerName} requirement ${qtyNum} MT ${productName}`;
-        return await processSalesMessage(syntheticText, senderPhone);
-      }
-
-      const syntheticText = `${customerName} requirement ${rawText} ${productName}`;
-      return await processSalesMessage(syntheticText, senderPhone);
-    }
-
-    await saveActiveSession(senderPhone, 'Unknown', 'general');
-  }
-
-  return null;
-}
-
-/**
  * Normalizes incoming interactive button IDs / action triggers into standard flow commands.
  */
 function normalizeIncomingButtonPayload(rawInput) {
@@ -349,13 +159,33 @@ function normalizeIncomingButtonPayload(rawInput) {
 }
 
 /**
+ * POST /chat/web/reset
+ * Resets the active conversation state and draft sessions for an employee.
+ */
+router.post('/reset', requireWebApiKey, async (req, res) => {
+  try {
+    const { employeePhone } = req.body;
+    let cleanPhone = String(employeePhone || '').replace(/\D/g, '');
+    if (cleanPhone.length < 10) cleanPhone = '9619226169';
+
+    await saveActiveSession(cleanPhone, 'Unknown', 'general');
+    await clearActiveSession(cleanPhone);
+
+    return res.json({ success: true, message: 'Session reset successfully' });
+  } catch (err) {
+    console.error('[WebChat] Error resetting session:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
  * POST /chat/web/message
  * Entry point for Web AI Assistant messages.
- * Body: { message: string, employeePhone?: string, userId?: string, employeeName?: string, role?: string }
+ * Body: { message: string, employeePhone?: string, userId?: string, employeeName?: string, role?: string, resetSession?: boolean }
  */
 router.post('/message', requireWebApiKey, async (req, res) => {
   try {
-    const { message, employeePhone, userId, employeeName, role } = req.body;
+    const { message, employeePhone, userId, employeeName, role, resetSession } = req.body;
 
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ success: false, error: 'message string is required' });
@@ -366,6 +196,12 @@ router.post('/message', requireWebApiKey, async (req, res) => {
       cleanPhone = cleanPhone.slice(-10);
     } else {
       cleanPhone = '9619226169'; // Default fallback phone for sales ops
+    }
+
+    // Optional reset if starting fresh conversation
+    if (resetSession === true) {
+      await saveActiveSession(cleanPhone, 'Unknown', 'general');
+      await clearActiveSession(cleanPhone);
     }
 
     const rawText = normalizeIncomingButtonPayload(message);
@@ -393,7 +229,7 @@ router.post('/message', requireWebApiKey, async (req, res) => {
       });
     }
 
-    // LAYER 2: Active Session Pending State Machine
+    // LAYER 2: Unified Active Session Pending State Machine
     const pendingReply = await handlePendingSessionState(rawText, cleanPhone);
     if (pendingReply) {
       const formattedReply = formatForWeb(pendingReply);
