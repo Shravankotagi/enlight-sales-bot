@@ -65,8 +65,9 @@ STEP 2B - If NO such label exists, OR the document says "Inquiry", "RFQ", "Quota
 5. LINE ITEMS & UNITS (line_items):
    - Extract exact quantity and EXACT UOM (unit of measure) stated in the line item table.
    - If the document table specifies UOM as "Kg" or "KG" and Qty "5000.0", set quantity: 5000 and unit: "KG".
-   - If the document table specifies UOM as "MT" or "Tons", set unit: "MT".
-   - If the document table specifies UOM as "PCS" or "Sheets", set unit: "PCS" / "Sheets".
+   - If the document table specifies UOM as "MT", "M.T", "Tons", or "Tonnes", set unit: "MT".
+   - If the document table specifies UOM as "PCS", "Nos", or "Sheets", set unit: "PCS" / "Nos" / "Sheets".
+   - ⚠️ CRITICAL: "HR Plate", "HR Sheet", "CR Coil", "MS Plate", "Angle", "Pipe" are MATERIAL/PRODUCT NAMES (sku_text), NOT units! Never set "Plates", "Coils", "Pipes" as the unit if the column or 'Per' column specifies "M.T", "MT", "KG", or numeric weights.
    - NEVER convert unit to MT if the document table explicitly says Kg!
 ════════════════════════════════════════════════════
 

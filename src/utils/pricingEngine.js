@@ -140,19 +140,20 @@ function convertLineItemToMt(item) {
   let widthM = null;
   let lengthM = null;
 
-  const dim3Match = combinedText.match(/(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)\s*[xX*]\s*(\d+(?:\.\d+)?)/);
+  const dim3Match = combinedText.match(/(\d+(?:\.\d+)?)\s*[xX*×]\s*(\d+(?:\.\d+)?)\s*[xX*×]\s*(\d+(?:\.\d+)?)/);
   if (dim3Match) {
     const n1 = parseFloat(dim3Match[1]);
     const n2 = parseFloat(dim3Match[2]);
     const n3 = parseFloat(dim3Match[3]);
     const sorted = [n1, n2, n3].sort((a, b) => a - b);
-    if (!thickness) thickness = sorted[0];
+    // In steel specs (e.g. 05X1500X6300MM), the smallest dimension is always thickness in mm
+    thickness = sorted[0];
     const w = sorted[1];
     const l = sorted[2];
     widthM = w > 20 ? w / 1000 : w;
     lengthM = l > 20 ? l / 1000 : l;
   } else {
-    const dim2Match = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*]\s*(\d+(?:\.\d+)?)\s*(?:mm)?/);
+    const dim2Match = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*×]\s*(\d+(?:\.\d+)?)\s*(?:mm)?/);
     if (dim2Match) {
       const d1 = parseFloat(dim2Match[1]);
       const d2 = parseFloat(dim2Match[2]);
@@ -160,6 +161,9 @@ function convertLineItemToMt(item) {
       const l = Math.max(d1, d2);
       widthM = w > 20 ? w / 1000 : w;
       lengthM = l > 20 ? l / 1000 : l;
+      if (thickness && thickness >= w) {
+        thickness = null;
+      }
     }
   }
 
