@@ -213,9 +213,9 @@ async function checkComplaints() {
 
     console.log(`Checking ${openComplaints.length} open complaints...`);
     const now = Date.now();
-    const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
+    const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
     const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
-    const FIVE_HOURS_AGO_ISO = new Date(now - FIVE_HOURS_MS).toISOString();
+    const TWELVE_HOURS_AGO_ISO = new Date(now - TWELVE_HOURS_MS).toISOString();
 
     // Query recent complaint reminder logs from kra_logs (persistent across server restarts)
     const { data: recentLogs } = await supabase
@@ -223,7 +223,7 @@ async function checkComplaints() {
       .select('description, salesperson_phone, kra_type, created_at')
       .eq('kra_number', 8)
       .in('kra_type', ['complaint_reminder', 'complaint_team_reminder', 'complaint_admin_digest'])
-      .gte('created_at', FIVE_HOURS_AGO_ISO);
+      .gte('created_at', TWELVE_HOURS_AGO_ISO);
 
     const recentlyRemindedComplaints = new Set(
       (recentLogs || [])
@@ -256,7 +256,7 @@ async function checkComplaints() {
     });
 
     // ────────────────────────────────────────────────────────────────────────
-    // 1. SALES MANAGER REMINDERS (AFTER EVERY 5 HOURS)
+    // 1. SALES MANAGER REMINDERS (AFTER EVERY 12 HOURS / TWICE DAILY)
     // ────────────────────────────────────────────────────────────────────────
     for (const manager of managers) {
       const teamPhones = managerTeamMap[manager.phone] || [manager.phone];
@@ -298,10 +298,10 @@ async function checkComplaints() {
           });
           recentlyRemindedManagers.add(manager.phone);
           notificationThrottleState.managerLastReminded[manager.phone] = now;
-          console.log(`[Complaints Notification] 5-hour team reminder sent to Sales Manager ${manager.name} (${manager.phone}) for ${count} complaints`);
+          console.log(`[Complaints Notification] 12-hour team reminder sent to Sales Manager ${manager.name} (${manager.phone}) for ${count} complaints`);
           await new Promise(r => setTimeout(r, 1000));
         } else {
-          console.log(`[Complaints Notification] Skipping manager ${manager.name} - already reminded within the last 5 hours`);
+          console.log(`[Complaints Notification] Skipping manager ${manager.name} - already reminded within the last 12 hours`);
         }
       }
     }
@@ -390,7 +390,7 @@ async function checkComplaints() {
         console.log(`[Complaints Notification] Escalation notice sent to salesperson for complaint ${complaint.id}`);
         await new Promise(r => setTimeout(r, 1000));
 
-      // 24+ hours - Send reminder to salesperson (cooldown strictly 5 hours via kra_logs)
+      // 24+ hours - Send reminder to salesperson (cooldown strictly 12 hours via kra_logs - twice daily)
       } else if (hoursElapsed >= 24 && hoursElapsed < 48) {
         if (!recentlyRemindedComplaints.has(complaint.id)) {
           const reminderMsg =
@@ -416,10 +416,10 @@ async function checkComplaints() {
           });
           recentlyRemindedComplaints.add(complaint.id);
           notificationThrottleState.complaintLastReminded[complaint.id] = now;
-          console.log(`[Complaints Notification] 5-hour reminder sent to salesperson for complaint ${complaint.id}`);
+          console.log(`[Complaints Notification] 12-hour reminder sent to salesperson for complaint ${complaint.id}`);
           await new Promise(r => setTimeout(r, 1000));
         } else {
-          console.log(`[Complaints Notification] Skipping complaint ${complaint.id} - already reminded within the last 5 hours`);
+          console.log(`[Complaints Notification] Skipping complaint ${complaint.id} - already reminded within the last 12 hours`);
         }
       }
     }

@@ -97,15 +97,38 @@ function startScheduler() {
 
   schedulePaymentChecks();
 
-  // KRA 8 - Complaint check every 5 hours
-  async function runComplaintCheck() {
-    await checkComplaints();
+  // KRA 8 - Complaint check twice daily (10 AM and 10 PM IST - 12 hours apart)
+  function scheduleComplaintChecks() {
+    function msUntilNext(hour) {
+      const now = new Date();
+      const IST_OFFSET = 5.5 * 60 * 60 * 1000;
+      const istNow = new Date(now.getTime() + IST_OFFSET);
+      const next = new Date(istNow);
+      next.setHours(hour, 0, 0, 0);
+      if (istNow.getHours() >= hour) {
+        next.setDate(next.getDate() + 1);
+      }
+      return next.getTime() - istNow.getTime();
+    }
+
+    // 10 AM IST check (Morning reminder)
+    const msTo10AM = msUntilNext(10);
+    setTimeout(async () => {
+      await checkComplaints();
+      setInterval(checkComplaints, 24 * 60 * 60 * 1000);
+    }, msTo10AM);
+
+    // 10 PM IST check (Evening reminder - 12 hours later)
+    const msTo10PM = msUntilNext(22);
+    setTimeout(async () => {
+      await checkComplaints();
+      setInterval(checkComplaints, 24 * 60 * 60 * 1000);
+    }, msTo10PM);
+
+    console.log(`Complaint checks scheduled: 10 AM and 10 PM IST daily (in ${Math.round(Math.min(msTo10AM, msTo10PM) / 60000)} minutes)`);
   }
 
-  // Run immediately on startup (throttled persistently in DB to 5 hours) and then every 5 hours
-  runComplaintCheck();
-  setInterval(runComplaintCheck, 5 * 60 * 60 * 1000);
-  console.log('Complaint check scheduled: every 5 hours');
+  scheduleComplaintChecks();
 }
 
 // For manual trigger (testing)
