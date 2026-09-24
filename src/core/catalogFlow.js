@@ -1181,7 +1181,8 @@ If only a single company is mentioned or if filling missing fields for an existi
 - In UPDATE_ORDER: Total order value (or total money / total amount / grand total) is a computed calculation derived strictly from line item rates, quantities, and taxes.
 - Users CANNOT directly modify or override the total order value at the header level.
 - If the user asks to change the total value or money directly (e.g. 'Change the total Value from 2,36,000 to 2,50,000' or 'update total amount to 2,50,000'), do NOT put 'total_amount' or 'total_value' into updates, and do NOT create a line item update with only amount.
-- You MUST still extract any other valid updates mentioned in the message (e.g. payment_terms, delivery_location, po_date, delivery_date, status, po_number, or specific line item rate/qty changes).
+- When the user edits company name, PO number, PO date, delivery location, payment terms, or other fields, do NOT output 'updates.total_amount' or dummy 'line_item_updates'.
+- You MUST extract ONLY the specific valid updates requested in the user message.
 12. UPDATE_COMPLAINT RESOLUTION NOTES (CRITICAL):
 - In UPDATE_COMPLAINT, 'updates.resolution_notes' MUST strictly contain ONLY actual details describing how the issue was resolved (e.g. 'replacement 10 MT plates dispatched and accepted', 'credit note CN-102 issued for ₹20,000', 'commercial discount of ₹500/MT approved').
 - NEVER put the user's action command, request text, or phrase (e.g. 'update this po PO: PO-20260923-9085 compliant and mark it resolved', 'mark as resolved', 'resolve my last complaint', 'close the complaint') into 'updates.resolution_notes'.
@@ -1222,27 +1223,25 @@ User Message:
 const TOTAL_VALUE_PERMISSION_NOTICE = '⚠️ *Permission Notice:* You do not have permission to directly change the Total Order Value. Total value is calculated automatically from individual line item quantities and rates. To adjust the total value, please update individual line item rates or quantities.';
 
 function detectTotalValueUpdateAttempt(text, extractedData) {
-  if (text && typeof text === 'string') {
-    const clean = text.trim();
-    if (
-      /\b(?:change|update|set|modify|make|edit|increase|decrease|reduce|fix)\b.*?\b(?:total\s*(?:order\s*)?(?:value|amount|price)|order\s*(?:value|amount)|grand\s*total|money)\b/i.test(clean) ||
-      /\b(?:total\s*(?:order\s*)?(?:value|amount|price)|order\s*(?:value|amount)|grand\s*total|money)\b.*?\b(?:change|update|set|modify|from|to|is|=|karo|badlo)\b/i.test(clean) ||
-      /\btotal\s+(?:value|amount)\s+(?:from\s+[\d,.]+\s+)?to\s+[\d,.]+/i.test(clean) ||
-      /\b(?:change|update|set|modify)\s+(?:the\s+)?total\s+(?:value|amount)\b/i.test(clean)
-    ) {
-      return true;
-    }
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.trim();
+  if (!clean) return false;
+
+  // Check if user input explicitly refers to modifying the total value / money / total amount
+  const hasTotalKeywords = /\b(?:total\s*(?:order\s*)?(?:value|amount|price)|order\s*(?:value|amount)|grand\s*total|total\s*money)\b/i.test(clean);
+  if (!hasTotalKeywords) {
+    return false;
   }
 
-  if (extractedData?.updates && (extractedData.updates.total_amount || extractedData.updates.total_value || extractedData.updates.grand_total)) {
+  // Verify modification action/intent targeting total value (prevent false positives on company name, PO, quantity/tonnage)
+  if (
+    /\b(?:change|update|set|modify|make|edit|increase|decrease|reduce|fix)\b.*?\b(?:total\s*(?:order\s*)?(?:value|amount|price)|order\s*(?:value|amount)|grand\s*total|total\s*money)\b/i.test(clean) ||
+    /\b(?:total\s*(?:order\s*)?(?:value|amount|price)|order\s*(?:value|amount)|grand\s*total|total\s*money)\b.*?\b(?:change|update|set|modify|from|to|is|=|karo|badlo)\b/i.test(clean) ||
+    /\btotal\s+(?:order\s+)?(?:value|amount)\s+(?:from\s+[\d,.]+\s+)?to\s+[\d,.]+/i.test(clean) ||
+    /\b(?:change|update|set|modify)\s+(?:the\s+)?total\s+(?:order\s+)?(?:value|amount)\b/i.test(clean) ||
+    /\b(?:total\s*(?:order\s*)?(?:value|amount))\s*[:=]\s*₹?\s*[\d,.]+/i.test(clean)
+  ) {
     return true;
-  }
-
-  if (Array.isArray(extractedData?.line_item_updates)) {
-    const spuriousAmountUpdate = extractedData.line_item_updates.some(item => 
-      item && item.amount && !item.rate && !item.quantity && !item.item_reference && !item.description && !item.sku_text
-    );
-    if (spuriousAmountUpdate) return true;
   }
 
   return false;
@@ -1432,6 +1431,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
 
 function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   const merged = { ...baseDraft, action };
+  delete merged._permissionNotice; // Always clear stale notice from prior turns
   if (baseDraft._queue) merged._queue = baseDraft._queue;
   if (baseDraft._totalCount) merged._totalCount = baseDraft._totalCount;
   if (baseDraft._currentIndex) merged._currentIndex = baseDraft._currentIndex;
@@ -1445,6 +1445,10 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
         for (const [uKey, uVal] of Object.entries(val)) {
           if (uVal !== null && uVal !== undefined && uVal !== '') {
             if (action === 'UPDATE_ORDER' && (uKey === 'total_amount' || uKey === 'total_value' || uKey === 'grand_total' || uKey === 'amount')) {
+              continue;
+            }
+            if (action === 'UPDATE_ORDER' && uKey === 'company_name') {
+              merged.company_name = String(uVal).replace(/^my\s*/i, '').replace(/^our\s+/i, '').replace(/^for\s+/i, '').trim();
               continue;
             }
             merged.updates[uKey] = uVal;
@@ -3580,10 +3584,6 @@ function buildConfirmationSummary(action, draft) {
     }
 
     case 'UPDATE_ORDER': {
-      if (draft.inquiry_id) {
-        const cleanDisplayInq = draft.inquiry_id.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
-        summary += `• *Inquiry ID:* INQ-${cleanDisplayInq}\n`;
-      }
       if (draft.company_name) {
         summary += `• *Customer / Company:* ${draft.company_name}\n`;
       }
@@ -3591,8 +3591,12 @@ function buildConfirmationSummary(action, draft) {
       if (poToDisplay) {
         summary += `• *PO Number:* ${poToDisplay}\n`;
       }
+      if (draft.inquiry_id) {
+        const cleanDisplayInq = draft.inquiry_id.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
+        summary += `• *Inquiry ID:* INQ-${cleanDisplayInq}\n`;
+      }
       if (draft.updates && Object.keys(draft.updates).length > 0) {
-        const headerEntries = Object.entries(draft.updates).filter(([k, v]) => v && k !== 'po_number');
+        const headerEntries = Object.entries(draft.updates).filter(([k, v]) => v && k !== 'po_number' && k !== 'company_name');
         if (headerEntries.length > 0) {
           summary += `• *Header Updates:*\n`;
           for (const [k, v] of headerEntries) {
