@@ -404,7 +404,7 @@ What would you like to update?
 - "For Inquiry INQ-936C7B, attach PO number PO-2026-8899"
 - "PO-2026-0042, update delivery location to Pune MIDC, change item 1 rate to 58000"`,
 
-  LOG_VISIT: `📍 **Log Customer Field Visit**
+  LOG_VISIT: `**Log Customer Field Visit**
 
 Please provide the following details:
 
@@ -415,9 +415,14 @@ Please provide the following details:
 - **Visit Date:** *
 - **Visit Outcome:** * (Positive / Negative / Neutral / Follow-up Required)
 - **Follow-up Action:** (optional)
-- **Meeting Remarks:** *`,
+- **Meeting Remarks:** *
 
-  UPDATE_VISIT: `✏️ **Update Field Visit**
+**Optional Extended Fields:**
+- Email, Designation, Customer Type (OEM / Fabricator / EPC / Manufacturer / Trader)
+- Visit Type (First Visit / Follow-up 1-3 / Regular Visit), Probability (Hot / Warm / Cold)
+- Product Details, Monthly Consumption, Current Requirement, Preferred Make, Payment Terms, Delivery Location`,
+
+  UPDATE_VISIT: `**Update Field Visit**
 
 - **Customer / Company:** * (e.g. Vanguard Industrial Automation Systems)
 - **Visit Date:** (optional e.g. 10-09-2026)
@@ -425,14 +430,11 @@ Please provide the following details:
 Which fields do you want to update? Mention the field name and new value.
 
 **Updatable Fields:**
-- Person Met
-- Contact Phone
-- City / Location
-- Visit Date
-- Visit Outcome (Positive / Negative / Neutral / Follow-up Required)
-- Follow-up Action
-- Meeting Remarks
+- Person Met, Contact Phone, City / Location, Visit Date
+- Visit Outcome (Positive / Negative / Neutral), Follow-up Action, Meeting Remarks
 - Status (Completed / Follow-up Pending / Cancelled)
+- Email, Designation, Customer Type, Visit Type, Customer Probability
+- Product Details, Monthly Consumption, Current Requirement, Delivery Location, Preferred Make, Payment Terms
 
 Example:
 "Vanguard Industrial Automation Systems, update Person Met to Amit Sharma, Visit Outcome to Positive"`,
@@ -1067,6 +1069,18 @@ LOG_VISIT:
   "visit_outcome": "<Positive | Negative | Neutral | Follow-up Required, else null>",
   "followup_action": "<specific follow up action if mentioned, else null>",
   "meeting_remarks": "<meeting remarks & requirements discussed, else null>",
+  "email": "<email address if mentioned, else null>",
+  "designation": "<job title / designation if mentioned, else null>",
+  "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader if mentioned, else null>",
+  "visit_type": "<First Visit | Follow-up 1 | Follow-up 2 | Follow-up 3 | Regular Visit if mentioned, else null>",
+  "customer_probability": "<Hot | Warm | Cold if mentioned, else null>",
+  "product_details": "<detailed product specifications or grades discussed, else null>",
+  "monthly_consumption": "<monthly consumption if mentioned, else null>",
+  "current_requirement": "<current requirement collected if mentioned, else null>",
+  "next_purchase_expected": "<expected next purchase date / timeframe, else null>",
+  "delivery_location": "<delivery location if mentioned, else null>",
+  "preferred_make": "<preferred brand / make if mentioned, else null>",
+  "payment_terms": "<payment terms if mentioned, else null>",
   "entries": [
     {
       "company_name": "<Company Name visited>",
@@ -1094,7 +1108,19 @@ UPDATE_VISIT:
     "visit_outcome": "<Positive | Negative | Neutral | Follow-up Required if updated, else null>",
     "followup_action": "<Follow-up action if updated, else null>",
     "meeting_remarks": "<Meeting remarks if updated, else null>",
-    "status": "<Completed | Follow-up Pending | Cancelled if updated, else null>"
+    "status": "<Completed | Follow-up Pending | Cancelled if updated, else null>",
+    "email": "<Email if updated, else null>",
+    "designation": "<Designation if updated, else null>",
+    "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader if updated, else null>",
+    "visit_type": "<First Visit | Follow-up 1-3 | Regular Visit if updated, else null>",
+    "customer_probability": "<Hot | Warm | Cold if updated, else null>",
+    "product_details": "<Product Details if updated, else null>",
+    "monthly_consumption": "<Monthly Consumption if updated, else null>",
+    "current_requirement": "<Current Requirement if updated, else null>",
+    "next_purchase_expected": "<Next Purchase Expected if updated, else null>",
+    "delivery_location": "<Delivery Location if updated, else null>",
+    "preferred_make": "<Preferred Make if updated, else null>",
+    "payment_terms": "<Payment Terms if updated, else null>"
   }
 }
 
@@ -1645,6 +1671,9 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.status && !merged.updates.stage) merged.updates.stage = newExtracted.status;
   } else if (action === 'UPDATE_VISIT') {
     if (!merged.updates) merged.updates = {};
+    if (newExtracted.updates) {
+      Object.assign(merged.updates, newExtracted.updates);
+    }
     if (newExtracted.person_met && !merged.updates.person_met) merged.updates.person_met = newExtracted.person_met;
     if (newExtracted.contact_phone && !merged.updates.contact_phone) merged.updates.contact_phone = newExtracted.contact_phone;
     if (newExtracted.city_location && !merged.updates.city_location) merged.updates.city_location = newExtracted.city_location;
@@ -1652,6 +1681,18 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.visit_date && !merged.updates.visit_date) merged.updates.visit_date = normalizeDateToDDMMYYYY(newExtracted.visit_date);
     if (newExtracted.meeting_remarks && !merged.updates.meeting_remarks) merged.updates.meeting_remarks = newExtracted.meeting_remarks;
     if (newExtracted.followup_action && !merged.updates.followup_action) merged.updates.followup_action = newExtracted.followup_action;
+    if (newExtracted.email && !merged.updates.email) merged.updates.email = newExtracted.email;
+    if (newExtracted.designation && !merged.updates.designation) merged.updates.designation = newExtracted.designation;
+    if (newExtracted.customer_type && !merged.updates.customer_type) merged.updates.customer_type = newExtracted.customer_type;
+    if (newExtracted.visit_type && !merged.updates.visit_type) merged.updates.visit_type = newExtracted.visit_type;
+    if (newExtracted.customer_probability && !merged.updates.customer_probability) merged.updates.customer_probability = newExtracted.customer_probability;
+    if (newExtracted.product_details && !merged.updates.product_details) merged.updates.product_details = newExtracted.product_details;
+    if (newExtracted.monthly_consumption && !merged.updates.monthly_consumption) merged.updates.monthly_consumption = newExtracted.monthly_consumption;
+    if (newExtracted.current_requirement && !merged.updates.current_requirement) merged.updates.current_requirement = newExtracted.current_requirement;
+    if (newExtracted.next_purchase_expected && !merged.updates.next_purchase_expected) merged.updates.next_purchase_expected = newExtracted.next_purchase_expected;
+    if (newExtracted.delivery_location && !merged.updates.delivery_location) merged.updates.delivery_location = newExtracted.delivery_location;
+    if (newExtracted.preferred_make && !merged.updates.preferred_make) merged.updates.preferred_make = newExtracted.preferred_make;
+    if (newExtracted.payment_terms && !merged.updates.payment_terms) merged.updates.payment_terms = newExtracted.payment_terms;
   } else if (action === 'UPDATE_COMPLAINT') {
     const { isInvalidOrGenericResolutionNotes } = require('../kra8');
     if (!merged.updates) merged.updates = {};
@@ -3623,6 +3664,18 @@ function buildConfirmationSummary(action, draft) {
       summary += `• *Visit Outcome:* ${draft.visit_outcome || '-'}\n`;
       summary += `• *Follow-up Action:* ${draft.followup_action || '-'}\n`;
       summary += `• *Meeting Remarks:* ${draft.meeting_remarks || '-'}\n`;
+      if (draft.designation) summary += `• *Designation:* ${draft.designation}\n`;
+      if (draft.email) summary += `• *Email:* ${draft.email}\n`;
+      if (draft.customer_type) summary += `• *Customer Type:* ${draft.customer_type}\n`;
+      if (draft.visit_type) summary += `• *Visit Type:* ${draft.visit_type}\n`;
+      if (draft.customer_probability) summary += `• *Customer Probability:* ${draft.customer_probability}\n`;
+      if (draft.product_details) summary += `• *Product Details:* ${draft.product_details}\n`;
+      if (draft.monthly_consumption) summary += `• *Monthly Consumption:* ${draft.monthly_consumption}\n`;
+      if (draft.current_requirement) summary += `• *Current Requirement:* ${draft.current_requirement}\n`;
+      if (draft.next_purchase_expected) summary += `• *Next Purchase Expected:* ${draft.next_purchase_expected}\n`;
+      if (draft.delivery_location) summary += `• *Delivery Location:* ${draft.delivery_location}\n`;
+      if (draft.preferred_make) summary += `• *Preferred Make:* ${draft.preferred_make}\n`;
+      if (draft.payment_terms) summary += `• *Payment Terms:* ${draft.payment_terms}\n`;
       break;
     }
 
@@ -5268,12 +5321,25 @@ async function executeAction(action, draft, senderPhone) {
           customer_address: draft.city_location || null,
           person_met: draft.person_met || null,
           contact_no: draft.contact_phone || null,
+          outcome: draft.visit_outcome || null,
           remarks: formattedRemarks,
           visited_at: visitDateIso,
           employee_id: employeeId,
           follow_up_action: draft.followup_action || null,
           follow_up_date: parsedFollowUpDate || null,
           follow_up_status: draft.followup_action ? 'pending' : null,
+          email: draft.email || null,
+          designation: draft.designation || null,
+          customer_type: draft.customer_type || null,
+          visit_type: draft.visit_type || null,
+          customer_probability: draft.customer_probability || null,
+          product_details: draft.product_details || null,
+          monthly_consumption: draft.monthly_consumption || null,
+          current_requirement: draft.current_requirement || null,
+          next_purchase_expected: draft.next_purchase_expected || null,
+          delivery_location: draft.delivery_location || null,
+          preferred_make: draft.preferred_make || null,
+          payment_terms: draft.payment_terms || null,
         };
 
         const { error: visErr } = await supabase.from('customer_visits').insert(visitPayload);
@@ -5286,7 +5352,7 @@ async function executeAction(action, draft, senderPhone) {
           const { error: fbVisErr } = await supabase.from('customer_visits').insert(visitPayload);
           if (fbVisErr) {
             console.error('[CatalogFlow] Visit fallback insert error:', fbVisErr.message);
-            return `❌ *Failed to log field visit for ${companyName}.*\n\nReason: ${fbVisErr.message || 'Database write error'}. Please try again.`;
+            return `*Failed to log field visit for ${companyName}.*\n\nReason: ${fbVisErr.message || 'Database write error'}. Please try again.`;
           }
         }
 
@@ -5327,16 +5393,31 @@ async function executeAction(action, draft, senderPhone) {
           console.warn('[CatalogFlow] Activity log notice for LOG_VISIT:', actErr?.message);
         }
 
-        return `📍 *Customer Field Visit Logged Successfully!*\n\n` +
+        let extDetails = '';
+        if (draft.designation) extDetails += `• *Designation:* ${draft.designation}\n`;
+        if (draft.email) extDetails += `• *Email:* ${draft.email}\n`;
+        if (draft.customer_type) extDetails += `• *Customer Type:* ${draft.customer_type}\n`;
+        if (draft.visit_type) extDetails += `• *Visit Type:* ${draft.visit_type}\n`;
+        if (draft.customer_probability) extDetails += `• *Customer Probability:* ${draft.customer_probability}\n`;
+        if (draft.monthly_consumption) extDetails += `• *Monthly Consumption:* ${draft.monthly_consumption}\n`;
+        if (draft.current_requirement) extDetails += `• *Current Requirement:* ${draft.current_requirement}\n`;
+        if (draft.product_details) extDetails += `• *Product Details:* ${draft.product_details}\n`;
+        if (draft.preferred_make) extDetails += `• *Preferred Make:* ${draft.preferred_make}\n`;
+        if (draft.payment_terms) extDetails += `• *Payment Terms:* ${draft.payment_terms}\n`;
+        if (draft.delivery_location) extDetails += `• *Delivery Location:* ${draft.delivery_location}\n`;
+        if (draft.next_purchase_expected) extDetails += `• *Next Purchase Expected:* ${draft.next_purchase_expected}\n`;
+
+        return `*Customer Field Visit Logged Successfully!*\n\n` +
           `• *Customer / Company:* ${companyName}\n` +
           `• *Person Met:* ${draft.person_met}\n` +
           `• *Contact Phone:* ${draft.contact_phone}\n` +
           `• *City / Location:* ${draft.city_location}\n` +
           `• *Visit Date:* ${draft.visit_date}\n` +
           `• *Visit Outcome:* ${draft.visit_outcome}\n` +
+          extDetails +
           (draft.followup_action ? `• *Follow-up Action:* ${draft.followup_action}\n` : '') +
           `• *Meeting Remarks:* ${draft.meeting_remarks}\n\n` +
-          `Logged to Customer Visits Card! ✅`;
+          `Logged to Customer Visits Card!`;
       }
 
       case 'UPDATE_VISIT': {
@@ -5454,6 +5535,19 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.contact_phone) visitUpdates.contact_no = cleanPhone(updates.contact_phone) || updates.contact_phone;
         if (newLocation) visitUpdates.customer_address = newLocation;
         if (updates.visit_date) visitUpdates.visited_at = parseDDMMYYYYtoISO(updates.visit_date);
+        if (updates.visit_outcome) visitUpdates.outcome = newOutcome;
+        if (updates.email) visitUpdates.email = updates.email;
+        if (updates.designation) visitUpdates.designation = updates.designation;
+        if (updates.customer_type) visitUpdates.customer_type = updates.customer_type;
+        if (updates.visit_type) visitUpdates.visit_type = updates.visit_type;
+        if (updates.customer_probability) visitUpdates.customer_probability = updates.customer_probability;
+        if (updates.product_details) visitUpdates.product_details = updates.product_details;
+        if (updates.monthly_consumption) visitUpdates.monthly_consumption = updates.monthly_consumption;
+        if (updates.current_requirement) visitUpdates.current_requirement = updates.current_requirement;
+        if (updates.next_purchase_expected) visitUpdates.next_purchase_expected = updates.next_purchase_expected;
+        if (updates.delivery_location) visitUpdates.delivery_location = updates.delivery_location;
+        if (updates.preferred_make) visitUpdates.preferred_make = updates.preferred_make;
+        if (updates.payment_terms) visitUpdates.payment_terms = updates.payment_terms;
 
         const resolvedCust = targetVisit ? targetVisit.customer_name : (draft.company_name || 'Customer');
 
@@ -5468,16 +5562,17 @@ async function executeAction(action, draft, senderPhone) {
             const { error: fbUpdErr } = await supabase.from('customer_visits').update(visitUpdates).eq('id', targetVisit.id);
             if (fbUpdErr) {
               console.error('[CatalogFlow] Visit fallback update error:', fbUpdErr.message);
-              return `❌ *Failed to update customer visit for ${resolvedCust}.*\n\nReason: ${fbUpdErr.message || 'Database write error'}. Please try again.`;
+              return `*Failed to update customer visit for ${resolvedCust}.*\n\nReason: ${fbUpdErr.message || 'Database write error'}. Please try again.`;
             }
           }
 
           // Sync customer master profile if contact details changed
-          if (updates.person_met || updates.contact_phone || updates.city_location) {
+          if (updates.person_met || updates.contact_phone || updates.city_location || updates.email) {
             const custUpdates = { updated_at: new Date().toISOString() };
             if (updates.person_met) custUpdates.contact_person = updates.person_met;
             if (updates.contact_phone) custUpdates.customer_phone = cleanPhone(updates.contact_phone) || updates.contact_phone;
             if (updates.city_location) custUpdates.customer_address = updates.city_location;
+            if (updates.email) custUpdates.customer_email = updates.email;
             await supabase
               .from('recurring_customers')
               .update(custUpdates)
@@ -5487,12 +5582,24 @@ async function executeAction(action, draft, senderPhone) {
 
         let updatesSummary = '';
         if (visitUpdates.person_met) updatesSummary += `• *Person Met:* ${visitUpdates.person_met}\n`;
+        if (visitUpdates.designation) updatesSummary += `• *Designation:* ${visitUpdates.designation}\n`;
         if (visitUpdates.contact_no) updatesSummary += `• *Contact Phone:* ${visitUpdates.contact_no}\n`;
+        if (visitUpdates.email) updatesSummary += `• *Email:* ${visitUpdates.email}\n`;
         if (visitUpdates.customer_address && updates.city_location) updatesSummary += `• *City / Location:* ${visitUpdates.customer_address}\n`;
         if (visitUpdates.visited_at && updates.visit_date) updatesSummary += `• *Visit Date:* ${formatDateDDMMYYYY(visitUpdates.visited_at)}\n`;
         if (updates.visit_outcome) updatesSummary += `• *Visit Outcome:* ${newOutcome}\n`;
+        if (visitUpdates.customer_type) updatesSummary += `• *Customer Type:* ${visitUpdates.customer_type}\n`;
+        if (visitUpdates.visit_type) updatesSummary += `• *Visit Type:* ${visitUpdates.visit_type}\n`;
+        if (visitUpdates.customer_probability) updatesSummary += `• *Customer Probability:* ${visitUpdates.customer_probability}\n`;
+        if (visitUpdates.product_details) updatesSummary += `• *Product Details:* ${visitUpdates.product_details}\n`;
+        if (visitUpdates.monthly_consumption) updatesSummary += `• *Monthly Consumption:* ${visitUpdates.monthly_consumption}\n`;
+        if (visitUpdates.current_requirement) updatesSummary += `• *Current Requirement:* ${visitUpdates.current_requirement}\n`;
+        if (visitUpdates.next_purchase_expected) updatesSummary += `• *Next Purchase Expected:* ${visitUpdates.next_purchase_expected}\n`;
+        if (visitUpdates.delivery_location) updatesSummary += `• *Delivery Location:* ${visitUpdates.delivery_location}\n`;
+        if (visitUpdates.preferred_make) updatesSummary += `• *Preferred Make:* ${visitUpdates.preferred_make}\n`;
+        if (visitUpdates.payment_terms) updatesSummary += `• *Payment Terms:* ${visitUpdates.payment_terms}\n`;
         if (updates.followup_action) updatesSummary += `• *Follow-up Action:* ${visitUpdates.follow_up_action}\n`;
-        if (newFollowupStatus && (isExplicitCompleted || isRemarksCompleted)) updatesSummary += `• *Follow-up Status:* Completed ✅\n`;
+        if (newFollowupStatus && (isExplicitCompleted || isRemarksCompleted)) updatesSummary += `• *Follow-up Status:* Completed\n`;
         if (updates.meeting_remarks) updatesSummary += `• *Meeting Remarks:* ${updates.meeting_remarks}\n`;
 
         // Log to activity_logs
@@ -5511,10 +5618,10 @@ async function executeAction(action, draft, senderPhone) {
           console.warn('[CatalogFlow] Activity log notice for UPDATE_VISIT:', actErr?.message);
         }
 
-        return `✅ *Field Visit Updated Successfully!*\n\n` +
+        return `*Field Visit Updated Successfully!*\n\n` +
           `• *Customer / Company:* ${resolvedCust}\n` +
           updatesSummary +
-          `\nVisit details updated in Customer Visits Card! ✅`;
+          `\nVisit details updated in Customer Visits Card!`;
       }
 
       case 'LOG_NEW_CUSTOMER': {

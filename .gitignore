@@ -4,3 +4,8 @@ node_modules/
 .zoho_token_cache.json
 fields_dump.json
 layout_dump.json
+.DS_Store
+*.log
+.vscode/
+.idea/
+

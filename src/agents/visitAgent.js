@@ -40,6 +40,18 @@ Extract into ONLY a JSON object (no prose, no markdown, no backticks):
   "material_requirement": "<steel product or requirement description mentioned (e.g. 'MS plate order', '50 MT HR Coil'), else null>",
   "follow_up_action": "<specific next action explicitly stated in the message (e.g. 'Send MS plate samples', 'Share quotation by tomorrow'), else null>",
   "followup_days": <number of days mentioned by customer to think/decide before ordering e.g. 3, 5, 7, else null>,
+  "email": "<email address of contact person or customer if explicitly mentioned, else null>",
+  "designation": "<job title / designation of person met e.g. 'Purchase Head', 'Director', 'Plant Manager', else null>",
+  "customer_type": "<'OEM' | 'Fabricator' | 'EPC' | 'Manufacturer' | 'Trader' if explicitly stated or inferred, else null>",
+  "visit_type": "<'First Visit' | 'Follow-up 1' | 'Follow-up 2' | 'Follow-up 3' | 'Regular Visit' if mentioned, else null>",
+  "customer_probability": "<'Hot' | 'Warm' | 'Cold' if mentioned or clearly implied, else null>",
+  "product_details": "<detailed product specifications or grades discussed, else null>",
+  "monthly_consumption": "<monthly metal consumption mentioned e.g. '50 MT', '100 MT/month', else null>",
+  "current_requirement": "<current requirement collected e.g. '20 MT SS 304 Sheets', else null>",
+  "next_purchase_expected": "<expected next purchase date / timeline e.g. '2 weeks', 'next month', '2026-10-15', else null>",
+  "delivery_location": "<delivery address / destination location if mentioned, else null>",
+  "preferred_make": "<preferred brand / mill / make e.g. 'Jindal', 'Tata', 'Sail', else null>",
+  "payment_terms": "<agreed or discussed payment terms e.g. '30 days credit', 'advance', 'PDC', else null>",
   "confidence": <float 0.0 to 1.0>
 }
 
@@ -52,6 +64,7 @@ Rules:
 - "remarks": Extract the actual discussion details, meeting summary, or purpose. If the user only said "Visited XYZ", output null. NEVER fabricate generic text like "Site visit conducted with XYZ Steel" or "Market presence".
 - "follow_up_action": ONLY extract a follow-up action if explicitly stated (e.g. "follow-up needed to send samples", "send quote tomorrow"). If no follow-up was mentioned, output null. NEVER invent actions like "Routine follow-up" or "Collect required quantity".
 - "visit_date": Extract any mentioned date, relative date, or weekday ("yesterday", "last Monday", "parso", "today", "10th September").
+- Extended fields (email, designation, customer_type, visit_type, customer_probability, product_details, monthly_consumption, current_requirement, next_purchase_expected, delivery_location, preferred_make, payment_terms): Extract ONLY if explicitly mentioned or clearly stated. Otherwise output null.
 
 Return ONLY the JSON object.
 `;
@@ -73,6 +86,18 @@ Extract any provided or updated fields:
   "product_interests": "<updated product interests if provided, else null>",
   "material_requirement": "<updated material requirement if provided, else null>",
   "follow_up_action": "<updated follow up action if provided, else null>",
+  "email": "<updated email if provided, else null>",
+  "designation": "<updated designation if provided, else null>",
+  "customer_type": "<'OEM' | 'Fabricator' | 'EPC' | 'Manufacturer' | 'Trader' if provided, else null>",
+  "visit_type": "<'First Visit' | 'Follow-up 1' | 'Follow-up 2' | 'Follow-up 3' | 'Regular Visit' if provided, else null>",
+  "customer_probability": "<'Hot' | 'Warm' | 'Cold' if provided, else null>",
+  "product_details": "<updated product details if provided, else null>",
+  "monthly_consumption": "<updated monthly consumption if provided, else null>",
+  "current_requirement": "<updated current requirement if provided, else null>",
+  "next_purchase_expected": "<updated next purchase expected timeline if provided, else null>",
+  "delivery_location": "<updated delivery location if provided, else null>",
+  "preferred_make": "<updated preferred make if provided, else null>",
+  "payment_terms": "<updated payment terms if provided, else null>",
   "is_unrelated_command": <true if the salesperson is ignoring this visit flow and giving an unrelated query or creating an unrelated deal/order for another company, else false>
 }
 
@@ -93,7 +118,7 @@ Input message can be English, Hindi, or Hinglish.
 Extract the correction request into ONLY a valid JSON object (no markdown, no backticks):
 {
   "customer_name": "<exact customer/company name if explicitly mentioned in message, else null>",
-  "target_field": "person_met|contact_no|customer_address|visit_outcome|remarks",
+  "target_field": "person_met|contact_no|customer_address|visit_outcome|remarks|email|designation|customer_type|visit_type|customer_probability|product_details|monthly_consumption|current_requirement|next_purchase_expected|delivery_location|preferred_make|payment_terms",
   "new_value": "<the new/corrected value to set (e.g. 'neutral', 'Suresh Patel', '9822012345')>",
   "old_value": "<the old/incorrect value mentioned to be replaced (e.g. 'positive', 'Rajesh Sharma'), else null>",
   "visit_date": "<explicit date or relative date mentioned for the visit e.g. '10th September', 'yesterday', 'last Monday', '9 Sep 2026', else null>",
@@ -102,11 +127,23 @@ Extract the correction request into ONLY a valid JSON object (no markdown, no ba
 
 Rules:
 - "target_field":
-  * "person_met" if updating contact person, person met, who they met (e.g. "Suresh Patel instead of Rajesh Sharma")
+  * "person_met" if updating contact person, person met, who they met
   * "contact_no" if updating phone number or mobile number
-  * "customer_address" if updating location, city, or address (e.g. "Nashik not Pune")
+  * "customer_address" if updating location, city, or address
   * "visit_outcome" if updating visit outcome (positive, neutral, negative)
   * "remarks" if updating discussion notes or remarks
+  * "email" if updating email address
+  * "designation" if updating job title or designation
+  * "customer_type" if updating customer classification (OEM, Fabricator, EPC, Manufacturer, Trader)
+  * "visit_type" if updating visit category (First Visit, Follow-up 1-3, Regular Visit)
+  * "customer_probability" if updating lead probability (Hot, Warm, Cold)
+  * "product_details" if updating product specs or details
+  * "monthly_consumption" if updating consumption volume
+  * "current_requirement" if updating current requirement collected
+  * "next_purchase_expected" if updating purchase expected timeframe
+  * "delivery_location" if updating delivery destination
+  * "preferred_make" if updating preferred brand or mill
+  * "payment_terms" if updating credit or payment terms
 - "new_value": The value it SHOULD be (e.g. "neutral", "Suresh Patel")
 - "old_value": The value it should NOT be / was previously (e.g. "positive", "Rajesh Sharma")
 - "visit_date": Extract any explicit or relative date specified in the request (e.g. "10th September", "yesterday", "last Monday").
@@ -470,6 +507,18 @@ async function saveCompletedVisit(visitState, senderPhone) {
     visit_date_month,
     visit_date_year,
     is_new_prospect,
+    email,
+    designation,
+    customer_type,
+    visit_type,
+    customer_probability,
+    product_details,
+    monthly_consumption,
+    current_requirement,
+    next_purchase_expected,
+    delivery_location,
+    preferred_make,
+    payment_terms,
   } = visitState;
 
   // Match or auto-onboard
@@ -569,12 +618,25 @@ async function saveCompletedVisit(visitState, senderPhone) {
     customer_address: city,
     person_met: person_met,
     contact_no: contact_no,
+    outcome: finalOutcome,
     remarks: fullRemarks,
     visited_at: visit_date_iso || new Date().toISOString(),
     employee_id: employeeId,
     follow_up_action: follow_up_action || null,
     follow_up_date: parsedFuDate || null,
     follow_up_status: follow_up_action ? 'pending' : null,
+    email: email || null,
+    designation: designation || null,
+    customer_type: customer_type || null,
+    visit_type: visit_type || null,
+    customer_probability: customer_probability || null,
+    product_details: product_details || null,
+    monthly_consumption: monthly_consumption || null,
+    current_requirement: current_requirement || material_requirement || null,
+    next_purchase_expected: next_purchase_expected || null,
+    delivery_location: delivery_location || null,
+    preferred_make: preferred_make || null,
+    payment_terms: payment_terms || null,
   };
 
   const { error: visitErr } = await supabase.from('customer_visits').insert(visitInsertPayload);
@@ -588,11 +650,12 @@ async function saveCompletedVisit(visitState, senderPhone) {
   }
 
   // Update customer master profile in recurring_customers
-  if (city || contact_no || person_met) {
+  if (city || contact_no || person_met || email) {
     const custUpdate = { updated_at: new Date().toISOString() };
     if (city) custUpdate.city = city;
     if (contact_no) custUpdate.customer_phone = contact_no;
     if (person_met) custUpdate.contact_person = person_met;
+    if (email) custUpdate.customer_email = email;
     await supabase
       .from('recurring_customers')
       .update(custUpdate)
@@ -749,12 +812,24 @@ async function saveCompletedVisit(visitState, senderPhone) {
   reply += `- Visit Date: ${visit_date_display}\n`;
   if (city) reply += `- Location: ${city}\n`;
   if (person_met) reply += `- Person Met: ${person_met}\n`;
+  if (designation) reply += `- Designation: ${designation}\n`;
   if (contact_no) reply += `- Contact Phone: ${contact_no}\n`;
+  if (email) reply += `- Email: ${email}\n`;
+  if (customer_type) reply += `- Customer Type: ${customer_type}\n`;
+  if (visit_type) reply += `- Visit Type: ${visit_type}\n`;
+  if (customer_probability) reply += `- Customer Probability: ${customer_probability}\n`;
   if (finalOutcome)
     reply += `- Outcome: ${finalOutcome.charAt(0).toUpperCase() + finalOutcome.slice(1)}\n`;
+  if (monthly_consumption) reply += `- Monthly Consumption: ${monthly_consumption}\n`;
+  if (current_requirement) reply += `- Current Requirement: ${current_requirement}\n`;
+  if (product_details) reply += `- Product Details: ${product_details}\n`;
+  if (preferred_make) reply += `- Preferred Make: ${preferred_make}\n`;
+  if (payment_terms) reply += `- Payment Terms: ${payment_terms}\n`;
+  if (delivery_location) reply += `- Delivery Location: ${delivery_location}\n`;
+  if (next_purchase_expected) reply += `- Next Purchase Expected: ${next_purchase_expected}\n`;
   if (remarks) reply += `- Discussion Notes: ${remarks}\n`;
   if (product_interests) reply += `- Product Interests: ${product_interests}\n`;
-  if (material_requirement) reply += `- Requirement: ${material_requirement}\n`;
+  if (material_requirement && material_requirement !== current_requirement) reply += `- Requirement: ${material_requirement}\n`;
   if (follow_up_action) reply += `- Follow-up: ${follow_up_action}\n`;
 
   reply += `\nTotal Visits This Month: ${totalVisits}\n\n`;
@@ -1150,10 +1225,10 @@ async function handleVisitCorrection(text, senderPhone) {
       );
 
       return (
-        `📅 *Multiple Visits Found for ${candidateVisits[0].customer_name}:*\n\n` +
+        `*Multiple Visits Found for ${candidateVisits[0].customer_name}:*\n\n` +
         `Please choose which visit you want to update:\n\n` +
         `${choicesText}\n\n` +
-        `👉 Reply with the *Option Number* (1–${candidateSummaries.length}), *Visit Date*, or what you want to update.`
+        `Reply with the *Option Number* (1–${candidateSummaries.length}), *Visit Date*, or what you want to update.`
       );
     }
 
@@ -1203,6 +1278,7 @@ async function applyVisitFieldUpdate(
     const normOut =
       newValue.charAt(0).toUpperCase() + newValue.slice(1).toLowerCase();
     newValue = normOut;
+    updatePayload.outcome = normOut;
     // Update outcome tag in remarks
     let updatedRemarks = targetVisit.remarks || '';
     if (/\[Outcome:\s*[^\]]+\]/i.test(updatedRemarks)) {
@@ -1217,6 +1293,42 @@ async function applyVisitFieldUpdate(
   } else if (targetField === 'remarks') {
     updatePayload.remarks = newValue;
     fieldLabel = 'Discussion Notes';
+  } else if (targetField === 'email') {
+    updatePayload.email = newValue;
+    fieldLabel = 'Email';
+  } else if (targetField === 'designation') {
+    updatePayload.designation = newValue;
+    fieldLabel = 'Designation';
+  } else if (targetField === 'customer_type') {
+    updatePayload.customer_type = newValue;
+    fieldLabel = 'Customer Type';
+  } else if (targetField === 'visit_type') {
+    updatePayload.visit_type = newValue;
+    fieldLabel = 'Visit Type';
+  } else if (targetField === 'customer_probability') {
+    updatePayload.customer_probability = newValue;
+    fieldLabel = 'Customer Probability';
+  } else if (targetField === 'product_details') {
+    updatePayload.product_details = newValue;
+    fieldLabel = 'Product Details';
+  } else if (targetField === 'monthly_consumption') {
+    updatePayload.monthly_consumption = newValue;
+    fieldLabel = 'Monthly Consumption';
+  } else if (targetField === 'current_requirement') {
+    updatePayload.current_requirement = newValue;
+    fieldLabel = 'Current Requirement';
+  } else if (targetField === 'next_purchase_expected') {
+    updatePayload.next_purchase_expected = newValue;
+    fieldLabel = 'Next Purchase Expected';
+  } else if (targetField === 'delivery_location') {
+    updatePayload.delivery_location = newValue;
+    fieldLabel = 'Delivery Location';
+  } else if (targetField === 'preferred_make') {
+    updatePayload.preferred_make = newValue;
+    fieldLabel = 'Preferred Make';
+  } else if (targetField === 'payment_terms') {
+    updatePayload.payment_terms = newValue;
+    fieldLabel = 'Payment Terms';
   } else {
     updatePayload.person_met = newValue;
   }

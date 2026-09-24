@@ -1879,6 +1879,23 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
       relative_due_text: relativeDueText,
       material_requirement: r.material_requirement || r.requirement || parsed.material_requirement,
       remarks: parsed.clean_remarks || rawRemarks,
+      email: r.email || null,
+      designation: r.designation || null,
+      customer_type: r.customer_type || null,
+      visit_type: r.visit_type || null,
+      customer_probability: r.customer_probability || null,
+      product_details: r.product_details || null,
+      monthly_consumption: r.monthly_consumption || null,
+      current_requirement: r.current_requirement || null,
+      next_purchase_expected: r.next_purchase_expected || null,
+      delivery_location: r.delivery_location || null,
+      preferred_make: r.preferred_make || null,
+      payment_terms: r.payment_terms || null,
+      gps_photo_url: r.gps_photo_url || null,
+      gps_latitude: r.gps_latitude ?? null,
+      gps_longitude: r.gps_longitude ?? null,
+      gps_accuracy: r.gps_accuracy ?? null,
+      attachments: r.attachments || null,
       created_at: r.created_at || r.visited_at,
     };
   });
@@ -2226,6 +2243,15 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   if (locFilter) filtered = filtered.filter((v) => v.location.toLowerCase().includes(locFilter) || v.remarks.toLowerCase().includes(locFilter));
   if (outcomeFilter && outcomeFilter !== 'all') filtered = filtered.filter((v) => v.outcome === outcomeFilter);
   if (requiresFollowUp !== null) filtered = filtered.filter((v) => v.requires_follow_up === requiresFollowUp);
+
+  const customerTypeFilter = args?.customer_type ? String(args.customer_type).toLowerCase().trim() : null;
+  const probabilityFilter = args?.customer_probability || args?.probability ? String(args.customer_probability || args.probability).toLowerCase().trim() : null;
+  if (customerTypeFilter && customerTypeFilter !== 'all') {
+    filtered = filtered.filter((v) => (v.customer_type || '').toLowerCase() === customerTypeFilter);
+  }
+  if (probabilityFilter && probabilityFilter !== 'all') {
+    filtered = filtered.filter((v) => (v.customer_probability || '').toLowerCase() === probabilityFilter);
+  }
 
   let pos = 0, neu = 0, neg = 0, fu = 0;
   filtered.forEach((v) => {
