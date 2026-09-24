@@ -242,11 +242,11 @@ function isDiscardOrCancelIntent(text) {
  * Extracts a candidate option index (1-based integer) from anywhere within natural language text.
  * Supports:
  * - "option 1", "opt 1", "choice 2", "no. 1", "#1", "in option 1", "for option 2"
- * - "1st option", "2nd one", "3rd inquiry", "1st", "2nd", "3rd"
- * - "first", "second", "third", "fourth", "fifth", "last"
+ * - "1st option", "2nd one", "3rd inquiry", "1st", "2nd", "3rd", "10th"
+ * - "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth", "last"
  * - Standalone "1", "1.", "1)", "1️⃣"
  */
-function extractCandidateIndex(text, candidateCount = 5) {
+function extractCandidateIndex(text, candidateCount = 10) {
   if (!text || typeof text !== 'string') return null;
   const clean = text.trim();
 
@@ -257,14 +257,14 @@ function extractCandidateIndex(text, candidateCount = 5) {
     if (idx >= 1 && idx <= candidateCount) return idx;
   }
 
-  // Pattern 2: "1st option", "2nd one", "3rd inquiry", "1st", "2nd", "3rd"
+  // Pattern 2: "1st option", "2nd one", "3rd inquiry", "1st", "2nd", "3rd", "10th"
   const ordMatch = clean.match(/\b([1-9]\d*)\s*(?:st|nd|rd|th)\b/i);
   if (ordMatch) {
     const idx = parseInt(ordMatch[1], 10);
     if (idx >= 1 && idx <= candidateCount) return idx;
   }
 
-  // Pattern 3: English ordinals ("first", "second", "third", "fourth", "fifth", "last")
+  // Pattern 3: English ordinals up to 10th
   const wordOrdinals = {
     first: 1,
     '1st': 1,
@@ -276,6 +276,16 @@ function extractCandidateIndex(text, candidateCount = 5) {
     '4th': 4,
     fifth: 5,
     '5th': 5,
+    sixth: 6,
+    '6th': 6,
+    seventh: 7,
+    '7th': 7,
+    eighth: 8,
+    '8th': 8,
+    ninth: 9,
+    '9th': 9,
+    tenth: 10,
+    '10th': 10,
     last: candidateCount,
   };
   for (const [word, val] of Object.entries(wordOrdinals)) {
@@ -294,6 +304,51 @@ function extractCandidateIndex(text, candidateCount = 5) {
   }
 
   return null;
+}
+
+/**
+ * Detects if the user entered an out-of-bounds numeric option (e.g. user typed Option 8 when only 3 options exist).
+ */
+function detectOutOfBoundsCandidateIndex(text, candidateCount = 10) {
+  if (!text || typeof text !== 'string') return null;
+  const clean = text.trim();
+
+  const optMatch = clean.match(/\b(?:in\s+|for\s+|from\s+|of\s+)?(?:option|opt|choice|no\.?|number|#|item|row)\s*([1-9]\d*)\b/i);
+  if (optMatch) {
+    const idx = parseInt(optMatch[1], 10);
+    if (idx > candidateCount) return idx;
+  }
+
+  const cleanKeycap = clean.replace(/([1-9]|10)️⃣/g, '$1');
+  const startNumMatch = cleanKeycap.match(/^\s*(?:option\s*|no\.?\s*|#\s*)?([1-9]\d*)\s*(?:[.)\-:\s]|$)/i);
+  if (startNumMatch) {
+    const idx = parseInt(startNumMatch[1], 10);
+    if (idx > candidateCount) return idx;
+  }
+
+  return null;
+}
+
+/**
+ * Detects if the user requested pagination ("view more", "more", "next", "page 2", etc.)
+ */
+function isPaginationRequest(text) {
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.toLowerCase().trim();
+  return (
+    clean === 'view more' ||
+    clean === 'more' ||
+    clean === 'view more records' ||
+    clean === 'show more' ||
+    clean === 'next' ||
+    clean === 'next page' ||
+    clean === 'page 2' ||
+    clean === 'page 3' ||
+    clean === 'load more' ||
+    clean === 'see more' ||
+    clean === 'aur dikhao' ||
+    clean === 'agla page'
+  );
 }
 
 /**
@@ -1638,6 +1693,7 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.po_number && !merged.updates.po_number && merged.inquiry_id) merged.updates.po_number = newExtracted.po_number;
   } else if (action === 'UPDATE_INQUIRY') {
     if (!merged.updates) merged.updates = {};
+    if (merged.rate && !merged.updates.rate) merged.updates.rate = merged.rate;
     if (newExtracted.rate && !merged.updates.rate) merged.updates.rate = newExtracted.rate;
     if (newExtracted.delivery_location && !merged.updates.delivery_location) merged.updates.delivery_location = newExtracted.delivery_location;
     if (newExtracted.payment_terms && !merged.updates.payment_terms) merged.updates.payment_terms = newExtracted.payment_terms;
@@ -1774,7 +1830,8 @@ function validateMandatoryFields(action, draft) {
     case 'UPDATE_INQUIRY':
       if (!draft.inquiry_id && !draft.company_name) missing.push('Inquiry ID (e.g. INQ-2026-0042) or Company Name');
       const inqUpdates = draft.updates || {};
-      const hasInqUpdate = Object.values(inqUpdates).some(v => v !== null && v !== undefined && v !== '');
+      const hasInqUpdate = Object.values(inqUpdates).some(v => v !== null && v !== undefined && v !== '') ||
+                           Boolean(draft.rate || draft.quantity || draft.new_stage || draft.stage || draft.payment_terms || draft.delivery_location);
       const hasInqLineUpdates = Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0;
       if (!hasInqUpdate && !hasInqLineUpdates) missing.push('At least one field to update (e.g. Rate, Quantity, Delivery Location, Payment Terms, or Stage)');
       const inqProdCheck = validateDraftProducts('UPDATE_INQUIRY', draft);
@@ -2384,7 +2441,8 @@ function validateDraftProducts(action, draft) {
 async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
   if (action !== 'UPDATE_VISIT') return { needsDisambiguation: false };
   if (draft.visit_id || draft.visit_date || draft.updates?.visit_date) return { needsDisambiguation: false };
-  if (!draft.company_name) return { needsDisambiguation: false };
+
+  const hasCompanyName = Boolean(draft.company_name && draft.company_name.trim());
 
   const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants, isPhoneInScope } = require('../supabase');
   const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
@@ -2392,8 +2450,11 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
   let query = supabase
     .from('customer_visits')
     .select('id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, salesperson_phone')
-    .ilike('customer_name', `%${draft.company_name.trim()}%`)
     .order('visited_at', { ascending: false });
+
+  if (hasCompanyName) {
+    query = query.ilike('customer_name', `%${draft.company_name.trim()}%`);
+  }
 
   if (scope.phones !== null) {
     const targetPhones = expandPhoneVariants(scope.phones);
@@ -2404,9 +2465,20 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
     }
   }
 
-  const { data: allVisits } = await query.limit(20);
+  const { data: allVisits } = await query.limit(50);
 
-  if (!allVisits || allVisits.length <= 1) return { needsDisambiguation: false };
+  if (!allVisits || allVisits.length === 0) {
+    if (hasCompanyName) return { needsDisambiguation: false };
+    return {
+      needsDisambiguation: false,
+      handled: true,
+      prompt: `ℹ️ *No Field Visits Found*\n\nThere are no existing field visit records in your portfolio.\n\nIf you would like to log a new field visit, reply with *5* or send the visit details (Customer Name, Person Met, Outcome, Remarks).`,
+      reply: `ℹ️ *No Field Visits Found*\n\nThere are no existing field visit records in your portfolio.\n\nIf you would like to log a new field visit, reply with *5* or send the visit details (Customer Name, Person Met, Outcome, Remarks).`,
+      draft,
+    };
+  }
+
+  if (hasCompanyName && allVisits.length <= 1) return { needsDisambiguation: false };
 
   // 1. Accessibility filtering by salesperson phone
   let candidateVisits = allVisits.filter(v => {
@@ -2419,9 +2491,25 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
   const realVisits = candidateVisits.filter(v => !(v.remarks && v.remarks.startsWith('Contact Synced from Zoho Bigin')));
   const pool = realVisits.length > 0 ? realVisits : candidateVisits;
 
-  if (pool.length <= 1) return { needsDisambiguation: false };
+  if (hasCompanyName && pool.length <= 1) return { needsDisambiguation: false };
+  if (pool.length === 0) {
+    if (hasCompanyName) return { needsDisambiguation: false };
+    return {
+      needsDisambiguation: false,
+      handled: true,
+      prompt: `ℹ️ *No Field Visits Found*\n\nThere are no existing field visit records in your portfolio.`,
+      reply: `ℹ️ *No Field Visits Found*\n\nThere are no existing field visit records in your portfolio.`,
+      draft,
+    };
+  }
 
-  const candidateSummaries = pool.slice(0, 5).map((v, idx) => {
+  const pageSize = 10;
+  const page = Number(draft._visit_candidates_page) || 1;
+  const startIdx = (page - 1) * pageSize;
+  const pageItems = pool.slice(startIdx, startIdx + pageSize);
+  const totalPages = Math.ceil(pool.length / pageSize);
+
+  const candidateSummaries = pageItems.map((v, idx) => {
     const vDate = v.visited_at ? new Date(v.visited_at) : new Date();
     const dateFormatted = formatDateDDMMYYYY(vDate);
     const outTagMatch = (v.remarks || '').match(/\[Outcome:\s*([^\]]+)\]/i);
@@ -2431,9 +2519,9 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
       .replace(/\[Follow-up:\s*[^\]]+\]/gi, '')
       .trim();
     return {
-      index: idx + 1,
+      index: startIdx + idx + 1,
       id: v.id,
-      company_name: v.customer_name || draft.company_name,
+      company_name: v.customer_name || draft.company_name || 'Customer',
       date: dateFormatted,
       visited_at: v.visited_at,
       person_met: v.person_met || 'Not recorded',
@@ -2445,8 +2533,9 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
 
   const choicesText = candidateSummaries
     .map(c => {
+      const companyLabel = hasCompanyName ? '' : ` (${c.company_name})`;
       const lines = [
-        `${c.index}. *Visit on ${c.date}*`,
+        `${c.index}. *Visit on ${c.date}*${companyLabel}`,
         `   • *Person Met:* ${c.person_met}`,
         `   • *Location:* ${c.location}`,
         `   • *Outcome:* ${c.outcome}`,
@@ -2458,16 +2547,35 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
     })
     .join('\n\n');
 
-  const prompt = `📅 *Multiple Visits Found for ${draft.company_name}:*\n\n` +
+  let headerText = hasCompanyName
+    ? `📅 *Multiple Visits Found for ${draft.company_name} (${pool.length} Records):*`
+    : `📅 *Recent Field Visits (${pool.length} Records):*`;
+
+  if (pool.length > pageSize) {
+    headerText = hasCompanyName
+      ? `📅 *Showing ${startIdx + 1}–${startIdx + candidateSummaries.length} of ${pool.length} Visits Found for ${draft.company_name} (Page ${page} of ${totalPages}):*`
+      : `📅 *Showing ${startIdx + 1}–${startIdx + candidateSummaries.length} of ${pool.length} Field Visits (Page ${page} of ${totalPages}):*`;
+  }
+
+  let footerText = `👉 Reply with the *Option Number* (1–${pool.length}), *Visit Date* (e.g. "${candidateSummaries[0].date}"), *Person Met*, or what you want to update.`;
+  if (totalPages > 1) {
+    footerText += `\n💡 _Type "View More" or "Next" to see next records._`;
+  }
+
+  const prompt = `${headerText}\n\n` +
     `Please choose which visit you want to update:\n\n` +
     `${choicesText}\n\n` +
-    `👉 Reply with the *Option Number* (1–${candidateSummaries.length}), *Visit Date* (e.g. "${candidateSummaries[0].date}"), or what you want to update (e.g. "update remarks in option 1 to Positive").`;
+    `${footerText}`;
 
   draft._visit_candidates = candidateSummaries;
+  draft._all_visit_candidates = pool;
+  draft._visit_candidates_page = page;
 
   return {
     needsDisambiguation: true,
+    handled: true,
     prompt,
+    reply: prompt,
     draft,
   };
 }
@@ -2689,14 +2797,32 @@ async function checkOrdersForComplaint(action, draft, senderPhone, originalText 
   }
 
   // Multiple won orders exist and no specific PO/INQ was provided -> Multi-Order Disambiguation
-  const orderList = enrichedDeals.map(formatOrderCandidate).join('\n\n');
+  const pageSize = 10;
+  const page = Number(draft._order_candidates_page) || 1;
+  const startIdx = (page - 1) * pageSize;
+  const pageDeals = enrichedDeals.slice(startIdx, startIdx + pageSize);
+  const totalPages = Math.ceil(enrichedDeals.length / pageSize);
 
-  const prompt = `⚠️ *Multiple Confirmed Orders Found for ${companyName || 'this customer'}:*\n\n` +
+  const orderList = pageDeals.map(formatOrderCandidate).join('\n\n');
+
+  let headerText = `⚠️ *Multiple Confirmed Orders Found for ${companyName || 'this customer'} (${enrichedDeals.length} Records):*`;
+  if (enrichedDeals.length > pageSize) {
+    headerText = `⚠️ *Showing ${startIdx + 1}–${startIdx + pageDeals.length} of ${enrichedDeals.length} Confirmed Orders for ${companyName || 'this customer'} (Page ${page} of ${totalPages}):*`;
+  }
+
+  let footerText = `👉 Reply with the *Number* (1–${enrichedDeals.length}) or the *Inquiry ID* / *PO Number*.`;
+  if (totalPages > 1) {
+    footerText += `\n💡 _Type "View More" or "Next" to see next records._`;
+  }
+
+  const prompt = `${headerText}\n\n` +
     `Please specify which order or PO this complaint is about:\n\n` +
     `${orderList}\n\n` +
-    `👉 Reply with the *Number* (1–${enrichedDeals.length}) or the *Inquiry ID* / *PO Number*.`;
+    `${footerText}`;
 
-  draft._order_candidates = enrichedDeals;
+  draft._order_candidates = pageDeals;
+  draft._all_order_candidates = enrichedDeals;
+  draft._order_candidates_page = page;
 
   return {
     handled: true,
@@ -2747,10 +2873,10 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
   const rawInqId = (draft.inquiry_id || '').trim();
   const cleanInqId = rawInqId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
   const companyName = (draft.company_name || '').trim();
+  const hasFilter = Boolean(cleanInqId || companyName);
 
-  // If neither ID nor company name is provided, let mandatory field check handle it
-  if (!cleanInqId && !companyName) {
-    return { handled: false };
+  if (draft._inquiry_verified && !originalText.match(/\b(?:INQ|DEAL)-[A-Z0-9]+\b|#INQ-[A-Z0-9]+/i)) {
+    return { handled: false, status: 'ALREADY_VERIFIED', draft };
   }
 
   const accessibleSet = new Set();
@@ -2990,6 +3116,54 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     });
   }
 
+  // 3. No Filter provided (Direct Browse mode) -> Populate from all scoped deals & inqs
+  if (!hasFilter && matchedCandidates.length === 0) {
+    scopedDeals.forEach(d => {
+      const stage = (d.stage || 'new_inquiry').toLowerCase();
+      const displayId = `INQ-${(d.inquiry_id || d.id).slice(0, 6).toUpperCase()}`;
+      matchedCandidates.push({
+        id: d.inquiry_id || d.id,
+        deal_id: d.id,
+        inquiry_id: d.inquiry_id || d.id,
+        displayId,
+        company_name: d.customer_name || 'Customer',
+        stage,
+        payment_terms: d.payment_terms || 'Not specified',
+        delivery_location: d.delivery_location || 'Not specified',
+        total_amount: Number(d.total_amount) || 0,
+        deal_items: d.deal_items || [],
+        created_at: d.created_at,
+        dateFormatted: formatDateDDMMYYYY(d.created_at),
+        raw_text: '',
+      });
+      seenKeys.add(d.id);
+      if (d.inquiry_id) seenKeys.add(d.inquiry_id);
+    });
+
+    scopedInqs.forEach(inq => {
+      if (seenKeys.has(inq.id)) return;
+      const ai = inq.ai_extraction_json || {};
+      const stage = (inq.status || 'new_inquiry').toLowerCase();
+      const displayId = `INQ-${inq.id.slice(0, 6).toUpperCase()}`;
+      matchedCandidates.push({
+        id: inq.id,
+        deal_id: null,
+        inquiry_id: inq.id,
+        displayId,
+        company_name: inq.sender_name || ai.companyName || ai.customer_name || 'Customer',
+        stage,
+        payment_terms: ai.paymentTerms || ai.payment_terms || 'Not specified',
+        delivery_location: ai.deliveryLocation || ai.delivery_location || 'Not specified',
+        total_amount: Number(ai.totalAmount) || Number(ai.grandTotal) || 0,
+        deal_items: ai.lineItems || ai.line_items || [],
+        created_at: inq.created_at,
+        dateFormatted: formatDateDDMMYYYY(inq.created_at),
+        raw_text: inq.raw_text,
+      });
+      seenKeys.add(inq.id);
+    });
+  }
+
   const formatStageLabel = (st) => {
     const s = String(st || '').toLowerCase();
     if (s.includes('won') || s.includes('order')) return 'Won';
@@ -3028,7 +3202,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
 
   // ── Case A: 0 Editable Inquiries Found ──
   if (editable.length === 0) {
-    if (nonEditable.length > 0) {
+    if (nonEditable.length > 0 && hasFilter) {
       const latestNonEditable = nonEditable[0];
       const stageLabel = formatStageLabel(latestNonEditable.stage);
       const reply = `ℹ️ *No Editable Inquiries Found for ${latestNonEditable.company_name}*\n\n` +
@@ -3054,9 +3228,13 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       };
     }
 
-    const reply = `ℹ️ *No Inquiries Found for ${targetName}*\n\n` +
-      `There are no existing inquiries recorded for *${targetName}*.\n\n` +
-      `If you would like to log a new inquiry, please share the inquiry details (Product, Quantity, Payment Terms, Delivery Location).`;
+    const reply = hasFilter
+      ? `ℹ️ *No Inquiries Found for ${targetName}*\n\n` +
+        `There are no existing inquiries recorded for *${targetName}*.\n\n` +
+        `If you would like to log a new inquiry, please share the inquiry details (Product, Quantity, Payment Terms, Delivery Location).`
+      : `ℹ️ *No Editable Inquiries Found*\n\n` +
+        `There are no active or editable inquiries recorded in your portfolio.\n\n` +
+        `If you would like to log a new inquiry, reply with *1* or send the inquiry details.`;
     return {
       handled: true,
       reply,
@@ -3066,7 +3244,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
   }
 
   // ── Case B: Exactly 1 Editable Inquiry Found ──
-  if (editable.length === 1) {
+  if (editable.length === 1 && hasFilter) {
     const single = editable[0];
     draft.inquiry_id = single.inquiry_id || single.id;
     draft.deal_id = single.deal_id || null;
@@ -3074,7 +3252,8 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     draft._inquiry_display_id = single.displayId;
 
     const hasUpdates = (draft.updates && Object.values(draft.updates).some(v => v !== null && v !== undefined && v !== '')) ||
-      (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0);
+      (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0) ||
+      Boolean(draft.rate || draft.quantity || draft.new_stage || draft.stage || draft.payment_terms || draft.delivery_location);
 
     // If user has not specified what to update yet, show current inquiry details & ask
     if (!hasUpdates) {
@@ -3106,8 +3285,14 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     };
   }
 
-  // ── Case C: Multiple Editable Inquiries Found ──
-  const candidateSummaries = editable.slice(0, 5).map((inq, idx) => {
+  // ── Case C: Multiple Editable Inquiries Found (or Direct Browse with 1+ records) ──
+  const pageSize = 10;
+  const page = Number(draft._inquiry_candidates_page) || 1;
+  const startIdx = (page - 1) * pageSize;
+  const pageItems = editable.slice(startIdx, startIdx + pageSize);
+  const totalPages = Math.ceil(editable.length / pageSize);
+
+  const candidateSummaries = pageItems.map((inq, idx) => {
     let rateStr = null;
     let makeStr = null;
     if (Array.isArray(inq.deal_items) && inq.deal_items.length > 0) {
@@ -3120,7 +3305,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       }
     }
     return {
-      index: idx + 1,
+      index: startIdx + idx + 1,
       id: inq.inquiry_id || inq.id,
       displayId: inq.displayId,
       company_name: inq.company_name,
@@ -3137,7 +3322,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
   const choicesText = candidateSummaries
     .map(c => {
       const lines = [
-        `${c.index}. *${c.displayId}* (${c.date}) — _${c.stage}_`,
+        `${c.index}. *${c.displayId}* (${c.company_name}) — ${c.date} — _${c.stage}_`,
         `   • *Product:* ${c.productSummary}`,
         `   • *Delivery Location:* ${c.delivery_location}`,
         `   • *Payment Terms:* ${c.payment_terms}`,
@@ -3152,12 +3337,29 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     })
     .join('\n\n');
 
-  const prompt = `📋 *Multiple Editable Inquiries Found for ${targetName}:*\n\n` +
+  let headerText = hasFilter
+    ? `📋 *Multiple Editable Inquiries Found for ${targetName} (${editable.length} Records):*`
+    : `📋 *Recent Editable Inquiries (${editable.length} Records):*`;
+
+  if (editable.length > pageSize) {
+    headerText = hasFilter
+      ? `📋 *Showing ${startIdx + 1}–${startIdx + candidateSummaries.length} of ${editable.length} Editable Inquiries for ${targetName} (Page ${page} of ${totalPages}):*`
+      : `📋 *Showing ${startIdx + 1}–${startIdx + candidateSummaries.length} of ${editable.length} Recent Editable Inquiries (Page ${page} of ${totalPages}):*`;
+  }
+
+  let footerText = `👉 Reply with the *Option Number* (1–${editable.length}), *Inquiry ID* (e.g. "${candidateSummaries[0].displayId}"), *Product*, or what you want to update.`;
+  if (totalPages > 1) {
+    footerText += `\n💡 _Type "View More" or "Next" to see next records._`;
+  }
+
+  const prompt = `${headerText}\n\n` +
     `Please choose which inquiry you want to edit:\n\n` +
     `${choicesText}\n\n` +
-    `👉 Reply with the *Option Number* (1–${candidateSummaries.length}), *Inquiry ID* (e.g. "${candidateSummaries[0].displayId}"), or what you want to update (e.g. "update location in option 1 to Bhiwandi").`;
+    `${footerText}`;
 
   draft._inquiry_candidates = candidateSummaries;
+  draft._all_inquiry_candidates = editable;
+  draft._inquiry_candidates_page = page;
 
   return {
     handled: true,
@@ -3180,9 +3382,10 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
   const rawPo = (draft.updates?.po_number || draft.po_number || '').trim();
   const cleanPo = rawPo.replace(/^(?:PO[-_:#\s]*)/i, '').trim();
   const rawCompany = (draft.company_name || '').trim();
+  const hasFilter = Boolean(cleanInqId || rawPo || rawCompany);
 
-  if (!cleanInqId && !rawPo && !rawCompany) {
-    return { handled: false };
+  if (draft._order_verified && !originalText.match(/\b(?:PO[-_:#\s]*[A-Za-z0-9_-]+|INQ-[A-Z0-9]+)\b/i)) {
+    return { handled: false, status: 'ALREADY_VERIFIED', draft };
   }
 
   // 1. Fetch recent deals strictly scoped by role
@@ -3201,6 +3404,89 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
   }
 
   const { data: deals } = dealsQuery ? await dealsQuery.limit(500) : { data: [] };
+
+  // If no filter is provided and multiple deals exist -> Multiple Orders candidate view
+  if (!hasFilter) {
+    if (!deals || deals.length === 0) {
+      const reply = `ℹ️ *No Orders Found*\n\nThere are no existing orders in your records.\n\nIf you would like to log a new order, reply with *3* or send the order details.`;
+      return {
+        handled: true,
+        status: 'NOT_FOUND',
+        reply,
+        draft,
+      };
+    }
+
+    const pageSize = 10;
+    const page = Number(draft._order_candidates_page) || 1;
+    const startIdx = (page - 1) * pageSize;
+    const pageDeals = deals.slice(startIdx, startIdx + pageSize);
+    const totalPages = Math.ceil(deals.length / pageSize);
+
+    const formatDeal = (d, idx) => {
+      const cleanCode = (d.id || '').replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase();
+      const dealCode = `INQ-${cleanCode}`;
+      const poRef = d.po_number ? `PO: *${d.po_number}* (${dealCode})` : `*${dealCode}*`;
+      const dateFormatted = d.po_date || (d.created_at ? formatDateDDMMYYYY(d.created_at) : '');
+      const lines = [
+        `${startIdx + idx + 1}. ${poRef} — *${d.customer_name || 'Customer'}* — _${d.stage || 'Won'}_`,
+      ];
+      if (Number(d.total_amount) > 0) {
+        lines.push(`   • *Total Value:* ₹${Number(d.total_amount).toLocaleString('en-IN')}`);
+      }
+      if (d.delivery_location) {
+        lines.push(`   • *Delivery Location:* ${d.delivery_location}`);
+      }
+      if (dateFormatted) {
+        lines.push(`   • *Date:* ${dateFormatted}`);
+      }
+      return lines.join('\n');
+    };
+
+    const choicesText = pageDeals.map(formatDeal).join('\n\n');
+
+    let headerText = `🛒 *Recent Orders (${deals.length} Records):*`;
+    if (deals.length > pageSize) {
+      headerText = `🛒 *Showing ${startIdx + 1}–${startIdx + pageDeals.length} of ${deals.length} Recent Orders (Page ${page} of ${totalPages}):*`;
+    }
+
+    let footerText = `👉 Reply with the *Option Number* (1–${deals.length}), *Inquiry ID*, *PO Number*, or what you want to update.`;
+    if (totalPages > 1) {
+      footerText += `\n💡 _Type "View More" or "Next" to see next records._`;
+    }
+
+    const prompt = `${headerText}\n\n` +
+      `Please choose which order you want to update:\n\n` +
+      `${choicesText}\n\n` +
+      `${footerText}`;
+
+    draft._order_candidates = pageDeals.map((d, i) => {
+      const cleanCode = (d.id || '').replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase();
+      return {
+        ...d,
+        index: startIdx + i + 1,
+        deal_code: `INQ-${cleanCode}`,
+        clean_code: cleanCode,
+      };
+    });
+    draft._all_order_candidates = deals.map((d, i) => {
+      const cleanCode = (d.id || '').replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase();
+      return {
+        ...d,
+        index: i + 1,
+        deal_code: `INQ-${cleanCode}`,
+        clean_code: cleanCode,
+      };
+    });
+    draft._order_candidates_page = page;
+
+    return {
+      handled: true,
+      status: 'MULTIPLE_ORDERS',
+      reply: prompt,
+      draft,
+    };
+  }
 
   let deal = null;
   if (deals && deals.length > 0) {
@@ -3399,9 +3685,105 @@ async function checkComplaintsForUpdate(action, draft, senderPhone, originalText
 
   const targetRef = (draft.linked_inquiry_or_po || draft.target_ref || draft.complaint_id || '').trim();
   const companyName = (draft.company_name || '').trim();
+  const hasFilter = Boolean(targetRef || companyName);
 
-  if (!targetRef && !companyName) {
-    return { handled: false };
+  if (draft._complaint_verified && !originalText.match(/\b(?:CMP-[A-Z0-9]+|PO[-_:#\s]*[A-Za-z0-9_-]+)\b/i)) {
+    return { handled: false, status: 'ALREADY_VERIFIED', draft };
+  }
+
+  if (!hasFilter) {
+    const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants } = require('../supabase');
+    const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+    const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
+    let complaintsQuery = supabase
+      .from('complaints')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (!scope.isAdmin && targetPhones.length > 0) {
+      complaintsQuery = complaintsQuery.in('reported_by', targetPhones);
+    }
+
+    const { data: allComplaints } = await complaintsQuery.limit(50);
+    const complaints = allComplaints || [];
+
+    if (complaints.length === 0) {
+      const reply = `ℹ️ *No Active Complaints Found*\n\nThere are no active customer complaints recorded in your portfolio.\n\nIf you would like to log a new complaint, reply with *8* or send the complaint details.`;
+      return {
+        handled: true,
+        reply,
+        status: 'NOT_FOUND',
+        draft,
+      };
+    }
+
+    if (complaints.length === 1) {
+      const matchedCmp = complaints[0];
+      draft.company_name = matchedCmp.customer_name;
+      draft.complaint_id = matchedCmp.id;
+      if (matchedCmp.po_number && !draft.linked_inquiry_or_po) {
+        draft.linked_inquiry_or_po = matchedCmp.po_number;
+      }
+      const prompt = `✏️ *Active Complaint Found for ${matchedCmp.customer_name}:*\n\n` +
+        (matchedCmp.po_number ? `• *Linked Order / Ref:* PO: ${matchedCmp.po_number}\n` : '') +
+        `• *Complaint Type:* ${matchedCmp.complaint_type || 'Quality Defect'}\n` +
+        `• *Status:* ${matchedCmp.status || 'Open'}\n` +
+        `• *Description:* ${matchedCmp.description || 'N/A'}\n\n` +
+        `What details would you like to update?\n` +
+        `_(e.g. "Mark as Resolved", "Update type to Specification Mismatch", "Add resolution notes: Replaced 2 MT coils")_`;
+      return {
+        handled: true,
+        reply: prompt,
+        status: 'ASK_DETAILS',
+        draft,
+      };
+    }
+
+    const pageSize = 10;
+    const page = Number(draft._complaint_candidates_page) || 1;
+    const startIdx = (page - 1) * pageSize;
+    const pageCmps = complaints.slice(startIdx, startIdx + pageSize);
+    const totalPages = Math.ceil(complaints.length / pageSize);
+
+    const choicesText = pageCmps.map((c, idx) => {
+      const poStr = c.po_number ? ` (PO: ${c.po_number})` : '';
+      const lines = [
+        `${startIdx + idx + 1}. *Complaint #${c.id.slice(0, 8)}* (${c.customer_name || 'Customer'}${poStr}) — _${c.status || 'Open'}_`,
+        `   • *Type:* ${c.complaint_type || 'Quality Defect'}`,
+      ];
+      if (c.description) {
+        const cleanDesc = c.description.length > 70 ? `${c.description.slice(0, 67)}...` : c.description;
+        lines.push(`   • *Description:* ${cleanDesc}`);
+      }
+      return lines.join('\n');
+    }).join('\n\n');
+
+    let headerText = `⚠️ *Recent Active Complaints (${complaints.length} Records):*`;
+    if (complaints.length > pageSize) {
+      headerText = `⚠️ *Showing ${startIdx + 1}–${startIdx + pageCmps.length} of ${complaints.length} Active Complaints (Page ${page} of ${totalPages}):*`;
+    }
+
+    let footerText = `👉 Reply with the *Option Number* (1–${complaints.length}), *Customer Name*, *PO Number*, or what you want to update.`;
+    if (totalPages > 1) {
+      footerText += `\n💡 _Type "View More" or "Next" to see next records._`;
+    }
+
+    const prompt = `${headerText}\n\n` +
+      `Please choose which complaint you want to update:\n\n` +
+      `${choicesText}\n\n` +
+      `${footerText}`;
+
+    draft._complaint_candidates = pageCmps;
+    draft._all_complaint_candidates = complaints;
+    draft._complaint_candidates_page = page;
+
+    return {
+      handled: true,
+      status: 'MULTIPLE_COMPLAINTS',
+      reply: prompt,
+      draft,
+    };
   }
 
   const matchedCmp = await findAndMatchComplaint(draft, senderPhone);
@@ -7876,21 +8258,214 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     await recordSessionMessage(senderPhone, 'user', text);
 
-    // Check if resolving candidate visit selection (by date or number)
+    // ── Pagination Handler for Candidate Lists (View More / Next) ────────────
+    if (isPaginationRequest(text)) {
+      if (existingDraft._all_visit_candidates && Array.isArray(existingDraft._all_visit_candidates)) {
+        const pool = existingDraft._all_visit_candidates;
+        const pageSize = 10;
+        const totalPages = Math.ceil(pool.length / pageSize);
+        let nextPage = (Number(existingDraft._visit_candidates_page) || 1) + 1;
+        if (nextPage > totalPages) nextPage = 1;
+        existingDraft._visit_candidates_page = nextPage;
+
+        const startIdx = (nextPage - 1) * pageSize;
+        const pageItems = pool.slice(startIdx, startIdx + pageSize);
+
+        const candidateSummaries = pageItems.map((v, idx) => {
+          const vDate = v.visited_at ? new Date(v.visited_at) : new Date();
+          const dateFormatted = formatDateDDMMYYYY(vDate);
+          const outTagMatch = (v.remarks || '').match(/\[Outcome:\s*([^\]]+)\]/i);
+          const outcome = outTagMatch ? outTagMatch[1] : 'Positive';
+          const cleanRemarks = (v.remarks || '')
+            .replace(/\[Outcome:\s*[^\]]+\]/gi, '')
+            .replace(/\[Follow-up:\s*[^\]]+\]/gi, '')
+            .trim();
+          return {
+            index: startIdx + idx + 1,
+            id: v.id,
+            company_name: v.customer_name || existingDraft.company_name,
+            date: dateFormatted,
+            visited_at: v.visited_at,
+            person_met: v.person_met || 'Not recorded',
+            location: v.customer_address || 'Not recorded',
+            outcome: outcome,
+            remarks: cleanRemarks ? (cleanRemarks.length > 80 ? cleanRemarks.slice(0, 77) + '...' : cleanRemarks) : null,
+          };
+        });
+
+        const choicesText = candidateSummaries
+          .map(c => `${c.index}. *Visit on ${c.date}*\n   • *Person Met:* ${c.person_met}\n   • *Location:* ${c.location}\n   • *Outcome:* ${c.outcome}${c.remarks ? `\n   • *Remarks:* ${c.remarks}` : ''}`)
+          .join('\n\n');
+
+        const headerText = `📅 *Showing ${startIdx + 1}–${startIdx + candidateSummaries.length} of ${pool.length} Visits for ${existingDraft.company_name} (Page ${nextPage} of ${totalPages}):*`;
+        const footerText = `👉 Reply with the *Option Number* (1–${pool.length}), *Visit Date*, *Person Met*, or type *"View More"* to see more visits.`;
+        const prompt = `${headerText}\n\n${choicesText}\n\n${footerText}`;
+
+        existingDraft._visit_candidates = candidateSummaries;
+        await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
+        await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+        return { handled: true, reply: prompt };
+      }
+
+      if (existingDraft._all_inquiry_candidates && Array.isArray(existingDraft._all_inquiry_candidates)) {
+        const pool = existingDraft._all_inquiry_candidates;
+        const pageSize = 10;
+        const totalPages = Math.ceil(pool.length / pageSize);
+        let nextPage = (Number(existingDraft._inquiry_candidates_page) || 1) + 1;
+        if (nextPage > totalPages) nextPage = 1;
+        existingDraft._inquiry_candidates_page = nextPage;
+
+        const startIdx = (nextPage - 1) * pageSize;
+        const pageItems = pool.slice(startIdx, startIdx + pageSize);
+
+        const candidateSummaries = pageItems.map((inq, idx) => {
+          let rateStr = null;
+          let makeStr = null;
+          if (Array.isArray(inq.deal_items) && inq.deal_items.length > 0) {
+            const firstItem = inq.deal_items[0];
+            if (firstItem.rate) rateStr = `₹${Number(firstItem.rate).toLocaleString('en-IN')}${firstItem.unit ? `/${firstItem.unit}` : '/MT'}`;
+            if (firstItem.preferred_make || firstItem.make) makeStr = firstItem.preferred_make || firstItem.make;
+          }
+          return {
+            index: startIdx + idx + 1,
+            id: inq.inquiry_id || inq.id,
+            displayId: inq.displayId,
+            company_name: inq.company_name,
+            date: inq.dateFormatted,
+            stage: formatStageLabel ? formatStageLabel(inq.stage) : inq.stage,
+            productSummary: inq.productSummary || 'Products on record',
+            payment_terms: inq.payment_terms || 'Not specified',
+            delivery_location: inq.delivery_location || 'Not specified',
+            rate: rateStr,
+            make: makeStr,
+          };
+        });
+
+        const choicesText = candidateSummaries
+          .map(c => `${c.index}. *${c.displayId}* (${c.date}) — _${c.stage}_\n   • *Product:* ${c.productSummary}\n   • *Delivery Location:* ${c.delivery_location}\n   • *Payment Terms:* ${c.payment_terms}${c.rate && !c.productSummary.includes('@ ₹') ? `\n   • *Rate:* ${c.rate}` : ''}${c.make ? `\n   • *Make:* ${c.make}` : ''}`)
+          .join('\n\n');
+
+        const headerText = `📋 *Showing ${startIdx + 1}–${startIdx + candidateSummaries.length} of ${pool.length} Inquiries for ${existingDraft.company_name || 'Customer'} (Page ${nextPage} of ${totalPages}):*`;
+        const footerText = `👉 Reply with the *Option Number* (1–${pool.length}), *Inquiry ID*, *Product*, or type *"View More"* to see more inquiries.`;
+        const prompt = `${headerText}\n\n${choicesText}\n\n${footerText}`;
+
+        existingDraft._inquiry_candidates = candidateSummaries;
+        await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
+        await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+        return { handled: true, reply: prompt };
+      }
+
+      if (existingDraft._all_order_candidates && Array.isArray(existingDraft._all_order_candidates)) {
+        const pool = existingDraft._all_order_candidates;
+        const pageSize = 10;
+        const totalPages = Math.ceil(pool.length / pageSize);
+        let nextPage = (Number(existingDraft._order_candidates_page) || 1) + 1;
+        if (nextPage > totalPages) nextPage = 1;
+        existingDraft._order_candidates_page = nextPage;
+
+        const startIdx = (nextPage - 1) * pageSize;
+        const pageDeals = pool.slice(startIdx, startIdx + pageSize);
+        const orderList = pageDeals.map(formatOrderCandidate).join('\n\n');
+
+        const headerText = `⚠️ *Showing ${startIdx + 1}–${startIdx + pageDeals.length} of ${pool.length} Confirmed Orders (Page ${nextPage} of ${totalPages}):*`;
+        const footerText = `👉 Reply with the *Number* (1–${pool.length}) or the *Inquiry ID* / *PO Number*.`;
+        const prompt = `${headerText}\n\n${orderList}\n\n${footerText}`;
+
+        existingDraft._order_candidates = pageDeals;
+        await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
+        await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+        return { handled: true, reply: prompt };
+      }
+
+      if (existingDraft._all_complaint_candidates && Array.isArray(existingDraft._all_complaint_candidates)) {
+        const pool = existingDraft._all_complaint_candidates;
+        const pageSize = 10;
+        const totalPages = Math.ceil(pool.length / pageSize);
+        let nextPage = (Number(existingDraft._complaint_candidates_page) || 1) + 1;
+        if (nextPage > totalPages) nextPage = 1;
+        existingDraft._complaint_candidates_page = nextPage;
+
+        const startIdx = (nextPage - 1) * pageSize;
+        const pageCmps = pool.slice(startIdx, startIdx + pageSize);
+        const choicesText = pageCmps.map((c, idx) => {
+          const poStr = c.po_number ? ` (PO: ${c.po_number})` : '';
+          const lines = [
+            `${startIdx + idx + 1}. *Complaint #${c.id.slice(0, 8)}* (${c.customer_name || 'Customer'}${poStr}) — _${c.status || 'Open'}_`,
+            `   • *Type:* ${c.complaint_type || 'Quality Defect'}`,
+          ];
+          if (c.description) {
+            const cleanDesc = c.description.length > 70 ? `${c.description.slice(0, 67)}...` : c.description;
+            lines.push(`   • *Description:* ${cleanDesc}`);
+          }
+          return lines.join('\n');
+        }).join('\n\n');
+
+        const headerText = `⚠️ *Showing ${startIdx + 1}–${startIdx + pageCmps.length} of ${pool.length} Active Complaints (Page ${nextPage} of ${totalPages}):*`;
+        const footerText = `👉 Reply with the *Number* (1–${pool.length}), *Customer Name*, or *PO Number*.`;
+        const prompt = `${headerText}\n\n${choicesText}\n\n${footerText}`;
+
+        existingDraft._complaint_candidates = pageCmps;
+        await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
+        await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+        return { handled: true, reply: prompt };
+      }
+    }
+
+    // ── Out-of-Bounds Option Number Guard ────────────────────────────────────
+    const totalVisibleCandidates =
+      (existingDraft._visit_candidates && existingDraft._visit_candidates.length) ||
+      (existingDraft._inquiry_candidates && existingDraft._inquiry_candidates.length) ||
+      (existingDraft._order_candidates && existingDraft._order_candidates.length) ||
+      (existingDraft._complaint_candidates && existingDraft._complaint_candidates.length) || 0;
+
+    const totalAllCandidates =
+      (existingDraft._all_visit_candidates && existingDraft._all_visit_candidates.length) ||
+      (existingDraft._all_inquiry_candidates && existingDraft._all_inquiry_candidates.length) ||
+      (existingDraft._all_order_candidates && existingDraft._all_order_candidates.length) ||
+      (existingDraft._all_complaint_candidates && existingDraft._all_complaint_candidates.length) || totalVisibleCandidates;
+
+    if (totalVisibleCandidates > 0) {
+      const outOfBoundsIdx = detectOutOfBoundsCandidateIndex(text, totalAllCandidates);
+      if (outOfBoundsIdx !== null && !text.toLowerCase().includes('rate') && !text.toLowerCase().includes('qty') && !text.toLowerCase().includes('quantity') && !text.toLowerCase().includes('₹')) {
+        const outOfBoundsReply = `⚠️ *Invalid Selection (${outOfBoundsIdx})*\n\nPlease choose a valid option number between **1 and ${totalAllCandidates}**, or type **Cancel** to exit.`;
+        await recordSessionMessage(senderPhone, 'assistant', outOfBoundsReply, { action_type: action });
+        return { handled: true, reply: outOfBoundsReply };
+      }
+    }
+
+    // ── 1. Check Visit Candidate Selection ───────────────────────────────────
     let candidateResolved = false;
     if (existingDraft._visit_candidates && Array.isArray(existingDraft._visit_candidates)) {
-      const numIdx = extractCandidateIndex(text, existingDraft._visit_candidates.length);
+      const numIdx = extractCandidateIndex(text, totalAllCandidates || existingDraft._visit_candidates.length);
       let matchedCandidate = null;
 
-      if (numIdx !== null && numIdx >= 1 && numIdx <= existingDraft._visit_candidates.length) {
-        matchedCandidate = existingDraft._visit_candidates[numIdx - 1];
-      } else {
+      if (numIdx !== null) {
+        if (existingDraft._all_visit_candidates && Array.isArray(existingDraft._all_visit_candidates) && numIdx >= 1 && numIdx <= existingDraft._all_visit_candidates.length) {
+          const v = existingDraft._all_visit_candidates[numIdx - 1];
+          const vDate = v.visited_at ? new Date(v.visited_at) : new Date();
+          const outTagMatch = (v.remarks || '').match(/\[Outcome:\s*([^\]]+)\]/i);
+          matchedCandidate = {
+            id: v.id,
+            company_name: v.customer_name || existingDraft.company_name,
+            date: formatDateDDMMYYYY(vDate),
+            person_met: v.person_met || 'Not recorded',
+            location: v.customer_address || 'Not recorded',
+            outcome: outTagMatch ? outTagMatch[1] : 'Positive',
+            remarks: v.remarks || 'Not specified',
+          };
+        } else if (numIdx >= 1 && numIdx <= existingDraft._visit_candidates.length) {
+          matchedCandidate = existingDraft._visit_candidates[numIdx - 1];
+        }
+      }
+
+      if (!matchedCandidate) {
         const normInputDate = normalizeDateToDDMMYYYY(text);
+        const lowerText = text.toLowerCase();
         matchedCandidate = existingDraft._visit_candidates.find(c =>
-          c.date === normInputDate ||
-          (c.visited_at && c.visited_at.startsWith(parseDDMMYYYYtoISO(normInputDate) || 'NOMATCH')) ||
-          text.includes(c.date) ||
-          (c.date && text.replace(/[-/.]/g, '').includes(c.date.replace(/[-/.]/g, '')))
+          (normInputDate && (c.date === normInputDate || (c.visited_at && c.visited_at.startsWith(parseDDMMYYYYtoISO(normInputDate) || 'NOMATCH')))) ||
+          (c.date && text.includes(c.date)) ||
+          (c.person_met && c.person_met !== 'Not recorded' && lowerText.includes(c.person_met.toLowerCase())) ||
+          (c.location && c.location !== 'Not recorded' && c.location.length >= 4 && lowerText.includes(c.location.toLowerCase()))
         );
       }
 
@@ -7898,6 +8473,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
         existingDraft.visit_id = matchedCandidate.id;
         existingDraft.visit_date = matchedCandidate.date;
         delete existingDraft._visit_candidates;
+        delete existingDraft._all_visit_candidates;
+        delete existingDraft._visit_candidates_page;
         candidateResolved = true;
 
         const isPureSelect = isPureOptionSelectorOnly(text);
@@ -7907,6 +8484,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
         if (isPureSelect && !hasUpdates) {
           const prompt = `✏️ **Selected Field Visit for ${matchedCandidate.company_name || 'Customer'} (${matchedCandidate.date}):**\n\n` +
             `- **Person Met:** ${matchedCandidate.person_met || 'Not specified'}\n` +
+            `- **Location:** ${matchedCandidate.location || 'Not specified'}\n` +
             `- **Visit Outcome:** ${matchedCandidate.outcome || 'Not specified'}\n` +
             `- **Remarks:** ${matchedCandidate.remarks || 'Not specified'}\n\n` +
             `What details would you like to update?\n` +
@@ -7919,20 +8497,47 @@ async function handleCatalogFlow(rawText, senderPhone) {
       }
     }
 
-    // Check if resolving candidate inquiry selection (by ID or number)
+    // ── 2. Check Inquiry Candidate Selection ─────────────────────────────────
     let inquiryCandidateResolved = false;
     if (existingDraft._inquiry_candidates && Array.isArray(existingDraft._inquiry_candidates)) {
-      const numIdx = extractCandidateIndex(text, existingDraft._inquiry_candidates.length);
+      const numIdx = extractCandidateIndex(text, totalAllCandidates || existingDraft._inquiry_candidates.length);
       let matchedCandidate = null;
 
-      if (numIdx !== null && numIdx >= 1 && numIdx <= existingDraft._inquiry_candidates.length) {
-        matchedCandidate = existingDraft._inquiry_candidates[numIdx - 1];
-      } else {
+      if (numIdx !== null) {
+        if (existingDraft._all_inquiry_candidates && Array.isArray(existingDraft._all_inquiry_candidates) && numIdx >= 1 && numIdx <= existingDraft._all_inquiry_candidates.length) {
+          const inq = existingDraft._all_inquiry_candidates[numIdx - 1];
+          matchedCandidate = {
+            id: inq.inquiry_id || inq.id,
+            displayId: inq.displayId || `INQ-${(inq.inquiry_id || inq.id).slice(0, 6).toUpperCase()}`,
+            company_name: inq.company_name,
+            date: inq.dateFormatted || formatDateDDMMYYYY(new Date(inq.created_at || Date.now())),
+            stage: inq.stage || 'New Inquiry',
+            productSummary: inq.productSummary || 'Products on record',
+            payment_terms: inq.payment_terms || 'Not specified',
+            delivery_location: inq.delivery_location || 'Not specified',
+          };
+        } else if (numIdx >= 1 && numIdx <= existingDraft._inquiry_candidates.length) {
+          matchedCandidate = existingDraft._inquiry_candidates[numIdx - 1];
+        }
+      }
+
+      if (!matchedCandidate) {
         const cleanText = text.replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+        const lowerText = text.toLowerCase();
         matchedCandidate = existingDraft._inquiry_candidates.find(c => {
           const cDisplay = (c.displayId || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
           const cId = (c.id || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
-          return cleanText.length >= 3 && (cleanText.includes(cDisplay) || cDisplay.includes(cleanText) || cleanText.includes(cId) || cId.includes(cleanText));
+          const hasIdMatch = cleanText.length >= 3 && (cleanText.includes(cDisplay) || cDisplay.includes(cleanText) || cleanText.includes(cId) || cId.includes(cleanText));
+          const hasProdMatch = c.productSummary && (
+            (lowerText.includes('hr coil') && c.productSummary.toLowerCase().includes('hr coil')) ||
+            (lowerText.includes('cr sheet') && c.productSummary.toLowerCase().includes('cr sheet')) ||
+            (lowerText.includes('plate') && c.productSummary.toLowerCase().includes('plate')) ||
+            (lowerText.includes('tmt') && c.productSummary.toLowerCase().includes('tmt')) ||
+            (lowerText.includes('pipe') && c.productSummary.toLowerCase().includes('pipe')) ||
+            (lowerText.includes('beam') && c.productSummary.toLowerCase().includes('beam')) ||
+            (lowerText.includes('angle') && c.productSummary.toLowerCase().includes('angle'))
+          );
+          return hasIdMatch || hasProdMatch;
         });
       }
 
@@ -7940,7 +8545,10 @@ async function handleCatalogFlow(rawText, senderPhone) {
         existingDraft.inquiry_id = matchedCandidate.id;
         existingDraft.company_name = matchedCandidate.company_name;
         existingDraft._inquiry_display_id = matchedCandidate.displayId;
+        existingDraft._inquiry_verified = true;
         delete existingDraft._inquiry_candidates;
+        delete existingDraft._all_inquiry_candidates;
+        delete existingDraft._inquiry_candidates_page;
         inquiryCandidateResolved = true;
 
         const isPureSelect = isPureOptionSelectorOnly(text);
@@ -7964,25 +8572,40 @@ async function handleCatalogFlow(rawText, senderPhone) {
       }
     }
 
-    // Check if resolving candidate order selection for LOG_COMPLAINT or UPDATE_ORDER (by number, PO, or INQ)
+    // ── 3. Check Order Candidate Selection ───────────────────────────────────
     let orderCandidateResolved = false;
     if (existingDraft._order_candidates && Array.isArray(existingDraft._order_candidates)) {
-      const numIdx = extractCandidateIndex(text, existingDraft._order_candidates.length);
+      const numIdx = extractCandidateIndex(text, totalAllCandidates || existingDraft._order_candidates.length);
       let matchedCandidate = null;
 
-      if (numIdx !== null && numIdx >= 1 && numIdx <= existingDraft._order_candidates.length) {
-        matchedCandidate = existingDraft._order_candidates[numIdx - 1];
-      } else {
+      if (numIdx !== null) {
+        if (existingDraft._all_order_candidates && Array.isArray(existingDraft._all_order_candidates) && numIdx >= 1 && numIdx <= existingDraft._all_order_candidates.length) {
+          matchedCandidate = existingDraft._all_order_candidates[numIdx - 1];
+        } else if (numIdx >= 1 && numIdx <= existingDraft._order_candidates.length) {
+          matchedCandidate = existingDraft._order_candidates[numIdx - 1];
+        }
+      }
+
+      if (!matchedCandidate) {
         const cleanText = text.replace(/^(?:PO|Purchase\s*Order|INQ|DEAL)[\s#:-]*/i, '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+        const lowerText = text.toLowerCase();
         matchedCandidate = existingDraft._order_candidates.find(c => {
           const cDealCode = (c.deal_code || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
           const cCleanCode = (c.clean_code || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
           const cPo = (c.po_number || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
           const cId = (c.id || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
-          return (
+          const hasCodeMatch = (
             (cleanText.length >= 2 && cPo && (cleanText.includes(cPo) || cPo.includes(cleanText))) ||
             (cleanText.length >= 3 && (cDealCode.includes(cleanText) || cleanText.includes(cDealCode) || cCleanCode === cleanText || cId.startsWith(cleanText)))
           );
+          const hasProdMatch = c.product_summary && (
+            (lowerText.includes('hr coil') && c.product_summary.toLowerCase().includes('hr coil')) ||
+            (lowerText.includes('cr sheet') && c.product_summary.toLowerCase().includes('cr sheet')) ||
+            (lowerText.includes('plate') && c.product_summary.toLowerCase().includes('plate')) ||
+            (lowerText.includes('tmt') && c.product_summary.toLowerCase().includes('tmt')) ||
+            (lowerText.includes('pipe') && c.product_summary.toLowerCase().includes('pipe'))
+          );
+          return hasCodeMatch || hasProdMatch;
         });
       }
 
@@ -7992,6 +8615,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
         existingDraft.linked_inquiry_or_po = matchedCandidate.po_number
           ? `PO: ${matchedCandidate.po_number} (${matchedCandidate.deal_code})`
           : matchedCandidate.deal_code;
+        existingDraft._order_verified = true;
         const dealProduct = matchedCandidate.product_summary || (matchedCandidate.items && matchedCandidate.items.length > 0 ? matchedCandidate.items.map(it => it.sku_text).filter(Boolean).join(', ') : null);
         const isCatProd = existingDraft.affected_product && isValidCatalogProduct(existingDraft.affected_product);
         if ((!existingDraft.affected_product || !isCatProd) && dealProduct) {
@@ -8001,6 +8625,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
           if (norm.catalogName) existingDraft.affected_product = norm.catalogName;
         }
         delete existingDraft._order_candidates;
+        delete existingDraft._all_order_candidates;
+        delete existingDraft._order_candidates_page;
         orderCandidateResolved = true;
 
         if (action === 'UPDATE_ORDER') {
@@ -8024,6 +8650,67 @@ async function handleCatalogFlow(rawText, senderPhone) {
       }
     }
 
+    // ── 4. Check Complaint Candidate Selection ───────────────────────────────
+    let complaintCandidateResolved = false;
+    if (existingDraft._complaint_candidates && Array.isArray(existingDraft._complaint_candidates)) {
+      const numIdx = extractCandidateIndex(text, totalAllCandidates || existingDraft._complaint_candidates.length);
+      let matchedCandidate = null;
+
+      if (numIdx !== null) {
+        if (existingDraft._all_complaint_candidates && Array.isArray(existingDraft._all_complaint_candidates) && numIdx >= 1 && numIdx <= existingDraft._all_complaint_candidates.length) {
+          matchedCandidate = existingDraft._all_complaint_candidates[numIdx - 1];
+        } else if (numIdx >= 1 && numIdx <= existingDraft._complaint_candidates.length) {
+          matchedCandidate = existingDraft._complaint_candidates[numIdx - 1];
+        }
+      }
+
+      if (!matchedCandidate) {
+        const cleanText = text.replace(/^(?:PO|Purchase\s*Order|INQ|DEAL|CMP|Complaint)[\s#:-]*/i, '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+        const lowerText = text.toLowerCase();
+        matchedCandidate = existingDraft._complaint_candidates.find(c => {
+          const cId = (c.id || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+          const cPo = (c.po_number || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+          const cCust = (c.customer_name || '').toLowerCase();
+          const cType = (c.complaint_type || '').toLowerCase();
+          return (
+            (cleanText.length >= 3 && (cId.startsWith(cleanText) || (cPo && (cleanText.includes(cPo) || cPo.includes(cleanText))))) ||
+            (cCust && lowerText.includes(cCust)) ||
+            (cType && lowerText.includes(cType))
+          );
+        });
+      }
+
+      if (matchedCandidate) {
+        existingDraft.complaint_id = matchedCandidate.id;
+        existingDraft.company_name = matchedCandidate.customer_name;
+        if (matchedCandidate.po_number) {
+          existingDraft.linked_inquiry_or_po = matchedCandidate.po_number;
+        }
+        existingDraft._complaint_verified = true;
+        delete existingDraft._complaint_candidates;
+        delete existingDraft._all_complaint_candidates;
+        delete existingDraft._complaint_candidates_page;
+        complaintCandidateResolved = true;
+
+        const isPureSelect = isPureOptionSelectorOnly(text);
+        const hasUpdates = (existingDraft.updates && Object.values(existingDraft.updates).some(v => v !== null && v !== undefined && v !== ''));
+
+        if (isPureSelect && !hasUpdates) {
+          const prompt = `✏️ **Selected Complaint for ${matchedCandidate.customer_name || 'Customer'}:**\n\n` +
+            (matchedCandidate.po_number ? `- **Linked PO:** ${matchedCandidate.po_number}\n` : '') +
+            `- **Type:** ${matchedCandidate.complaint_type || 'Quality Defect'}\n` +
+            `- **Status:** ${matchedCandidate.status || 'Open'}\n` +
+            `- **Description:** ${matchedCandidate.description || 'N/A'}\n\n` +
+            `What details would you like to update?\n` +
+            `_(e.g., "Mark as Resolved", "Update type to Specification Mismatch", "Resolution notes: Replaced 2 MT coils")_`;
+
+          await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
+          await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+          return { handled: true, reply: prompt };
+        }
+      }
+    }
+
     // Check if user wants to abort / switch (only if not resolving candidate selection)
     if (isDiscardOrCancelIntent(text)) {
       const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
@@ -8038,7 +8725,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
 
     // Check if user wants to abort / switch (only if not resolving candidate selection)
-    if (!candidateResolved && !inquiryCandidateResolved && !orderCandidateResolved) {
+    if (!candidateResolved && !inquiryCandidateResolved && !orderCandidateResolved && !complaintCandidateResolved) {
       if (text.trim().toLowerCase() === 'general query' || text.trim() === '10' || text.trim() === '10.' || text.trim() === 'menu_10') {
         const queryReply = `🔍 *SalesOS Search & Intelligence*\n\nAsk any question about your inquiries, quotations, customer profiles, site visits, or complaints!\n\n_Example: "What was the last rate quoted to Horizon Sheet Metal?" or "Show pending complaints"_`;
         await recordSessionMessage(senderPhone, 'assistant', queryReply, { action_type: 'GENERAL_QUERY' });
@@ -8089,9 +8776,9 @@ async function handleCatalogFlow(rawText, senderPhone) {
       : await extractFieldsWithLLM(action, text, existingDraft);
 
     const preserveKeys = [
-      'visit_id', 'visit_date', 'inquiry_id', '_inquiry_display_id',
-      'deal_id', 'po_number', 'linked_inquiry_or_po', 'affected_product',
-      'complaint_type', 'complaint_description', 'company_name',
+      'visit_id', 'visit_date', 'inquiry_id', '_inquiry_display_id', '_inquiry_verified',
+      'deal_id', 'po_number', 'linked_inquiry_or_po', 'affected_product', '_order_verified',
+      'complaint_type', 'complaint_description', 'company_name', 'complaint_id', '_complaint_verified',
       'rate', '_customer_verified', '_new_customer_created'
     ];
     for (const key of preserveKeys) {
@@ -8294,6 +8981,47 @@ async function handleCatalogFlow(rawText, senderPhone) {
       };
     }
 
+    // 6a. Direct candidate browsing for UPDATE actions
+    if (matchedAction === 'UPDATE_INQUIRY') {
+      const inqCheck = await checkInquiriesForUpdate('UPDATE_INQUIRY', {}, senderPhone, text);
+      if (inqCheck && inqCheck.handled) {
+        await startNewCatalogSession(senderPhone, inqCheck.reply);
+        await recordSessionMessage(senderPhone, 'assistant', inqCheck.reply, { action_type: 'UPDATE_INQUIRY' });
+        await saveActiveSession(senderPhone, (inqCheck.draft?.company_name || 'Customer'), `catalog_flow|UPDATE_INQUIRY|${JSON.stringify(inqCheck.draft || {})}`);
+        return { handled: true, reply: inqCheck.reply };
+      }
+    }
+
+    if (matchedAction === 'UPDATE_ORDER') {
+      const ordCheck = await checkOrdersForUpdate('UPDATE_ORDER', {}, senderPhone, text);
+      if (ordCheck && ordCheck.handled) {
+        await startNewCatalogSession(senderPhone, ordCheck.reply);
+        await recordSessionMessage(senderPhone, 'assistant', ordCheck.reply, { action_type: 'UPDATE_ORDER' });
+        await saveActiveSession(senderPhone, (ordCheck.draft?.company_name || 'Customer'), `catalog_flow|UPDATE_ORDER|${JSON.stringify(ordCheck.draft || {})}`);
+        return { handled: true, reply: ordCheck.reply };
+      }
+    }
+
+    if (matchedAction === 'UPDATE_VISIT') {
+      const visCheck = await checkMultipleVisitsForUpdate('UPDATE_VISIT', {}, senderPhone);
+      if (visCheck && visCheck.handled && visCheck.reply) {
+        await startNewCatalogSession(senderPhone, visCheck.reply);
+        await recordSessionMessage(senderPhone, 'assistant', visCheck.reply, { action_type: 'UPDATE_VISIT' });
+        await saveActiveSession(senderPhone, (visCheck.draft?.company_name || 'Customer'), `catalog_flow|UPDATE_VISIT|${JSON.stringify(visCheck.draft || {})}`);
+        return { handled: true, reply: visCheck.reply };
+      }
+    }
+
+    if (matchedAction === 'UPDATE_COMPLAINT') {
+      const cmpCheck = await checkComplaintsForUpdate('UPDATE_COMPLAINT', {}, senderPhone, text);
+      if (cmpCheck && cmpCheck.handled) {
+        await startNewCatalogSession(senderPhone, cmpCheck.reply);
+        await recordSessionMessage(senderPhone, 'assistant', cmpCheck.reply, { action_type: 'UPDATE_COMPLAINT' });
+        await saveActiveSession(senderPhone, (cmpCheck.draft?.company_name || 'Customer'), `catalog_flow|UPDATE_COMPLAINT|${JSON.stringify(cmpCheck.draft || {})}`);
+        return { handled: true, reply: cmpCheck.reply };
+      }
+    }
+
     const initialPrompt = MODULE_PROMPTS[matchedAction];
     if (initialPrompt) {
       await startNewCatalogSession(senderPhone, initialPrompt);
@@ -8366,4 +9094,5 @@ module.exports = {
   classifyActiveSessionIntent,
   validateDraftProducts,
   resolveClarifiedProduct,
+  detectNonEditableFieldAttempt,
 };
