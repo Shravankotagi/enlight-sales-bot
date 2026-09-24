@@ -1532,7 +1532,7 @@ async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
   const dealCode = getDealCode(deal);
 
   const resendApiKey = process.env.RESEND_API_KEY || '';
-  const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+  const fromEmail = process.env.RESEND_FROM_EMAIL || 'quotes@enlightmetals.com';
 
   const qRefNum = `QT-2026-${dealCode.replace(/[^A-Z0-9]/gi, '').slice(-4) || Math.floor(1000 + Math.random() * 9000)}`;
   const todayDateStr = new Date().toLocaleDateString('en-IN');
