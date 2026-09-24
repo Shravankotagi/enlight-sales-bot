@@ -1744,10 +1744,29 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     mode === 'follow_up_pending' ||
     mode === 'pending_followups' ||
     mode === 'pending' ||
+    mode === 'all_pending' ||
+    mode === 'completed' ||
+    mode === 'addressed' ||
+    mode === 'completed_followup' ||
+    mode === 'completed_followups' ||
+    mode === 'addressed_followup' ||
+    mode === 'addressed_followups' ||
+    mode === 'no_followup' ||
+    mode === 'no_follow_up' ||
+    mode === 'none' ||
+    mode === 'without_followup' ||
+    mode === 'without_follow_up' ||
+    mode === 'no_followups' ||
+    mode === 'all_followups' ||
+    mode === 'all_follow_ups' ||
     mode === 'follow_up' ||
     mode === 'followup' ||
     args?.due_today ||
     args?.overdue ||
+    args?.completed ||
+    args?.addressed ||
+    args?.no_followup ||
+    args?.no_follow_up ||
     args?.pending_followup ||
     args?.pending_follow_up ||
     args?.requires_follow_up ||
@@ -2120,6 +2139,137 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     };
   }
 
+  // ── Mode: Addressed / Completed Follow-up Visits ───────────────────────────
+  if (
+    mode === 'completed' ||
+    mode === 'addressed' ||
+    mode === 'completed_followup' ||
+    mode === 'completed_followups' ||
+    mode === 'addressed_followup' ||
+    mode === 'addressed_followups' ||
+    mode === 'resolved_followup' ||
+    mode === 'resolved_followups' ||
+    args?.completed ||
+    args?.addressed ||
+    args?.follow_up_filter === 'completed' ||
+    args?.follow_up_filter === 'addressed'
+  ) {
+    let completedVisits = materialized.filter((v) => v.follow_up_status === 'completed');
+    if (custFilter) completedVisits = completedVisits.filter((v) => v.customer_name.toLowerCase().includes(custFilter));
+    if (repFilter) completedVisits = completedVisits.filter((v) => v.salesperson_name.toLowerCase().includes(repFilter));
+    if (locFilter) completedVisits = completedVisits.filter((v) => v.location.toLowerCase().includes(locFilter) || v.remarks.toLowerCase().includes(locFilter));
+
+    const totalCompleted = completedVisits.length;
+    const displayCompleted = completedVisits.slice(0, 8);
+    const hasMore = totalCompleted > 8;
+
+    const allWithFu = materialized.filter((v) => Boolean(v.follow_up_action));
+    const allPending = allWithFu.filter((v) => v.requires_follow_up);
+
+    return {
+      data: {
+        total_completed_followup_visits: totalCompleted,
+        completed_count: totalCompleted,
+        total_records: totalCompleted,
+        showing_count: displayCompleted.length,
+        has_more: hasMore,
+        follow_up_status_breakdown: {
+          total_visits: materialized.length,
+          all_follow_ups_logged: allWithFu.length,
+          addressed_completed: totalCompleted,
+          all_pending: allPending.length,
+          no_follow_up: materialized.filter((v) => !v.follow_up_action).length,
+        },
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalCompleted} addressed visit follow-ups. Please navigate to the dashboard to view all ${totalCompleted} records.`
+          : null,
+        summary: totalCompleted > 0
+          ? `You have ${totalCompleted} addressed (completed) visit follow-up${totalCompleted === 1 ? '' : 's'}. (Overall: ${allPending.length} pending, ${totalCompleted} completed).`
+          : 'No addressed (completed) visit follow-ups found.',
+        visits: displayCompleted,
+      },
+      rowCount: totalCompleted,
+    };
+  }
+
+  // ── Mode: No Follow-up Visits ─────────────────────────────────────────────
+  if (
+    mode === 'no_followup' ||
+    mode === 'no_follow_up' ||
+    mode === 'none' ||
+    mode === 'without_followup' ||
+    mode === 'without_follow_up' ||
+    mode === 'no_followups' ||
+    mode === 'no_follow_ups' ||
+    args?.no_followup ||
+    args?.no_follow_up ||
+    args?.follow_up_filter === 'none' ||
+    args?.follow_up_filter === 'no_followup' ||
+    args?.follow_up_filter === 'no_follow_up'
+  ) {
+    let noFuVisits = materialized.filter((v) => !v.follow_up_action);
+    if (custFilter) noFuVisits = noFuVisits.filter((v) => v.customer_name.toLowerCase().includes(custFilter));
+    if (repFilter) noFuVisits = noFuVisits.filter((v) => v.salesperson_name.toLowerCase().includes(repFilter));
+    if (locFilter) noFuVisits = noFuVisits.filter((v) => v.location.toLowerCase().includes(locFilter) || v.remarks.toLowerCase().includes(locFilter));
+    if (outcomeFilter && outcomeFilter !== 'all') noFuVisits = noFuVisits.filter((v) => v.outcome === outcomeFilter);
+
+    const totalNoFu = noFuVisits.length;
+    const displayNoFu = noFuVisits.slice(0, 8);
+    const hasMore = totalNoFu > 8;
+
+    return {
+      data: {
+        total_no_followup_visits: totalNoFu,
+        no_follow_up_count: totalNoFu,
+        total_records: totalNoFu,
+        showing_count: displayNoFu.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalNoFu} visits with no follow-up required. Please navigate to the dashboard to view all ${totalNoFu} records.`
+          : null,
+        summary: `Found ${totalNoFu} customer visit${totalNoFu === 1 ? '' : 's'} where no follow-up action was logged or required.`,
+        visits: displayNoFu,
+      },
+      rowCount: totalNoFu,
+    };
+  }
+
+  // ── Mode: All Follow-ups Logged (Pending + Completed) ──────────────────────
+  if (
+    mode === 'all_followups' ||
+    mode === 'all_follow_ups' ||
+    args?.follow_up_filter === 'all_followups' ||
+    args?.follow_up_filter === 'all_follow_ups'
+  ) {
+    let allFuVisits = materialized.filter((v) => Boolean(v.follow_up_action));
+    if (custFilter) allFuVisits = allFuVisits.filter((v) => v.customer_name.toLowerCase().includes(custFilter));
+    if (repFilter) allFuVisits = allFuVisits.filter((v) => v.salesperson_name.toLowerCase().includes(repFilter));
+    if (locFilter) allFuVisits = allFuVisits.filter((v) => v.location.toLowerCase().includes(locFilter) || v.remarks.toLowerCase().includes(locFilter));
+
+    const totalAllFu = allFuVisits.length;
+    const pendingCount = allFuVisits.filter((v) => v.requires_follow_up).length;
+    const completedCount = allFuVisits.filter((v) => v.follow_up_status === 'completed').length;
+    const displayAllFu = allFuVisits.slice(0, 8);
+    const hasMore = totalAllFu > 8;
+
+    return {
+      data: {
+        total_followups_logged: totalAllFu,
+        all_pending_count: pendingCount,
+        completed_count: completedCount,
+        total_records: totalAllFu,
+        showing_count: displayAllFu.length,
+        has_more: hasMore,
+        dashboard_notice: hasMore
+          ? `Showing 8 of ${totalAllFu} follow-up visits. Please navigate to the dashboard to view all ${totalAllFu} records.`
+          : null,
+        summary: `Total ${totalAllFu} visit follow-up${totalAllFu === 1 ? '' : 's'} logged: ${pendingCount} pending and ${completedCount} completed.`,
+        visits: displayAllFu,
+      },
+      rowCount: totalAllFu,
+    };
+  }
+
   // ── Mode: Visited Customers with No Orders ────────────────────────────────
   if (
     mode === 'visits_no_orders' ||
@@ -2227,15 +2377,27 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
   if (outcomeFilter && outcomeFilter !== 'all') filtered = filtered.filter((v) => v.outcome === outcomeFilter);
   if (requiresFollowUp !== null) filtered = filtered.filter((v) => v.requires_follow_up === requiresFollowUp);
 
-  let pos = 0, neu = 0, neg = 0, fu = 0;
+  let pos = 0, neu = 0, neg = 0;
+  let allPendingCount = 0, completedCount = 0, noFollowupCount = 0, dueTodayCount = 0, overdueCount = 0;
+
   filtered.forEach((v) => {
     if (v.outcome === 'positive') pos++;
     else if (v.outcome === 'neutral') neu++;
     else if (v.outcome === 'negative') neg++;
-    if (v.requires_follow_up) fu++;
+
+    if (!v.follow_up_action) {
+      noFollowupCount++;
+    } else if (v.follow_up_status === 'completed') {
+      completedCount++;
+    } else {
+      allPendingCount++;
+      if (v.urgency === 'today' || v.due_today) dueTodayCount++;
+      else if (v.urgency === 'overdue' || v.is_overdue) overdueCount++;
+    }
   });
 
   const totalCount = filtered.length;
+  const totalFollowupsLogged = allPendingCount + completedCount;
   const displayVisits = filtered.slice(0, 8);
   const hasMore = totalCount > 8;
 
@@ -2247,7 +2409,13 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
         neutral_outcomes: neu,
         negative_outcomes: neg,
         unspecified_outcomes: totalCount - (pos + neu + neg),
-        follow_ups_logged: fu,
+        all_followups_logged: totalFollowupsLogged,
+        all_pending_followups: allPendingCount,
+        completed_followups: completedCount,
+        no_followup_visits: noFollowupCount,
+        due_today_followups: dueTodayCount,
+        overdue_followups: overdueCount,
+        due_or_overdue_followups: dueTodayCount + overdueCount,
         multiple_visits_for_customer: Boolean(custFilter && totalCount > 1),
         customer_visits_breakdown: custFilter && totalCount > 1
           ? filtered.map((v, i) => `${i + 1}. Date: ${v.visit_date}, Outcome: ${v.outcome || 'Not recorded'}, Person: ${v.person_met}`).join(' | ')
