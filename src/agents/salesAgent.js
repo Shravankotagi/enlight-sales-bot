@@ -1531,7 +1531,7 @@ async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
   const customerName = deal.customer_name || 'Valued Customer';
   const dealCode = getDealCode(deal);
 
-  const resendApiKey = process.env.RESEND_API_KEY || ['re_e9csFE46_rtWH3LBQ', 'ywF73hnTm1qbrm4n'].join('');
+  const resendApiKey = process.env.RESEND_API_KEY || '';
   const fromEmail = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
 
   const qRefNum = `QT-2026-${dealCode.replace(/[^A-Z0-9]/gi, '').slice(-4) || Math.floor(1000 + Math.random() * 9000)}`;
