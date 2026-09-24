@@ -6312,6 +6312,53 @@ function isOutOfScopeDeliveryQuery(text) {
   return outOfScopePatterns.some((pattern) => pattern.test(lower));
 }
 
+/**
+ * Detects whether a query is within the domain of Enlight Metals B2B SalesOS
+ * (CRM entities, metal/steel products, customers, suppliers, sales metrics, or SOPs).
+ */
+function isSalesOsDomainQuery(text) {
+  if (!text || typeof text !== 'string') return false;
+  const lower = text.toLowerCase().trim();
+
+  // 1. Sales & CRM Domain Terms
+  const salesTerms = /\b(?:inquir(?:y|ies)|enquir(?:y|ies)|deal|deals|order|orders|po[-_#\s]*\d*|purchase\s*order|visit|visits|visited|meeting|meetings|person\s*met|contact\s*person|contact\s*phone|mobile|complaint|complaints|defect|rejection|damage|claim|resolution|payment|payments|advance|outstanding|cheque|upi|neft|rtgs|ledger|balance|customer|customers|client|clients|party|parties|new\s*customer|customer\s*master|customer\s*360|pipeline|leaderboard|kra|target|achievement|churn|retention|reorder|loss|quote|quotes|quotation|quotations|rfq|rate|rates|bhav|price|pricing|discount|credit|payment\s*terms|delivery\s*location|sop|moq|policy|enlight|salesos|gst|gstin|pan|turnover|follow-?up|stage|pipeline)\b/i;
+
+  // 2. Metal & Steel Products, Grades & Specifications
+  const metalTerms = /\b(?:steel|metal|iron|coil|coils|sheet|sheets|plate|plates|tmt|pipe|pipes|tube|tubes|beam|beams|angle|angles|channel|channels|round|flat|flats|billet|billets|wire|hr|cr|gp|hrpo|galvalume|chequered|ms|ss|carbon|alloy|is\s*2062|e250|e350|fe500|fe550|ss304|ss316|ton|tons|tonne|tonnes|tonnage|mt|kg|pcs|pieces|sheets|bundles|thickness|width|length|grade|gauge|hsn|hsn_code|prime|secondary)\b/i;
+
+  // 3. Known Mills, Major Suppliers & CRM Accounts
+  const supplierTerms = /\b(?:jsw|sail|tata|tata\s*steel|jindal|jindal\s*steel|amns|posco|vedanta|arcelor|vizag|rashtriya|bhushan|shyam|electrosteel|apex|delta|mehta|om\s*traders|horizon|supreme)\b/i;
+
+  // 4. System Entity IDs (INQ-*, PO-*, VIS-*, CMP-*, DEAL-*)
+  const entityIdTerms = /\b(?:INQ|DEAL|PO|VIS|CMP)-[A-Z0-9-]+\b|#INQ-[A-Z0-9]+/i;
+
+  return salesTerms.test(lower) || metalTerms.test(lower) || supplierTerms.test(lower) || entityIdTerms.test(text);
+}
+
+/**
+ * Detects obvious generic, out-of-scope prompts (celebrities, sports, cricketers, trivia, science, coding, jokes, etc.)
+ */
+function isOutOfScopeGenericPrompt(text) {
+  if (!text || typeof text !== 'string') return false;
+  const lower = text.toLowerCase().trim();
+
+  // If it matches steel / sales domain terms, it is in-scope
+  if (isSalesOsDomainQuery(text)) return false;
+
+  const outOfScopePatterns = [
+    /\b(?:virat|kohli|dhoni|rohit\s*sharma|sachin|cricket|ipl|football|messi|ronaldo|olympics|world\s*cup|match\s*score|cinema|movie|actor|actress|bollywood|hollywood)\b/i,
+    /\b(?:who\s+is\s+(?:the\s+)?(?:president|prime\s*minister|pm|governor|actor|actress|singer|cricketer|player|captain|founder|ceo\s+of\s+(?!enlight)|king|queen))\b/i,
+    /\b(?:capital\s+of|weather\s+(?:in|today|forecast)|temperature\s+in|distance\s+between|speed\s+of\s+light|photosynthesis|gravity|earthquake|solar\s+system|planet)\b/i,
+    /\b(?:tell\s+(?:me\s+)?a\s+joke|make\s+me\s+laugh|write\s+(?:a\s+)?poem|sing\s+(?:a\s+)?song|recipe\s+for|how\s+to\s+cook|how\s+to\s+make\s+(?:tea|coffee|cake|pizza|biryani|paneer))\b/i,
+    /\b(?:write\s+(?:a\s+)?(?:python|javascript|java|c\+\+|html|css|sql|code|script|program)|how\s+to\s+code|how\s+to\s+program)\b/i,
+    /\b(?:how\s+are\s+you\s+feeling|who\s+created\s+you|who\s+made\s+you|are\s+you\s+(?:chatgpt|gpt|gemini|openai|ai|human|bot|robot))\b/i,
+    /\b(?:meaning\s+of\s+life|translate\s+(?:to|in|from)|solve\s+(?:this\s+)?math|square\s+root\s+of|calculate\s+\d+\s*[\+\-\*\/]\s*\d+)\b/i,
+    /\b(?:who\s+is\s+[a-z]+(?:\s+[a-z]+)?)\s*\??$/i,
+  ];
+
+  return outOfScopePatterns.some(p => p.test(lower));
+}
+
 function isOperationalQuery(text) {
   if (!text || typeof text !== 'string') return false;
   const lower = text.toLowerCase().trim();
@@ -6350,31 +6397,32 @@ function isOperationalQuery(text) {
 
 /**
  * Fast LLM Query Classifier fallback
- * Classifies whether text is a read query / question vs operational data entry / command
+ * Classifies whether text is a valid Sales/CRM query vs out of scope / other
  */
 async function isOperationalQueryWithLLM(text) {
-  if (!text || typeof text !== 'string' || text.trim().length < 5) return false;
+  if (!text || typeof text !== 'string' || text.trim().length < 4) return false;
   const clean = text.trim();
 
   // If starts with clear action commands, not a query
   if (/^(?:1|2|3|4|5|6|7|8|9|10|yes|no|y|n|confirm|edit|cancel|save|discard|stop|exit|quit|upadte|update)$/i.test(clean)) return false;
   if (/^(?:log|record|add|create|new|onboard|acquire|update|modify|change|set|mark|resolve|close|upadte)\b/i.test(clean)) return false;
 
-  const prompt = `You are a strict classifier for a CRM WhatsApp Bot.
-Classify whether this user message is a DATA RETRIEVAL / READ QUERY / SEARCH QUESTION or NOT.
+  const prompt = `You are a strict domain classifier for Enlight Metals SalesOS (a B2B metal & steel sales CRM system).
+Classify whether this user message is a VALID SALES/CRM QUERY RELATED TO ENLIGHT METALS (inquiries, orders, visits, complaints, payments, customers, metal products, sales data, company SOPs) OR an OUT-OF-SCOPE / IRRELEVANT PROMPT (e.g. general knowledge, celebrities, sports, trivia, personal chit-chat, politics, science, recipes, coding, general AI queries).
 
 User message: "${clean}"
 
 Options:
-- RETRIEVAL: User is asking a question to search, lookup, check status, inspect records, or read data from the database.
-- OTHER: User is giving a command to update, create, log data, a general word/typo (like 'upadte', 'update', 'inquiry', 'deal'), or greeting.
+- SALES_QUERY: User is asking a legitimate question about Enlight Metals sales data, CRM records, customers, products, pricing, or sales operations.
+- OUT_OF_SCOPE: User is asking general trivia, sports, celebrities, politics, science, coding, recipes, jokes, or non-sales questions.
+- OTHER: User is giving an operational command, greeting, or random text.
 
-Respond with ONLY "RETRIEVAL" or "OTHER".`;
+Respond with ONLY "SALES_QUERY", "OUT_OF_SCOPE", or "OTHER".`;
 
   try {
     const res = await invokeWithFallback([new HumanMessage(prompt)]);
     const result = (typeof res.content === 'string' ? res.content : '').trim().toUpperCase();
-    return result.includes('RETRIEVAL');
+    return result.includes('SALES_QUERY');
   } catch (err) {
     return false;
   }
@@ -7246,6 +7294,11 @@ async function classifyActiveSessionIntent(activeActivity, text) {
   const currentFamily = getModuleFamily(activeActivity);
   const activityDisplayName = getModuleDisplayName(activeActivity);
 
+  // Fast guard for obvious out-of-scope trivia/celebrity/sports queries
+  if (isOutOfScopeGenericPrompt(trimmed)) {
+    return { classification: 'OUT_OF_SCOPE_GENERIC' };
+  }
+
   const prompt = `You are a strict conversational intent classifier for an active B2B sales workflow session on WhatsApp.
 
 The user is currently in the active [${activeActivity}] (${activityDisplayName}) workflow.
@@ -7259,7 +7312,8 @@ Classify this incoming message:
 - If this message is onboarding a new customer profile -> DIFFERENT_ACTIVITY:LOG_NEW_CUSTOMER
 - If this message is logging a customer field visit / client meeting -> DIFFERENT_ACTIVITY:LOG_VISIT
 - If this message provides field details (payment terms e.g. "45 days" / "advance", delivery location e.g. "Mumbai" / "Kolhapur", person met, contact phone, meeting remarks, visit date, outcome, company name, rate, tonnage, quantity, notes, make) for the active [${activeActivity}] (${activityDisplayName}) form -> SAME_ACTIVITY
-- If this message is asking a read-only data query or search (asking for rates, checking status, listing inquiries, checking orders) -> RETRIEVAL_QUERY
+- If this message is asking a read-only data query or search about Enlight Metals sales data or CRM records (asking for rates, checking status, listing inquiries, checking orders) -> RETRIEVAL_QUERY
+- If this message is asking an out-of-scope generic question or prompt (celebrities, sports, cricketers, trivia, science, geography, jokes, coding, recipes) -> OUT_OF_SCOPE_GENERIC
 
 Respond strictly with ONLY the classification label on a single line, nothing else. Valid responses:
 SAME_ACTIVITY
@@ -7272,6 +7326,7 @@ DIFFERENT_ACTIVITY:UPDATE_VISIT
 DIFFERENT_ACTIVITY:UPDATE_COMPLAINT
 RETRIEVAL_QUERY
 STAGE_UPDATE
+OUT_OF_SCOPE_GENERIC
 
 Classification:`;
 
@@ -7514,6 +7569,19 @@ async function handleCatalogFlow(rawText, senderPhone) {
       // AI Intent Classifier: Classify every non-control incoming message against active session
       const intentResult = await classifyActiveSessionIntent(currentAction, text);
       console.log(`[CatalogFlow] Active session (${currentAction}) AI classification for "${text.slice(0, 50)}...":`, intentResult);
+
+      if (intentResult.classification === 'OUT_OF_SCOPE_GENERIC') {
+        const outOfScopeMsg = `⚠️ *Out of Scope Request*\n\nI am the *Enlight Metals SalesOS Assistant* and cannot answer general knowledge, trivia, or non-sales questions.\n\n━━━━━━━━━━━━━━━━━━━━\nYou were in the middle of ${getActionFriendlyName(currentAction)} — do you want to continue?`;
+        await recordSessionMessage(senderPhone, 'user', text);
+        await recordSessionMessage(senderPhone, 'assistant', outOfScopeMsg, { action_type: 'OUT_OF_SCOPE_REDIRECT' });
+        await saveActiveSession(senderPhone, currentDraft.company_name || 'Customer', `catalog_resume_ask|${activeState}|${currentAction}|${JSON.stringify(currentDraft)}`);
+        return {
+          handled: true,
+          reply: outOfScopeMsg,
+          interactiveType: 'buttons',
+          interactiveButtons: RESUME_QUERY_BUTTONS,
+        };
+      }
 
       if (intentResult.classification === 'RETRIEVAL_QUERY') {
         return await handleMidFlowRetrievalQuery(text, senderPhone, activeState, currentAction, currentDraft);
@@ -9031,14 +9099,72 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
   }
 
-  // ── 7. FREE DATA RETRIEVAL QUERIES (Direct DB Lookup, No Catalog, No Flow) ──
-  let isQuery = isOperationalQuery(text);
-  if (!isQuery && text.length >= 8 && !/^(?:log|record|add|create|new|onboard|acquire|update|modify|change|set|mark|resolve|close|upadte|edit|cancel|save)\b/i.test(text)) {
-    isQuery = await isOperationalQueryWithLLM(text);
+  // ── 7. FREE DATA RETRIEVAL QUERIES VS OUT-OF-SCOPE PROMPTS ──
+  const isGenericOutOfScope = isOutOfScopeGenericPrompt(text);
+  if (isGenericOutOfScope) {
+    await recordSessionMessage(senderPhone, 'user', text);
+    const outOfScopeReply = `⚠️ *Out of Scope Request*\n\n` +
+      `I am the *Enlight Metals SalesOS Assistant* dedicated exclusively to managing and supporting your metal sales operations, inquiries, customer visits, orders, payments, and complaints.\n\n` +
+      `I cannot assist with general knowledge, trivia, or non-sales prompts.\n\n` +
+      `*Here is the SalesOS menu to assist you with your daily activities:*\n\n` +
+      CATALOG_MENU;
+
+    await recordSessionMessage(senderPhone, 'assistant', outOfScopeReply, { action_type: 'OUT_OF_SCOPE_PROMPT' });
+    await startNewCatalogSession(senderPhone, outOfScopeReply);
+    return {
+      handled: true,
+      reply: outOfScopeReply,
+      interactiveType: 'list',
+      interactiveList: {
+        bodyText: `I am the *Enlight Metals SalesOS Assistant*. Here is the menu to start a sales activity:`,
+        buttonText: 'Choose Action',
+        sections: CATALOG_MENU_SECTIONS,
+      },
+    };
   }
 
-  if (isQuery) {
+  const isDomainQuery = isSalesOsDomainQuery(text);
+  const isQueryPattern = isOperationalQuery(text);
+
+  if (isDomainQuery && isQueryPattern) {
+    // Valid in-scope CRM/sales query -> delegate to LangGraph Orchestrator
     return { handled: false };
+  }
+
+  if (isQueryPattern && !isDomainQuery) {
+    // Question format but lacks obvious metal/sales terms -> test with LLM domain classifier
+    const isLlmSalesQuery = await isOperationalQueryWithLLM(text);
+    if (isLlmSalesQuery) {
+      return { handled: false };
+    }
+
+    // It is an out-of-scope generic / trivia question!
+    await recordSessionMessage(senderPhone, 'user', text);
+    const outOfScopeReply = `⚠️ *Out of Scope Request*\n\n` +
+      `I am the *Enlight Metals SalesOS Assistant* dedicated exclusively to managing and supporting your metal sales operations, inquiries, customer visits, orders, payments, and complaints.\n\n` +
+      `I cannot assist with general knowledge, trivia, or non-sales prompts.\n\n` +
+      `*Here is the SalesOS menu to assist you with your daily activities:*\n\n` +
+      CATALOG_MENU;
+
+    await recordSessionMessage(senderPhone, 'assistant', outOfScopeReply, { action_type: 'OUT_OF_SCOPE_PROMPT' });
+    await startNewCatalogSession(senderPhone, outOfScopeReply);
+    return {
+      handled: true,
+      reply: outOfScopeReply,
+      interactiveType: 'list',
+      interactiveList: {
+        bodyText: `I am the *Enlight Metals SalesOS Assistant*. Here is the menu to start a sales activity:`,
+        buttonText: 'Choose Action',
+        sections: CATALOG_MENU_SECTIONS,
+      },
+    };
+  }
+
+  if (!isQueryPattern && text.length >= 8 && !/^(?:log|record|add|create|new|onboard|acquire|update|modify|change|set|mark|resolve|close|upadte|edit|cancel|save)\b/i.test(text)) {
+    const isLlmSalesQuery = await isOperationalQueryWithLLM(text);
+    if (isLlmSalesQuery) {
+      return { handled: false };
+    }
   }
 
   // ── 8. ALL OTHER MESSAGES OUTSIDE ACTIVE SESSION -> STRICT CATALOG GATING ──
@@ -9074,6 +9200,8 @@ module.exports = {
   executeAction,
   handleCatalogFlow,
   isOperationalQuery,
+  isSalesOsDomainQuery,
+  isOutOfScopeGenericPrompt,
   isStageUpdatePrompt,
   detectOperationalAction,
   extractFieldsWithLLM,
