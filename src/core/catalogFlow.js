@@ -93,6 +93,11 @@ const DISCARD_DRAFT_BUTTONS = [
   { id: 'btn_confirm_cancel', title: '🗑️ Discard Draft' },
 ];
 
+const NON_EDITABLE_REPLY_BUTTONS = [
+  { id: 'btn_confirm_edit', title: 'Edit Details' },
+  { id: 'btn_confirm_cancel', title: 'Cancel' },
+];
+
 const NEW_CUSTOMER_BUTTONS = [
   { id: 'btn_cust_yes', title: 'Yes, Add Customer' },
   { id: 'btn_cust_no', title: 'No / Cancel' },
@@ -587,10 +592,10 @@ function isGreeting(text) {
   const greetings = [
     'hi', 'hello', 'hey', 'start', 'menu', 'main menu', 'options',
     'namaste', 'good morning', 'good afternoon', 'good evening',
-    'hii', 'hiii', 'heyy', 'catalog', 'help', 'btn_post_menu'
+    'hii', 'hiii', 'heyy', 'catalog', 'help', 'btn_post_menu','hie'
   ];
   if (greetings.includes(clean)) return true;
-  return /^(?:hi|hello|hey|start|menu|namaste)\b/i.test(clean) && clean.length <= 15;
+  return /^(?:hie|hi|hello|hey|start|menu|namaste)\b/i.test(clean) && clean.length <= 15;
 }
 
 function matchActionFromInput(text) {
@@ -1181,6 +1186,10 @@ If only a single company is mentioned or if filling missing fields for an existi
 - In UPDATE_COMPLAINT, 'updates.resolution_notes' MUST strictly contain ONLY actual details describing how the issue was resolved (e.g. 'replacement 10 MT plates dispatched and accepted', 'credit note CN-102 issued for ₹20,000', 'commercial discount of ₹500/MT approved').
 - NEVER put the user's action command, request text, or phrase (e.g. 'update this po PO: PO-20260923-9085 compliant and mark it resolved', 'mark as resolved', 'resolve my last complaint', 'close the complaint') into 'updates.resolution_notes'.
 - If the user only commands to resolve/mark resolved/close the complaint without providing specific resolution notes, set 'updates.status' to 'Resolved', but leave 'updates.resolution_notes' as null!
+13. SYSTEM-GENERATED AND NON-EDITABLE FIELDS (CRITICAL):
+- Inquiry ID (e.g. INQ-XXXXXX), Order ID, Complaint Ticket ID, Visit Log ID, and Customer ID are system-generated record identifiers. They CANNOT be edited, renamed, or modified.
+- Customer / Company Name in update workflows (UPDATE_INQUIRY, UPDATE_ORDER, UPDATE_VISIT, UPDATE_COMPLAINT) is tied to the existing database record and cannot be changed.
+- If the user's message is ONLY asking to change/edit a system-generated or non-editable field (e.g. 'change inquiry id to IN879', 'change ticket id to 101', 'change customer to ABC'), return null for all updates. NEVER hallucinate, guess, or populate unmentioned fields (like payment_terms, rate, etc.)!
 `;
 
   const userPrompt = `Existing Active Draft:
@@ -1237,6 +1246,186 @@ function detectTotalValueUpdateAttempt(text, extractedData) {
   }
 
   return false;
+}
+
+function getAllowedFieldsListForAction(action) {
+  switch (action) {
+    case 'LOG_INQUIRY':
+      return `• *Rate / Target Price*\n• *Quantity & Unit (e.g. 25 MT)*\n• *Product Specifications / Dimensions*\n• *Payment Terms (e.g. 30 Days Credit)*\n• *Delivery Location*\n• *Preferred Make (e.g. JSW, SAIL)*\n• *Additional Notes*`;
+    case 'UPDATE_INQUIRY':
+      return `• *Rate / Target Price*\n• *Quantity / Line Items*\n• *Payment Terms (e.g. 30 Days)*\n• *Delivery Location*\n• *Preferred Make*\n• *Stage / Status (Open, Quoted, Won, Lost, On Hold)*\n• *Additional Notes*`;
+    case 'LOG_ORDER':
+      return `• *PO Number (e.g. PO-2026-001)*\n• *PO Date*\n• *Delivery Location*\n• *Payment Terms*\n• *Product Rates & Quantities*`;
+    case 'UPDATE_ORDER':
+      return `• *PO Number*\n• *PO Date / Delivery Date*\n• *Delivery Location*\n• *Payment Terms*\n• *Status (Pending, Processing, Dispatched, Delivered, Cancelled)*\n• *Line Item Rates & Quantities*`;
+    case 'LOG_VISIT':
+      return `• *Person Met*\n• *Contact Phone*\n• *City / Location*\n• *Visit Date*\n• *Visit Outcome (Positive / Neutral / Negative)*\n• *Meeting Remarks & Discussion Notes*`;
+    case 'UPDATE_VISIT':
+      return `• *Person Met*\n• *Contact Phone*\n• *City / Location*\n• *Visit Date*\n• *Visit Outcome*\n• *Meeting Remarks & Follow-up Notes*\n• *Status*`;
+    case 'LOG_COMPLAINT':
+      return `• *Complaint Type (Quality Defect, Physical Damage, etc.)*\n• *Affected Product*\n• *Linked Inquiry ID / PO Number*\n• *Complaint Description*\n• *Corrective Action Taken*`;
+    case 'UPDATE_COMPLAINT':
+      return `• *Complaint Type*\n• *Complaint Description*\n• *Corrective Action Taken*\n• *Resolution Notes*\n• *Status (Pending, In Progress, Resolved, Closed)*`;
+    case 'LOG_NEW_CUSTOMER':
+      return `• *Company Name*\n• *Contact Person*\n• *Mobile Number*\n• *Delivery Location / City*\n• *Email Address*\n• *GST Number*`;
+    default:
+      return `• *Rate*\n• *Quantity*\n• *Payment Terms*\n• *Delivery Location*`;
+  }
+}
+
+function detectNonEditableFieldAttempt(action, text, draft = {}) {
+  if (!text || typeof text !== 'string') return { isNonEditable: false };
+  const clean = text.trim();
+
+  // 1. Inquiry ID attempt
+  const isInqIdChange =
+    /\b(?:change|edit|update|modify|set|alter|fix|revise|amend|make|replace)\b.*?\b(?:inquiry\s*id|inq\s*id|deal\s*id|enquiry\s*id|inquiry\s*no|inq\s*no|deal\s*no)\b/i.test(clean) ||
+    /\b(?:inquiry\s*id|inq\s*id|deal\s*id|enquiry\s*id|inquiry\s*no|inq\s*no|deal\s*no)\b.*?\b(?:change|edit|update|modify|set|to|is|=|karo|badlo)\b/i.test(clean) ||
+    /^(?:change|edit|update|modify|set)\s+(?:the\s+)?(?:inquiry|inq|deal|enquiry)\s+(?:id|number|no|code)\b/i.test(clean) ||
+    /^(?:inquiry|inq|deal|enquiry)\s+(?:id|number|no|code)\s*(?:to|as|=|is|:)\s*[A-Za-z0-9_-]+/i.test(clean);
+
+  if (isInqIdChange) {
+    const currentInq = draft._inquiry_display_id || draft.inquiry_id || (action === 'LOG_INQUIRY' ? 'auto-generated' : 'current inquiry');
+    return {
+      isNonEditable: true,
+      fieldName: 'Inquiry ID',
+      message: `⚠️ *Inquiry ID is system-generated and cannot be edited.*\n\n• Inquiry IDs (e.g. *${currentInq}*) are generated automatically by the CRM and cannot be modified or renamed.\n• If you meant to update a *different* inquiry, please reply *Cancel* and start an update for that Inquiry ID or Customer Name.`,
+      allowedFieldsList: getAllowedFieldsListForAction(action),
+    };
+  }
+
+  // 2. Total Order Value / Total Amount attempt
+  const isTotalValueChange =
+    /\b(?:change|edit|update|modify|set|alter|fix|make|increase|decrease|reduce)\b.*?\b(?:total\s*(?:order\s*)?(?:value|amount|price)|order\s*(?:value|amount)|grand\s*total|money)\b/i.test(clean) ||
+    /\b(?:total\s*(?:order\s*)?(?:value|amount|price)|order\s*(?:value|amount)|grand\s*total|money)\b.*?\b(?:change|edit|update|set|modify|from|to|is|=|karo|badlo)\b/i.test(clean) ||
+    /\btotal\s+(?:value|amount)\s+(?:from\s+[\d,.]+\s+)?to\s+[\d,.]+/i.test(clean) ||
+    /^(?:change|edit|update|modify|set)\s+(?:the\s+)?total\s+(?:value|amount)\b/i.test(clean);
+
+  if (isTotalValueChange) {
+    return {
+      isNonEditable: true,
+      fieldName: 'Total Order Value',
+      message: `⚠️ *Total Order Value is system-calculated and cannot be edited directly.*\n\n• Total value is calculated automatically from individual item rates and quantities (Rate × Quantity + Taxes).\n• To adjust the total value, please update individual product rates or quantities.`,
+      allowedFieldsList: getAllowedFieldsListForAction(action),
+    };
+  }
+
+  // 3. Customer / Company Name in Record Update flows (UPDATE_INQUIRY, UPDATE_ORDER, UPDATE_VISIT, UPDATE_COMPLAINT)
+  if (['UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(action)) {
+    const isCustomerChange =
+      /\b(?:change|edit|update|modify|set|alter|switch|replace)\b.*?\b(?:customer(?:\s*name)?|company(?:\s*name)?|party(?:\s*name)?|client(?:\s*name)?)\b/i.test(clean) ||
+      /\b(?:customer(?:\s*name)?|company(?:\s*name)?|party(?:\s*name)?|client(?:\s*name)?)\b.*?\b(?:change|edit|update|set|modify|to|is|=|karo|badlo)\b/i.test(clean) ||
+      /^(?:change|edit|update|modify|set)\s+(?:the\s+)?(?:customer|company|party|client)\s+(?:name\s+)?(?:to|as|=|is)\s+[A-Za-z0-9\s]+/i.test(clean);
+
+    if (isCustomerChange) {
+      const currentCust = draft.company_name || 'the current customer';
+      const recordType = getActionFriendlyName(action);
+      return {
+        isNonEditable: true,
+        fieldName: 'Customer Name',
+        message: `⚠️ *Customer Name cannot be edited for an existing record.*\n\n• This ${recordType} is permanently linked to *${currentCust}* in the CRM.\n• If this belongs to a different customer, please reply *Cancel* and start a new update with the correct customer name.`,
+        allowedFieldsList: getAllowedFieldsListForAction(action),
+      };
+    }
+  }
+
+  // 4. Order ID / Database Internal ID
+  const isOrderIdChange =
+    /\b(?:change|edit|update|modify|set|alter)\b.*?\b(?:order\s*id|internal\s*id|deal\s*id)\b/i.test(clean) ||
+    /\b(?:order\s*id|internal\s*id|deal\s*id)\b.*?\b(?:change|edit|update|set|modify|to|is|=|karo|badlo)\b/i.test(clean);
+
+  if (isOrderIdChange && !/\b(?:po\s*number|po\s*no|po#)\b/i.test(clean)) {
+    return {
+      isNonEditable: true,
+      fieldName: 'Order ID',
+      message: `⚠️ *Order ID is system-generated and cannot be edited.*\n\n• Internal Order IDs are generated automatically by the CRM.\n• _Note: If you want to update the Customer PO Number, please specify "PO Number: PO-XXXX"._`,
+      allowedFieldsList: getAllowedFieldsListForAction(action),
+    };
+  }
+
+  // 5. Visit ID / Log ID
+  const isVisitIdChange =
+    /\b(?:change|edit|update|modify|set)\b.*?\b(?:visit\s*id|log\s*id|visit\s*no)\b/i.test(clean);
+
+  if (isVisitIdChange) {
+    return {
+      isNonEditable: true,
+      fieldName: 'Visit ID',
+      message: `⚠️ *Visit ID is system-generated and cannot be edited.*\n\n• Visit log IDs are generated automatically by the CRM.`,
+      allowedFieldsList: getAllowedFieldsListForAction(action),
+    };
+  }
+
+  // 6. Complaint Ticket ID
+  const isComplaintIdChange =
+    /\b(?:change|edit|update|modify|set)\b.*?\b(?:complaint\s*id|ticket\s*id|ticket\s*no|ticket\s*number|complaint\s*no)\b/i.test(clean);
+
+  if (isComplaintIdChange) {
+    return {
+      isNonEditable: true,
+      fieldName: 'Complaint Ticket ID',
+      message: `⚠️ *Complaint Ticket ID is system-generated and cannot be edited.*\n\n• Complaint ticket numbers are assigned automatically by the CRM.`,
+      allowedFieldsList: getAllowedFieldsListForAction(action),
+    };
+  }
+
+  // 7. Linked Deal / PO in Complaint Updates
+  if (action === 'UPDATE_COMPLAINT') {
+    const isLinkedDealChange =
+      /\b(?:change|edit|update|modify|set|switch|replace)\b.*?\b(?:linked\s*(?:inquiry|po|order|deal)|po\s*number|inquiry\s*id)\b/i.test(clean);
+
+    if (isLinkedDealChange) {
+      return {
+        isNonEditable: true,
+        fieldName: 'Linked Inquiry/PO',
+        message: `⚠️ *Linked Inquiry/PO cannot be changed for an existing complaint.*\n\n• This complaint is permanently tied to its original order reference.\n• To file a complaint for a different order, please reply *Cancel* and log a new complaint.`,
+        allowedFieldsList: getAllowedFieldsListForAction(action),
+      };
+    }
+  }
+
+  // 8. Customer ID in LOG_NEW_CUSTOMER
+  if (action === 'LOG_NEW_CUSTOMER') {
+    const isCustIdChange =
+      /\b(?:change|edit|update|modify|set)\b.*?\b(?:customer\s*id|client\s*id|account\s*id)\b/i.test(clean);
+
+    if (isCustIdChange) {
+      return {
+        isNonEditable: true,
+        fieldName: 'Customer ID',
+        message: `⚠️ *Customer ID is system-generated and cannot be edited.*\n\n• Customer Master IDs are generated automatically upon onboarding.`,
+        allowedFieldsList: getAllowedFieldsListForAction(action),
+      };
+    }
+  }
+
+  // 9. System Audit Fields (Logged By, Creation Date, Salesperson Phone)
+  const isAuditFieldChange =
+    /\b(?:change|edit|update|modify|set)\b.*?\b(?:logged\s*by|created\s*by|created\s*date|creation\s*date|salesperson(?:\s*phone|\s*id)?)\b/i.test(clean);
+
+  if (isAuditFieldChange) {
+    return {
+      isNonEditable: true,
+      fieldName: 'Audit Metadata',
+      message: `⚠️ *Audit metadata (Logged By / Creation Date) is system-generated and cannot be edited.*`,
+      allowedFieldsList: getAllowedFieldsListForAction(action),
+    };
+  }
+
+  // 10. Tax / GST Calculation
+  const isTaxChange =
+    /\b(?:change|edit|update|modify|set)\b.*?\b(?:gst\s*(?:rate|amount|percentage|%)?|tax\s*(?:rate|amount|percentage|%)?|cgst|sgst|igst)\b/i.test(clean);
+
+  if (isTaxChange) {
+    return {
+      isNonEditable: true,
+      fieldName: 'GST / Taxes',
+      message: `⚠️ *GST and Tax calculations are computed automatically based on product HSN codes and cannot be edited directly.*`,
+      allowedFieldsList: getAllowedFieldsListForAction(action),
+    };
+  }
+
+  return { isNonEditable: false };
 }
 
 // ── MERGE DRAFT HELPER ───────────────────────────────────────────────────────
@@ -1335,7 +1524,17 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
         merged.product_description = val;
       } else {
         if (key === 'company_name' && typeof val === 'string') {
-          merged.company_name = val.replace(/^my\s*/i, '').replace(/^our\s+/i, '').replace(/^for\s+/i, '').trim();
+          if (['UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(action) && baseDraft.company_name) {
+            // Keep existing customer on update workflows
+          } else {
+            merged.company_name = val.replace(/^my\s*/i, '').replace(/^our\s+/i, '').replace(/^for\s+/i, '').trim();
+          }
+        } else if (key === 'inquiry_id' && typeof val === 'string') {
+          if (['UPDATE_INQUIRY', 'UPDATE_ORDER'].includes(action) && baseDraft.inquiry_id) {
+            // Keep existing inquiry_id on update workflows
+          } else {
+            merged.inquiry_id = val;
+          }
         } else if (key.includes('date') && typeof val === 'string') {
           if (/\b(?:day before yesterday|parso)\b/i.test(userInput)) {
             const dby = new Date(Date.now() - 48 * 3600 * 1000);
@@ -7474,6 +7673,21 @@ async function handleCatalogFlow(rawText, senderPhone) {
       return buildOutOfScopeActivityResponse(action, outOfScopeAction);
     }
 
+    // Check if user is attempting to edit a non-editable or system-generated field
+    const nonEditableCheckConfirm = detectNonEditableFieldAttempt(action, text, draft);
+    if (nonEditableCheckConfirm.isNonEditable) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      const fullReply = `${nonEditableCheckConfirm.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheckConfirm.allowedFieldsList}\n\nWhich editable field would you like to change?`;
+      await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: action });
+      await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_editing|${action}|${draftJsonStr}`);
+      return {
+        handled: true,
+        reply: fullReply,
+        interactiveType: 'buttons',
+        interactiveButtons: NON_EDITABLE_REPLY_BUTTONS,
+      };
+    }
+
     // Direct inline edit attempt during confirmation
     await recordSessionMessage(senderPhone, 'user', text);
     const updatedDraft = await extractFieldsWithLLM(action, text, draft);
@@ -7563,6 +7777,21 @@ async function handleCatalogFlow(rawText, senderPhone) {
     if (outOfScopeAction) {
       console.log(`[CatalogFlow] Strict activity scope guard in catalog_editing: active=${action} (${getModuleFamily(action)}), incoming=${outOfScopeAction} (${getModuleFamily(outOfScopeAction)})`);
       return buildOutOfScopeActivityResponse(action, outOfScopeAction);
+    }
+
+    // Check if user is attempting to edit a non-editable or system-generated field
+    const nonEditableCheck = detectNonEditableFieldAttempt(action, text, draft);
+    if (nonEditableCheck.isNonEditable) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      const fullReply = `${nonEditableCheck.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheck.allowedFieldsList}\n\nWhich editable field would you like to change?`;
+      await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: action });
+      await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_editing|${action}|${draftJsonStr}`);
+      return {
+        handled: true,
+        reply: fullReply,
+        interactiveType: 'buttons',
+        interactiveButtons: NON_EDITABLE_REPLY_BUTTONS,
+      };
     }
 
     await recordSessionMessage(senderPhone, 'user', text);
