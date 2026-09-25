@@ -765,7 +765,7 @@ async function isGreeting(text) {
   return false;
 }
 
-function matchActionFromInput(text) {
+function matchActionFromInput(text, hasActiveSession = false) {
   if (!text || typeof text !== 'string') return null;
 
   // Extract first line in case of multi-line interactive list replies (e.g. "3. Log New Order\nRecord new confirmed PO")
@@ -774,64 +774,76 @@ function matchActionFromInput(text) {
   const fullClean = text.toLowerCase().replace(/[🔟*️⃣\uFE0F\u20E3]/g, '').trim();
 
   // If text is a full sentence with arguments/details, let natural action detection & LLM extraction handle it
-  if (clean.length > 35 || /\b(?:for|to|on|of|with|at|rate|qty|status|inq-|po-|midc|midc\s+pune|midc\s+bhosari|mt|tons|plate|sheet|coil)\b/i.test(clean)) {
+  if (clean.length > 45 || /\b(?:rate|qty|status|inq-|po-|vis-|cmp-|midc|midc\s+pune|midc\s+bhosari|mt|tons|plate|sheet|coil)\b/i.test(clean)) {
     if (!/^(?:1|2|3|4|5|6|7|8|9|10)\.?$/i.test(clean) && !/^(?:\d+[\.\)\s\-]+|menu_\d+|start_log_|start_update_)?(?:log|update|record|start_log_|start_update_)?\s*(?:new\s*)?(?:inquiry|order|visit|complaint|customer|customer acquisition|field visit|customer visit|customer complaint|general query|other query)$/i.test(clean)) {
       return null;
     }
   }
 
-  const stripped = clean.replace(/^(?:menu_|\d+[\.\)\s\-]+|\*+[0-9🔟]+[️⃣\s\.\)]+)/i, '').trim();
+  const isBareNumber = /^(?:[1-9]|10)\.?$/i.test(clean) || /^(?:option|choice)\s*(?:[1-9]|10)\.?$/i.test(clean);
+  if (isBareNumber && hasActiveSession) {
+    return null;
+  }
+
+  const stripped = clean.replace(/^(?:menu_|\d+[\.\)\s\-]+|\*+[0-9🔟]+[️⃣\s\.\)]+|switch\s+to\s+|change\s+to\s+|start\s+|open\s+)/i, '').trim();
 
   if (
-    clean === '1' || clean === '1.' || clean === 'menu_1' ||
-    stripped === 'log inquiry' || stripped === 'log new inquiry' || stripped === 'new inquiry' || stripped === 'start_log_inquiry' ||
+    (!hasActiveSession && (clean === '1' || clean === '1.' || clean === 'option 1' || clean === 'choice 1')) ||
+    clean === 'menu_1' ||
+    stripped === 'log inquiry' || stripped === 'log new inquiry' || stripped === 'new inquiry' || stripped === 'create inquiry' || stripped === 'log inq' || stripped === 'new inq' || stripped === 'start_log_inquiry' ||
     clean === '1. log new inquiry' || clean === '1. log inquiry' || clean === '1 log new inquiry' ||
     fullClean.includes('capture customer requirements')
   ) {
     return 'LOG_INQUIRY';
   }
   if (
-    clean === '2' || clean === '2.' || clean === 'menu_2' ||
-    stripped === 'update inquiry' || stripped === 'start_update_inquiry' ||
+    (!hasActiveSession && (clean === '2' || clean === '2.' || clean === 'option 2' || clean === 'choice 2')) ||
+    clean === 'menu_2' ||
+    stripped === 'update inquiry' || stripped === 'update inq' || stripped === 'update an inquiry' || stripped === 'update the inquiry' || stripped === 'inquiry update' || stripped === 'inq update' || stripped === 'edit inquiry' || stripped === 'edit inq' || stripped === 'modify inquiry' || stripped === 'start_update_inquiry' ||
     clean === '2. update inquiry' || clean === '2 update inquiry' ||
     fullClean.includes('update rates, specs or stage')
   ) {
     return 'UPDATE_INQUIRY';
   }
   if (
-    clean === '3' || clean === '3.' || clean === 'menu_3' ||
-    stripped === 'log order' || stripped === 'log new order' || stripped === 'record order' || stripped === 'record new order' || stripped === 'new order' || stripped === 'start_log_order' ||
+    (!hasActiveSession && (clean === '3' || clean === '3.' || clean === 'option 3' || clean === 'choice 3')) ||
+    clean === 'menu_3' ||
+    stripped === 'log order' || stripped === 'log new order' || stripped === 'record order' || stripped === 'record new order' || stripped === 'new order' || stripped === 'log won order' || stripped === 'record won order' || stripped === 'start_log_order' ||
     clean === '3. log new order' || clean === '3. log order' || clean === '3 log new order' ||
     fullClean.includes('record new confirmed po')
   ) {
     return 'LOG_ORDER';
   }
   if (
-    clean === '4' || clean === '4.' || clean === 'menu_4' ||
-    stripped === 'update order' || stripped === 'start_update_order' ||
+    (!hasActiveSession && (clean === '4' || clean === '4.' || clean === 'option 4' || clean === 'choice 4')) ||
+    clean === 'menu_4' ||
+    stripped === 'update order' || stripped === 'update won order' || stripped === 'order update' || stripped === 'edit order' || stripped === 'modify order' || stripped === 'start_update_order' ||
     clean === '4. update order' || clean === '4 update order' ||
     fullClean.includes('update po date, items or stage')
   ) {
     return 'UPDATE_ORDER';
   }
   if (
-    clean === '5' || clean === '5.' || clean === 'menu_5' ||
-    stripped === 'log visit' || stripped === 'log customer field visit' || stripped === 'log customer visit' || stripped === 'log field visit' || stripped === 'field visit' || stripped === 'new visit' || stripped === 'start_log_visit' ||
+    (!hasActiveSession && (clean === '5' || clean === '5.' || clean === 'option 5' || clean === 'choice 5')) ||
+    clean === 'menu_5' ||
+    stripped === 'log visit' || stripped === 'log customer field visit' || stripped === 'log customer visit' || stripped === 'log field visit' || stripped === 'field visit' || stripped === 'new visit' || stripped === 'record visit' || stripped === 'start_log_visit' ||
     clean === '5. log customer field visit' || clean === '5. log field visit' || clean === '5 log customer field visit' ||
     fullClean.includes('log rep on-site client visit')
   ) {
     return 'LOG_VISIT';
   }
   if (
-    clean === '6' || clean === '6.' || clean === 'menu_6' ||
-    stripped === 'update visit' || stripped === 'update field visit' || stripped === 'update customer visit' || stripped === 'start_update_visit' ||
+    (!hasActiveSession && (clean === '6' || clean === '6.' || clean === 'option 6' || clean === 'choice 6')) ||
+    clean === 'menu_6' ||
+    stripped === 'update visit' || stripped === 'update field visit' || stripped === 'update customer visit' || stripped === 'visit update' || stripped === 'field visit update' || stripped === 'edit visit' || stripped === 'modify visit' || stripped === 'start_update_visit' ||
     clean === '6. update field visit' || clean === '6. update visit' || clean === '6 update field visit' ||
     fullClean.includes('update outcome or remarks')
   ) {
     return 'UPDATE_VISIT';
   }
   if (
-    clean === '7' || clean === '7.' || clean === 'menu_7' ||
+    (!hasActiveSession && (clean === '7' || clean === '7.' || clean === 'option 7' || clean === 'choice 7')) ||
+    clean === 'menu_7' ||
     stripped === 'new acquisition' || stripped === 'new customer' || stripped === 'new customer acquisition' || stripped === 'customer acquisition' || stripped === 'add customer' || stripped === 'onboard customer' || stripped === 'log customer' || stripped === 'start_log_customer' ||
     clean === '7. new customer acquisition' || clean === '7. new acquisition' || clean === '7 new customer acquisition' ||
     fullClean.includes('onboard new client profile')
@@ -839,24 +851,27 @@ function matchActionFromInput(text) {
     return 'LOG_NEW_CUSTOMER';
   }
   if (
-    clean === '8' || clean === '8.' || clean === 'menu_8' ||
-    stripped === 'log complaint' || stripped === 'log customer complaint' || stripped === 'new complaint' || stripped === 'start_log_complaint' ||
+    (!hasActiveSession && (clean === '8' || clean === '8.' || clean === 'option 8' || clean === 'choice 8')) ||
+    clean === 'menu_8' ||
+    stripped === 'log complaint' || stripped === 'log customer complaint' || stripped === 'new complaint' || stripped === 'record complaint' || stripped === 'raise complaint' || stripped === 'start_log_complaint' ||
     clean === '8. log customer complaint' || clean === '8. log complaint' || clean === '8 log customer complaint' ||
     fullClean.includes('log quality/service issue')
   ) {
     return 'LOG_COMPLAINT';
   }
   if (
-    clean === '9' || clean === '9.' || clean === 'menu_9' ||
-    stripped === 'update complaint' || stripped === 'update customer complaint' || stripped === 'start_update_complaint' ||
+    (!hasActiveSession && (clean === '9' || clean === '9.' || clean === 'option 9' || clean === 'choice 9')) ||
+    clean === 'menu_9' ||
+    stripped === 'update complaint' || stripped === 'update customer complaint' || stripped === 'complaint update' || stripped === 'resolve complaint' || stripped === 'close complaint' || stripped === 'edit complaint' || stripped === 'start_update_complaint' ||
     clean === '9. update customer complaint' || clean === '9. update complaint' || clean === '9 update customer complaint' ||
     fullClean.includes('update resolution or status')
   ) {
     return 'UPDATE_COMPLAINT';
   }
   if (
-    clean === '10' || clean === '10.' || clean === 'menu_10' ||
-    stripped === 'other' || stripped === 'general query' || stripped === 'other query' || stripped === 'general_query' || stripped === 'other / general query' || text.includes('🔟') || text.includes('1️⃣0️⃣') ||
+    (!hasActiveSession && (clean === '10' || clean === '10.' || clean === 'option 10' || clean === 'choice 10')) ||
+    clean === 'menu_10' ||
+    stripped === 'other' || stripped === 'general query' || stripped === 'other query' || stripped === 'general_query' || stripped === 'other / general query' || stripped === 'search query' || text.includes('🔟') || text.includes('1️⃣0️⃣') ||
     clean === '10. other / general query' || clean === '10. other' || clean === '10. general query' ||
     fullClean.includes('general search or intelligence')
   ) {
@@ -874,7 +889,7 @@ function isExplicitMenuSelection(text, hasActiveSession = false) {
 
   // 1. WhatsApp List Item ID (e.g. menu_1 .. menu_10)
   if (/^menu_(?:[1-9]|10)$/i.test(clean)) {
-    return matchActionFromInput(text);
+    return matchActionFromInput(text, false);
   }
 
   // 2. Exact catalog list titles / descriptions
@@ -892,12 +907,12 @@ function isExplicitMenuSelection(text, hasActiveSession = false) {
     fullClean.includes('ask any data retrieval query') ||
     fullClean.includes('general search or intelligence')
   ) {
-    return matchActionFromInput(text);
+    return matchActionFromInput(text, false);
   }
 
   // 3. Action command / start prefix (e.g. "start_log_order", "start_update_inquiry")
   if (/^start_(?:log|update)_(?:inquiry|order|visit|customer|complaint)$/i.test(clean)) {
-    return matchActionFromInput(text);
+    return matchActionFromInput(text, false);
   }
 
   // 3b. Repeat action button / command (e.g. "btn_repeat_log_complaint", "log another complaint")
@@ -909,17 +924,15 @@ function isExplicitMenuSelection(text, hasActiveSession = false) {
     if (clean.includes('customer') || clean.includes('cust') || clean.includes('onboard')) return 'LOG_NEW_CUSTOMER';
   }
 
-  // 4. Standalone action verbs when NOT providing complex data/arguments (e.g. "log order", "new inquiry", "log visit")
-  if (
-    /^(?:log|update|record|new|onboard)?\s*(?:new\s*)?(?:inquiry|order|visit|field visit|customer visit|complaint|customer complaint|customer acquisition|customer onboarding|general query|other query)$/i.test(clean) &&
-    clean.length <= 30
-  ) {
-    return matchActionFromInput(text);
+  // 4. Standalone action verbs / switch commands (e.g. "log order", "new inquiry", "update inquiry", "switch to inquiry")
+  const matchedAction = matchActionFromInput(text, hasActiveSession);
+  if (matchedAction) {
+    return matchedAction;
   }
 
   // 5. If NOT in an active session (idle/general), single digits 1-10 are catalog selections
   if (!hasActiveSession && /^(?:[1-9]|10)\.?$/i.test(clean)) {
-    return matchActionFromInput(text);
+    return matchActionFromInput(text, false);
   }
 
   return null;
@@ -3566,6 +3579,18 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     };
   }
 
+  // 1b. Direct cross-module action / menu selection preemption
+  const explicitAction = isExplicitMenuSelection(clean, true);
+  if (explicitAction && explicitAction !== action) {
+    await finalizeCurrentSession(senderPhone, `Switched from ${getActionFriendlyName(action)} to ${getActionFriendlyName(explicitAction)}`);
+    return await handleCatalogFlow(text, senderPhone);
+  }
+
+  // 1c. Mid-flow retrieval query interception
+  if (await isMidFlowReadQuery(clean)) {
+    return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_update_select', action, selectionState);
+  }
+
   // 2. View All / Reset Filter
   if (['all', 'show all', 'view all', 'all records', 'reset', 'clear'].includes(lower)) {
     await recordSessionMessage(senderPhone, 'user', text);
@@ -3616,14 +3641,26 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
 
   // 4b. Record ID matching
   if (!matchedRecord) {
-    const embeddedInq = clean.match(/\b(?:INQ|DEAL)-([A-Z0-9]+)\b|#INQ-([A-Z0-9]+)/i);
-    const embeddedPo = clean.match(/\b(?:PO[-_:#\s]*([A-Za-z0-9_-]+)|(?:po\s*number|po\s*no\.?|po#)[\s:=-]*([A-Za-z0-9_-]+))\b/i);
-    const embeddedCmp = clean.match(/\b(?:COMP|CMP)-([A-Z0-9]+)\b|#COMP-([A-Z0-9]+)/i);
+    const embeddedInq = clean.match(/(?:inquiry|inq|deal)\s*(?:id|no\.?|#)?\s*(?:to|is|:)?\s*#?([A-Za-z0-9_-]+)|\b(?:INQ|DEAL)-([A-Z0-9]+)\b|#INQ-([A-Z0-9]+)/i);
+    const embeddedPo = clean.match(/(?:po|order)\s*(?:id|no\.?|#)?\s*(?:to|is|:)?\s*#?([A-Za-z0-9_-]+)|\b(?:PO[-_:#\s]*([A-Za-z0-9_-]+)|(?:po\s*number|po\s*no\.?|po#)[\s:=-]*([A-Za-z0-9_-]+))\b/i);
+    const embeddedCmp = clean.match(/(?:complaint|cmp)\s*(?:id|no\.?|#)?\s*(?:to|is|:)?\s*#?([A-Za-z0-9_-]+)|\b(?:COMP|CMP)-([A-Z0-9]+)\b|#COMP-([A-Z0-9]+)/i);
 
     const candidateIds = [];
-    if (embeddedInq) candidateIds.push((embeddedInq[1] || embeddedInq[2] || '').replace(/[^0-9A-Z]/gi, '').toUpperCase());
-    if (embeddedPo) candidateIds.push((embeddedPo[1] || embeddedPo[2] || '').replace(/[^0-9A-Z]/gi, '').toUpperCase());
-    if (embeddedCmp) candidateIds.push((embeddedCmp[1] || embeddedCmp[2] || '').replace(/[^0-9A-Z]/gi, '').toUpperCase());
+    if (embeddedInq) {
+      for (let i = 1; i < embeddedInq.length; i++) {
+        if (embeddedInq[i]) candidateIds.push(embeddedInq[i].replace(/[^0-9A-Z]/gi, '').toUpperCase());
+      }
+    }
+    if (embeddedPo) {
+      for (let i = 1; i < embeddedPo.length; i++) {
+        if (embeddedPo[i]) candidateIds.push(embeddedPo[i].replace(/[^0-9A-Z]/gi, '').toUpperCase());
+      }
+    }
+    if (embeddedCmp) {
+      for (let i = 1; i < embeddedCmp.length; i++) {
+        if (embeddedCmp[i]) candidateIds.push(embeddedCmp[i].replace(/[^0-9A-Z]/gi, '').toUpperCase());
+      }
+    }
 
     const directCleanId = clean.replace(/^#?(?:INQ|DEAL|PO|COMP|CMP)-?/i, '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
     if (directCleanId.length >= 2 && directCleanId.length <= 15) {
@@ -3817,9 +3854,11 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
   }
 
   // 8. No customer match and not an index -> inform user
-  const notFoundReply = `ℹ️ *No editable records found for "${clean}".*\n\nType another customer name to search specifically, type "All" to view all recent records, or reply "Cancel" to exit.`;
+  const moduleDisplayName = getModuleDisplayName(action);
+  const notFoundReply = `ℹ️ *No editable ${moduleDisplayName} records found for "${clean}".*\n\nType another customer name to search specifically, type "All" to view all recent records, or reply "Cancel" to exit.`;
   await recordSessionMessage(senderPhone, 'user', text);
   await recordSessionMessage(senderPhone, 'assistant', notFoundReply, { action_type: action });
+  await saveActiveSession(senderPhone, selectionState.customerFilter || 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionState)}`);
   return { handled: true, reply: notFoundReply };
 }
 
@@ -8416,6 +8455,18 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
         reply: askMissing,
       };
     }
+  }
+
+  if (interruptedState === 'catalog_update_select') {
+    const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, {
+      page: draft.page || 1,
+      customerFilter: draft.customerFilter || null,
+    });
+    await saveActiveSession(senderPhone, draft.customerFilter || 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
+    return {
+      handled: true,
+      reply: selectionRes.reply,
+    };
   }
 
   if (interruptedState === 'catalog_confirm') {
