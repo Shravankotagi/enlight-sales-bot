@@ -451,8 +451,6 @@ To identify the order, please provide ONE of the following:
 - **PO Number:** * (e.g. PO-2026-0042)
 
 What would you like to update?
-- **Attach / Update PO Number:** (e.g. "attach PO-2026-8899")
-- **Header Fields:** PO Date, Delivery Location, Payment Terms, Status
 - **Line Item Updates:** Quantity, Rate, Add/Remove Items
 
 **Examples:**
@@ -675,6 +673,11 @@ async function isGreeting(text) {
   if (!text || typeof text !== 'string') return false;
   const clean = text.trim().toLowerCase().replace(/[!.,?*~_]/g, '').trim();
   if (!clean) return false;
+
+  // 0. Catalog Item IDs (menu_1 .. menu_10) or Action Commands are NOT greetings!
+  if (/^menu_?(?:[1-9]|10)$/i.test(clean) || /^start_(?:log|update)_/i.test(clean) || /^btn_repeat_/i.test(clean)) {
+    return false;
+  }
 
   // 1. Exact high-frequency greeting match
   const exactGreetings = new Set([
@@ -3191,8 +3194,22 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
 
   // 4b. Record ID matching
   if (!matchedRecord) {
-    const cleanId = clean.replace(/^#?(?:INQ|DEAL|PO|COMP|CMP)-?/i, '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
-    if (cleanId.length >= 2) {
+    const embeddedInq = clean.match(/\b(?:INQ|DEAL)-([A-Z0-9]+)\b|#INQ-([A-Z0-9]+)/i);
+    const embeddedPo = clean.match(/\b(?:PO[-_:#\s]*([A-Za-z0-9_-]+)|(?:po\s*number|po\s*no\.?|po#)[\s:=-]*([A-Za-z0-9_-]+))\b/i);
+    const embeddedCmp = clean.match(/\b(?:COMP|CMP)-([A-Z0-9]+)\b|#COMP-([A-Z0-9]+)/i);
+
+    const candidateIds = [];
+    if (embeddedInq) candidateIds.push((embeddedInq[1] || embeddedInq[2] || '').replace(/[^0-9A-Z]/gi, '').toUpperCase());
+    if (embeddedPo) candidateIds.push((embeddedPo[1] || embeddedPo[2] || '').replace(/[^0-9A-Z]/gi, '').toUpperCase());
+    if (embeddedCmp) candidateIds.push((embeddedCmp[1] || embeddedCmp[2] || '').replace(/[^0-9A-Z]/gi, '').toUpperCase());
+
+    const directCleanId = clean.replace(/^#?(?:INQ|DEAL|PO|COMP|CMP)-?/i, '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
+    if (directCleanId.length >= 2 && directCleanId.length <= 15) {
+      candidateIds.push(directCleanId);
+    }
+
+    for (const cleanId of candidateIds) {
+      if (!cleanId || cleanId.length < 2) continue;
       matchedRecord = cached.find(r => {
         const dId = (r.displayId || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
         const rId = (r.id || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
@@ -3209,6 +3226,8 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
           return dId.includes(cleanId) || rId.startsWith(cleanId) || (po && po.includes(cleanId));
         });
       }
+
+      if (matchedRecord) break;
     }
   }
 
@@ -8247,33 +8266,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
   const text = rawText.trim();
   if (text.length === 0) return { handled: false };
 
-  // ── 1. GREETING CHECK ──────────────────────────────────────────────────────
-  if (await isGreeting(text)) {
-    await saveActiveSession(senderPhone, 'Unknown', 'general');
-    await startNewCatalogSession(senderPhone, CATALOG_MENU);
-    return {
-      handled: true,
-      reply: CATALOG_MENU,
-      interactiveType: 'list',
-      interactiveList: {
-        bodyText: `Welcome to *SalesOS Assistant*!\n\nHere is the menu to start a new activity:`,
-        buttonText: 'Choose Action',
-        sections: CATALOG_MENU_SECTIONS,
-      },
-    };
-  }
-
-  // ── 1b. OUT-OF-SCOPE DELIVERY / DISPATCH QUERY CHECK ─────────────────────────
-  if (isOutOfScopeDeliveryQuery(text)) {
-    const outOfScopeMsg = `ℹ️ *Delivery & Dispatch Tracking is Out of Scope*\n\nOrder delivery, shipment, and dispatch tracking are not currently within my scope.\n\nPlease ask questions related to Inquiries, Won Orders, Customer Visits, Complaints, Payments, or Customer Master records.`;
-    await recordSessionMessage(senderPhone, 'assistant', outOfScopeMsg);
-    return {
-      handled: true,
-      reply: outOfScopeMsg,
-    };
-  }
-
-  // ── 2. FETCH ACTIVE SESSION STATE ──────────────────────────────────────────
+  // ── 1. FETCH ACTIVE SESSION STATE ──────────────────────────────────────────
   const activeSession = await getFullActiveSession(senderPhone);
   let lastIntent = activeSession ? (activeSession.last_intent || '') : '';
 
@@ -8329,6 +8322,32 @@ async function handleCatalogFlow(rawText, senderPhone) {
         reply: initialPrompt,
       };
     }
+  }
+
+  // ── 2b. GREETING CHECK ──────────────────────────────────────────────────────
+  if (await isGreeting(text)) {
+    await saveActiveSession(senderPhone, 'Unknown', 'general');
+    await startNewCatalogSession(senderPhone, CATALOG_MENU);
+    return {
+      handled: true,
+      reply: CATALOG_MENU,
+      interactiveType: 'list',
+      interactiveList: {
+        bodyText: `Welcome to *SalesOS Assistant*!\n\nHere is the menu to start a new activity:`,
+        buttonText: 'Choose Action',
+        sections: CATALOG_MENU_SECTIONS,
+      },
+    };
+  }
+
+  // ── 2c. OUT-OF-SCOPE DELIVERY / DISPATCH QUERY CHECK ─────────────────────────
+  if (isOutOfScopeDeliveryQuery(text)) {
+    const outOfScopeMsg = `ℹ️ *Delivery & Dispatch Tracking is Out of Scope*\n\nOrder delivery, shipment, and dispatch tracking are not currently within my scope.\n\nPlease ask questions related to Inquiries, Won Orders, Customer Visits, Complaints, Payments, or Customer Master records.`;
+    await recordSessionMessage(senderPhone, 'assistant', outOfScopeMsg);
+    return {
+      handled: true,
+      reply: outOfScopeMsg,
+    };
   }
 
   // ── 2b. ACTIVE SESSION SCOPE GUARD (AI INTENT CLASSIFICATION) ──────────────
