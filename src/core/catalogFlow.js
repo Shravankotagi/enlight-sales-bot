@@ -1263,14 +1263,14 @@ LOG_VISIT:
 UPDATE_VISIT:
 {
   "action": "UPDATE_VISIT",
-  
   "company_name": "<Customer / Company Name if mentioned (strip leading possessives like 'my' or 'our'), else null>",
-  "visit_date": "<Visit Date if mentioned, else null>",
+  "visit_date": "<Existing Visit Date of the visit record to identify it, else null>",
   "updates": {
     "person_met": "<Person met if updated, else null>",
     "contact_phone": "<Contact phone if updated, else null>",
     "city_location": "<City / Location if updated, else null>",
     "visit_outcome": "<Positive | Negative | Neutral | Follow-up Required if updated, else null>",
+    "visit_date": "<New visit date ONLY IF the user explicitly asked to change/update the visit date, else null>",
     "followup_action": "<Follow-up action if updated, else null>",
     "meeting_remarks": "<Meeting remarks if updated, else null>",
     "status": "<Completed | Follow-up Pending | Cancelled if updated, else null>",
@@ -1382,6 +1382,10 @@ If only a single company is mentioned or if filling missing fields for an existi
 - Inquiry ID (e.g. INQ-XXXXXX), Order ID, Complaint Ticket ID, Visit Log ID, and Customer ID are system-generated record identifiers. They CANNOT be edited, renamed, or modified.
 - Customer / Company Name in update workflows (UPDATE_INQUIRY, UPDATE_ORDER, UPDATE_VISIT, UPDATE_COMPLAINT) is tied to the existing database record and cannot be changed.
 - If the user's message is ONLY asking to change/edit a system-generated or non-editable field (e.g. 'change inquiry id to IN879', 'change ticket id to 101', 'change customer to ABC'), return null for all updates. NEVER hallucinate, guess, or populate unmentioned fields (like payment_terms, rate, etc.)!
+14. STRICT UPDATE EXTRACTION IN UPDATE FLOWS (CRITICAL):
+- In UPDATE_VISIT, UPDATE_ORDER, UPDATE_INQUIRY, UPDATE_COMPLAINT: 'updates' MUST contain ONLY the fields that the user EXPLICITLY requested to change/update in their message.
+- If the user says 'update contact person phone to 5612788945', populate ONLY 'updates.contact_phone'. Do NOT put 'visit_date', 'person_met', 'city_location', etc. into 'updates' unless the user explicitly requested to update those specific fields.
+- NEVER put existing unedited fields from the draft into 'updates'.
 `;
 
   const userPrompt = `Existing Active Draft:
@@ -2044,16 +2048,34 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.status && !merged.updates.stage) merged.updates.stage = newExtracted.status;
   } else if (action === 'UPDATE_VISIT') {
     if (!merged.updates) merged.updates = {};
-    if (newExtracted.updates) {
-      Object.assign(merged.updates, newExtracted.updates);
+    if (newExtracted.person_met && !merged.updates.person_met && (newExtracted.person_met !== baseDraft.person_met || /\b(?:person|met|name|contact)\b/i.test(userInput))) {
+      merged.updates.person_met = newExtracted.person_met;
     }
-    if (newExtracted.person_met && !merged.updates.person_met) merged.updates.person_met = newExtracted.person_met;
-    if (newExtracted.contact_phone && !merged.updates.contact_phone) merged.updates.contact_phone = newExtracted.contact_phone;
-    if (newExtracted.city_location && !merged.updates.city_location) merged.updates.city_location = newExtracted.city_location;
-    if (newExtracted.visit_outcome && !merged.updates.visit_outcome) merged.updates.visit_outcome = newExtracted.visit_outcome;
-    if (newExtracted.visit_date && !merged.updates.visit_date) merged.updates.visit_date = normalizeDateToDDMMYYYY(newExtracted.visit_date);
-    if (newExtracted.meeting_remarks && !merged.updates.meeting_remarks) merged.updates.meeting_remarks = newExtracted.meeting_remarks;
-    if (newExtracted.followup_action && !merged.updates.followup_action) merged.updates.followup_action = newExtracted.followup_action;
+    if (newExtracted.contact_phone && !merged.updates.contact_phone && (newExtracted.contact_phone !== baseDraft.contact_phone || /\b(?:phone|mobile|number|contact)\b/i.test(userInput))) {
+      merged.updates.contact_phone = newExtracted.contact_phone;
+    }
+    if (newExtracted.city_location && !merged.updates.city_location && (newExtracted.city_location !== baseDraft.city_location || /\b(?:location|city|address|site)\b/i.test(userInput))) {
+      merged.updates.city_location = newExtracted.city_location;
+    }
+    if (newExtracted.visit_outcome && !merged.updates.visit_outcome && (newExtracted.visit_outcome !== baseDraft.visit_outcome || /\b(?:outcome|positive|negative|neutral|follow-up|followup)\b/i.test(userInput))) {
+      merged.updates.visit_outcome = newExtracted.visit_outcome;
+    }
+
+    const userMentionedDate = /\b(?:date|yesterday|today|kal|parso|now|day before yesterday|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\b/i.test(userInput);
+    if (newExtracted.updates?.visit_date && userMentionedDate) {
+      merged.updates.visit_date = normalizeDateToDDMMYYYY(newExtracted.updates.visit_date);
+    } else if (newExtracted.visit_date && userMentionedDate && newExtracted.visit_date !== baseDraft.visit_date) {
+      merged.updates.visit_date = normalizeDateToDDMMYYYY(newExtracted.visit_date);
+    } else if (merged.updates.visit_date && (!userMentionedDate || merged.updates.visit_date === baseDraft.visit_date)) {
+      delete merged.updates.visit_date;
+    }
+
+    if (newExtracted.meeting_remarks && !merged.updates.meeting_remarks && (newExtracted.meeting_remarks !== baseDraft.meeting_remarks || /\b(?:remarks?|notes?|meeting|discussed)\b/i.test(userInput))) {
+      merged.updates.meeting_remarks = newExtracted.meeting_remarks;
+    }
+    if (newExtracted.followup_action && !merged.updates.followup_action && (newExtracted.followup_action !== baseDraft.followup_action || /\b(?:followup|follow-up|action|task)\b/i.test(userInput))) {
+      merged.updates.followup_action = newExtracted.followup_action;
+    }
     if (newExtracted.email && !merged.updates.email) merged.updates.email = newExtracted.email;
     if (newExtracted.designation && !merged.updates.designation) merged.updates.designation = newExtracted.designation;
     if (newExtracted.customer_type && !merged.updates.customer_type) merged.updates.customer_type = newExtracted.customer_type;
