@@ -66,6 +66,51 @@ function getPhoneVariants(phone) {
   return Array.from(variants);
 }
 
+function extractPhotoAndGps(rawText, options = {}) {
+  let photoDataUrl = null;
+  const mimeType = options.imageMimeType || options.image?.mimeType || 'image/jpeg';
+
+  if (options.photoDataUrl) {
+    photoDataUrl = options.photoDataUrl;
+  } else if (options.image && options.image.base64) {
+    const base64Clean = options.image.base64.replace(/^data:image\/\w+;base64,/, '');
+    photoDataUrl = options.image.base64.startsWith('data:')
+      ? options.image.base64
+      : `data:${mimeType};base64,${base64Clean}`;
+  }
+
+  let gpsData = null;
+  if (options.gps && typeof options.gps.latitude === 'number' && typeof options.gps.longitude === 'number') {
+    gpsData = {
+      latitude: options.gps.latitude,
+      longitude: options.gps.longitude,
+      accuracy: typeof options.gps.accuracy === 'number' ? options.gps.accuracy : null,
+    };
+  } else if (typeof rawText === 'string') {
+    const gpsMatch = rawText.match(/\[GPS:\s*([-+]?\d*\.?\d+),\s*([-+]?\d*\.?\d+)(?:\s*\(accuracy:\s*±?(\d+)m\))?\]/i);
+    if (gpsMatch) {
+      gpsData = {
+        latitude: parseFloat(gpsMatch[1]),
+        longitude: parseFloat(gpsMatch[2]),
+        accuracy: gpsMatch[3] ? parseInt(gpsMatch[3], 10) : null,
+      };
+    }
+  }
+
+  let attachmentObj = null;
+  if (photoDataUrl) {
+    attachmentObj = {
+      name: `site-visit-${Date.now()}.jpg`,
+      url: photoDataUrl,
+      type: mimeType,
+      uploaded_at: new Date().toISOString(),
+      ...(gpsData ? { gps: gpsData } : {}),
+    };
+  }
+
+  return { photoDataUrl, gpsData, attachmentObj };
+}
+
 const CATALOG_MENU = `👋 Welcome to **SalesOS Assistant**!
 
 What would you like to do today?
@@ -432,12 +477,13 @@ Which fields do you want to update? Mention the field name and new value.
 **Updatable Fields:**
 - Person Met, Contact Phone, City / Location, Visit Date
 - Visit Outcome (Positive / Negative / Neutral), Follow-up Action, Meeting Remarks
+- Add Photo / Document (Attach new site photos; existing photos are permanently preserved)
 - Status (Completed / Follow-up Pending / Cancelled)
 - Email, Designation, Customer Type, Visit Type, Customer Probability
 - Product Details, Monthly Consumption, Current Requirement, Delivery Location, Preferred Make, Payment Terms
 
 Example:
-"Vanguard Industrial Automation Systems, update Person Met to Amit Sharma, Visit Outcome to Positive"`,
+"Vanguard Industrial Automation Systems, update Person Met to Amit Sharma, Visit Outcome to Positive" (or upload a new site photo)`,
 
   LOG_NEW_CUSTOMER: `👤 **New Customer Acquisition**
 
@@ -554,9 +600,9 @@ function getEditPromptForAction(action) {
     case 'UPDATE_ORDER':
       return `Which field would you like to change? (e.g. "PO Number: PO-2026-001", "PO Date: 12-09-2026", or "Delivery location: Pune")`;
     case 'LOG_VISIT':
-      return `Which field would you like to change? (e.g. "Person met: Jenny Shah", "Contact phone: 9820123456", "Visit date: 20-09-2026", or "Remarks: Discussed HR coil")`;
+      return `Which field would you like to change? (e.g. "Person met: Jenny Shah", "Contact phone: 9820123456", "Visit date: 20-09-2026", "Remarks: Discussed HR coil", or upload another photo)`;
     case 'UPDATE_VISIT':
-      return `Which field would you like to change? (e.g. "Person met: Jenny Shah", "Outcome: Positive", or "Remarks: Updated remarks")`;
+      return `Which field would you like to change? (e.g. "Person met: Jenny Shah", "Outcome: Positive", "Remarks: Updated remarks", or upload a new site photo)`;
     case 'LOG_COMPLAINT':
       return `Which field would you like to change? (e.g. "Description: Delivered product had severe rust", "Product: HR Sheet 3mm", or "Type: Quality Defect")`;
     case 'UPDATE_COMPLAINT':
@@ -1286,7 +1332,7 @@ function getAllowedFieldsListForAction(action) {
     case 'LOG_VISIT':
       return `- *Person Met*\n- *Contact Phone*\n- *City / Location*\n- *Visit Date*\n- *Visit Outcome (Positive / Neutral / Negative)*\n- *Meeting Remarks & Discussion Notes*`;
     case 'UPDATE_VISIT':
-      return `- *Person Met*\n- *Contact Phone*\n- *City / Location*\n- *Visit Date*\n- *Visit Outcome*\n- *Meeting Remarks & Follow-up Notes*\n- *Customer Probability (Hot / Warm / Cold)*\n- *Customer Type (OEM / Fabricator / etc.)*\n- *Delivery Location & Payment Terms*\n- *Status*`;
+      return `- *Person Met*\n- *Contact Phone*\n- *City / Location*\n- *Visit Date*\n- *Visit Outcome*\n- *Meeting Remarks & Follow-up Notes*\n- *Add Photo / Document (Attach additional site photos)*\n- *Customer Probability (Hot / Warm / Cold)*\n- *Customer Type (OEM / Fabricator / etc.)*\n- *Delivery Location & Payment Terms*\n- *Status*`;
     case 'LOG_COMPLAINT':
       return `- *Complaint Type (Quality Defect, Physical Damage, etc.)*\n- *Affected Product*\n- *Linked Inquiry ID / PO Number*\n- *Complaint Description*\n- *Corrective Action Taken*`;
     case 'UPDATE_COMPLAINT':
@@ -1457,6 +1503,22 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
     };
   }
 
+  // 11. Photo Replacement / Deletion Attempt on Visits (Audit Trail Protection)
+  if (['LOG_VISIT', 'UPDATE_VISIT'].includes(action)) {
+    const isPhotoReplaceAttempt =
+      /\b(?:replace|delete|remove|overwrite|swap)\b.*?\b(?:photo|pic|picture|image|attachment)s?\b/i.test(clean) ||
+      /\b(?:photo|pic|picture|image|attachment)s?\b.*?\b(?:replace|delete|remove|overwrite|swap|badlo|hatao)\b/i.test(clean);
+
+    if (isPhotoReplaceAttempt) {
+      return {
+        isNonEditable: true,
+        fieldName: 'Photo Attachment',
+        message: `*Previously uploaded photos cannot be replaced or removed.*\n\n- Existing photos are permanent records preserved for verified visit audit compliance.\n- You can always attach additional photos to this visit report.`,
+        allowedFieldsList: getAllowedFieldsListForAction(action),
+      };
+    }
+  }
+
   return { isNonEditable: false };
 }
 
@@ -1584,6 +1646,14 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
           } else {
             merged[key] = normalizeDateToDDMMYYYY(val);
           }
+        } else if (key === 'attachments' && Array.isArray(val)) {
+          const prevAtts = Array.isArray(baseDraft.attachments) ? baseDraft.attachments : [];
+          const existingUrls = new Set(prevAtts.map(a => a && a.url).filter(Boolean));
+          const newlyAdded = val.filter(a => a && a.url && !existingUrls.has(a.url));
+          merged.attachments = [...prevAtts, ...newlyAdded];
+        } else if (key === 'gps_photo_url' && typeof val === 'string') {
+          // Keep baseDraft photo if already set (never replace previously added photo)
+          merged.gps_photo_url = baseDraft.gps_photo_url || val;
         } else {
           merged[key] = val;
         }
@@ -1721,6 +1791,30 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
 
     if (merged.updates.resolution_notes && isInvalidOrGenericResolutionNotes(merged.updates.resolution_notes, merged.company_name)) {
       delete merged.updates.resolution_notes;
+    }
+  }
+
+  // Preserve attachments and GPS metadata from baseDraft
+  if (baseDraft.attachments && (!merged.attachments || merged.attachments.length === 0)) {
+    merged.attachments = baseDraft.attachments;
+  }
+  if (baseDraft.gps_photo_url && !merged.gps_photo_url) {
+    merged.gps_photo_url = baseDraft.gps_photo_url;
+  }
+  if (baseDraft.gps_latitude !== undefined && merged.gps_latitude === undefined) {
+    merged.gps_latitude = baseDraft.gps_latitude;
+    merged.gps_longitude = baseDraft.gps_longitude;
+    merged.gps_accuracy = baseDraft.gps_accuracy;
+  }
+  if (action === 'UPDATE_VISIT') {
+    if (newExtracted.new_attachments || newExtracted.updates?.new_attachments) {
+      const incoming = newExtracted.new_attachments || newExtracted.updates?.new_attachments || [];
+      const prevNew = Array.isArray(merged.updates.new_attachments) ? merged.updates.new_attachments : (Array.isArray(baseDraft.updates?.new_attachments) ? baseDraft.updates.new_attachments : []);
+      const existingUrls = new Set(prevNew.map(a => a && a.url).filter(Boolean));
+      const distinct = incoming.filter(a => a && a.url && !existingUrls.has(a.url));
+      merged.updates.new_attachments = [...prevNew, ...distinct];
+    } else if (baseDraft.updates?.new_attachments) {
+      merged.updates.new_attachments = baseDraft.updates.new_attachments;
     }
   }
 
@@ -1899,8 +1993,11 @@ function validateMandatoryFields(action, draft) {
         missing.push('Customer / Company Name');
       }
       const visUpdates = draft.updates || {};
-      const hasVisUpdate = Object.values(visUpdates).some(v => v !== null && v !== undefined && v !== '');
-      if (!hasVisUpdate) missing.push('At least one field to update (e.g. Person Met, Contact Phone, City/Location, Outcome, Follow-up, Remarks)');
+      const hasVisUpdate = Object.values(visUpdates).some(v => v !== null && v !== undefined && v !== '') ||
+        (Array.isArray(visUpdates.new_attachments) && visUpdates.new_attachments.length > 0) ||
+        (Array.isArray(draft.attachments) && draft.attachments.length > 0) ||
+        Boolean(visUpdates.gps_photo_url || draft.gps_photo_url);
+      if (!hasVisUpdate) missing.push('At least one field to update (e.g. Person Met, Contact Phone, City/Location, Outcome, Follow-up, Remarks, or Add Photo)');
       break;
     }
 
@@ -3683,6 +3780,16 @@ function buildConfirmationSummary(action, draft) {
       if (draft.delivery_location) summary += `• *Delivery Location:* ${draft.delivery_location}\n`;
       if (draft.preferred_make) summary += `• *Preferred Make:* ${draft.preferred_make}\n`;
       if (draft.payment_terms) summary += `• *Payment Terms:* ${draft.payment_terms}\n`;
+      if (Array.isArray(draft.attachments) && draft.attachments.length > 0) {
+        const photoCount = draft.attachments.length;
+        summary += `• *Photos Attached:* ${photoCount} ${photoCount === 1 ? 'geotagged site photo' : 'geotagged site photos'}\n`;
+      } else if (draft.gps_photo_url) {
+        summary += `• *Photos Attached:* 1 geotagged site photo\n`;
+      }
+      if (typeof draft.gps_latitude === 'number' && typeof draft.gps_longitude === 'number') {
+        const accTag = draft.gps_accuracy ? ` (±${Math.round(draft.gps_accuracy)}m)` : '';
+        summary += `• *GPS Tag:* ${draft.gps_latitude.toFixed(6)}, ${draft.gps_longitude.toFixed(6)}${accTag}\n`;
+      }
       break;
     }
 
@@ -3691,10 +3798,23 @@ function buildConfirmationSummary(action, draft) {
       summary += `• *Customer / Company:* ${targetVis}\n`;
       summary += `• *Updating Fields:*\n`;
       for (const [k, v] of Object.entries(draft.updates || {})) {
-        if (v) {
+        if (k === 'new_attachments' || k === 'attachments') {
+          if (Array.isArray(v) && v.length > 0) {
+            summary += `  • *New Photos Added* → ${v.length} additional photo(s)\n`;
+          }
+        } else if (k === 'gps_photo_url' || k === 'gps_latitude' || k === 'gps_longitude' || k === 'gps_accuracy') {
+          // Handled separately below
+        } else if (v) {
           const label = k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
           summary += `  • *${label}* → ${v}\n`;
         }
+      }
+      const updLat = draft.updates?.gps_latitude ?? draft.gps_latitude;
+      const updLng = draft.updates?.gps_longitude ?? draft.gps_longitude;
+      const updAcc = draft.updates?.gps_accuracy ?? draft.gps_accuracy;
+      if (typeof updLat === 'number' && typeof updLng === 'number') {
+        const accTag = updAcc ? ` (±${Math.round(updAcc)}m)` : '';
+        summary += `  • *GPS Tag* → ${updLat.toFixed(6)}, ${updLng.toFixed(6)}${accTag}\n`;
       }
       break;
     }
@@ -5347,6 +5467,11 @@ async function executeAction(action, draft, senderPhone) {
           delivery_location: draft.delivery_location || null,
           preferred_make: draft.preferred_make || null,
           payment_terms: draft.payment_terms || null,
+          gps_photo_url: draft.gps_photo_url || (Array.isArray(draft.attachments) && draft.attachments[0]?.url) || null,
+          gps_latitude: typeof draft.gps_latitude === 'number' ? draft.gps_latitude : null,
+          gps_longitude: typeof draft.gps_longitude === 'number' ? draft.gps_longitude : null,
+          gps_accuracy: typeof draft.gps_accuracy === 'number' ? draft.gps_accuracy : null,
+          attachments: Array.isArray(draft.attachments) && draft.attachments.length > 0 ? draft.attachments : null,
         };
 
         const { error: visErr } = await supabase.from('customer_visits').insert(visitPayload);
@@ -5358,8 +5483,17 @@ async function executeAction(action, draft, senderPhone) {
           delete visitPayload.employee_id;
           const { error: fbVisErr } = await supabase.from('customer_visits').insert(visitPayload);
           if (fbVisErr) {
-            console.error('[CatalogFlow] Visit fallback insert error:', fbVisErr.message);
-            return `*Failed to log field visit for ${companyName}.*\n\nReason: ${fbVisErr.message || 'Database write error'}. Please try again.`;
+            console.error('[CatalogFlow] Visit fallback insert error, retrying without attachments/gps:', fbVisErr.message);
+            delete visitPayload.gps_photo_url;
+            delete visitPayload.gps_latitude;
+            delete visitPayload.gps_longitude;
+            delete visitPayload.gps_accuracy;
+            delete visitPayload.attachments;
+            const { error: thirdErr } = await supabase.from('customer_visits').insert(visitPayload);
+            if (thirdErr) {
+              console.error('[CatalogFlow] Visit third fallback insert error:', thirdErr.message);
+              return `*Failed to log field visit for ${companyName}.*\n\nReason: ${thirdErr.message || 'Database write error'}. Please try again.`;
+            }
           }
         }
 
@@ -5556,6 +5690,45 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.preferred_make) visitUpdates.preferred_make = updates.preferred_make;
         if (updates.payment_terms) visitUpdates.payment_terms = updates.payment_terms;
 
+        // Photo & attachments handling for UPDATE_VISIT (User can only ADD new photos, cannot replace existing)
+        let existingAttachments = [];
+        if (Array.isArray(targetVisit.attachments)) {
+          existingAttachments = [...targetVisit.attachments];
+        } else if (typeof targetVisit.attachments === 'string') {
+          try {
+            const parsed = JSON.parse(targetVisit.attachments);
+            if (Array.isArray(parsed)) existingAttachments = parsed;
+          } catch (e) {}
+        }
+
+        const newAttachmentsToAdd = [
+          ...(Array.isArray(updates.new_attachments) ? updates.new_attachments : []),
+          ...(Array.isArray(updates.attachments) ? updates.attachments : []),
+          ...(Array.isArray(draft.attachments) ? draft.attachments : []),
+        ];
+
+        const existingUrls = new Set(existingAttachments.map(a => a && a.url).filter(Boolean));
+        const distinctNew = newAttachmentsToAdd.filter(a => a && a.url && !existingUrls.has(a.url));
+
+        if (distinctNew.length > 0) {
+          visitUpdates.attachments = [...existingAttachments, ...distinctNew];
+          // Never replace previously added pic: only populate gps_photo_url if not set
+          if (!targetVisit.gps_photo_url) {
+            visitUpdates.gps_photo_url = distinctNew[0].url;
+          }
+        }
+
+        const updLat = updates.gps_latitude ?? draft.gps_latitude;
+        const updLng = updates.gps_longitude ?? draft.gps_longitude;
+        const updAcc = updates.gps_accuracy ?? draft.gps_accuracy;
+        if (typeof updLat === 'number' && typeof updLng === 'number') {
+          if (!targetVisit.gps_latitude || !targetVisit.gps_longitude) {
+            visitUpdates.gps_latitude = updLat;
+            visitUpdates.gps_longitude = updLng;
+            if (typeof updAcc === 'number') visitUpdates.gps_accuracy = updAcc;
+          }
+        }
+
         const resolvedCust = targetVisit ? targetVisit.customer_name : (draft.company_name || 'Customer');
 
         if (Object.keys(visitUpdates).length > 0) {
@@ -5568,18 +5741,26 @@ async function executeAction(action, draft, senderPhone) {
             delete visitUpdates.follow_up_completed_at;
             const { error: fbUpdErr } = await supabase.from('customer_visits').update(visitUpdates).eq('id', targetVisit.id);
             if (fbUpdErr) {
-              console.error('[CatalogFlow] Visit fallback update error:', fbUpdErr.message);
-              return `*Failed to update customer visit for ${resolvedCust}.*\n\nReason: ${fbUpdErr.message || 'Database write error'}. Please try again.`;
+              console.error('[CatalogFlow] Visit fallback update error, retrying without attachments/gps:', fbUpdErr.message);
+              delete visitUpdates.attachments;
+              delete visitUpdates.gps_photo_url;
+              delete visitUpdates.gps_latitude;
+              delete visitUpdates.gps_longitude;
+              delete visitUpdates.gps_accuracy;
+              const { error: thirdUpdErr } = await supabase.from('customer_visits').update(visitUpdates).eq('id', targetVisit.id);
+              if (thirdUpdErr) {
+                console.error('[CatalogFlow] Visit third fallback update error:', thirdUpdErr.message);
+                return `*Failed to update customer visit for ${resolvedCust}.*\n\nReason: ${thirdUpdErr.message || 'Database write error'}. Please try again.`;
+              }
             }
           }
 
           // Sync customer master profile if contact details changed
-          if (updates.person_met || updates.contact_phone || updates.city_location || updates.email) {
+          if (updates.person_met || updates.contact_phone || updates.city_location) {
             const custUpdates = { updated_at: new Date().toISOString() };
             if (updates.person_met) custUpdates.contact_person = updates.person_met;
             if (updates.contact_phone) custUpdates.customer_phone = cleanPhone(updates.contact_phone) || updates.contact_phone;
             if (updates.city_location) custUpdates.customer_address = updates.city_location;
-            if (updates.email) custUpdates.customer_email = updates.email;
             await supabase
               .from('recurring_customers')
               .update(custUpdates)
@@ -5588,6 +5769,8 @@ async function executeAction(action, draft, senderPhone) {
         }
 
         let updatesSummary = '';
+        if (distinctNew.length > 0) updatesSummary += `• *Photos Added:* ${distinctNew.length} new photo(s) attached\n`;
+        if (visitUpdates.gps_latitude && visitUpdates.gps_longitude) updatesSummary += `• *GPS Tag:* ${visitUpdates.gps_latitude.toFixed(6)}, ${visitUpdates.gps_longitude.toFixed(6)}\n`;
         if (visitUpdates.person_met) updatesSummary += `• *Person Met:* ${visitUpdates.person_met}\n`;
         if (visitUpdates.designation) updatesSummary += `• *Designation:* ${visitUpdates.designation}\n`;
         if (visitUpdates.contact_no) updatesSummary += `• *Contact Phone:* ${visitUpdates.contact_no}\n`;
@@ -7139,10 +7322,12 @@ async function detectNewOperationalIntent(text) {
  * { handled: true, reply: "..." } if intercepted and handled by catalog state machine
  * { handled: false } if message should proceed to general LangGraph Orchestrator
  */
-async function handleCatalogFlow(rawText, senderPhone) {
+async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   if (!rawText || typeof rawText !== 'string') return { handled: false };
   const text = rawText.trim();
   if (text.length === 0) return { handled: false };
+
+  const { photoDataUrl, gpsData, attachmentObj } = extractPhotoAndGps(rawText, options);
 
   // ── 1. GREETING CHECK ──────────────────────────────────────────────────────
   if (isGreeting(text)) {
@@ -7809,6 +7994,40 @@ async function handleCatalogFlow(rawText, senderPhone) {
     // Direct inline edit attempt during confirmation
     await recordSessionMessage(senderPhone, 'user', text);
     const updatedDraft = await extractFieldsWithLLM(action, text, draft);
+
+    if (action === 'LOG_VISIT') {
+      if (attachmentObj) {
+        const prevAtts = Array.isArray(updatedDraft.attachments) ? updatedDraft.attachments : (Array.isArray(draft.attachments) ? draft.attachments : []);
+        if (!prevAtts.some(a => a && a.url === attachmentObj.url)) {
+          updatedDraft.attachments = [...prevAtts, attachmentObj];
+        }
+        if (!updatedDraft.gps_photo_url && !draft.gps_photo_url) {
+          updatedDraft.gps_photo_url = attachmentObj.url;
+        }
+      }
+      if (gpsData && (updatedDraft.gps_latitude === undefined || updatedDraft.gps_latitude === null)) {
+        updatedDraft.gps_latitude = gpsData.latitude;
+        updatedDraft.gps_longitude = gpsData.longitude;
+        updatedDraft.gps_accuracy = gpsData.accuracy;
+      }
+    } else if (action === 'UPDATE_VISIT') {
+      if (attachmentObj) {
+        updatedDraft.updates = updatedDraft.updates || {};
+        const prevNew = Array.isArray(updatedDraft.updates.new_attachments) ? updatedDraft.updates.new_attachments : (Array.isArray(draft.updates?.new_attachments) ? draft.updates.new_attachments : []);
+        if (!prevNew.some(a => a && a.url === attachmentObj.url)) {
+          updatedDraft.updates.new_attachments = [...prevNew, attachmentObj];
+        }
+      }
+      if (gpsData) {
+        updatedDraft.updates = updatedDraft.updates || {};
+        if (updatedDraft.updates.gps_latitude === undefined) {
+          updatedDraft.updates.gps_latitude = gpsData.latitude;
+          updatedDraft.updates.gps_longitude = gpsData.longitude;
+          updatedDraft.updates.gps_accuracy = gpsData.accuracy;
+        }
+      }
+    }
+
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
       if (custCheck.isUnrecognizedCustomer) {
@@ -7914,6 +8133,40 @@ async function handleCatalogFlow(rawText, senderPhone) {
 
     await recordSessionMessage(senderPhone, 'user', text);
     const updatedDraft = await extractFieldsWithLLM(action, text, draft);
+
+    if (action === 'LOG_VISIT') {
+      if (attachmentObj) {
+        const prevAtts = Array.isArray(updatedDraft.attachments) ? updatedDraft.attachments : (Array.isArray(draft.attachments) ? draft.attachments : []);
+        if (!prevAtts.some(a => a && a.url === attachmentObj.url)) {
+          updatedDraft.attachments = [...prevAtts, attachmentObj];
+        }
+        if (!updatedDraft.gps_photo_url && !draft.gps_photo_url) {
+          updatedDraft.gps_photo_url = attachmentObj.url;
+        }
+      }
+      if (gpsData && (updatedDraft.gps_latitude === undefined || updatedDraft.gps_latitude === null)) {
+        updatedDraft.gps_latitude = gpsData.latitude;
+        updatedDraft.gps_longitude = gpsData.longitude;
+        updatedDraft.gps_accuracy = gpsData.accuracy;
+      }
+    } else if (action === 'UPDATE_VISIT') {
+      if (attachmentObj) {
+        updatedDraft.updates = updatedDraft.updates || {};
+        const prevNew = Array.isArray(updatedDraft.updates.new_attachments) ? updatedDraft.updates.new_attachments : (Array.isArray(draft.updates?.new_attachments) ? draft.updates.new_attachments : []);
+        if (!prevNew.some(a => a && a.url === attachmentObj.url)) {
+          updatedDraft.updates.new_attachments = [...prevNew, attachmentObj];
+        }
+      }
+      if (gpsData) {
+        updatedDraft.updates = updatedDraft.updates || {};
+        if (updatedDraft.updates.gps_latitude === undefined) {
+          updatedDraft.updates.gps_latitude = gpsData.latitude;
+          updatedDraft.updates.gps_longitude = gpsData.longitude;
+          updatedDraft.updates.gps_accuracy = gpsData.accuracy;
+        }
+      }
+    }
+
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
       if (custCheck.isUnrecognizedCustomer) {
@@ -8206,7 +8459,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
       'visit_id', 'visit_date', 'inquiry_id', '_inquiry_display_id',
       'deal_id', 'po_number', 'linked_inquiry_or_po', 'affected_product',
       'complaint_type', 'complaint_description', 'company_name',
-      'rate', '_customer_verified', '_new_customer_created'
+      'rate', '_customer_verified', '_new_customer_created',
+      'gps_photo_url', 'gps_latitude', 'gps_longitude', 'gps_accuracy', 'attachments'
     ];
     for (const key of preserveKeys) {
       if (existingDraft[key] !== undefined && (updatedDraft[key] === undefined || updatedDraft[key] === null || updatedDraft[key] === '')) {
@@ -8215,6 +8469,39 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
     if (existingDraft._inquiry_display_id && !updatedDraft._inquiry_display_id) {
       updatedDraft._inquiry_display_id = existingDraft._inquiry_display_id;
+    }
+
+    if (action === 'LOG_VISIT') {
+      if (attachmentObj) {
+        const prevAtts = Array.isArray(updatedDraft.attachments) ? updatedDraft.attachments : (Array.isArray(existingDraft.attachments) ? existingDraft.attachments : []);
+        if (!prevAtts.some(a => a && a.url === attachmentObj.url)) {
+          updatedDraft.attachments = [...prevAtts, attachmentObj];
+        }
+        if (!updatedDraft.gps_photo_url && !existingDraft.gps_photo_url) {
+          updatedDraft.gps_photo_url = attachmentObj.url;
+        }
+      }
+      if (gpsData && (updatedDraft.gps_latitude === undefined || updatedDraft.gps_latitude === null)) {
+        updatedDraft.gps_latitude = gpsData.latitude;
+        updatedDraft.gps_longitude = gpsData.longitude;
+        updatedDraft.gps_accuracy = gpsData.accuracy;
+      }
+    } else if (action === 'UPDATE_VISIT') {
+      if (attachmentObj) {
+        updatedDraft.updates = updatedDraft.updates || {};
+        const prevNew = Array.isArray(updatedDraft.updates.new_attachments) ? updatedDraft.updates.new_attachments : (Array.isArray(existingDraft.updates?.new_attachments) ? existingDraft.updates.new_attachments : []);
+        if (!prevNew.some(a => a && a.url === attachmentObj.url)) {
+          updatedDraft.updates.new_attachments = [...prevNew, attachmentObj];
+        }
+      }
+      if (gpsData) {
+        updatedDraft.updates = updatedDraft.updates || {};
+        if (updatedDraft.updates.gps_latitude === undefined) {
+          updatedDraft.updates.gps_latitude = gpsData.latitude;
+          updatedDraft.updates.gps_longitude = gpsData.longitude;
+          updatedDraft.updates.gps_accuracy = gpsData.accuracy;
+        }
+      }
     }
 
     // Check if user is attempting to edit a non-editable or system-generated field
@@ -8452,6 +8739,187 @@ async function handleCatalogFlow(rawText, senderPhone) {
         reply: fullReply,
         interactiveType: 'buttons',
         interactiveButtons: NON_EDITABLE_REPLY_BUTTONS,
+      };
+    }
+  }
+
+  // ── 6c. COLD-START OPERATIONAL VISIT UPDATE ──
+  const isColdUpdateVisit =
+    detectedUpdateAction === 'UPDATE_VISIT' ||
+    detectOperationalAction(text) === 'UPDATE_VISIT' ||
+    /\b(?:update|change|modify|edit|amend|revise)\s+(?:the\s+|a\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i.test(text);
+
+  if (isColdUpdateVisit) {
+    let currentCust = null;
+    const match = text.match(/(?:for|of|regarding|on)\s+([A-Za-z0-9\s&.,'-]+?)(?:,|\s+change|\s+edit|\s+update|\s+set|\s+modify|\s+to|$)/i);
+    if (match && match[1] && !/^(?:the|a|an|customer|visit|order|inquiry|complaint)$/i.test(match[1].trim())) {
+      currentCust = match[1].trim();
+    }
+    const initialUpdateDraft = {
+      action: 'UPDATE_VISIT',
+      company_name: currentCust,
+      updates: {},
+      ...(attachmentObj ? { updates: { new_attachments: [attachmentObj] } } : {}),
+      ...(gpsData ? {
+        updates: {
+          ...(attachmentObj ? { new_attachments: [attachmentObj] } : {}),
+          gps_latitude: gpsData.latitude,
+          gps_longitude: gpsData.longitude,
+          gps_accuracy: gpsData.accuracy,
+        }
+      } : {}),
+    };
+
+    await recordSessionMessage(senderPhone, 'user', text);
+    const updatedDraft = await extractFieldsWithLLM('UPDATE_VISIT', text, initialUpdateDraft);
+    if (attachmentObj) {
+      updatedDraft.updates = updatedDraft.updates || {};
+      const prevNew = Array.isArray(updatedDraft.updates.new_attachments) ? updatedDraft.updates.new_attachments : [];
+      if (!prevNew.some(a => a && a.url === attachmentObj.url)) {
+        updatedDraft.updates.new_attachments = [...prevNew, attachmentObj];
+      }
+    }
+    if (gpsData) {
+      updatedDraft.updates = updatedDraft.updates || {};
+      if (updatedDraft.updates.gps_latitude === undefined) {
+        updatedDraft.updates.gps_latitude = gpsData.latitude;
+        updatedDraft.updates.gps_longitude = gpsData.longitude;
+        updatedDraft.updates.gps_accuracy = gpsData.accuracy;
+      }
+    }
+
+    const nonEditableColdUpdate = detectNonEditableFieldAttempt('UPDATE_VISIT', text, updatedDraft);
+    if (nonEditableColdUpdate.isNonEditable) {
+      const fullReply = `${nonEditableColdUpdate.message}\n\n*Editable fields for this ${getActionFriendlyName('UPDATE_VISIT')}:*\n${nonEditableColdUpdate.allowedFieldsList}\n\nWhich editable field would you like to change?`;
+      await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'UPDATE_VISIT' });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|UPDATE_VISIT|${JSON.stringify(updatedDraft)}`);
+      return {
+        handled: true,
+        reply: fullReply,
+        interactiveType: 'buttons',
+        interactiveButtons: NON_EDITABLE_REPLY_BUTTONS,
+      };
+    }
+
+    const missing = validateMandatoryFields('UPDATE_VISIT', updatedDraft);
+    if (missing.length === 0) {
+      const summary = buildConfirmationSummary('UPDATE_VISIT', updatedDraft);
+      await recordSessionMessage(senderPhone, 'assistant', summary, {
+        action_type: 'UPDATE_VISIT',
+        customer_name: updatedDraft.company_name,
+      });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_confirm|UPDATE_VISIT|${JSON.stringify(updatedDraft)}`);
+      return {
+        handled: true,
+        reply: summary,
+        interactiveType: 'buttons',
+        interactiveButtons: CONFIRMATION_BUTTONS,
+      };
+    } else {
+      const missingList = missing.map((m) => `• *${m}*`).join('\n');
+      const askMissing = `Please provide the remaining mandatory details for this visit update:\n\n${missingList}`;
+      await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+        action_type: 'UPDATE_VISIT',
+        customer_name: updatedDraft.company_name,
+      });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|UPDATE_VISIT|${JSON.stringify(updatedDraft)}`);
+      return {
+        handled: true,
+        reply: askMissing,
+      };
+    }
+  }
+
+  // ── 6d. COLD-START OPERATIONAL VISIT LOGGING (With Photo / GPS or Detailed Notes) ──
+  const isColdVisitIntent =
+    !isColdUpdateVisit &&
+    ((detectedUpdateAction === 'LOG_VISIT' || detectOperationalAction(text) === 'LOG_VISIT') ||
+    (Boolean(attachmentObj) && /\b(?:visit|site|meeting|met|client|customer|office|plant|factory)\b/i.test(text)));
+
+  if (isColdVisitIntent) {
+    const initialVisitDraft = {
+      action: 'LOG_VISIT',
+      ...(photoDataUrl ? { gps_photo_url: photoDataUrl } : {}),
+      ...(attachmentObj ? { attachments: [attachmentObj] } : {}),
+      ...(gpsData ? {
+        gps_latitude: gpsData.latitude,
+        gps_longitude: gpsData.longitude,
+        gps_accuracy: gpsData.accuracy,
+      } : {}),
+    };
+
+    await recordSessionMessage(senderPhone, 'user', text);
+    const updatedDraft = await extractFieldsWithLLM('LOG_VISIT', text, initialVisitDraft);
+
+    if (photoDataUrl && !updatedDraft.gps_photo_url) updatedDraft.gps_photo_url = photoDataUrl;
+    if (attachmentObj) {
+      if (!Array.isArray(updatedDraft.attachments) || updatedDraft.attachments.length === 0) {
+        updatedDraft.attachments = [attachmentObj];
+      }
+    }
+    if (gpsData && (updatedDraft.gps_latitude === undefined || updatedDraft.gps_latitude === null)) {
+      updatedDraft.gps_latitude = gpsData.latitude;
+      updatedDraft.gps_longitude = gpsData.longitude;
+      updatedDraft.gps_accuracy = gpsData.accuracy;
+    }
+
+    const nonEditableColdLog = detectNonEditableFieldAttempt('LOG_VISIT', text, updatedDraft);
+    if (nonEditableColdLog.isNonEditable) {
+      const fullReply = `${nonEditableColdLog.message}\n\n*Editable fields for this ${getActionFriendlyName('LOG_VISIT')}:*\n${nonEditableColdLog.allowedFieldsList}\n\nWhich editable field would you like to change?`;
+      await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'LOG_VISIT' });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|LOG_VISIT|${JSON.stringify(updatedDraft)}`);
+      return {
+        handled: true,
+        reply: fullReply,
+        interactiveType: 'buttons',
+        interactiveButtons: NON_EDITABLE_REPLY_BUTTONS,
+      };
+    }
+
+    const custCheck = await verifyDraftCustomer('LOG_VISIT', updatedDraft, senderPhone);
+    if (!custCheck.isValid) {
+      if (custCheck.isUnrecognizedCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: 'LOG_VISIT' });
+        await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|LOG_VISIT|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: NEW_CUSTOMER_BUTTONS,
+        };
+      } else {
+        updatedDraft.company_name = null;
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: 'LOG_VISIT' });
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|LOG_VISIT|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: custCheck.rejectionMessage };
+      }
+    }
+
+    const missing = validateMandatoryFields('LOG_VISIT', updatedDraft);
+    if (missing.length === 0) {
+      const summary = buildConfirmationSummary('LOG_VISIT', updatedDraft);
+      await recordSessionMessage(senderPhone, 'assistant', summary, {
+        action_type: 'LOG_VISIT',
+        customer_name: updatedDraft.company_name,
+      });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_confirm|LOG_VISIT|${JSON.stringify(updatedDraft)}`);
+      return {
+        handled: true,
+        reply: summary,
+        interactiveType: 'buttons',
+        interactiveButtons: CONFIRMATION_BUTTONS,
+      };
+    } else {
+      const missingList = missing.map((m) => `• *${m}*`).join('\n');
+      const askMissing = `Please provide the remaining mandatory details for this field visit:\n\n${missingList}`;
+      await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+        action_type: 'LOG_VISIT',
+        customer_name: updatedDraft.company_name,
+      });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|LOG_VISIT|${JSON.stringify(updatedDraft)}`);
+      return {
+        handled: true,
+        reply: askMissing,
       };
     }
   }

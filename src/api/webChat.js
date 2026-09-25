@@ -215,16 +215,26 @@ router.post('/message', requireWebApiKey, async (req, res) => {
 
     let imageBuffer = null;
     let imageMimeType = null;
+    let photoDataUrl = null;
     if (image && image.base64) {
       const base64Clean = image.base64.replace(/^data:image\/\w+;base64,/, '');
       imageBuffer = Buffer.from(base64Clean, 'base64');
       imageMimeType = image.mimeType || 'image/jpeg';
+      photoDataUrl = image.base64.startsWith('data:')
+        ? image.base64
+        : `data:${imageMimeType};base64,${base64Clean}`;
     }
 
     console.log(`[WebChat] Processing message from ${empName} (${cleanPhone}): "${augmentedText.slice(0, 80)}" (image: ${Boolean(imageBuffer)}, gps: ${Boolean(gps)})`);
 
     // LAYER 1: Guided Catalog & Conversational Form Flow (Greetings, 1-10 Routing, Confirmations)
-    const catalogResult = await handleCatalogFlow(augmentedText, cleanPhone);
+    const catalogResult = await handleCatalogFlow(augmentedText, cleanPhone, {
+      image,
+      imageBuffer,
+      imageMimeType,
+      photoDataUrl,
+      gps,
+    });
     if (catalogResult && catalogResult.handled && catalogResult.reply) {
       let replyToSend = catalogResult.reply;
       if (catalogResult.interactiveType === 'list' && catalogResult.interactiveList?.sections) {
