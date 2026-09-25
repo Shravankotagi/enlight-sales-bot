@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "predev": "chmod +x ./node_modules/.bin/* 2>/dev/null || true",
     "dev": "nodemon index.js",
     "chat": "node scripts/chat_cli.js"
   },
