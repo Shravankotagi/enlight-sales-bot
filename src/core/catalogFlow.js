@@ -1641,6 +1641,94 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
   return { isNonEditable: false };
 }
 
+function matchLineItemUpdate(item, index, totalItems, lineUpdates) {
+  if (!Array.isArray(lineUpdates) || lineUpdates.length === 0 || !item) return null;
+
+  const itemSku = (item.sku_text || item.description || '').trim().toLowerCase();
+  const itemDim = (item.dimensions || item.spec || '').trim().toLowerCase();
+  const itemGrade = (item.grade || '').trim().toLowerCase();
+  const cleanItemFull = [itemSku, itemDim, itemGrade].join(' ').replace(/[^a-z0-9]/g, '');
+
+  // 1. Explicit item number match: '1', 'item 1', 'first item', etc.
+  for (const upd of lineUpdates) {
+    if (!upd) continue;
+    const rawRef = String(upd.item_reference || upd.description || upd.sku_text || '').trim();
+    const numMatch = rawRef.match(/^(?:item\s*#?|line\s*#?|#)?(\d+)(?:st|nd|rd|th)?(?:\s*item)?$/i);
+    if (numMatch) {
+      const targetIdx = parseInt(numMatch[1], 10) - 1;
+      if (targetIdx === index) return upd;
+    }
+    if (/^first(?:\s*item)?$/i.test(rawRef) && index === 0) return upd;
+    if (/^second(?:\s*item)?$/i.test(rawRef) && index === 1) return upd;
+    if (/^third(?:\s*item)?$/i.test(rawRef) && index === 2) return upd;
+    if (/^fourth(?:\s*item)?$/i.test(rawRef) && index === 3) return upd;
+    if (/^fifth(?:\s*item)?$/i.test(rawRef) && index === 4) return upd;
+  }
+
+  // 2. Specific product name / spec / description matching
+  let bestMatch = null;
+  let highestScore = 0;
+
+  for (const upd of lineUpdates) {
+    if (!upd) continue;
+    const updSku = (upd.sku_text || upd.description || upd.item_reference || '').trim().toLowerCase();
+    const updSpec = (upd.spec || upd.dimensions || '').trim().toLowerCase();
+    const cleanUpdFull = [updSku, updSpec].join(' ').replace(/[^a-z0-9]/g, '');
+    if (!cleanUpdFull) continue;
+
+    let score = 0;
+    if (cleanItemFull && cleanUpdFull) {
+      if (cleanItemFull === cleanUpdFull) {
+        score += 100;
+      } else if (cleanItemFull.includes(cleanUpdFull)) {
+        score += 50 + cleanUpdFull.length;
+      } else if (cleanUpdFull.includes(cleanItemFull)) {
+        score += 50 + cleanItemFull.length;
+      }
+    }
+
+    const stopWords = new Set(['the', 'for', 'and', 'with', 'item', 'update', 'change', 'rate', 'price', 'quantity', 'qty', 'of', 'to', 'in', 'at']);
+    const curTokens = [itemSku, itemDim, itemGrade].join(' ').split(/[\s,()/-]+/).map(t => t.trim().toLowerCase()).filter(t => t.length >= 2 && !stopWords.has(t));
+    const updTokens = [updSku, updSpec].join(' ').split(/[\s,()/-]+/).map(t => t.trim().toLowerCase()).filter(t => t.length >= 2 && !stopWords.has(t));
+
+    let matchedTokens = 0;
+    for (const ut of updTokens) {
+      if (curTokens.some(ct => ct === ut || ct.includes(ut) || ut.includes(ct))) {
+        matchedTokens++;
+      }
+    }
+
+    if (matchedTokens > 0) {
+      score += matchedTokens * 20;
+    }
+
+    const steelKeywords = ['channel', 'plate', 'sheet', 'coil', 'angle', 'pipe', 'tube', 'beam', 'bar', 'chequered', 'gp', 'cr', 'hr', 'ms', 'gi', 'tmt'];
+    for (const kw of steelKeywords) {
+      const inCur = curTokens.some(t => t.includes(kw));
+      const inUpd = updTokens.some(t => t.includes(kw));
+      if (inCur && inUpd) {
+        score += 30;
+      } else if (inCur !== inUpd && inUpd) {
+        score -= 40;
+      }
+    }
+
+    if (score > highestScore && score >= 20) {
+      highestScore = score;
+      bestMatch = upd;
+    }
+  }
+
+  if (bestMatch) return bestMatch;
+
+  // 3. Fallback ONLY if there is exactly 1 item in total
+  if (totalItems === 1 && lineUpdates.length > 0) {
+    return lineUpdates[0];
+  }
+
+  return null;
+}
+
 // ── MERGE DRAFT HELPER ───────────────────────────────────────────────────────
 
 function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
@@ -1874,13 +1962,32 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
       if (qtyMatch) extractedQty = Number(qtyMatch[1]);
     }
 
-    const lineUpdates = Array.isArray(newExtracted.line_item_updates) ? newExtracted.line_item_updates : (Array.isArray(merged.line_item_updates) ? merged.line_item_updates : []);
+    let lineUpdates = Array.isArray(newExtracted.line_item_updates) ? newExtracted.line_item_updates : [];
+    if (lineUpdates.length === 0 && Array.isArray(merged.line_item_updates)) {
+      lineUpdates = merged.line_item_updates;
+    }
 
     if (lineUpdates.length > 0) {
-      merged.line_item_updates = lineUpdates;
+      if (Array.isArray(baseDraft.line_item_updates) && baseDraft.line_item_updates.length > 0) {
+        const mergedList = [...baseDraft.line_item_updates];
+        for (const newUpd of lineUpdates) {
+          const matchedPrevIdx = mergedList.findIndex((prev, pIdx) => {
+            const match = matchLineItemUpdate(prev, pIdx, mergedList.length, [newUpd]);
+            return match !== null;
+          });
+          if (matchedPrevIdx >= 0) {
+            mergedList[matchedPrevIdx] = { ...mergedList[matchedPrevIdx], ...newUpd };
+          } else {
+            mergedList.push(newUpd);
+          }
+        }
+        merged.line_item_updates = mergedList;
+      } else {
+        merged.line_item_updates = lineUpdates;
+      }
     } else if ((extractedRate !== undefined && extractedRate !== null) || (extractedQty !== undefined && extractedQty !== null)) {
       const existingItems = Array.isArray(merged.existing_items) ? merged.existing_items : [];
-      if (existingItems.length > 0) {
+      if (existingItems.length === 1) {
         const firstItem = existingItems[0];
         merged.line_item_updates = [{
           operation: 'update',
@@ -1890,6 +1997,34 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
           unit: firstItem.unit || 'MT',
           rate: extractedRate !== undefined && extractedRate !== null ? extractedRate : firstItem.rate,
         }];
+      } else if (existingItems.length > 1) {
+        let targetItem = null;
+        for (let i = 0; i < existingItems.length; i++) {
+          const it = existingItems[i];
+          const itSku = (it.sku_text || it.description || '').toLowerCase();
+          const itTokens = itSku.split(/[\s,()/-]+/).filter(t => t.length >= 3);
+          if (itTokens.some(t => userInput.toLowerCase().includes(t))) {
+            targetItem = it;
+            break;
+          }
+        }
+        if (targetItem) {
+          merged.line_item_updates = [{
+            operation: 'update',
+            item_reference: targetItem.sku_text || 'Item',
+            description: targetItem.sku_text,
+            quantity: extractedQty !== undefined && extractedQty !== null ? extractedQty : targetItem.quantity,
+            unit: targetItem.unit || 'MT',
+            rate: extractedRate !== undefined && extractedRate !== null ? extractedRate : targetItem.rate,
+          }];
+        } else {
+          merged.line_item_updates = [{
+            operation: 'update',
+            item_reference: 'Line Item',
+            quantity: extractedQty,
+            rate: extractedRate,
+          }];
+        }
       } else {
         merged.line_item_updates = [{
           operation: 'update',
@@ -5081,14 +5216,7 @@ function buildConfirmationSummary(action, draft) {
         summary += `• *Updated Line Items:*\n`;
         let subtotal = 0;
         existingItems.forEach((item, idx) => {
-          const curSku = (item.sku_text || item.description || '').toLowerCase();
-          const matchedUpd = lineUpdates.find((upd, uIdx) => {
-            const updSku = (upd.sku_text || upd.description || upd.item_reference || '').toLowerCase();
-            if (!updSku) return uIdx === idx;
-            const cleanCur = curSku.replace(/[^a-z0-9]/g, '');
-            const cleanUpd = updSku.replace(/[^a-z0-9]/g, '');
-            return cleanCur.includes(cleanUpd) || cleanUpd.includes(cleanCur) || uIdx === idx;
-          });
+          const matchedUpd = matchLineItemUpdate(item, idx, existingItems.length, lineUpdates);
 
           let itQty = Number(item.quantity) || 0;
           let itRate = Number(item.rate) || 0;
@@ -5911,15 +6039,7 @@ async function executeAction(action, draft, senderPhone) {
         if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0 && dItems && dItems.length > 0) {
           for (let i = 0; i < dItems.length; i++) {
             const currentItem = dItems[i];
-            const curSku = (currentItem.sku_text || currentItem.description || '').toLowerCase();
-
-            const matchedUpd = draft.line_item_updates.find((upd, uIdx) => {
-              const updSku = (upd.sku_text || upd.description || '').toLowerCase();
-              if (!updSku) return uIdx === i;
-              const cleanCur = curSku.replace(/[^a-z0-9]/g, '');
-              const cleanUpd = updSku.replace(/[^a-z0-9]/g, '');
-              return cleanCur.includes(cleanUpd) || cleanUpd.includes(cleanCur) || uIdx === i;
-            });
+            const matchedUpd = matchLineItemUpdate(currentItem, i, dItems.length, draft.line_item_updates);
 
             let itRate = Number(currentItem.rate) || 0;
             let itQty = Number(currentItem.quantity) || 0;
@@ -6650,14 +6770,7 @@ async function executeAction(action, draft, senderPhone) {
             let subtotal = 0;
             for (let i = 0; i < dItems.length; i++) {
               const currentItem = dItems[i];
-              const curSku = (currentItem.sku_text || currentItem.description || '').toLowerCase();
-              const matchedUpd = draft.line_item_updates.find((upd, uIdx) => {
-                const updSku = (upd.sku_text || upd.description || upd.item_reference || '').toLowerCase();
-                if (!updSku) return uIdx === i;
-                const cleanCur = curSku.replace(/[^a-z0-9]/g, '');
-                const cleanUpd = updSku.replace(/[^a-z0-9]/g, '');
-                return cleanCur.includes(cleanUpd) || cleanUpd.includes(cleanCur) || uIdx === i;
-              });
+              const matchedUpd = matchLineItemUpdate(currentItem, i, dItems.length, draft.line_item_updates);
 
               let itRate = Number(currentItem.rate) || 0;
               let itQty = Number(currentItem.quantity) || 0;
