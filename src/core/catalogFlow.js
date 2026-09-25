@@ -2749,7 +2749,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
 
     const dealByInqId = new Map();
     const wonOrClosedInqIds = new Set();
-    const terminalStages = new Set(['won', 'lost', 'closed', 'completed', 'cancelled', 'auto_created']);
+    const terminalStages = new Set(['won', 'lost', 'closed', 'completed', 'cancelled']);
 
     scopedDeals.forEach(d => {
       const stage = (d.stage || '').toLowerCase().trim();
@@ -2985,7 +2985,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
   if (action === 'UPDATE_VISIT') {
     let visitQuery = supabase
       .from('customer_visits')
-      .select('id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, created_at, salesperson_phone')
+      .select('*')
       .order('visited_at', { ascending: false, nullsFirst: false });
 
     if (!scope.isAdmin && targetPhones.length > 0) {
@@ -3009,8 +3009,8 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
 
     // Sort newest first strictly matching CRM Visits module sequence
     scopedVisits.sort((a, b) => {
-      const timeA = new Date(a.visited_at || a.created_at || 0).getTime();
-      const timeB = new Date(b.visited_at || b.created_at || 0).getTime();
+      const timeA = new Date(a.visited_at || 0).getTime();
+      const timeB = new Date(b.visited_at || 0).getTime();
       return timeB - timeA;
     });
 
@@ -3019,10 +3019,10 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
     }
 
     return scopedVisits.map(v => {
-      const vDate = v.visited_at ? new Date(v.visited_at) : (v.created_at ? new Date(v.created_at) : new Date());
+      const vDate = v.visited_at ? new Date(v.visited_at) : new Date();
       const dateFormatted = formatDateDDMMYYYY(vDate);
       const outTagMatch = (v.remarks || '').match(/\[Outcome:\s*([^\]]+)\]/i);
-      const outcome = outTagMatch ? outTagMatch[1] : 'Positive';
+      const outcome = outTagMatch ? outTagMatch[1] : (v.outcome || 'Positive');
       const locTagMatch = (v.remarks || '').match(/\[Location:\s*([^\]]+)\]/i);
       const location = v.customer_address || (locTagMatch ? locTagMatch[1] : 'Not specified');
       const cleanRemarks = (v.remarks || '')
@@ -3041,7 +3041,6 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         contact_no: v.contact_no || null,
         remarks: cleanRemarks || 'Not specified',
         visited_at: v.visited_at,
-        created_at: v.created_at,
       };
     });
   }
