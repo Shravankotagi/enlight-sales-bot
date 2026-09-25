@@ -5,7 +5,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 const { handleCatalogFlow } = require('../src/core/catalogFlow');
 const { saveActiveSession, getFullActiveSession, supabase } = require('../src/supabase');
 
-const TEST_PHONE = '8262937458';
+const TEST_PHONE = '910000000097';
 
 async function runAllModulesTest() {
   console.log('================================================================');

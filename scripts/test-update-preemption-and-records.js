@@ -5,7 +5,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 const { handleCatalogFlow } = require('../src/core/catalogFlow');
 const { saveActiveSession, getFullActiveSession, finalizeCurrentSession } = require('../src/supabase');
 
-const TEST_PHONE = '8262937458';
+const TEST_PHONE = '910000000094';
 
 async function runTests() {
   console.log('=== RUNNING TESTS FOR UPDATE FLOW PREEMPTION & RECENT RECORDS ===\n');

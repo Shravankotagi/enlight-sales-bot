@@ -10,7 +10,7 @@ async function runComprehensiveInterruptionAudit() {
   console.log('--- COMPREHENSIVE RE-PROMPT & INTERRUPTION RESILIENCE AUDIT ---');
   console.log('================================================================\n');
 
-  const testPhone = '8262937458';
+  const testPhone = '910000000098';
   let totalTests = 0;
   let passedTests = 0;
 
@@ -115,7 +115,7 @@ async function runComprehensiveInterruptionAudit() {
   // Create a dummy open complaint in Supabase for recognized customer
   const dummyCust = 'Apex Precision Ltd';
   const { data: dummyCmp } = await supabase.from('complaints').insert({
-    reported_by: '+918262937458',
+    reported_by: testPhone,
     customer_name: dummyCust,
     description: 'Defective test sheet with surface damage',
     complaint_type: 'Quality Defect',

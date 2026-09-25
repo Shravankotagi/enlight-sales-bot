@@ -6,8 +6,20 @@ const { handleCatalogFlow } = require('../src/core/catalogFlow');
 const { saveActiveSession, supabase } = require('../src/supabase');
 
 async function run() {
-  const senderPhone = '8262937458';
+  const senderPhone = '910000000095';
   await saveActiveSession(senderPhone, 'Unknown', 'general');
+
+  // Insert isolated test visit
+  await supabase.from('customer_visits').delete().eq('salesperson_phone', senderPhone);
+  const { data: testVisit } = await supabase.from('customer_visits').insert({
+    salesperson_phone: senderPhone,
+    customer_name: 'Maurya Industries',
+    person_met: 'Anil Maurya',
+    contact_no: '9820011223',
+    customer_address: 'Pune',
+    remarks: '[Outcome: Positive] [Location: Pune] Good meeting',
+    visited_at: new Date().toISOString(),
+  }).select().single();
 
   console.log('--- Step 1: User chooses 6. Update Field Visit ---');
   const res1 = await handleCatalogFlow('menu_6', senderPhone);
@@ -57,6 +69,10 @@ async function run() {
   console.log(`- Visited At: ${updatedVisit.visited_at}`);
 
   assert.strictEqual(updatedVisit.contact_no, '5612788945', 'Contact number should be updated to 5612788945 in DB');
+
+  // Clean up test data
+  if (testVisit) await supabase.from('customer_visits').delete().eq('id', testVisit.id);
+  await saveActiveSession(senderPhone, 'Unknown', 'general');
 
   console.log('\n========================================');
   console.log('ALL TESTS PASSED! VISIT UPDATE FLOW VERIFIED 100%');

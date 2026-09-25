@@ -6,7 +6,7 @@ const { handleCatalogFlow } = require('../src/core/catalogFlow');
 const { saveActiveSession, supabase } = require('../src/supabase');
 
 async function testUpdateVisit() {
-  const testPhone = '918262937458';
+  const testPhone = '910000000096';
   console.log('--- Testing UPDATE_VISIT flow for Apex Precision Ltd ---');
 
   // 1. Reset Apex Precision visit record to test state
