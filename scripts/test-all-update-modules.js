@@ -121,7 +121,7 @@ async function runAllModulesTest() {
     await assert(ordSel.handled === true, '2.3 Order selection handled');
     await assert(ordSel.reply.includes('PO-2026-8801'), '2.4 Displays Selected PO Number');
     await assert(ordSel.reply.includes('Bhushan Power & Steel'), '2.5 Displays Customer Name');
-    await assert(ordSel.reply.includes('What details would you like to update?'), '2.6 Prompts for fields to update');
+    await assert(ordSel.reply.includes('What changes would you like to make to the line items?') || ordSel.reply.includes('What details would you like to update?'), '2.6 Prompts for fields to update');
     await assert(!ordSel.reply.includes('To identify the order, please provide'), '2.7 Does NOT ask for PO number / ID again');
 
     // Provide field update

@@ -603,7 +603,7 @@ function getEditPromptForAction(action) {
     case 'LOG_ORDER':
       return `Which field would you like to change? (e.g. "Rate: 54000", "Delivery location: Pune", or "PO Number: PO-2026-001")`;
     case 'UPDATE_ORDER':
-      return `Which field would you like to change? (e.g. "PO Number: PO-2026-001", "PO Date: 12-09-2026", or "Delivery location: Pune")`;
+      return `Which field would you like to change? (e.g. "Rate: 52000", "Quantity: 35 MT", or "Rate: 50000 and Quantity: 40 MT")`;
     case 'LOG_VISIT':
       return `Which field would you like to change? (e.g. "Person met: Jenny Shah", "Contact phone: 9820123456", "Visit date: 20-09-2026", or "Remarks: Discussed HR coil")`;
     case 'UPDATE_VISIT':
@@ -1755,6 +1755,47 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.payment_terms && !merged.updates.payment_terms) merged.updates.payment_terms = newExtracted.payment_terms;
     if (newExtracted.status && !merged.updates.status) merged.updates.status = newExtracted.status;
     if (newExtracted.po_number && !merged.updates.po_number && merged.inquiry_id) merged.updates.po_number = newExtracted.po_number;
+
+    let extractedRate = newExtracted.rate !== undefined && newExtracted.rate !== null ? newExtracted.rate : (newExtracted.updates && newExtracted.updates.rate);
+    let extractedQty = newExtracted.quantity !== undefined && newExtracted.quantity !== null ? newExtracted.quantity : (newExtracted.updates && newExtracted.updates.quantity);
+
+    if (extractedRate === undefined || extractedRate === null) {
+      const rateMatch = userInput.match(/(?:rate|price|@|bhav)[\s:=-]*₹?\s*(\d+(?:,\d+)*(?:\.\d+)?)/i) ||
+        userInput.match(/(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:\/|\s*per\s*)(?:mt|ton|tonne|kg|pcs|sheet)/i);
+      if (rateMatch) extractedRate = Number(rateMatch[1].replace(/,/g, ''));
+    }
+
+    if (extractedQty === undefined || extractedQty === null) {
+      const qtyMatch = userInput.match(/(\d+(?:\.\d+)?)\s*(?:mt|ton|tonne|kg|pcs|nos|sheets?|plates?|coils?)\b/i) ||
+        userInput.match(/(?:qty|quantity)[\s:=-]*(\d+(?:\.\d+)?)/i);
+      if (qtyMatch) extractedQty = Number(qtyMatch[1]);
+    }
+
+    const lineUpdates = Array.isArray(newExtracted.line_item_updates) ? newExtracted.line_item_updates : (Array.isArray(merged.line_item_updates) ? merged.line_item_updates : []);
+
+    if (lineUpdates.length > 0) {
+      merged.line_item_updates = lineUpdates;
+    } else if ((extractedRate !== undefined && extractedRate !== null) || (extractedQty !== undefined && extractedQty !== null)) {
+      const existingItems = Array.isArray(merged.existing_items) ? merged.existing_items : [];
+      if (existingItems.length > 0) {
+        const firstItem = existingItems[0];
+        merged.line_item_updates = [{
+          operation: 'update',
+          item_reference: firstItem.sku_text || 'Item 1',
+          description: firstItem.sku_text,
+          quantity: extractedQty !== undefined && extractedQty !== null ? extractedQty : firstItem.quantity,
+          unit: firstItem.unit || 'MT',
+          rate: extractedRate !== undefined && extractedRate !== null ? extractedRate : firstItem.rate,
+        }];
+      } else {
+        merged.line_item_updates = [{
+          operation: 'update',
+          item_reference: 'Line Item',
+          quantity: extractedQty,
+          rate: extractedRate,
+        }];
+      }
+    }
   } else if (action === 'UPDATE_INQUIRY') {
     if (!merged.updates) merged.updates = {};
     if (merged.rate && !merged.updates.rate) merged.updates.rate = merged.rate;
@@ -2935,6 +2976,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         delivery_location: d.delivery_location || 'Not specified',
         payment_terms: d.payment_terms || 'Not specified',
         total_amount: Number(d.total_amount) || 0,
+        deal_items: d.deal_items || [],
         created_at: d.created_at,
         won_at: d.won_at,
       };
@@ -3334,12 +3376,15 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
         _inquiry_verified: true,
       };
     } else if (action === 'UPDATE_ORDER') {
+      const orderItems = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
       draft = {
         inquiry_id: matchedRecord.inquiry_id || matchedRecord.id,
         deal_id: matchedRecord.deal_id || matchedRecord.id,
         po_number: matchedRecord.po_number || null,
         linked_inquiry_or_po: matchedRecord.po_number ? `PO: ${matchedRecord.po_number} (${matchedRecord.deal_code})` : matchedRecord.deal_code,
         company_name: matchedRecord.customer_name,
+        existing_items: orderItems,
+        total_amount: Number(matchedRecord.total_amount || 0),
         _order_verified: true,
       };
     } else if (action === 'UPDATE_COMPLAINT') {
@@ -3372,12 +3417,31 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
           `What details would you like to update?\n` +
           `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
       } else if (action === 'UPDATE_ORDER') {
+        let itemsListText = '';
+        const items = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
+        if (items.length > 0) {
+          itemsListText = items.map((item, idx) => {
+            const name = item.sku_text || item.description || 'Steel Item';
+            const spec = item.dimensions ? ` (${item.dimensions})` : (item.grade ? ` (${item.grade})` : '');
+            const qty = item.quantity ?? 0;
+            const unit = item.unit || 'MT';
+            const rate = Number(item.rate ?? 0);
+            const rateText = rate > 0 ? ` @ ₹${rate.toLocaleString('en-IN')}/${unit}` : '';
+            const amt = Number(item.amount ?? (qty * rate));
+            const amtText = amt > 0 ? ` (₹${amt.toLocaleString('en-IN')})` : '';
+            return `${idx + 1}. *${name}${spec}* — ${qty} ${unit}${rateText}${amtText}`;
+          }).join('\n');
+        } else {
+          itemsListText = `1. *${matchedRecord.product_summary || 'Steel Material'}*`;
+        }
+
         prompt = `✏️ *Selected Order ${matchedRecord.displayId} (${matchedRecord.customer_name}):*\n\n` +
           `• *Date:* ${matchedRecord.date_formatted}\n` +
           `• *Stage:* ${matchedRecord.stage}\n` +
           `• *Total Value:* ₹${Number(matchedRecord.total_amount || 0).toLocaleString('en-IN')}\n\n` +
-          `What details would you like to update?\n` +
-          `_(e.g., Attach PO Number, Delivery Location, Payment Terms, Rate, or Quantity)_`;
+          `*Current Line Items:*\n${itemsListText}\n\n` +
+          `What changes would you like to make to the line items?\n` +
+          `_(e.g., "Change rate to 48000", "Update quantity to 35 MT", "Change rate to 52000 and quantity to 40 MT")_`;
       } else if (action === 'UPDATE_COMPLAINT') {
         prompt = `✏️ *Selected Complaint ${matchedRecord.displayId} (${matchedRecord.customer_name}):*\n\n` +
           (matchedRecord.po_number ? `• *Linked Ref:* PO: ${matchedRecord.po_number}\n` : '') +
@@ -4855,7 +4919,7 @@ function buildConfirmationSummary(action, draft) {
         summary += `• *Inquiry ID:* INQ-${cleanDisplayInq}\n`;
       }
       if (draft.updates && Object.keys(draft.updates).length > 0) {
-        const headerEntries = Object.entries(draft.updates).filter(([k, v]) => v && k !== 'po_number' && k !== 'company_name');
+        const headerEntries = Object.entries(draft.updates).filter(([k, v]) => v && k !== 'po_number' && k !== 'company_name' && k !== 'rate' && k !== 'quantity');
         if (headerEntries.length > 0) {
           summary += `• *Header Updates:*\n`;
           for (const [k, v] of headerEntries) {
@@ -4864,10 +4928,53 @@ function buildConfirmationSummary(action, draft) {
           }
         }
       }
-      if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0) {
+
+      const existingItems = Array.isArray(draft.existing_items) ? draft.existing_items : [];
+      const lineUpdates = Array.isArray(draft.line_item_updates) ? draft.line_item_updates : [];
+
+      if (existingItems.length > 0) {
+        summary += `• *Updated Line Items:*\n`;
+        let subtotal = 0;
+        existingItems.forEach((item, idx) => {
+          const curSku = (item.sku_text || item.description || '').toLowerCase();
+          const matchedUpd = lineUpdates.find((upd, uIdx) => {
+            const updSku = (upd.sku_text || upd.description || upd.item_reference || '').toLowerCase();
+            if (!updSku) return uIdx === idx;
+            const cleanCur = curSku.replace(/[^a-z0-9]/g, '');
+            const cleanUpd = updSku.replace(/[^a-z0-9]/g, '');
+            return cleanCur.includes(cleanUpd) || cleanUpd.includes(cleanCur) || uIdx === idx;
+          });
+
+          let itQty = Number(item.quantity) || 0;
+          let itRate = Number(item.rate) || 0;
+          let itUnit = item.unit || 'MT';
+          if (matchedUpd) {
+            if (matchedUpd.quantity !== null && matchedUpd.quantity !== undefined && matchedUpd.quantity !== '') {
+              itQty = Number(String(matchedUpd.quantity).replace(/[^\d.]/g, '')) || itQty;
+            }
+            if (matchedUpd.rate !== null && matchedUpd.rate !== undefined && matchedUpd.rate !== '') {
+              itRate = Number(String(matchedUpd.rate).replace(/[^\d.]/g, '')) || itRate;
+            }
+            if (matchedUpd.unit) itUnit = matchedUpd.unit;
+          }
+          const itAmt = itQty * itRate;
+          subtotal += itAmt;
+          const name = item.sku_text || item.description || 'Steel Item';
+          const spec = item.dimensions ? ` (${item.dimensions})` : (item.grade ? ` (${item.grade})` : '');
+          summary += `  ${idx + 1}. *${name}${spec}* — ${itQty} ${itUnit} @ ₹${itRate.toLocaleString('en-IN')}/${itUnit} = ₹${itAmt.toLocaleString('en-IN')}\n`;
+        });
+
+        if (subtotal > 0) {
+          const gst = Math.round(subtotal * 0.18);
+          const grandTotal = subtotal + gst;
+          summary += `• *Subtotal:* ₹${subtotal.toLocaleString('en-IN')}\n`;
+          summary += `• *GST (18%):* ₹${gst.toLocaleString('en-IN')}\n`;
+          summary += `• *New Total Order Value:* ₹${grandTotal.toLocaleString('en-IN')}\n`;
+        }
+      } else if (lineUpdates.length > 0) {
         summary += `• *Line Item Updates:*\n`;
-        draft.line_item_updates.forEach((liu) => {
-          summary += `  • [${(liu.operation || 'update').toUpperCase()}] ${liu.item_reference || liu.description || 'Line Item'}: Qty ${liu.quantity || '-'}, Rate ₹${liu.rate || '-'}\n`;
+        lineUpdates.forEach((liu, idx) => {
+          summary += `  ${idx + 1}. *${liu.item_reference || liu.description || 'Line Item'}* — Qty ${liu.quantity || '-'} ${liu.unit || 'MT'}, Rate ₹${liu.rate || '-'}\n`;
         });
       }
       break;
@@ -6159,7 +6266,17 @@ async function executeAction(action, draft, senderPhone) {
         const { data: deals } = await dealsQuery.limit(500);
 
         let deal = null;
-        if (deals && deals.length > 0) {
+        if (draft.deal_id) {
+          if (deals && deals.length > 0) {
+            deal = deals.find(d => d.id === draft.deal_id) || null;
+          }
+          if (!deal) {
+            const { data: dRow } = await supabase.from('deals').select('*').eq('id', draft.deal_id).maybeSingle();
+            if (dRow) deal = dRow;
+          }
+        }
+
+        if (!deal && deals && deals.length > 0) {
           // A. Match by Inquiry ID / Deal ID prefix or exact code
           if (cleanInqId) {
             deal = deals.find(d => {
@@ -6350,12 +6467,12 @@ async function executeAction(action, draft, senderPhone) {
         if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0) {
           const { data: dItems } = await supabase.from('deal_items').select('*').eq('deal_id', deal.id);
           if (dItems && dItems.length > 0) {
-            let totalAmount = 0;
+            let subtotal = 0;
             for (let i = 0; i < dItems.length; i++) {
               const currentItem = dItems[i];
               const curSku = (currentItem.sku_text || currentItem.description || '').toLowerCase();
               const matchedUpd = draft.line_item_updates.find((upd, uIdx) => {
-                const updSku = (upd.sku_text || upd.description || '').toLowerCase();
+                const updSku = (upd.sku_text || upd.description || upd.item_reference || '').toLowerCase();
                 if (!updSku) return uIdx === i;
                 const cleanCur = curSku.replace(/[^a-z0-9]/g, '');
                 const cleanUpd = updSku.replace(/[^a-z0-9]/g, '');
@@ -6373,7 +6490,7 @@ async function executeAction(action, draft, senderPhone) {
                 }
               }
               const itAmt = itQty > 0 && itRate > 0 ? itQty * itRate : 0;
-              totalAmount += itAmt;
+              subtotal += itAmt;
               const { error: dItemErr } = await supabase.from('deal_items').update({
                 rate: itRate,
                 quantity: itQty,
@@ -6385,7 +6502,32 @@ async function executeAction(action, draft, senderPhone) {
                 return `❌ *Failed to update order ${displayPo} for ${displayCust}.*\n\nReason: ${dItemErr.message || 'Database write error'}. Please try again.`;
               }
             }
-            if (totalAmount > 0) dealUpdates.total_amount = totalAmount;
+            if (subtotal > 0) {
+              const gst = Math.round(subtotal * 0.18);
+              const grandTotal = subtotal + gst;
+              dealUpdates.total_amount = grandTotal;
+            }
+          } else {
+            let subtotal = 0;
+            for (const upd of draft.line_item_updates) {
+              const itRate = Number(String(upd.rate || 0).replace(/[^\d.]/g, '')) || 0;
+              const itQty = Number(String(upd.quantity || 0).replace(/[^\d.]/g, '')) || 0;
+              const itAmt = itQty * itRate;
+              subtotal += itAmt;
+              await supabase.from('deal_items').insert({
+                deal_id: deal.id,
+                sku_text: upd.sku_text || upd.description || upd.item_reference || 'Steel Item',
+                quantity: itQty,
+                unit: upd.unit || 'MT',
+                rate: itRate,
+                amount: itAmt,
+              });
+            }
+            if (subtotal > 0) {
+              const gst = Math.round(subtotal * 0.18);
+              const grandTotal = subtotal + gst;
+              dealUpdates.total_amount = grandTotal;
+            }
           }
         }
 
