@@ -17,7 +17,8 @@ const GEMINI_API_KEY =
   process.env.GEMINI_PAID_API_KEY ||
   process.env.GEMINI_API_KEY ||
   process.env.GEMINI_API_KEY_1 ||
-  process.env.GEMINI_API_KEY_2;
+  process.env.GEMINI_API_KEY_2 ||
+  process.env.GOOGLE_API_KEY;
 
 const PRIMARY_MODEL = process.env.GEMINI_PRIMARY_MODEL || 'gemini-3.8-flash';
 const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.7-flash';

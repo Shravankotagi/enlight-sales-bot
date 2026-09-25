@@ -639,18 +639,79 @@ function buildOutOfScopeActivityResponse(currentAction, detectedAction) {
   };
 }
 
-// ── GREETING & ROUTING MATCHERS ──────────────────────────────────────────────
-
-function isGreeting(text) {
+async function isGreetingWithLLM(text) {
   if (!text || typeof text !== 'string') return false;
-  const clean = text.trim().toLowerCase().replace(/[!.,?]/g, '');
-  const greetings = [
+  const clean = text.trim();
+  if (clean.length === 0 || clean.length > 80) return false;
+
+  // Immediate guard: If message contains obvious CRM transaction terms, numbers with units, IDs, or field assignments, it's NOT a greeting
+  if (/\b(?:inq-|po-|vis-|cmp-|deal-|[0-9a-f]{8}-[0-9a-f]{4}|₹|\d+\s*(?:mt|tons?|kg|pcs|sheet|coil|plate|beam)|rate\s*[:=]|qty\s*[:=]|payment\s*terms|delivery\s*location|credit\s*period|complaint|acquisition|onboard)\b/i.test(clean)) {
+    return false;
+  }
+
+  const prompt = `You are a strict greeting and menu classifier for a B2B sales WhatsApp bot (Enlight Metals SalesOS).
+Determine if the following message is a greeting, salutation, polite conversational opener, or menu/start request (in English, Hindi, Hinglish, Marathi, Gujarati, or any language/slang):
+"${clean}"
+
+Examples of greetings / menu requests:
+- "hi", "hello", "hieeee", "heyyyyy", "hola", "yo", "namaste", "namaskar", "kem cho", "vanakkam", "pranam", "ram ram", "radhe radhe", "kya haal hai", "good morning", "good evening", "hey bot", "start bot", "show menu", "options", "help", "let's begin"
+
+Examples of non-greetings (operational or data queries):
+- "send 10 MT HR Coil", "what is the rate for SS Industries?", "update PO 1234", "visited Horizon yesterday", "cancel", "45 days credit", "Pune delivery"
+
+Respond strictly with ONLY "YES" if it is a greeting/salutation/opener/menu request, or "NO" otherwise. No markdown, no punctuation.`;
+
+  try {
+    const res = await invokeWithFallback([new HumanMessage(prompt)]);
+    const raw = (typeof res.content === 'string' ? res.content : '').trim().toUpperCase();
+    return raw.startsWith('YES');
+  } catch (err) {
+    console.warn('[CatalogFlow] AI greeting detection fallback notice:', err.message);
+    return false;
+  }
+}
+
+async function isGreeting(text) {
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.trim().toLowerCase().replace(/[!.,?*~_]/g, '').trim();
+  if (!clean) return false;
+
+  // 1. Exact high-frequency greeting match
+  const exactGreetings = new Set([
     'hi', 'hello', 'hey', 'start', 'menu', 'main menu', 'options',
-    'namaste', 'good morning', 'good afternoon', 'good evening',
-    'hii', 'hiii', 'heyy', 'catalog', 'help', 'btn_post_menu','hie'
-  ];
-  if (greetings.includes(clean)) return true;
-  return /^(?:hie|hi|hello|hey|start|menu|namaste)\b/i.test(clean) && clean.length <= 15;
+    'namaste', 'namaskar', 'pranam', 'good morning', 'good afternoon', 'good evening', 'good day', 'good night',
+    'hii', 'hiii', 'hiiii', 'heyy', 'heyyy', 'catalog', 'help', 'btn_post_menu', 'hie', 'hiee', 'hieee', 'hieeee',
+    'yo', 'hola', 'sup', 'wassup', 'whatsup', 'wazzup', 'kya haal hai', 'kaise ho', 'kaisa hai',
+    'ram ram', 'jai shree ram', 'radhe radhe', 'adab', 'salam', 'assalam alaikum', 'vanakkam', 'kem cho'
+  ]);
+  if (exactGreetings.has(clean)) return true;
+
+  // 2. Regex for elongated variations (e.g. hieeee, hiiiiii, heyyyy, helloooo)
+  if (
+    /^(?:h+i+|h+e+y+|h+e+l+l*o+|h+i+e+|y+o+|h+o+l+a+|s+u+p+|w+a+s+s+u+p+|w+h+a+t+s+u+p+|w+z+u+p+|n+a+m+a+s+t+e+|n+a+m+a+s+k+a+r+|p+r+a+n+a+m+|a+d+a+a?b+|s+a+l+a+a?m+|r+a+m\s*r+a+m+|j+a+i\s*s+h+r+e+e\s*r+a+m+|k+y+a\s*h+a+a?l\s*h+a+i?|k+a+i+s+e\s*h+o+|k+a+i+s+a\s*h+a+i?|v+a+n+a+k+k+a+m+|k+e+m\s*c+h+o+|s+t+a+r+t|m+e+n+u|m+a+i+n\s*m+e+n+u|o+p+t+i+o+n+s?|c+a+t+a+l+o+g|h+e+l+p|b+t+n_p+o+s+t_m+e+n+u)$/i.test(clean)
+  ) {
+    return true;
+  }
+
+  // 3. Multi-word standard greeting openers
+  if (
+    /^(?:good\s*(?:morning|afternoon|evening|day|night)|hey\s*there|hi\s*there|hello\s*there|hi\s*bot|hello\s*bot|hey\s*bot|hi\s*assistant|hello\s*assistant|hey\s*all|greetings|let'?s\s*start|start\s*here)\b/i.test(clean) &&
+    clean.length <= 35
+  ) {
+    return true;
+  }
+
+  // 4. Guard before LLM: If it contains obvious CRM transactions/data, don't call LLM
+  if (/\b(?:inq-|po-|vis-|cmp-|deal-|₹|\d+\s*(?:mt|tons?|kg|pcs|sheet|coil|plate|beam)|rate|price|quote|order|visit|complaint|acquisition|delivery|payment|invoice|credit|bhosari|pune|mumbai)\b/i.test(clean)) {
+    return false;
+  }
+
+  // 5. Intelligent Gemini Model Classifier for non-fixed / novel / multilingual greetings
+  if (clean.length <= 60) {
+    return await isGreetingWithLLM(clean);
+  }
+
+  return false;
 }
 
 function matchActionFromInput(text) {
@@ -7468,7 +7529,7 @@ async function handleCatalogFlow(rawText, senderPhone) {
   if (text.length === 0) return { handled: false };
 
   // ── 1. GREETING CHECK ──────────────────────────────────────────────────────
-  if (isGreeting(text)) {
+  if (await isGreeting(text)) {
     await saveActiveSession(senderPhone, 'Unknown', 'general');
     await startNewCatalogSession(senderPhone, CATALOG_MENU);
     return {
@@ -9193,6 +9254,7 @@ module.exports = {
   CATALOG_MENU,
   MODULE_PROMPTS,
   isGreeting,
+  isGreetingWithLLM,
   matchActionFromInput,
   isExplicitMenuSelection,
   validateMandatoryFields,
