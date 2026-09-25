@@ -4146,6 +4146,23 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
     let inqId = existingDeal?.inquiry_id || null;
     const initialInqStatus = dbStage === 'won' ? 'confirmed' : ((dealAmount > 0 || processedItems.some(i => i.rate > 0)) ? 'quoted' : 'review');
 
+    // CRM Account Owner Binding: If customer is registered in recurring_customers, bind to assigned owner
+    let effectiveSalespersonPhone = senderPhone;
+    if (finalCustomerName) {
+      try {
+        const { data: matchedCust } = await supabase
+          .from('recurring_customers')
+          .select('assigned_salesperson_phone')
+          .ilike('customer_name', finalCustomerName.trim())
+          .limit(1);
+        if (matchedCust && matchedCust.length > 0 && matchedCust[0].assigned_salesperson_phone) {
+          effectiveSalespersonPhone = matchedCust[0].assigned_salesperson_phone;
+        }
+      } catch (custLookupErr) {
+        console.warn('[SalesAgent] Customer salesperson lookup warning:', custLookupErr.message);
+      }
+    }
+
     if (!dealId || !inqId) {
       try {
         const { data: insertedInq, error: inqInsErr } = await supabase
@@ -4155,7 +4172,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
             raw_text: data.raw_text || text,
             sender_name: finalCustomerName || null,
             sender_phone: actualCustomerPhone || null,
-            salesperson_phone: senderPhone,
+            salesperson_phone: effectiveSalespersonPhone,
             inquiry_type: 'inquiry',
             status: initialInqStatus,
             ai_extraction_json: structuredExtraction,
@@ -4300,7 +4317,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
           ...(inqId ? { id: inqId } : {}),
           inquiry_id:        inqId || null,
           customer_name:     finalCustomerName,
-          salesperson_phone: senderPhone,
+          salesperson_phone: effectiveSalespersonPhone,
           customer_phone:    actualCustomerPhone,
           stage:             effectiveStage,
           total_amount:      dealAmount || 0,

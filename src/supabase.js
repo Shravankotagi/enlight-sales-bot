@@ -207,6 +207,31 @@ async function getAccessibleSalespersonPhonesForBot(senderPhone) {
  */
 async function saveInquiry(data) {
   try {
+    let effectiveSalespersonPhone = data.salesperson_phone || data.sender_phone || null;
+    const targetCustName =
+      data.customer_name ||
+      data.sender_name ||
+      (data.ai_extraction_json &&
+        (data.ai_extraction_json.companyName ||
+          data.ai_extraction_json.customer_name));
+
+    if (targetCustName && typeof targetCustName === 'string') {
+      try {
+        const { data: matchedCust } = await supabase
+          .from('recurring_customers')
+          .select('assigned_salesperson_phone')
+          .ilike('customer_name', targetCustName.trim())
+          .limit(1);
+        if (
+          matchedCust &&
+          matchedCust.length > 0 &&
+          matchedCust[0].assigned_salesperson_phone
+        ) {
+          effectiveSalespersonPhone = matchedCust[0].assigned_salesperson_phone;
+        }
+      } catch (e) {}
+    }
+
     const payload = {
       source_channel: data.source_channel || 'whatsapp',
       raw_text: data.raw_text,
@@ -217,7 +242,7 @@ async function saveInquiry(data) {
       whatsapp_message_id: data.message_id || null,
       status: data.status || 'processed',
       created_at: new Date().toISOString(),
-      salesperson_phone: data.salesperson_phone || data.sender_phone || null,
+      salesperson_phone: effectiveSalespersonPhone,
       employee_id: data.employee_id || null,
       inquiry_type: data.inquiry_type || null,
       ai_extraction_json: data.ai_extraction_json || null,
@@ -281,6 +306,29 @@ async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
       poNumber = `PO-${todayStr}-${randomNum}`;
     }
 
+    let effectiveSalespersonPhone = senderPhone;
+    const targetCustName =
+      extraction?.customer?.name ||
+      extraction?.companyName ||
+      extraction?.customer_name;
+
+    if (targetCustName && typeof targetCustName === 'string') {
+      try {
+        const { data: matchedCust } = await supabase
+          .from('recurring_customers')
+          .select('assigned_salesperson_phone')
+          .ilike('customer_name', targetCustName.trim())
+          .limit(1);
+        if (
+          matchedCust &&
+          matchedCust.length > 0 &&
+          matchedCust[0].assigned_salesperson_phone
+        ) {
+          effectiveSalespersonPhone = matchedCust[0].assigned_salesperson_phone;
+        }
+      } catch (e) {}
+    }
+
     // Save deal
     const { data: deal, error: dealError } = await supabase
       .from('deals')
@@ -304,7 +352,7 @@ async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
             ? 'auto_created'
             : 'needs_review',
         created_at: new Date().toISOString(),
-        salesperson_phone: senderPhone || null,
+        salesperson_phone: effectiveSalespersonPhone || null,
         employee_id: employeeId || null,
       })
       .select()

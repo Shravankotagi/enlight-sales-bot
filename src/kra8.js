@@ -71,6 +71,10 @@ function isInvalidOrGenericResolutionNotes(notes, customerName = '') {
   clean = clean.replace(/\b(?:this|that|these|those|the|a|an|my|our|your|it|its|all)\b/gi, ' ');
   clean = clean.replace(/\b(?:of|for|about|on|in|at|to|from|with|by|as|and|or|is|was|are|been)\b/gi, ' ');
 
+  // 5b. Strip any customer entity suffixes and 'of/for [Company]' trailing phrases
+  clean = clean.replace(/\b(?:of|for|about|against|regarding)\s+[a-z0-9\s.&'-]+$/i, ' ');
+  clean = clean.replace(/\b(?:steel|metals?|industries|alloys?|iron|tubes?|pipes?|coils?|traders?|corp|ltd|pvt|llc|inc)\b/gi, ' ');
+
   // 6. Clean whitespace and non-alphanumeric chars
   clean = clean.replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
 

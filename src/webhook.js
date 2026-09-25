@@ -209,11 +209,7 @@ router.post('/', async (req, res) => {
               } else if (message.interactive.type === 'list_reply' && message.interactive.list_reply) {
                 const listId = message.interactive.list_reply.id || '';
                 const listTitle = message.interactive.list_reply.title || '';
-                if (listId.startsWith('menu_')) {
-                  raw_text = listId.replace('menu_', '');
-                } else {
-                  raw_text = listId || listTitle;
-                }
+                raw_text = listId || listTitle;
               }
             }
             break;
