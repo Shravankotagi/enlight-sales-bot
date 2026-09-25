@@ -2034,6 +2034,7 @@ async function verifyDraftCustomer(action, draft, senderPhone) {
     action === 'LOG_NEW_CUSTOMER' ||
     action === 'UPDATE_INQUIRY' ||
     action === 'UPDATE_ORDER' ||
+    action === 'UPDATE_VISIT' ||
     action === 'UPDATE_COMPLAINT' ||
     action === 'LOG_COMPLAINT' ||
     (action === 'LOG_ORDER' && (draft.deal_id || draft.inquiry_id || draft._inquiry_display_id))
