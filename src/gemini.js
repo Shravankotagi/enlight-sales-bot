@@ -373,11 +373,10 @@ async function extractFromImageOrDoc(buffer, mimeType) {
     const cleanMime = mimeType || 'application/pdf';
 
     const candidateModels = [
-      process.env.GEMINI_PRIMARY_MODEL || 'gemini-3.7-flash',
-      process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.0-flash',
-      process.env.GEMINI_LITE_MODEL || 'gemini-2.5-flash',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
+      process.env.GEMINI_PRIMARY_MODEL || 'gemini-3.8-flash',
+      process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.7-flash',
+      process.env.GEMINI_LITE_MODEL || 'gemini-3.5-flash',
+      'gemini-2.5-flash',
     ];
 
     let lastError = null;
@@ -572,9 +571,10 @@ You are an intelligent query router for a B2B metal sales system.
 Your job is to classify the salesperson's request into one of the following categories:
 
 DATA & RBAC QUERIES:
+- "visit_list": Queries asking to list, show, or filter customer visits, field visits, or site meetings by date, salesperson, outcome, probability, customer type, or location (e.g. "Show all Hot visits logged this month", "Show all visits", "List visits this week", "Field visits to Pune", "Visits by Max", "Hot visits this month", "Warm visits", "Cold visits", "First visit logs").
 - "inquiry_summary": Queries asking how many inquiries received, total inquiry count, inquiry stats (e.g. "How many inquiries have we received this month?", "Inquiry count", "Total inquiries this month", "Kitni inquiries aayi hai", "Number of inquiries", "Total inquiries")
 - "order_list": Queries asking to list, filter, find, search, or show specific orders/deals by delivery location, customer name, product/material, status/stage, amount/value, quantity, or date (e.g. "List orders with delivery location Mumbai", "Show orders for Dynamic Industries", "Orders with product HR coil", "Show deals above 10 lakhs", "Orders in Pune", "Filter orders by status won", "List deals delivering to Chakan")
-- "customer_360": Questions asking for 360 view, profile, deals, payments, or overview of a specific customer/company (e.g. "Customer 360 for Supreme Steel", "Tell me about Tata Motors", "Profile of Mehta Eng").
+- "customer_360": Questions asking for 360 view, profile, past orders, or overview of a specific NAMED customer/company (e.g. "Customer 360 for Supreme Steel", "Tell me about Tata Motors", "Profile of Mehta Eng"). NEVER use customer_360 for visit list queries or "Show all hot visits".
 - "knowledge_base": Questions about company policies, SOPs, MOQ (minimum order quantity), quotation validity, payment terms, discount slabs, or company guidelines.
 - "reorder_queue": Questions asking which recurring customers are due for reorder.
 - "churn_radar": Questions asking for churn radar or churn risk customers.
@@ -582,7 +582,7 @@ DATA & RBAC QUERIES:
 - "team_pipeline": Questions from managers/admins asking for overall team pipeline or subordinates' deals.
 - "inactive_customers": Questions asking for inactive recurring customer accounts.
 - "deal_id_lookup": Questions asking for the Inquiry ID, inquiry IDs, deal numbers, or active inquiry codes for a company or asking "What is the inquiry ID?" / "What is the deal ID?" (e.g. "What is the inquiry ID for Radhe Ispat?", "Inquiry ID for Apex Steel", "Give me inquiry ID", "Deal ID", "Inquiry ID", "Show inquiry IDs", "Find inquiry ID for Supreme Steel", "Inquiry code of Mehta").
-- "dashboard_link", "sales_summary", "kra_status", "visit_summary", "payment_summary", "complaint_summary", "full_report", "deals_this_week", "pending_deals", "pending_inquiries", "new_customers_summary", "won_customers", "active_deals_detail", "customer_list", "rate_sheet", "visit_list", "payment_aging", "lost_deals"
+- "dashboard_link", "sales_summary", "kra_status", "visit_summary", "payment_summary", "complaint_summary", "full_report", "deals_this_week", "pending_deals", "pending_inquiries", "new_customers_summary", "won_customers", "active_deals_detail", "customer_list", "rate_sheet", "payment_aging", "lost_deals"
 
 ASSISTANT QUERIES: "general"
 BLOCKED QUERIES: "blocked"

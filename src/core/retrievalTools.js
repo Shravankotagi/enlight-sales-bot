@@ -2246,11 +2246,15 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
 
   const customerTypeFilter = args?.customer_type ? String(args.customer_type).toLowerCase().trim() : null;
   const probabilityFilter = args?.customer_probability || args?.probability ? String(args.customer_probability || args.probability).toLowerCase().trim() : null;
+  const visitTypeFilter = args?.visit_type ? String(args.visit_type).toLowerCase().trim().replace(/[\s-]/g, '_') : null;
   if (customerTypeFilter && customerTypeFilter !== 'all') {
     filtered = filtered.filter((v) => (v.customer_type || '').toLowerCase() === customerTypeFilter);
   }
   if (probabilityFilter && probabilityFilter !== 'all') {
     filtered = filtered.filter((v) => (v.customer_probability || '').toLowerCase() === probabilityFilter);
+  }
+  if (visitTypeFilter && visitTypeFilter !== 'all') {
+    filtered = filtered.filter((v) => (v.visit_type || '').toLowerCase().trim().replace(/[\s-]/g, '_') === visitTypeFilter);
   }
 
   let pos = 0, neu = 0, neg = 0, fu = 0;
@@ -2274,6 +2278,12 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
         negative_outcomes: neg,
         unspecified_outcomes: totalCount - (pos + neu + neg),
         follow_ups_logged: fu,
+        hot_visits: filtered.filter((v) => (v.customer_probability || '').toLowerCase() === 'hot').length,
+        warm_visits: filtered.filter((v) => (v.customer_probability || '').toLowerCase() === 'warm').length,
+        cold_visits: filtered.filter((v) => (v.customer_probability || '').toLowerCase() === 'cold').length,
+        filter_probability: probabilityFilter || 'all',
+        filter_customer_type: customerTypeFilter || 'all',
+        filter_visit_type: visitTypeFilter || 'all',
         multiple_visits_for_customer: Boolean(custFilter && totalCount > 1),
         customer_visits_breakdown: custFilter && totalCount > 1
           ? filtered.map((v, i) => `${i + 1}. Date: ${v.visit_date}, Outcome: ${v.outcome || 'Not recorded'}, Person: ${v.person_met}`).join(' | ')

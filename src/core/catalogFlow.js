@@ -90,7 +90,7 @@ const CONFIRMATION_BUTTONS = [
 ];
 
 const DISCARD_DRAFT_BUTTONS = [
-  { id: 'btn_confirm_cancel', title: '🗑️ Discard Draft' },
+  { id: 'btn_confirm_cancel', title: 'Discard Draft' },
 ];
 
 const NON_EDITABLE_REPLY_BUTTONS = [
@@ -1276,25 +1276,25 @@ function detectTotalValueUpdateAttempt(text, extractedData) {
 function getAllowedFieldsListForAction(action) {
   switch (action) {
     case 'LOG_INQUIRY':
-      return `• *Rate / Target Price*\n• *Quantity & Unit (e.g. 25 MT)*\n• *Product Specifications / Dimensions*\n• *Payment Terms (e.g. 30 Days Credit)*\n• *Delivery Location*\n• *Preferred Make (e.g. JSW, SAIL)*\n• *Additional Notes*`;
+      return `- *Rate / Target Price*\n- *Quantity & Unit (e.g. 25 MT)*\n- *Product Specifications / Dimensions*\n- *Payment Terms (e.g. 30 Days Credit)*\n- *Delivery Location*\n- *Preferred Make (e.g. JSW, SAIL)*\n- *Additional Notes*`;
     case 'UPDATE_INQUIRY':
-      return `• *Rate / Target Price*\n• *Quantity / Line Items*\n• *Payment Terms (e.g. 30 Days)*\n• *Delivery Location*\n• *Preferred Make*\n• *Stage / Status (Open, Quoted, Won, Lost, On Hold)*\n• *Additional Notes*`;
+      return `- *Rate / Target Price*\n- *Quantity / Line Items*\n- *Payment Terms (e.g. 30 Days)*\n- *Delivery Location*\n- *Preferred Make*\n- *Stage / Status (Open, Quoted, Won, Lost, On Hold)*\n- *Additional Notes*`;
     case 'LOG_ORDER':
-      return `• *PO Number (e.g. PO-2026-001)*\n• *PO Date*\n• *Delivery Location*\n• *Payment Terms*\n• *Product Rates & Quantities*`;
+      return `- *PO Number (e.g. PO-2026-001)*\n- *PO Date*\n- *Delivery Location*\n- *Payment Terms*\n- *Product Rates & Quantities*`;
     case 'UPDATE_ORDER':
-      return `• *PO Number*\n• *PO Date / Delivery Date*\n• *Delivery Location*\n• *Payment Terms*\n• *Status (Pending, Processing, Dispatched, Delivered, Cancelled)*\n• *Line Item Rates & Quantities*`;
+      return `- *PO Number*\n- *PO Date / Delivery Date*\n- *Delivery Location*\n- *Payment Terms*\n- *Status (Pending, Processing, Dispatched, Delivered, Cancelled)*\n- *Line Item Rates & Quantities*`;
     case 'LOG_VISIT':
-      return `• *Person Met*\n• *Contact Phone*\n• *City / Location*\n• *Visit Date*\n• *Visit Outcome (Positive / Neutral / Negative)*\n• *Meeting Remarks & Discussion Notes*`;
+      return `- *Person Met*\n- *Contact Phone*\n- *City / Location*\n- *Visit Date*\n- *Visit Outcome (Positive / Neutral / Negative)*\n- *Meeting Remarks & Discussion Notes*`;
     case 'UPDATE_VISIT':
-      return `• *Person Met*\n• *Contact Phone*\n• *City / Location*\n• *Visit Date*\n• *Visit Outcome*\n• *Meeting Remarks & Follow-up Notes*\n• *Status*`;
+      return `- *Person Met*\n- *Contact Phone*\n- *City / Location*\n- *Visit Date*\n- *Visit Outcome*\n- *Meeting Remarks & Follow-up Notes*\n- *Customer Probability (Hot / Warm / Cold)*\n- *Customer Type (OEM / Fabricator / etc.)*\n- *Delivery Location & Payment Terms*\n- *Status*`;
     case 'LOG_COMPLAINT':
-      return `• *Complaint Type (Quality Defect, Physical Damage, etc.)*\n• *Affected Product*\n• *Linked Inquiry ID / PO Number*\n• *Complaint Description*\n• *Corrective Action Taken*`;
+      return `- *Complaint Type (Quality Defect, Physical Damage, etc.)*\n- *Affected Product*\n- *Linked Inquiry ID / PO Number*\n- *Complaint Description*\n- *Corrective Action Taken*`;
     case 'UPDATE_COMPLAINT':
-      return `• *Complaint Type*\n• *Complaint Description*\n• *Corrective Action Taken*\n• *Resolution Notes*\n• *Status (Pending, In Progress, Resolved, Closed)*`;
+      return `- *Complaint Type*\n- *Complaint Description*\n- *Corrective Action Taken*\n- *Resolution Notes*\n- *Status (Pending, In Progress, Resolved, Closed)*`;
     case 'LOG_NEW_CUSTOMER':
-      return `• *Company Name*\n• *Contact Person*\n• *Mobile Number*\n• *Delivery Location / City*\n• *Email Address*\n• *GST Number*`;
+      return `- *Company Name*\n- *Contact Person*\n- *Mobile Number*\n- *Delivery Location / City*\n- *Email Address*\n- *GST Number*`;
     default:
-      return `• *Rate*\n• *Quantity*\n• *Payment Terms*\n• *Delivery Location*`;
+      return `- *Rate*\n- *Quantity*\n- *Payment Terms*\n- *Delivery Location*`;
   }
 }
 
@@ -1314,7 +1314,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
     return {
       isNonEditable: true,
       fieldName: 'Inquiry ID',
-      message: `⚠️ *Inquiry ID is system-generated and cannot be edited.*\n\n• Inquiry IDs (e.g. *${currentInq}*) are generated automatically by the CRM and cannot be modified or renamed.\n• If you meant to update a *different* inquiry, please reply *Cancel* and start an update for that Inquiry ID or Customer Name.`,
+      message: `*Inquiry ID is system-generated and cannot be edited.*\n\n- Inquiry IDs (e.g. *${currentInq}*) are generated automatically by the CRM and cannot be modified or renamed.\n- If you meant to update a *different* inquiry, please reply *Cancel* and start an update for that Inquiry ID or Customer Name.`,
       allowedFieldsList: getAllowedFieldsListForAction(action),
     };
   }
@@ -1330,7 +1330,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
     return {
       isNonEditable: true,
       fieldName: 'Total Order Value',
-      message: `⚠️ *Total Order Value is system-calculated and cannot be edited directly.*\n\n• Total value is calculated automatically from individual item rates and quantities (Rate × Quantity + Taxes).\n• To adjust the total value, please update individual product rates or quantities.`,
+      message: `*Total Order Value is system-calculated and cannot be edited directly.*\n\n- Total value is calculated automatically from individual item rates and quantities (Rate x Quantity + Taxes).\n- To adjust the total value, please update individual product rates or quantities.`,
       allowedFieldsList: getAllowedFieldsListForAction(action),
     };
   }
@@ -1343,12 +1343,19 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
       /^(?:change|edit|update|modify|set)\s+(?:the\s+)?(?:customer|company|party|client)\s+(?:name\s+)?(?:to|as|=|is)\s+[A-Za-z0-9\s]+/i.test(clean);
 
     if (isCustomerChange) {
-      const currentCust = draft.company_name || 'the current customer';
+      let currentCust = draft.company_name;
+      if (!currentCust) {
+        const match = clean.match(/(?:for|of|regarding|on)\s+([A-Za-z0-9\s&.,'-]+?)(?:,|\s+change|\s+edit|\s+update|\s+set|\s+modify|\s+to|$)/i);
+        if (match && match[1] && !/^(?:the|a|an|customer|visit|order|inquiry|complaint)$/i.test(match[1].trim())) {
+          currentCust = match[1].trim();
+        }
+      }
+      currentCust = currentCust || 'the current customer';
       const recordType = getActionFriendlyName(action);
       return {
         isNonEditable: true,
         fieldName: 'Customer Name',
-        message: `⚠️ *Customer Name cannot be edited for an existing record.*\n\n• This ${recordType} is permanently linked to *${currentCust}* in the CRM.\n• If this belongs to a different customer, please reply *Cancel* and start a new update with the correct customer name.`,
+        message: `*Customer Name cannot be edited for an existing record.*\n\n- This ${recordType} is permanently linked to *${currentCust}* in the CRM.\n- If this belongs to a different customer, please reply *Cancel* and start a new update with the correct customer name.`,
         allowedFieldsList: getAllowedFieldsListForAction(action),
       };
     }
@@ -1363,7 +1370,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
     return {
       isNonEditable: true,
       fieldName: 'Order ID',
-      message: `⚠️ *Order ID is system-generated and cannot be edited.*\n\n• Internal Order IDs are generated automatically by the CRM.\n• _Note: If you want to update the Customer PO Number, please specify "PO Number: PO-XXXX"._`,
+      message: `*Order ID is system-generated and cannot be edited.*\n\n- Internal Order IDs are generated automatically by the CRM.\n- Note: If you want to update the Customer PO Number, please specify "PO Number: PO-XXXX".`,
       allowedFieldsList: getAllowedFieldsListForAction(action),
     };
   }
@@ -1376,7 +1383,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
     return {
       isNonEditable: true,
       fieldName: 'Visit ID',
-      message: `⚠️ *Visit ID is system-generated and cannot be edited.*\n\n• Visit log IDs are generated automatically by the CRM.`,
+      message: `*Visit ID is system-generated and cannot be edited.*\n\n- Visit log IDs are generated automatically by the CRM.`,
       allowedFieldsList: getAllowedFieldsListForAction(action),
     };
   }
@@ -1389,7 +1396,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
     return {
       isNonEditable: true,
       fieldName: 'Complaint Ticket ID',
-      message: `⚠️ *Complaint Ticket ID is system-generated and cannot be edited.*\n\n• Complaint ticket numbers are assigned automatically by the CRM.`,
+      message: `*Complaint Ticket ID is system-generated and cannot be edited.*\n\n- Complaint ticket numbers are assigned automatically by the CRM.`,
       allowedFieldsList: getAllowedFieldsListForAction(action),
     };
   }
@@ -1403,7 +1410,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
       return {
         isNonEditable: true,
         fieldName: 'Linked Inquiry/PO',
-        message: `⚠️ *Linked Inquiry/PO cannot be changed for an existing complaint.*\n\n• This complaint is permanently tied to its original order reference.\n• To file a complaint for a different order, please reply *Cancel* and log a new complaint.`,
+        message: `*Linked Inquiry/PO cannot be changed for an existing complaint.*\n\n- This complaint is permanently tied to its original order reference.\n- To file a complaint for a different order, please reply *Cancel* and log a new complaint.`,
         allowedFieldsList: getAllowedFieldsListForAction(action),
       };
     }
@@ -1418,7 +1425,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
       return {
         isNonEditable: true,
         fieldName: 'Customer ID',
-        message: `⚠️ *Customer ID is system-generated and cannot be edited.*\n\n• Customer Master IDs are generated automatically upon onboarding.`,
+        message: `*Customer ID is system-generated and cannot be edited.*\n\n- Customer Master IDs are generated automatically upon onboarding.`,
         allowedFieldsList: getAllowedFieldsListForAction(action),
       };
     }
@@ -1432,7 +1439,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
     return {
       isNonEditable: true,
       fieldName: 'Audit Metadata',
-      message: `⚠️ *Audit metadata (Logged By / Creation Date) is system-generated and cannot be edited.*`,
+      message: `*Audit metadata (Logged By / Creation Date) is system-generated and cannot be edited.*`,
       allowedFieldsList: getAllowedFieldsListForAction(action),
     };
   }
@@ -1445,7 +1452,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
     return {
       isNonEditable: true,
       fieldName: 'GST / Taxes',
-      message: `⚠️ *GST and Tax calculations are computed automatically based on product HSN codes and cannot be edited directly.*`,
+      message: `*GST and Tax calculations are computed automatically based on product HSN codes and cannot be edited directly.*`,
       allowedFieldsList: getAllowedFieldsListForAction(action),
     };
   }
@@ -8210,6 +8217,20 @@ async function handleCatalogFlow(rawText, senderPhone) {
       updatedDraft._inquiry_display_id = existingDraft._inquiry_display_id;
     }
 
+    // Check if user is attempting to edit a non-editable or system-generated field
+    const nonEditableCheckFlow = detectNonEditableFieldAttempt(action, text, updatedDraft);
+    if (nonEditableCheckFlow.isNonEditable) {
+      const fullReply = `${nonEditableCheckFlow.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheckFlow.allowedFieldsList}\n\nWhich editable field would you like to change?`;
+      await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: action });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+      return {
+        handled: true,
+        reply: fullReply,
+        interactiveType: 'buttons',
+        interactiveButtons: NON_EDITABLE_REPLY_BUTTONS,
+      };
+    }
+
     // 0. LOG_ORDER Inquiry Quoted Stage Gate check
     if (action === 'LOG_ORDER') {
       const stageCheck = await validateOrderInquiryStage(updatedDraft, senderPhone);
@@ -8407,6 +8428,31 @@ async function handleCatalogFlow(rawText, senderPhone) {
       await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: matchedAction });
       await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${matchedAction}|{}`);
       return { handled: true, reply: initialPrompt };
+    }
+  }
+
+  // ── 6b. DIRECT UPDATE WITH NON-EDITABLE FIELD ATTEMPT (Cold-Start Guard) ──
+  const detectedUpdateAction = matchedAction || detectOperationalAction(text);
+  if (detectedUpdateAction && ['UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(detectedUpdateAction)) {
+    let currentCust = null;
+    const match = text.match(/(?:for|of|regarding|on)\s+([A-Za-z0-9\s&.,'-]+?)(?:,|\s+change|\s+edit|\s+update|\s+set|\s+modify|\s+to|$)/i);
+    if (match && match[1] && !/^(?:the|a|an|customer|visit|order|inquiry|complaint)$/i.test(match[1].trim())) {
+      currentCust = match[1].trim();
+    }
+    const tempDraft = { action: detectedUpdateAction, company_name: currentCust };
+    const nonEditableCheckCold = detectNonEditableFieldAttempt(detectedUpdateAction, text, tempDraft);
+    if (nonEditableCheckCold.isNonEditable) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      const fullReply = `${nonEditableCheckCold.message}\n\n*Editable fields for this ${getActionFriendlyName(detectedUpdateAction)}:*\n${nonEditableCheckCold.allowedFieldsList}\n\nWhich editable field would you like to change?`;
+      await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: detectedUpdateAction });
+      await startNewCatalogSession(senderPhone, fullReply);
+      await saveActiveSession(senderPhone, currentCust || 'Customer', `catalog_flow|${detectedUpdateAction}|${JSON.stringify(tempDraft)}`);
+      return {
+        handled: true,
+        reply: fullReply,
+        interactiveType: 'buttons',
+        interactiveButtons: NON_EDITABLE_REPLY_BUTTONS,
+      };
     }
   }
 

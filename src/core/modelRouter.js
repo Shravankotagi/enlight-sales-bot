@@ -16,9 +16,9 @@ const GEMINI_API_KEY =
   process.env.GEMINI_API_KEY_1 ||
   process.env.GEMINI_API_KEY_2;
 
-const PRIMARY_MODEL = process.env.GEMINI_PRIMARY_MODEL || 'gemini-3.7-flash';
-const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.0-flash';
-const LITE_FALLBACK_MODEL = process.env.GEMINI_LITE_MODEL || 'gemini-2.5-flash';
+const PRIMARY_MODEL = process.env.GEMINI_PRIMARY_MODEL || 'gemini-3.8-flash';
+const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.7-flash';
+const LITE_FALLBACK_MODEL = process.env.GEMINI_LITE_MODEL || 'gemini-3.5-flash';
 
 /**
  * High-accuracy Gemini model for Image Processing, OCR, PDFs, & Complex Reasoning.
@@ -54,22 +54,25 @@ function getModel(tools = null) {
 
 /**
  * Invoke Gemini with automatic model fallback:
- * 1. gemini-3.7-flash (Primary)
- * 2. gemini-3.0-flash (Secondary)
- * 3. gemini-2.5-flash (Tertiary)
- * 4. gemini-2.0-flash (Quaternary)
- * 5. gemini-1.5-flash (Final resilient fallback)
+ * 1. gemini-3.8-flash (Primary)
+ * 2. gemini-3.7-flash (Secondary)
+ * 3. gemini-3.6-flash (Tertiary)
+ * 4. gemini-3.5-flash
+ * 5. gemini-3.1-flash-lite
+ * 6. gemini-2.5-flash
  */
 async function invokeWithFallback(messages, tools = null, isPaidTask = false) {
   const cascadeModels = [
     PRIMARY_MODEL,
     FALLBACK_MODEL,
-    'gemini-3.5-flash',
+    'gemini-3.8-flash',
+    'gemini-3.7-flash',
     'gemini-3.6-flash',
+    'gemini-3.5-flash',
+    'gemini-3.1-flash-lite',
     LITE_FALLBACK_MODEL,
+    'gemini-2.5-flash',
     'gemini-2.5-flash-lite',
-    'gemini-2.0-flash',
-    'gemini-1.5-flash',
   ];
 
   const uniqueModels = Array.from(new Set(cascadeModels.filter(Boolean)));

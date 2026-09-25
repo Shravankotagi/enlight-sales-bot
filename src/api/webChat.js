@@ -185,10 +185,10 @@ router.post('/reset', requireWebApiKey, async (req, res) => {
  */
 router.post('/message', requireWebApiKey, async (req, res) => {
   try {
-    const { message, employeePhone, userId, employeeName, role, resetSession } = req.body;
+    const { message, employeePhone, userId, employeeName, role, resetSession, image, gps } = req.body;
 
-    if (!message || typeof message !== 'string') {
-      return res.status(400).json({ success: false, error: 'message string is required' });
+    if (!message && !image) {
+      return res.status(400).json({ success: false, error: 'message string or image is required' });
     }
 
     let cleanPhone = String(employeePhone || '').replace(/\D/g, '');
@@ -204,13 +204,27 @@ router.post('/message', requireWebApiKey, async (req, res) => {
       await clearActiveSession(cleanPhone);
     }
 
-    const rawText = normalizeIncomingButtonPayload(message);
+    const rawText = normalizeIncomingButtonPayload(message || '');
     const empName = employeeName || 'Sales Staff';
 
-    console.log(`[WebChat] Processing message from ${empName} (${cleanPhone}): "${rawText.slice(0, 80)}"`);
+    let augmentedText = rawText;
+    if (gps && typeof gps.latitude === 'number' && typeof gps.longitude === 'number') {
+      const accText = gps.accuracy ? ` (accuracy: ±${Math.round(gps.accuracy)}m)` : '';
+      augmentedText = `${rawText} [GPS: ${gps.latitude.toFixed(6)}, ${gps.longitude.toFixed(6)}${accText}]`.trim();
+    }
+
+    let imageBuffer = null;
+    let imageMimeType = null;
+    if (image && image.base64) {
+      const base64Clean = image.base64.replace(/^data:image\/\w+;base64,/, '');
+      imageBuffer = Buffer.from(base64Clean, 'base64');
+      imageMimeType = image.mimeType || 'image/jpeg';
+    }
+
+    console.log(`[WebChat] Processing message from ${empName} (${cleanPhone}): "${augmentedText.slice(0, 80)}" (image: ${Boolean(imageBuffer)}, gps: ${Boolean(gps)})`);
 
     // LAYER 1: Guided Catalog & Conversational Form Flow (Greetings, 1-10 Routing, Confirmations)
-    const catalogResult = await handleCatalogFlow(rawText, cleanPhone);
+    const catalogResult = await handleCatalogFlow(augmentedText, cleanPhone);
     if (catalogResult && catalogResult.handled && catalogResult.reply) {
       let replyToSend = catalogResult.reply;
       if (catalogResult.interactiveType === 'list' && catalogResult.interactiveList?.sections) {
@@ -230,7 +244,7 @@ router.post('/message', requireWebApiKey, async (req, res) => {
     }
 
     // LAYER 2: Unified Active Session Pending State Machine
-    const pendingReply = await handlePendingSessionState(rawText, cleanPhone);
+    const pendingReply = await handlePendingSessionState(augmentedText, cleanPhone);
     if (pendingReply) {
       const formattedReply = formatForWeb(pendingReply);
       return res.json({
@@ -244,9 +258,12 @@ router.post('/message', requireWebApiKey, async (req, res) => {
     }
 
     // LAYER 3: LangGraph Agentic Orchestrator (Google Gemini + 23 Tools)
-    const reply = await runOrchestrator(rawText, cleanPhone, {
+    const reply = await runOrchestrator(augmentedText, cleanPhone, {
       employeeName: empName,
-      messageType: 'text',
+      messageType: imageBuffer ? 'image' : 'text',
+      imageBuffer,
+      imageMimeType,
+      gps,
     });
 
     const formattedReply = formatForWeb(reply);

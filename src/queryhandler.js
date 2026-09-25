@@ -1722,28 +1722,80 @@ async function getVisitList(scopeOrPhone, text = '') {
       .order('visited_at', { ascending: false });
     query = applySalespersonFilter(query, scope.phones, 'salesperson_phone');
 
-    const { data: visits } = await query;
+    const { data: rawVisits } = await query;
+    let visits = rawVisits || [];
 
-    if (!visits || visits.length === 0) {
-      return `No visits logged for ${label}.`;
+    const lower = text.toLowerCase();
+    let probFilter = null;
+    if (/\bhot\b/.test(lower)) probFilter = 'hot';
+    else if (/\bwarm\b/.test(lower)) probFilter = 'warm';
+    else if (/\bcold\b/.test(lower)) probFilter = 'cold';
+
+    let custTypeFilter = null;
+    if (/\boem\b/.test(lower)) custTypeFilter = 'oem';
+    else if (/\bfabricator\b/.test(lower)) custTypeFilter = 'fabricator';
+    else if (/\bepc\b/.test(lower)) custTypeFilter = 'epc';
+    else if (/\bmanufacturer\b/.test(lower)) custTypeFilter = 'manufacturer';
+    else if (/\btrader\b/.test(lower)) custTypeFilter = 'trader';
+
+    let visitTypeFilter = null;
+    if (/first\s*visit/.test(lower)) visitTypeFilter = 'first_visit';
+    else if (/follow-?up\s*1\b|followup\s*1\b/.test(lower)) visitTypeFilter = 'follow_up_1';
+    else if (/follow-?up\s*2\b|followup\s*2\b/.test(lower)) visitTypeFilter = 'follow_up_2';
+    else if (/follow-?up\s*3\b|followup\s*3\b/.test(lower)) visitTypeFilter = 'follow_up_3';
+    else if (/regular\s*visit/.test(lower)) visitTypeFilter = 'regular_visit';
+
+    let outcomeFilter = null;
+    if (/\bpositive\b/.test(lower)) outcomeFilter = 'positive';
+    else if (/\bneutral\b/.test(lower)) outcomeFilter = 'neutral';
+    else if (/\bnegative\b/.test(lower)) outcomeFilter = 'negative';
+
+    if (probFilter) {
+      visits = visits.filter(v => (v.customer_probability || '').toLowerCase() === probFilter);
+    }
+    if (custTypeFilter) {
+      visits = visits.filter(v => (v.customer_type || '').toLowerCase() === custTypeFilter);
+    }
+    if (visitTypeFilter) {
+      visits = visits.filter(v => (v.visit_type || '').toLowerCase().replace(/[\s-]/g, '_') === visitTypeFilter);
+    }
+    if (outcomeFilter) {
+      visits = visits.filter(v => (v.outcome || '').toLowerCase() === outcomeFilter);
     }
 
-    const lines = visits.map(
-      (v, i) =>
-        `${i + 1}. ${v.customer_name || 'Customer'}\n` +
-        `   Date: ${new Date(v.visited_at).toLocaleDateString('en-IN')}\n` +
-        (v.person_met ? `   Contact: ${v.person_met}\n` : '') +
-        (v.customer_address ? `   Location: ${v.customer_address}\n` : '') +
-        `   Remarks: ${v.remarks || 'Visit completed'}`,
-    );
+    let filterLabel = '';
+    if (probFilter) filterLabel += ` ${probFilter.toUpperCase()}`;
+    if (custTypeFilter) filterLabel += ` ${custTypeFilter.toUpperCase()}`;
+    if (visitTypeFilter) filterLabel += ` ${visitTypeFilter.replace(/_/g, ' ')}`;
+    if (outcomeFilter) filterLabel += ` ${outcomeFilter.toUpperCase()}`;
+
+    if (!visits || visits.length === 0) {
+      return `No${filterLabel} visits logged for ${label}.`;
+    }
+
+    const lines = visits.map((v, i) => {
+      let card = `${i + 1}. ${v.customer_name || 'Customer'}\n` +
+        `   Date: ${new Date(v.visited_at).toLocaleDateString('en-IN')}\n`;
+      if (v.customer_probability) card += `   Probability: ${v.customer_probability}\n`;
+      if (v.customer_type) card += `   Customer Type: ${v.customer_type}\n`;
+      if (v.visit_type) card += `   Visit Type: ${v.visit_type}\n`;
+      if (v.outcome) card += `   Outcome: ${v.outcome}\n`;
+      if (v.person_met) card += `   Contact: ${v.person_met}${v.designation ? ` (${v.designation})` : ''}\n`;
+      if (v.customer_address || v.location) card += `   Location: ${v.customer_address || v.location}\n`;
+      if (v.product_details) card += `   Products: ${v.product_details}\n`;
+      if (v.current_requirement) card += `   Requirement: ${v.current_requirement}\n`;
+      if (v.next_purchase_expected) card += `   Next Purchase: ${v.next_purchase_expected}\n`;
+      card += `   Remarks: ${v.remarks || 'Visit completed'}`;
+      return card;
+    });
 
     const title = scope.targetRepName
-      ? `${scope.targetRepName}'s Customer Visits`
+      ? `${scope.targetRepName}'s${filterLabel} Customer Visits`
       : scope.isAdmin
-        ? 'Company Customer Visits'
+        ? `Company${filterLabel} Customer Visits`
         : scope.isManager
-          ? 'Team Customer Visits'
-          : 'Customer Visits';
+          ? `Team${filterLabel} Customer Visits`
+          : `${filterLabel ? filterLabel.trim() + ' ' : ''}Customer Visits`;
 
     return (
       `${title} - ${label} (${visits.length} visits)\n\n` +
@@ -3452,6 +3504,9 @@ async function routeToHandler(category, text, scope, supabase, extra = {}) {
       : scope;
   switch (category) {
     case 'customer_360':
+      if (/\b(?:visits?|field\s*visits?)\b/i.test(text) && (!extra.customer_name || extra.customer_name === 'all')) {
+        return await getVisitList(scope, text);
+      }
       return await getCustomer360(phone, text, extra.customer_name);
     case 'knowledge_base':
       return await getKnowledgeBaseAnswer(phone, text);
@@ -3669,6 +3724,35 @@ async function handleQuery(text, senderPhone) {
     /^(?:get\s+|show\s+|what\s+is\s+|give\s+me\s+)?deal\s*ids?\b/i.test(lower)
   ) {
     return await getDealIdsForCompany(effectiveScope, text);
+  }
+
+  // Fast path for Customer Visits (e.g. "Show all Hot visits logged this month", "List visits this week", "Field visits to Pune")
+  if (
+    /\b(?:visits?|field\s*visits?)\b/i.test(lower) &&
+    (/\b(?:show|list|get|find|all|recent|hot|warm|cold|positive|neutral|negative|oem|fabricator|epc)\b/i.test(lower) ||
+      /\b(?:this\s+month|last\s+month|today|this\s+week|last\s+week)\b/i.test(lower))
+  ) {
+    if (
+      lower.includes('follow-up') ||
+      lower.includes('followup') ||
+      lower.includes('pending') ||
+      lower.includes('due') ||
+      lower.includes('overdue')
+    ) {
+      return await getVisitsPendingFollowup(effectiveScope, text);
+    }
+    if (
+      lower.includes('vs') ||
+      lower.includes('compare') ||
+      lower.includes('comparison') ||
+      (lower.includes('last month') && lower.includes('this month'))
+    ) {
+      return await getVisitCountComparison(effectiveScope, text);
+    }
+    if (lower.includes('summary') || lower.includes('total visits')) {
+      return await getVisitSummary(effectiveScope, text);
+    }
+    return await getVisitList(effectiveScope, text);
   }
 
   // 2. Fetch all employees to check if query mentions a salesperson by name

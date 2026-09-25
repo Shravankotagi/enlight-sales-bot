@@ -407,7 +407,23 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
       .addEdge('tools', 'agent')
       .compile();
 
-    const humanMsg = new HumanMessage(text || 'Image received');
+    let humanMsg;
+    if (imageBuffer && imageMimeType) {
+      const b64 = Buffer.isBuffer(imageBuffer) ? imageBuffer.toString('base64') : String(imageBuffer);
+      humanMsg = new HumanMessage({
+        content: [
+          { type: 'text', text: text || 'Image attached' },
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:${imageMimeType};base64,${b64}`,
+            },
+          },
+        ],
+      });
+    } else {
+      humanMsg = new HumanMessage(text || 'Image received');
+    }
 
     const finalState = await graph.invoke({
       messages:      [humanMsg],

@@ -637,6 +637,11 @@ async function saveCompletedVisit(visitState, senderPhone) {
     delivery_location: delivery_location || null,
     preferred_make: preferred_make || null,
     payment_terms: payment_terms || null,
+    gps_photo_url: visitState?.gps_photo_url || null,
+    gps_latitude: visitState?.gps_latitude ?? null,
+    gps_longitude: visitState?.gps_longitude ?? null,
+    gps_accuracy: visitState?.gps_accuracy ?? null,
+    attachments: visitState?.attachments || null,
   };
 
   const { error: visitErr } = await supabase.from('customer_visits').insert(visitInsertPayload);
