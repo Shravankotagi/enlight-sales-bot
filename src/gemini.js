@@ -1,5 +1,5 @@
 /**
- * gemini.js - Inquiry extraction & classification module using Google Gemini (gemini-3.5-flash / gemini-3.5-flash-lite)
+ * gemini.js - Inquiry extraction & classification module using Google Gemini (gemini-3.8-flash / gemini-3.7-flash)
  */
 
 const { ChatGoogleGenerativeAI } = require('@langchain/google-genai');
@@ -373,11 +373,12 @@ async function extractFromImageOrDoc(buffer, mimeType) {
     const cleanMime = mimeType || 'application/pdf';
 
     const candidateModels = [
-      process.env.GEMINI_PRIMARY_MODEL || 'gemini-3.7-flash',
-      process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.0-flash',
-      process.env.GEMINI_LITE_MODEL || 'gemini-2.5-flash',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
+      process.env.GEMINI_PRIMARY_MODEL || 'gemini-3.8-flash',
+      process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.7-flash',
+      'gemini-3.6-flash',
+      'gemini-3.5-flash',
+      process.env.GEMINI_LITE_MODEL || 'gemini-3.1-flash-lite',
+      'gemini-2.5-flash',
     ];
 
     let lastError = null;
