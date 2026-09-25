@@ -2712,12 +2712,13 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
   if (action === 'UPDATE_INQUIRY') {
     let dealsQuery = supabase
       .from('deals')
-      .select('id, inquiry_id, customer_name, customer_phone, stage, total_amount, payment_terms, delivery_location, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+      .select('id, inquiry_id, customer_name, customer_phone, po_number, stage, total_amount, payment_terms, delivery_location, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
       .order('created_at', { ascending: false });
 
     let inqsQuery = supabase
       .from('inquiries')
       .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, inquiry_type, created_at, salesperson_phone')
+      .neq('inquiry_type', 'purchase_order')
       .order('created_at', { ascending: false });
 
     if (!scope.isAdmin) {
@@ -2746,21 +2747,80 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
     const scopedDeals = filterByScope(allDeals);
     const scopedInqs = filterByScope(allInqs);
 
-    const matched = [];
-    const seenKeys = new Set();
+    const dealByInqId = new Map();
+    const wonOrClosedInqIds = new Set();
+    const terminalStages = new Set(['won', 'lost', 'closed', 'completed', 'cancelled', 'auto_created']);
 
     scopedDeals.forEach(d => {
-      const stage = (d.stage || 'new_inquiry').toLowerCase();
-      const cleanCode = (d.inquiry_id || d.id || '').replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
+      const stage = (d.stage || '').toLowerCase().trim();
+      const isTerminal = terminalStages.has(stage) || Boolean(d.po_number);
+      if (d.inquiry_id) {
+        if (isTerminal) {
+          wonOrClosedInqIds.add(d.inquiry_id);
+        } else if (!dealByInqId.has(d.inquiry_id)) {
+          dealByInqId.set(d.inquiry_id, d);
+        }
+      }
+    });
+
+    const matched = [];
+    const seenInqIds = new Set();
+
+    // 1. Process Genuine Inquiries from inquiries table
+    scopedInqs.forEach(inq => {
+      if (wonOrClosedInqIds.has(inq.id)) return;
+      if (terminalStages.has((inq.status || '').toLowerCase().trim())) return;
+      const rawLower = (inq.raw_text || '').toLowerCase().trim();
+      if (rawLower.startsWith('[po document attached:') || rawLower.includes('po number:')) return;
+
+      const linkedDeal = dealByInqId.get(inq.id);
+      const stage = (linkedDeal?.stage || inq.status || 'new_inquiry').toLowerCase().trim();
+      if (terminalStages.has(stage)) return;
+
+      const cleanCode = (inq.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
+      const displayId = `INQ-${cleanCode}`;
+      const ai = inq.ai_extraction_json || {};
+      const prodSummary = linkedDeal ? formatProductSummaryCompact(linkedDeal) : formatProductSummaryCompact(inq);
+      const stageLabel = formatStageLabel(stage);
+      const dateFormatted = formatDateDDMMYYYY(inq.created_at);
+
+      matched.push({
+        id: inq.id,
+        deal_id: linkedDeal?.id || null,
+        inquiry_id: inq.id,
+        displayId,
+        clean_code: cleanCode,
+        customer_name: linkedDeal?.customer_name || inq.sender_name || ai.companyName || ai.customer_name || 'Customer',
+        product_summary: prodSummary,
+        stage: stageLabel,
+        raw_stage: stage,
+        date_formatted: dateFormatted,
+        payment_terms: linkedDeal?.payment_terms || ai.paymentTerms || ai.payment_terms || 'Not specified',
+        delivery_location: linkedDeal?.delivery_location || ai.deliveryLocation || ai.delivery_location || 'Not specified',
+        total_amount: Number(linkedDeal?.total_amount) || Number(ai.totalAmount) || 0,
+        deal_items: linkedDeal?.deal_items || ai.lineItems || ai.line_items || [],
+        created_at: inq.created_at,
+      });
+      seenInqIds.add(inq.id);
+    });
+
+    // 2. Process standalone deals that have NO inquiry_id (created directly in CRM without an inquiry record)
+    scopedDeals.forEach(d => {
+      if (d.inquiry_id && seenInqIds.has(d.inquiry_id)) return;
+      if (d.inquiry_id) return; // If it has an inquiry_id but wasn't in inqs, it was filtered out (e.g. PO)
+      const stage = (d.stage || 'new_inquiry').toLowerCase().trim();
+      if (terminalStages.has(stage) || Boolean(d.po_number)) return;
+
+      const cleanCode = (d.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
       const displayId = `INQ-${cleanCode}`;
       const prodSummary = formatProductSummaryCompact(d);
       const stageLabel = formatStageLabel(stage);
       const dateFormatted = formatDateDDMMYYYY(d.created_at);
 
       matched.push({
-        id: d.inquiry_id || d.id,
+        id: d.id,
         deal_id: d.id,
-        inquiry_id: d.inquiry_id || d.id,
+        inquiry_id: d.id,
         displayId,
         clean_code: cleanCode,
         customer_name: d.customer_name || 'Customer',
@@ -2774,46 +2834,12 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         deal_items: d.deal_items || [],
         created_at: d.created_at,
       });
-      seenKeys.add(d.id);
-      if (d.inquiry_id) seenKeys.add(d.inquiry_id);
     });
 
-    scopedInqs.forEach(inq => {
-      if (seenKeys.has(inq.id)) return;
-      const ai = inq.ai_extraction_json || {};
-      const stage = (inq.status || 'new_inquiry').toLowerCase();
-      const cleanCode = (inq.id || '').replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
-      const displayId = `INQ-${cleanCode}`;
-      const prodSummary = formatProductSummaryCompact(inq);
-      const stageLabel = formatStageLabel(stage);
-      const dateFormatted = formatDateDDMMYYYY(inq.created_at);
-
-      matched.push({
-        id: inq.id,
-        deal_id: null,
-        inquiry_id: inq.id,
-        displayId,
-        clean_code: cleanCode,
-        customer_name: inq.sender_name || ai.companyName || ai.customer_name || 'Customer',
-        product_summary: prodSummary,
-        stage: stageLabel,
-        raw_stage: stage,
-        date_formatted: dateFormatted,
-        payment_terms: ai.paymentTerms || ai.payment_terms || 'Not specified',
-        delivery_location: ai.deliveryLocation || ai.delivery_location || 'Not specified',
-        total_amount: Number(ai.totalAmount) || Number(ai.grandTotal) || 0,
-        deal_items: ai.lineItems || ai.line_items || [],
-        created_at: inq.created_at,
-      });
-      seenKeys.add(inq.id);
-    });
-
-    // Sort newest first
+    // Sort newest first by created_at strictly matching CRM Inquiries table sequence
     matched.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
 
-    // Exclude Won, Lost, Closed, Completed, Cancelled
-    const isTerminal = (st) => ['won', 'lost', 'closed', 'completed', 'cancelled'].includes(String(st || '').toLowerCase());
-    let editable = matched.filter(m => !isTerminal(m.raw_stage));
+    let editable = matched;
 
     if (cleanCustFilter) {
       editable = editable.filter(m => isCustomerMatch(cleanCustFilter, null, m.customer_name, null));
@@ -2848,6 +2874,16 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
 
     let scopedDeals = filterByScope(deals);
 
+    // Orders in CRM are won deals or deals with po_number
+    scopedDeals = scopedDeals.filter(d => (d.stage || '').toLowerCase() === 'won' || Boolean(d.po_number));
+
+    // Sort newest first by won_at || po_date || created_at strictly matching CRM Orders module sequence
+    scopedDeals.sort((a, b) => {
+      const timeA = new Date(a.won_at || a.created_at || 0).getTime();
+      const timeB = new Date(b.won_at || b.created_at || 0).getTime();
+      return timeB - timeA;
+    });
+
     if (cleanCustFilter) {
       scopedDeals = scopedDeals.filter(d => isCustomerMatch(cleanCustFilter, null, d.customer_name, d.customer_phone));
     }
@@ -2856,7 +2892,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
       const cleanCode = (d.id || '').replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase();
       const displayInq = `INQ-${cleanCode}`;
       const displayId = d.po_number ? d.po_number : displayInq;
-      const dateFormatted = d.po_date ? formatDateDDMMYYYY(d.po_date) : (d.created_at ? formatDateDDMMYYYY(d.created_at) : formatDateDDMMYYYY(new Date()));
+      const dateFormatted = d.po_date ? formatDateDDMMYYYY(d.po_date) : (d.won_at ? formatDateDDMMYYYY(d.won_at) : (d.created_at ? formatDateDDMMYYYY(d.created_at) : formatDateDDMMYYYY(new Date())));
 
       return {
         id: d.id,
@@ -2874,6 +2910,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         payment_terms: d.payment_terms || 'Not specified',
         total_amount: Number(d.total_amount) || 0,
         created_at: d.created_at,
+        won_at: d.won_at,
       };
     });
   }
@@ -2882,7 +2919,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
     let complaintsQuery = supabase
       .from('complaints')
       .select('*')
-      .order('created_at', { ascending: false });
+      .order('reported_at', { ascending: false, nullsFirst: false });
 
     if (!scope.isAdmin && targetPhones.length > 0) {
       complaintsQuery = complaintsQuery.in('reported_by', targetPhones);
@@ -2904,6 +2941,13 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
     scopedComplaints = scopedComplaints.filter(c => {
       const st = String(c.status || '').toLowerCase().trim();
       return !['resolved', 'closed', 'cancelled'].includes(st);
+    });
+
+    // Sort newest first strictly matching CRM Complaints module sequence
+    scopedComplaints.sort((a, b) => {
+      const timeA = new Date(a.reported_at || a.created_at || 0).getTime();
+      const timeB = new Date(b.reported_at || b.created_at || 0).getTime();
+      return timeB - timeA;
     });
 
     if (cleanCustFilter) {
@@ -2933,6 +2977,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         po_number: c.po_number || null,
         deal_id: c.deal_id || null,
         created_at: c.created_at,
+        reported_at: c.reported_at,
       };
     });
   }
@@ -2941,7 +2986,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
     let visitQuery = supabase
       .from('customer_visits')
       .select('id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, created_at, salesperson_phone')
-      .order('visited_at', { ascending: false });
+      .order('visited_at', { ascending: false, nullsFirst: false });
 
     if (!scope.isAdmin && targetPhones.length > 0) {
       visitQuery = visitQuery.in('salesperson_phone', targetPhones);
@@ -2961,6 +3006,13 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
 
     // Exclude synthetic Bigin sync logs
     scopedVisits = scopedVisits.filter(v => !(v.remarks && v.remarks.startsWith('Contact Synced from Zoho Bigin')));
+
+    // Sort newest first strictly matching CRM Visits module sequence
+    scopedVisits.sort((a, b) => {
+      const timeA = new Date(a.visited_at || a.created_at || 0).getTime();
+      const timeB = new Date(b.visited_at || b.created_at || 0).getTime();
+      return timeB - timeA;
+    });
 
     if (cleanCustFilter) {
       scopedVisits = scopedVisits.filter(v => isCustomerMatch(cleanCustFilter, null, v.customer_name, null));
