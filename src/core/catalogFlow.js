@@ -1372,7 +1372,7 @@ function getAllowedFieldsListForAction(action) {
     case 'LOG_ORDER':
       return `• *PO Number (e.g. PO-2026-001)*\n• *PO Date*\n• *Delivery Location*\n• *Payment Terms*\n• *Product Rates & Quantities*`;
     case 'UPDATE_ORDER':
-      return `• *PO Number*\n• *PO Date / Delivery Date*\n• *Delivery Location*\n• *Payment Terms*\n• *Status (Pending, Processing, Dispatched, Delivered, Cancelled)*\n• *Line Item Rates & Quantities*`;
+      return `• *PO Number*\n• *PO Date / Delivery Date*\n• *Delivery Location*\n• *Payment Terms*\n• *Line Item Rates & Quantities*`;
     case 'LOG_VISIT':
       return `• *Person Met*\n• *Contact Phone*\n• *City / Location*\n• *Visit Date*\n• *Visit Outcome (Positive / Neutral / Negative)*\n• *Meeting Remarks & Discussion Notes*`;
     case 'UPDATE_VISIT':
@@ -2639,6 +2639,725 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
     reply: prompt,
     draft,
   };
+}
+
+// ── MODULE STAGE FORMATTER ───────────────────────────────────────────────────
+
+function formatStageLabel(st) {
+  const s = String(st || '').toLowerCase();
+  if (s.includes('won') || s.includes('order')) return 'Won';
+  if (s.includes('lost')) return 'Lost';
+  if (s.includes('quote') || s.includes('price')) return 'Quoted';
+  if (s.includes('negot')) return 'Negotiation';
+  if (s.includes('hold')) return 'On Hold';
+  return 'New Inquiry';
+}
+
+function formatProductSummaryCompact(item) {
+  if (!item) return 'Steel Material';
+
+  // Check deal_items or line items
+  const items = (Array.isArray(item.deal_items) && item.deal_items.length > 0)
+    ? item.deal_items
+    : (item.ai_extraction_json && Array.isArray(item.ai_extraction_json.line_items) && item.ai_extraction_json.line_items.length > 0)
+      ? item.ai_extraction_json.line_items
+      : (item.ai_extraction_json && Array.isArray(item.ai_extraction_json.lineItems) && item.ai_extraction_json.lineItems.length > 0)
+        ? item.ai_extraction_json.lineItems
+        : (Array.isArray(item.line_items) && item.line_items.length > 0)
+          ? item.line_items
+          : [];
+
+  if (items.length > 0) {
+    if (items.length === 1) {
+      const it = items[0];
+      const name = it.sku_text || it.description || it.product_name || 'Metal Item';
+      const qtyStr = it.quantity ? `${it.quantity} ${it.unit || 'MT'}` : '';
+      return qtyStr ? `${qtyStr} ${name}` : name;
+    }
+    const totalQty = items.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+    const names = items.slice(0, 2).map(it => it.sku_text || it.description || 'Item').join(', ');
+    return `${items.length} Items${totalQty > 0 ? ` (${totalQty} MT)` : ''} — ${names}`;
+  }
+
+  if (item.product_summary) return item.product_summary;
+  if (item.product_description) return item.product_description;
+  if (item.product_name) return item.product_name;
+  if (item.affected_product) return item.affected_product;
+  if (item.ai_extraction_json?.product_requirement) return item.ai_extraction_json.product_requirement;
+  if (item.ai_extraction_json?.productType) return item.ai_extraction_json.productType;
+
+  if (item.raw_text) {
+    const firstLine = item.raw_text.split(/[\r\n]+/)[0].trim();
+    if (firstLine && firstLine.length < 50 && !firstLine.toLowerCase().startsWith('customer:')) {
+      return firstLine;
+    }
+  }
+
+  return 'Steel Material';
+}
+
+// ── RECORD FETCHING FOR UPDATE SELECTION FLOWS ───────────────────────────────
+
+async function fetchEditableRecordsForModule(action, senderPhone, { customerFilter = null } = {}) {
+  const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants, isPhoneInScope } = require('../supabase');
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+  const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
+  const cleanCustFilter = customerFilter ? customerFilter.trim() : null;
+
+  if (action === 'UPDATE_INQUIRY') {
+    let dealsQuery = supabase
+      .from('deals')
+      .select('id, inquiry_id, customer_name, customer_phone, stage, total_amount, payment_terms, delivery_location, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+      .order('created_at', { ascending: false });
+
+    let inqsQuery = supabase
+      .from('inquiries')
+      .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, inquiry_type, created_at, salesperson_phone')
+      .order('created_at', { ascending: false });
+
+    if (!scope.isAdmin) {
+      if (targetPhones.length > 0) {
+        dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+        inqsQuery = inqsQuery.in('salesperson_phone', targetPhones);
+      } else {
+        dealsQuery = null;
+        inqsQuery = null;
+      }
+    }
+
+    const [{ data: allDeals }, { data: allInqs }] = await Promise.all([
+      dealsQuery ? dealsQuery.limit(500) : Promise.resolve({ data: [] }),
+      inqsQuery ? inqsQuery.limit(500) : Promise.resolve({ data: [] }),
+    ]);
+
+    const filterByScope = (items) => {
+      if (scope.isAdmin || scope.phones === null) return items || [];
+      return (items || []).filter(item => {
+        if (!item.salesperson_phone) return false;
+        return isPhoneInScope(item.salesperson_phone, targetPhones);
+      });
+    };
+
+    const scopedDeals = filterByScope(allDeals);
+    const scopedInqs = filterByScope(allInqs);
+
+    const matched = [];
+    const seenKeys = new Set();
+
+    scopedDeals.forEach(d => {
+      const stage = (d.stage || 'new_inquiry').toLowerCase();
+      const cleanCode = (d.inquiry_id || d.id || '').replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
+      const displayId = `INQ-${cleanCode}`;
+      const prodSummary = formatProductSummaryCompact(d);
+      const stageLabel = formatStageLabel(stage);
+      const dateFormatted = formatDateDDMMYYYY(d.created_at);
+
+      matched.push({
+        id: d.inquiry_id || d.id,
+        deal_id: d.id,
+        inquiry_id: d.inquiry_id || d.id,
+        displayId,
+        clean_code: cleanCode,
+        customer_name: d.customer_name || 'Customer',
+        product_summary: prodSummary,
+        stage: stageLabel,
+        raw_stage: stage,
+        date_formatted: dateFormatted,
+        payment_terms: d.payment_terms || 'Not specified',
+        delivery_location: d.delivery_location || 'Not specified',
+        total_amount: Number(d.total_amount) || 0,
+        deal_items: d.deal_items || [],
+        created_at: d.created_at,
+      });
+      seenKeys.add(d.id);
+      if (d.inquiry_id) seenKeys.add(d.inquiry_id);
+    });
+
+    scopedInqs.forEach(inq => {
+      if (seenKeys.has(inq.id)) return;
+      const ai = inq.ai_extraction_json || {};
+      const stage = (inq.status || 'new_inquiry').toLowerCase();
+      const cleanCode = (inq.id || '').replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
+      const displayId = `INQ-${cleanCode}`;
+      const prodSummary = formatProductSummaryCompact(inq);
+      const stageLabel = formatStageLabel(stage);
+      const dateFormatted = formatDateDDMMYYYY(inq.created_at);
+
+      matched.push({
+        id: inq.id,
+        deal_id: null,
+        inquiry_id: inq.id,
+        displayId,
+        clean_code: cleanCode,
+        customer_name: inq.sender_name || ai.companyName || ai.customer_name || 'Customer',
+        product_summary: prodSummary,
+        stage: stageLabel,
+        raw_stage: stage,
+        date_formatted: dateFormatted,
+        payment_terms: ai.paymentTerms || ai.payment_terms || 'Not specified',
+        delivery_location: ai.deliveryLocation || ai.delivery_location || 'Not specified',
+        total_amount: Number(ai.totalAmount) || Number(ai.grandTotal) || 0,
+        deal_items: ai.lineItems || ai.line_items || [],
+        created_at: inq.created_at,
+      });
+      seenKeys.add(inq.id);
+    });
+
+    // Sort newest first
+    matched.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+
+    // Exclude Won, Lost, Closed, Completed, Cancelled
+    const isTerminal = (st) => ['won', 'lost', 'closed', 'completed', 'cancelled'].includes(String(st || '').toLowerCase());
+    let editable = matched.filter(m => !isTerminal(m.raw_stage));
+
+    if (cleanCustFilter) {
+      editable = editable.filter(m => isCustomerMatch(cleanCustFilter, null, m.customer_name, null));
+    }
+
+    return editable;
+  }
+
+  if (action === 'UPDATE_ORDER') {
+    let dealsQuery = supabase
+      .from('deals')
+      .select('id, inquiry_id, customer_name, customer_phone, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+      .order('created_at', { ascending: false });
+
+    if (scope.phones !== null) {
+      if (targetPhones.length > 0) {
+        dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+      } else {
+        dealsQuery = null;
+      }
+    }
+
+    const { data: deals } = dealsQuery ? await dealsQuery.limit(500) : { data: [] };
+
+    const filterByScope = (items) => {
+      if (scope.isAdmin || scope.phones === null) return items || [];
+      return (items || []).filter(item => {
+        if (!item.salesperson_phone) return false;
+        return isPhoneInScope(item.salesperson_phone, scope.phones);
+      });
+    };
+
+    let scopedDeals = filterByScope(deals);
+
+    if (cleanCustFilter) {
+      scopedDeals = scopedDeals.filter(d => isCustomerMatch(cleanCustFilter, null, d.customer_name, d.customer_phone));
+    }
+
+    return scopedDeals.map(d => {
+      const cleanCode = (d.id || '').replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase();
+      const displayInq = `INQ-${cleanCode}`;
+      const displayId = d.po_number ? d.po_number : displayInq;
+      const dateFormatted = d.po_date ? formatDateDDMMYYYY(d.po_date) : (d.created_at ? formatDateDDMMYYYY(d.created_at) : formatDateDDMMYYYY(new Date()));
+
+      return {
+        id: d.id,
+        deal_id: d.id,
+        inquiry_id: d.inquiry_id || d.id,
+        displayId,
+        po_number: d.po_number || null,
+        deal_code: displayInq,
+        clean_code: cleanCode,
+        customer_name: d.customer_name || 'Customer',
+        product_summary: formatProductSummaryCompact(d),
+        stage: formatStageLabel(d.stage || 'Won'),
+        date_formatted: dateFormatted,
+        delivery_location: d.delivery_location || 'Not specified',
+        payment_terms: d.payment_terms || 'Not specified',
+        total_amount: Number(d.total_amount) || 0,
+        created_at: d.created_at,
+      };
+    });
+  }
+
+  if (action === 'UPDATE_COMPLAINT') {
+    let complaintsQuery = supabase
+      .from('complaints')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (!scope.isAdmin && targetPhones.length > 0) {
+      complaintsQuery = complaintsQuery.in('reported_by', targetPhones);
+    }
+
+    const { data: allComplaints } = await complaintsQuery.limit(500);
+
+    const filterByScope = (items) => {
+      if (scope.isAdmin || scope.phones === null) return items || [];
+      return (items || []).filter(item => {
+        if (!item.reported_by) return false;
+        return isPhoneInScope(item.reported_by, targetPhones);
+      });
+    };
+
+    let scopedComplaints = filterByScope(allComplaints);
+
+    // Filter: Pending & Open only; excludes Resolved & Closed
+    scopedComplaints = scopedComplaints.filter(c => {
+      const st = String(c.status || '').toLowerCase().trim();
+      return !['resolved', 'closed', 'cancelled'].includes(st);
+    });
+
+    if (cleanCustFilter) {
+      scopedComplaints = scopedComplaints.filter(c => isCustomerMatch(cleanCustFilter, null, c.customer_name, null));
+    }
+
+    return scopedComplaints.map(c => {
+      const cleanId = (c.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
+      const displayId = `COMP-${cleanId}`;
+      const dateFormatted = formatDateDDMMYYYY(c.reported_at || c.created_at || new Date());
+      const typeLabel = c.complaint_type
+        ? c.complaint_type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+        : 'Quality Defect';
+      const statusLabel = c.status
+        ? c.status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+        : 'Open';
+
+      return {
+        id: c.id,
+        displayId,
+        clean_code: cleanId,
+        customer_name: c.customer_name || 'Customer',
+        complaint_type: typeLabel,
+        status: statusLabel,
+        date_formatted: dateFormatted,
+        description: c.description || null,
+        po_number: c.po_number || null,
+        deal_id: c.deal_id || null,
+        created_at: c.created_at,
+      };
+    });
+  }
+
+  if (action === 'UPDATE_VISIT') {
+    let visitQuery = supabase
+      .from('customer_visits')
+      .select('id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, created_at, salesperson_phone')
+      .order('visited_at', { ascending: false });
+
+    if (!scope.isAdmin && targetPhones.length > 0) {
+      visitQuery = visitQuery.in('salesperson_phone', targetPhones);
+    }
+
+    const { data: allVisits } = await visitQuery.limit(500);
+
+    const filterByScope = (items) => {
+      if (scope.isAdmin || scope.phones === null) return items || [];
+      return (items || []).filter(item => {
+        if (!item.salesperson_phone) return false;
+        return isPhoneInScope(item.salesperson_phone, targetPhones);
+      });
+    };
+
+    let scopedVisits = filterByScope(allVisits);
+
+    // Exclude synthetic Bigin sync logs
+    scopedVisits = scopedVisits.filter(v => !(v.remarks && v.remarks.startsWith('Contact Synced from Zoho Bigin')));
+
+    if (cleanCustFilter) {
+      scopedVisits = scopedVisits.filter(v => isCustomerMatch(cleanCustFilter, null, v.customer_name, null));
+    }
+
+    return scopedVisits.map(v => {
+      const vDate = v.visited_at ? new Date(v.visited_at) : (v.created_at ? new Date(v.created_at) : new Date());
+      const dateFormatted = formatDateDDMMYYYY(vDate);
+      const outTagMatch = (v.remarks || '').match(/\[Outcome:\s*([^\]]+)\]/i);
+      const outcome = outTagMatch ? outTagMatch[1] : 'Positive';
+      const locTagMatch = (v.remarks || '').match(/\[Location:\s*([^\]]+)\]/i);
+      const location = v.customer_address || (locTagMatch ? locTagMatch[1] : 'Not specified');
+      const cleanRemarks = (v.remarks || '')
+        .replace(/\[Outcome:\s*[^\]]+\]/gi, '')
+        .replace(/\[Location:\s*[^\]]+\]/gi, '')
+        .replace(/\[Follow-up:\s*[^\]]+\]/gi, '')
+        .trim();
+
+      return {
+        id: v.id,
+        customer_name: v.customer_name || 'Customer',
+        location: location || 'Not specified',
+        outcome: outcome || 'Positive',
+        date_formatted: dateFormatted,
+        person_met: v.person_met || 'Not recorded',
+        contact_no: v.contact_no || null,
+        remarks: cleanRemarks || 'Not specified',
+        visited_at: v.visited_at,
+        created_at: v.created_at,
+      };
+    });
+  }
+
+  return [];
+}
+
+// ── FORMAT SINGLE RECORD LINE FOR MODULE SELECTION ──────────────────────────
+
+function formatRecordLineForModule(action, record, index) {
+  switch (action) {
+    case 'UPDATE_INQUIRY':
+      return `${index}. ${record.displayId} | ${record.customer_name} | ${record.product_summary} | ${record.stage} | ${record.date_formatted}`;
+    case 'UPDATE_ORDER':
+      return `${index}. ${record.displayId} | ${record.customer_name} | ${record.product_summary} | ${record.date_formatted}`;
+    case 'UPDATE_COMPLAINT':
+      return `${index}. ${record.displayId} | ${record.customer_name} | ${record.complaint_type} | ${record.status} | ${record.date_formatted}`;
+    case 'UPDATE_VISIT':
+      return `${index}. ${record.customer_name} | ${record.location} | ${record.outcome} | ${record.date_formatted}`;
+    default:
+      return `${index}. ${record.customer_name} | ${record.date_formatted}`;
+  }
+}
+
+// ── FETCH AND RENDER UPDATE SELECTION MESSAGE ────────────────────────────────
+
+async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pageSize = 7, customerFilter = null } = {}) {
+  const allRecords = await fetchEditableRecordsForModule(action, senderPhone, { customerFilter });
+
+  if (allRecords.length === 0) {
+    let emptyReply = '';
+    if (customerFilter) {
+      emptyReply = `ℹ️ *No records found for "${customerFilter}".*\n\nType another customer name to search specifically, or reply "All" to view all recent records.`;
+    } else {
+      switch (action) {
+        case 'UPDATE_INQUIRY':
+          emptyReply = `ℹ️ *No Editable Inquiries Found*\n\nThere are no active or editable inquiries recorded in your portfolio.\n\nIf you would like to log a new inquiry, reply with *1* or send the inquiry details.`;
+          break;
+        case 'UPDATE_ORDER':
+          emptyReply = `ℹ️ *No Orders Found*\n\nThere are no existing orders in your records.\n\nIf you would like to log a new order, reply with *3* or send the order details.`;
+          break;
+        case 'UPDATE_COMPLAINT':
+          emptyReply = `ℹ️ *No Active Complaints Found*\n\nThere are no active customer complaints recorded in your portfolio.\n\nIf you would like to log a new complaint, reply with *8* or send the complaint details.`;
+          break;
+        case 'UPDATE_VISIT':
+          emptyReply = `ℹ️ *No Field Visits Found*\n\nThere are no customer visits recorded in your portfolio.\n\nIf you would like to log a field visit, reply with *5* or send the visit details.`;
+          break;
+        default:
+          emptyReply = `ℹ️ *No editable records found.*`;
+      }
+    }
+
+    return {
+      hasRecords: false,
+      reply: emptyReply,
+      state: {
+        action,
+        page: 1,
+        totalCount: 0,
+        customerFilter,
+        cachedRecords: [],
+      },
+    };
+  }
+
+  const totalCount = allRecords.length;
+  const totalPages = Math.ceil(totalCount / pageSize);
+  const curPage = Math.max(1, Math.min(page, totalPages));
+  const startIdx = (curPage - 1) * pageSize;
+  const pageItems = allRecords.slice(startIdx, startIdx + pageSize);
+
+  const cachedRecords = pageItems.map((r, i) => ({
+    ...r,
+    index: startIdx + i + 1,
+  }));
+
+  const lines = cachedRecords.map(r => formatRecordLineForModule(action, r, r.index));
+  const listText = lines.join('\n');
+
+  let headerText = '';
+  if (customerFilter) {
+    switch (action) {
+      case 'UPDATE_INQUIRY':
+        headerText = `📋 *Editable Inquiries for ${customerFilter} (${totalCount} Records):*`;
+        break;
+      case 'UPDATE_ORDER':
+        headerText = `🛒 *Orders for ${customerFilter} (${totalCount} Records):*`;
+        break;
+      case 'UPDATE_COMPLAINT':
+        headerText = `⚠️ *Active Complaints for ${customerFilter} (${totalCount} Records):*`;
+        break;
+      case 'UPDATE_VISIT':
+        headerText = `📍 *Field Visits for ${customerFilter} (${totalCount} Records):*`;
+        break;
+    }
+  } else {
+    const countDisplay = totalCount <= pageSize ? totalCount : `${startIdx + 1}–${startIdx + cachedRecords.length} of ${totalCount}`;
+    switch (action) {
+      case 'UPDATE_INQUIRY':
+        headerText = `📋 *Update Inquiry*\n\nHere are your ${totalCount <= pageSize ? `${totalCount} ` : ''}recent editable inquiries${totalCount > pageSize ? ` (${countDisplay})` : ''}:`;
+        break;
+      case 'UPDATE_ORDER':
+        headerText = `🛒 *Update Order*\n\nHere are your ${totalCount <= pageSize ? `${totalCount} ` : ''}recent orders${totalCount > pageSize ? ` (${countDisplay})` : ''}:`;
+        break;
+      case 'UPDATE_COMPLAINT':
+        headerText = `⚠️ *Update Complaint*\n\nHere are your ${totalCount <= pageSize ? `${totalCount} ` : ''}active complaints${totalCount > pageSize ? ` (${countDisplay})` : ''}:`;
+        break;
+      case 'UPDATE_VISIT':
+        headerText = `📍 *Update Field Visit*\n\nHere are your ${totalCount <= pageSize ? `${totalCount} ` : ''}recent field visits${totalCount > pageSize ? ` (${countDisplay})` : ''}:`;
+        break;
+    }
+  }
+
+  const footerText = `Reply with the serial number or record ID to update that record. Type "Next" for the next 7 records, or tell me the customer name to search their records.`;
+
+  const fullReply = `${headerText}\n\n${listText}\n\n${footerText}`;
+
+  return {
+    hasRecords: true,
+    reply: fullReply,
+    state: {
+      action,
+      page: curPage,
+      totalCount,
+      customerFilter,
+      cachedRecords,
+    },
+  };
+}
+
+// ── HANDLE UPDATE SELECTION STATE ───────────────────────────────────────────
+
+async function handleUpdateSelectionState(text, senderPhone, action, selectionState) {
+  const clean = text.trim();
+  const lower = clean.toLowerCase();
+
+  // 1. Cancel / Discard / Menu
+  if (isDiscardOrCancelIntent(clean) || (await isGreeting(clean)) || lower === 'menu' || lower === 'exit' || lower === 'quit') {
+    await recordSessionMessage(senderPhone, 'user', text);
+    const cancelReply = `Activity cancelled.\n\n` + CATALOG_MENU;
+    await recordSessionMessage(senderPhone, 'assistant', cancelReply, { action_type: 'CATALOG_MENU' });
+    await finalizeCurrentSession(senderPhone, `Cancelled ${getActionFriendlyName(action)} selection`);
+    await saveActiveSession(senderPhone, 'Unknown', 'general');
+    return {
+      handled: true,
+      reply: cancelReply,
+      interactiveType: 'list',
+      interactiveList: {
+        bodyText: 'Here is the menu to start a new activity:',
+        buttonText: 'Choose Action',
+        sections: CATALOG_MENU_SECTIONS,
+      },
+    };
+  }
+
+  // 2. View All / Reset Filter
+  if (['all', 'show all', 'view all', 'all records', 'reset', 'clear'].includes(lower)) {
+    await recordSessionMessage(senderPhone, 'user', text);
+    const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, { page: 1, customerFilter: null });
+    await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
+    await saveActiveSession(senderPhone, 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
+    return { handled: true, reply: selectionRes.reply };
+  }
+
+  // 3. Pagination ("Next", "more", "view more", "page 2", etc.)
+  if (isPaginationRequest(clean)) {
+    await recordSessionMessage(senderPhone, 'user', text);
+    const totalPages = Math.ceil((selectionState.totalCount || 0) / 7);
+    const nextPage = (Number(selectionState.page) || 1) + 1;
+    if (nextPage > totalPages) {
+      const noMoreMsg = `ℹ️ No more records. Type a customer name to search specifically, or reply "All" to start from the beginning.`;
+      await recordSessionMessage(senderPhone, 'assistant', noMoreMsg, { action_type: action });
+      return { handled: true, reply: noMoreMsg };
+    }
+    const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, {
+      page: nextPage,
+      customerFilter: selectionState.customerFilter || null,
+    });
+    await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
+    await saveActiveSession(senderPhone, selectionState.customerFilter || 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
+    return { handled: true, reply: selectionRes.reply };
+  }
+
+  // 4. Candidate Match Resolution (by Serial Number, Record ID, Date, or Name)
+  const cached = Array.isArray(selectionState.cachedRecords) ? selectionState.cachedRecords : [];
+  let matchedRecord = null;
+
+  // 4a. Numeric candidate index match
+  const numIdx = extractCandidateIndex(clean, selectionState.totalCount || cached.length);
+  if (numIdx !== null) {
+    matchedRecord = cached.find(r => r.index === numIdx);
+    if (!matchedRecord && numIdx >= 1 && numIdx <= cached.length) {
+      matchedRecord = cached[numIdx - 1];
+    }
+    if (!matchedRecord && numIdx >= 1) {
+      // Lookup in full pool
+      const fullPool = await fetchEditableRecordsForModule(action, senderPhone, { customerFilter: selectionState.customerFilter || null });
+      if (numIdx <= fullPool.length) {
+        matchedRecord = fullPool[numIdx - 1];
+      }
+    }
+  }
+
+  // 4b. Record ID matching
+  if (!matchedRecord) {
+    const cleanId = clean.replace(/^#?(?:INQ|DEAL|PO|COMP|CMP)-?/i, '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
+    if (cleanId.length >= 2) {
+      matchedRecord = cached.find(r => {
+        const dId = (r.displayId || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
+        const rId = (r.id || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
+        const po = (r.po_number || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
+        return dId.includes(cleanId) || rId.startsWith(cleanId) || (po && po.includes(cleanId));
+      });
+
+      if (!matchedRecord) {
+        const fullPool = await fetchEditableRecordsForModule(action, senderPhone, { customerFilter: null });
+        matchedRecord = fullPool.find(r => {
+          const dId = (r.displayId || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
+          const rId = (r.id || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
+          const po = (r.po_number || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
+          return dId.includes(cleanId) || rId.startsWith(cleanId) || (po && po.includes(cleanId));
+        });
+      }
+    }
+  }
+
+  // 4c. Visit matching by Date / Person Met for UPDATE_VISIT
+  if (!matchedRecord && action === 'UPDATE_VISIT') {
+    const normInputDate = normalizeDateToDDMMYYYY(clean);
+    matchedRecord = cached.find(c =>
+      (normInputDate && c.date_formatted === normInputDate) ||
+      (c.date_formatted && clean.includes(c.date_formatted)) ||
+      (c.person_met && c.person_met !== 'Not recorded' && lower.includes(c.person_met.toLowerCase())) ||
+      (c.location && c.location !== 'Not specified' && c.location.length >= 4 && lower.includes(c.location.toLowerCase()))
+    );
+  }
+
+  // 5. If a record was matched:
+  if (matchedRecord) {
+    await recordSessionMessage(senderPhone, 'user', text);
+
+    let draft = {};
+    if (action === 'UPDATE_INQUIRY') {
+      draft = {
+        inquiry_id: matchedRecord.inquiry_id || matchedRecord.id,
+        deal_id: matchedRecord.deal_id || null,
+        company_name: matchedRecord.customer_name,
+        _inquiry_display_id: matchedRecord.displayId,
+        _inquiry_verified: true,
+      };
+    } else if (action === 'UPDATE_ORDER') {
+      draft = {
+        inquiry_id: matchedRecord.inquiry_id || matchedRecord.id,
+        deal_id: matchedRecord.deal_id || matchedRecord.id,
+        po_number: matchedRecord.po_number || null,
+        linked_inquiry_or_po: matchedRecord.po_number ? `PO: ${matchedRecord.po_number} (${matchedRecord.deal_code})` : matchedRecord.deal_code,
+        company_name: matchedRecord.customer_name,
+        _order_verified: true,
+      };
+    } else if (action === 'UPDATE_COMPLAINT') {
+      draft = {
+        complaint_id: matchedRecord.id,
+        company_name: matchedRecord.customer_name,
+        linked_inquiry_or_po: matchedRecord.po_number || null,
+        _complaint_verified: true,
+      };
+    } else if (action === 'UPDATE_VISIT') {
+      draft = {
+        visit_id: matchedRecord.id,
+        company_name: matchedRecord.customer_name,
+        visit_date: matchedRecord.date_formatted,
+        _visit_verified: true,
+      };
+    }
+
+    const isPureSelect = isPureOptionSelectorOnly(clean);
+
+    if (isPureSelect) {
+      let prompt = '';
+      if (action === 'UPDATE_INQUIRY') {
+        prompt = `✏️ *Selected Inquiry ${matchedRecord.displayId} (${matchedRecord.customer_name}):*\n\n` +
+          `• *Date:* ${matchedRecord.date_formatted}\n` +
+          `• *Stage:* ${matchedRecord.stage}\n` +
+          `• *Product / Requirement:* ${matchedRecord.product_summary}\n` +
+          `• *Payment Terms:* ${matchedRecord.payment_terms || 'Not specified'}\n` +
+          `• *Delivery Location:* ${matchedRecord.delivery_location || 'Not specified'}\n\n` +
+          `What details would you like to update?\n` +
+          `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
+      } else if (action === 'UPDATE_ORDER') {
+        prompt = `✏️ *Selected Order ${matchedRecord.displayId} (${matchedRecord.customer_name}):*\n\n` +
+          `• *Date:* ${matchedRecord.date_formatted}\n` +
+          `• *Stage:* ${matchedRecord.stage}\n` +
+          `• *Total Value:* ₹${Number(matchedRecord.total_amount || 0).toLocaleString('en-IN')}\n\n` +
+          `What details would you like to update?\n` +
+          `_(e.g., Attach PO Number, Delivery Location, Payment Terms, Rate, or Quantity)_`;
+      } else if (action === 'UPDATE_COMPLAINT') {
+        prompt = `✏️ *Selected Complaint ${matchedRecord.displayId} (${matchedRecord.customer_name}):*\n\n` +
+          (matchedRecord.po_number ? `• *Linked Ref:* PO: ${matchedRecord.po_number}\n` : '') +
+          `• *Type:* ${matchedRecord.complaint_type || 'Quality Defect'}\n` +
+          `• *Status:* ${matchedRecord.status || 'Open'}\n` +
+          (matchedRecord.description ? `• *Description:* ${matchedRecord.description}\n\n` : '\n') +
+          `What details would you like to update?\n` +
+          `_(e.g., "Mark as Resolved", "Update type to Specification Mismatch", "Resolution notes: Replaced material")_`;
+      } else if (action === 'UPDATE_VISIT') {
+        prompt = `✏️ *Selected Field Visit for ${matchedRecord.customer_name} (${matchedRecord.date_formatted}):*\n\n` +
+          `• *Person Met:* ${matchedRecord.person_met || 'Not specified'}\n` +
+          `• *Location:* ${matchedRecord.location || 'Not specified'}\n` +
+          `• *Outcome:* ${matchedRecord.outcome || 'Positive'}\n` +
+          `• *Remarks:* ${matchedRecord.remarks || 'Not specified'}\n\n` +
+          `What details would you like to update?\n` +
+          `_(e.g., Person Met, Outcome to Positive, Remarks, or Follow-up Action)_`;
+      }
+
+      await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
+      await saveActiveSession(senderPhone, matchedRecord.customer_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
+      return { handled: true, reply: prompt };
+    }
+
+    // Direct update provided alongside selector:
+    const updatedDraft = await extractFieldsWithLLM(action, text, draft);
+    const missing = validateMandatoryFields(action, updatedDraft);
+
+    if (missing.length === 0) {
+      const summary = buildConfirmationSummary(action, updatedDraft);
+      await recordSessionMessage(senderPhone, 'assistant', summary, {
+        action_type: action,
+        customer_name: updatedDraft.company_name,
+      });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(updatedDraft)}`);
+      return {
+        handled: true,
+        reply: summary,
+        interactiveType: 'buttons',
+        interactiveButtons: CONFIRMATION_BUTTONS,
+      };
+    } else {
+      const missingList = missing.map((m) => `- **${m}**`).join('\n');
+      const askMissing = `Please provide the remaining details to update:\n\n${missingList}`;
+      await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+        action_type: action,
+        customer_name: updatedDraft.company_name,
+      });
+      await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+      return { handled: true, reply: askMissing };
+    }
+  }
+
+  // 6. Customer Name Search
+  // If user typed a customer name (e.g. "Maurya Industries" or "Menon")
+  const custSearchResults = await fetchEditableRecordsForModule(action, senderPhone, { customerFilter: clean });
+  if (custSearchResults.length > 0) {
+    await recordSessionMessage(senderPhone, 'user', text);
+    const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, { page: 1, customerFilter: clean });
+    await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
+    await saveActiveSession(senderPhone, clean, `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
+    return { handled: true, reply: selectionRes.reply };
+  }
+
+  // 7. Check if user typed an out-of-bounds number
+  if (/^\s*[1-9]\d*\s*$/.test(clean)) {
+    const enteredNum = parseInt(clean, 10);
+    const reply = `⚠️ Invalid selection (${enteredNum}). Please choose a valid number from the list above, type "Next" for more records, or tell me the customer name to search specifically.`;
+    await recordSessionMessage(senderPhone, 'user', text);
+    await recordSessionMessage(senderPhone, 'assistant', reply, { action_type: action });
+    return { handled: true, reply };
+  }
+
+  // 8. No customer match and not an index -> inform user
+  const notFoundReply = `ℹ️ *No editable records found for "${clean}".*\n\nType another customer name to search specifically, type "All" to view all recent records, or reply "Cancel" to exit.`;
+  await recordSessionMessage(senderPhone, 'user', text);
+  await recordSessionMessage(senderPhone, 'assistant', notFoundReply, { action_type: action });
+  return { handled: true, reply: notFoundReply };
 }
 
 // ── COMPLAINT ORDER VALIDATION & MULTI-ORDER DISAMBIGUATION CHECK ───────────
@@ -7585,6 +8304,21 @@ async function handleCatalogFlow(rawText, senderPhone) {
       };
     }
 
+    if (['UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(explicitAction)) {
+      const selectionRes = await fetchAndRenderUpdateSelection(explicitAction, senderPhone, { page: 1, customerFilter: null });
+      await startNewCatalogSession(senderPhone, selectionRes.reply);
+      await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: explicitAction });
+      if (selectionRes.hasRecords) {
+        await saveActiveSession(senderPhone, 'Unknown', `catalog_update_select|${explicitAction}|${JSON.stringify(selectionRes.state)}`);
+      } else {
+        await saveActiveSession(senderPhone, 'Unknown', 'general');
+      }
+      return {
+        handled: true,
+        reply: selectionRes.reply,
+      };
+    }
+
     const initialPrompt = MODULE_PROMPTS[explicitAction];
     if (initialPrompt) {
       await startNewCatalogSession(senderPhone, initialPrompt);
@@ -7602,7 +8336,8 @@ async function handleCatalogFlow(rawText, senderPhone) {
     hasActiveCatalogSession &&
     !lastIntent.startsWith('catalog_resume_ask|') &&
     !lastIntent.startsWith('catalog_implicit_cust_ask|') &&
-    !lastIntent.startsWith('catalog_implicit_cust_collect|')
+    !lastIntent.startsWith('catalog_implicit_cust_collect|') &&
+    !lastIntent.startsWith('catalog_update_select|')
   ) {
     const cleanInput = text.toLowerCase().replace(/[^a-z0-9\s_/]/g, ' ').replace(/\s+/g, ' ').trim();
     const parts = lastIntent.split('|');
@@ -7662,6 +8397,15 @@ async function handleCatalogFlow(rawText, senderPhone) {
       }
       // If SAME_ACTIVITY, proceed into the flow below!
     }
+  }
+
+  // ── 2c. HANDLE UPDATE RECORD SELECTION STATE (catalog_update_select|action|stateJson) ──
+  if (lastIntent.startsWith('catalog_update_select|')) {
+    const parts = lastIntent.split('|');
+    const action = parts[1];
+    const selectionStateJson = parts.slice(2).join('|');
+    const selectionState = safeParseJSON(selectionStateJson, {});
+    return await handleUpdateSelectionState(text, senderPhone, action, selectionState);
   }
 
   // ── 3-0. HANDLE RESUME ASK STATE (catalog_resume_ask|interruptedState|action|draftJson) ──
@@ -9111,44 +9855,16 @@ async function handleCatalogFlow(rawText, senderPhone) {
     }
 
     // 6a. Direct candidate browsing for UPDATE actions
-    if (matchedAction === 'UPDATE_INQUIRY') {
-      const inqCheck = await checkInquiriesForUpdate('UPDATE_INQUIRY', {}, senderPhone, text);
-      if (inqCheck && inqCheck.handled) {
-        await startNewCatalogSession(senderPhone, inqCheck.reply);
-        await recordSessionMessage(senderPhone, 'assistant', inqCheck.reply, { action_type: 'UPDATE_INQUIRY' });
-        await saveActiveSession(senderPhone, (inqCheck.draft?.company_name || 'Customer'), `catalog_flow|UPDATE_INQUIRY|${JSON.stringify(inqCheck.draft || {})}`);
-        return { handled: true, reply: inqCheck.reply };
+    if (['UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(matchedAction)) {
+      const selectionRes = await fetchAndRenderUpdateSelection(matchedAction, senderPhone, { page: 1, customerFilter: null });
+      await startNewCatalogSession(senderPhone, selectionRes.reply);
+      await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: matchedAction });
+      if (selectionRes.hasRecords) {
+        await saveActiveSession(senderPhone, 'Unknown', `catalog_update_select|${matchedAction}|${JSON.stringify(selectionRes.state)}`);
+      } else {
+        await saveActiveSession(senderPhone, 'Unknown', 'general');
       }
-    }
-
-    if (matchedAction === 'UPDATE_ORDER') {
-      const ordCheck = await checkOrdersForUpdate('UPDATE_ORDER', {}, senderPhone, text);
-      if (ordCheck && ordCheck.handled) {
-        await startNewCatalogSession(senderPhone, ordCheck.reply);
-        await recordSessionMessage(senderPhone, 'assistant', ordCheck.reply, { action_type: 'UPDATE_ORDER' });
-        await saveActiveSession(senderPhone, (ordCheck.draft?.company_name || 'Customer'), `catalog_flow|UPDATE_ORDER|${JSON.stringify(ordCheck.draft || {})}`);
-        return { handled: true, reply: ordCheck.reply };
-      }
-    }
-
-    if (matchedAction === 'UPDATE_VISIT') {
-      const visCheck = await checkMultipleVisitsForUpdate('UPDATE_VISIT', {}, senderPhone);
-      if (visCheck && visCheck.handled && visCheck.reply) {
-        await startNewCatalogSession(senderPhone, visCheck.reply);
-        await recordSessionMessage(senderPhone, 'assistant', visCheck.reply, { action_type: 'UPDATE_VISIT' });
-        await saveActiveSession(senderPhone, (visCheck.draft?.company_name || 'Customer'), `catalog_flow|UPDATE_VISIT|${JSON.stringify(visCheck.draft || {})}`);
-        return { handled: true, reply: visCheck.reply };
-      }
-    }
-
-    if (matchedAction === 'UPDATE_COMPLAINT') {
-      const cmpCheck = await checkComplaintsForUpdate('UPDATE_COMPLAINT', {}, senderPhone, text);
-      if (cmpCheck && cmpCheck.handled) {
-        await startNewCatalogSession(senderPhone, cmpCheck.reply);
-        await recordSessionMessage(senderPhone, 'assistant', cmpCheck.reply, { action_type: 'UPDATE_COMPLAINT' });
-        await saveActiveSession(senderPhone, (cmpCheck.draft?.company_name || 'Customer'), `catalog_flow|UPDATE_COMPLAINT|${JSON.stringify(cmpCheck.draft || {})}`);
-        return { handled: true, reply: cmpCheck.reply };
-      }
+      return { handled: true, reply: selectionRes.reply };
     }
 
     const initialPrompt = MODULE_PROMPTS[matchedAction];
@@ -9285,4 +10001,8 @@ module.exports = {
   validateDraftProducts,
   resolveClarifiedProduct,
   detectNonEditableFieldAttempt,
+  fetchEditableRecordsForModule,
+  formatRecordLineForModule,
+  fetchAndRenderUpdateSelection,
+  handleUpdateSelectionState,
 };
