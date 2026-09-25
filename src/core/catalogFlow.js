@@ -2857,6 +2857,112 @@ function validateDraftProducts(action, draft) {
   return { isValid: true };
 }
 
+// ── EXTRACT VISIT DETAILS & FORMATTING HELPERS ──────────────────────────────
+
+function extractVisitDetails(v) {
+  if (!v) return {};
+  const vDate = v.visited_at ? new Date(v.visited_at) : new Date();
+  const dateFormatted = formatDateDDMMYYYY(vDate);
+
+  const rem = String(v.remarks || '');
+
+  const outTagMatch = rem.match(/\[Outcome:\s*([^\]]+)\]/i);
+  const rawOutcome = v.outcome || (outTagMatch ? outTagMatch[1].trim() : 'Positive');
+  const outcome = rawOutcome ? (rawOutcome.charAt(0).toUpperCase() + rawOutcome.slice(1)) : 'Positive';
+
+  const locTagMatch = rem.match(/\[Location:\s*([^\]]+)\]/i) || rem.match(/(?:^|\||\n)\s*Location:\s*([^|\]\n]+)/i);
+  const location = v.customer_address || v.location || (locTagMatch ? locTagMatch[1].trim() : 'Not specified');
+
+  const fuActionMatch = rem.match(/\[(?:Follow-?Up|Follow-?up\s*Action):\s*([^\]]+)\]/i) ||
+                        rem.match(/(?:^|\||\n)\s*Follow-?up(?:\s*Action)?:\s*([^|\]\n]+)/i);
+  let followUpAction = v.follow_up_action || (fuActionMatch ? fuActionMatch[1].trim() : null);
+  if (followUpAction) {
+    const lFu = followUpAction.toLowerCase();
+    if (['none', 'nil', 'n/a', 'na', 'null', '-', 'not required', 'no follow-up', 'no follow up'].includes(lFu)) {
+      followUpAction = null;
+    }
+  }
+
+  const fuDateMatch = rem.match(/\[(?:Follow-?UpDate|Follow-?up\s*Date):\s*([^\]]+)\]/i) ||
+                      rem.match(/(?:^|\||\n)\s*Follow-?up\s*Date:\s*([^|\]\n]+)/i);
+  const rawFuDate = v.follow_up_date || (fuDateMatch ? fuDateMatch[1].trim() : null);
+  let followUpDate = null;
+  if (rawFuDate) {
+    const parsed = new Date(rawFuDate);
+    if (!isNaN(parsed.getTime())) {
+      followUpDate = formatDateDDMMYYYY(parsed);
+    } else {
+      followUpDate = rawFuDate;
+    }
+  } else if (followUpAction) {
+    const extractedDate = extractFollowUpDate(followUpAction, vDate);
+    if (extractedDate) {
+      followUpDate = formatDateDDMMYYYY(new Date(extractedDate));
+    }
+  }
+
+  const fuStatusMatch = rem.match(/\[(?:Follow-?UpStatus|Follow-?up\s*Status):\s*([^\]]+)\]/i) ||
+                        rem.match(/(?:^|\||\n)\s*Follow-?up\s*Status:\s*([^|\]\n]+)/i);
+  const rawFuStatus = (followUpAction || fuStatusMatch) ? (fuStatusMatch ? fuStatusMatch[1].trim() : (v.follow_up_status || 'pending')) : null;
+  let followUpStatus = null;
+  if (rawFuStatus) {
+    const sLower = rawFuStatus.toLowerCase();
+    if (['completed', 'done', 'resolved', 'closed'].some(st => sLower.includes(st))) {
+      followUpStatus = 'Completed';
+    } else {
+      followUpStatus = 'Pending';
+    }
+  }
+
+  const cleanRemarks = rem
+    .replace(/\[(?:Outcome|Location|Follow-?Up|Follow-?up\s*Action|Follow-?UpDate|Follow-?up\s*Date|Follow-?UpStatus|Follow-?up\s*Status|Requirement|Requirements|Material\s*Requirement|Discussion|Interests?|Make|Payment\s*Terms|Terms):\s*[^\]]+\]/gi, '')
+    .replace(/(?:^|\||\n)\s*Follow-?up(?:\s*Action)?:\s*[^|\n]+/gi, '')
+    .replace(/(?:^|\||\n)\s*Follow-?up\s*Date:\s*[^|\n]+/gi, '')
+    .replace(/(?:^|\||\n)\s*Follow-?up\s*Status:\s*[^|\n]+/gi, '')
+    .replace(/(?:^|\||\n)\s*(?:Material\s*)?Requirement:\s*[^|\n]+/gi, '')
+    .replace(/(?:^|\||\n)\s*Location:\s*[^|\n]+/gi, '')
+    .replace(/^[\s|•-]+|[\s|•-]+$/g, '')
+    .trim();
+
+  return {
+    id: v.id,
+    customer_name: v.customer_name || 'Customer',
+    location: location || 'Not specified',
+    outcome: outcome || 'Positive',
+    date_formatted: dateFormatted,
+    person_met: v.person_met || 'Not specified',
+    contact_no: v.contact_no || null,
+    follow_up_action: followUpAction,
+    follow_up_date: followUpDate,
+    follow_up_status: followUpStatus,
+    remarks: cleanRemarks || 'Not specified',
+    visited_at: v.visited_at,
+  };
+}
+
+function formatSelectedVisitPrompt(record) {
+  let prompt = `✏️ *Selected Field Visit for ${record.customer_name} (${record.date_formatted}):*\n\n` +
+    `• *Person Met:* ${record.person_met || 'Not specified'}\n` +
+    `• *Location:* ${record.location || 'Not specified'}\n` +
+    `• *Outcome:* ${record.outcome || 'Positive'}\n`;
+
+  if (record.follow_up_action) {
+    prompt += `• *Follow-up Action:* ${record.follow_up_action}\n`;
+  }
+  if (record.follow_up_date) {
+    prompt += `• *Follow-up Date:* ${record.follow_up_date}\n`;
+  }
+  if (record.follow_up_status) {
+    prompt += `• *Follow-up Status:* ${record.follow_up_status}\n`;
+  }
+
+  prompt += `• *Remarks:* ${record.remarks || 'Not specified'}\n\n` +
+    `What details would you like to update?\n` +
+    `_(e.g., Person Met, Outcome to Positive, Remarks, or Follow-up Action)_`;
+
+  return prompt;
+}
+
 // ── MULTI-VISIT DATE DISAMBIGUATION CHECK ────────────────────────────────────
 
 async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
@@ -2870,7 +2976,7 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
 
   let query = supabase
     .from('customer_visits')
-    .select('id, customer_name, customer_address, person_met, contact_no, remarks, visited_at, salesperson_phone')
+    .select('*')
     .order('visited_at', { ascending: false });
 
   if (hasCompanyName) {
@@ -2931,24 +3037,20 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
   const totalPages = Math.ceil(pool.length / pageSize);
 
   const candidateSummaries = pageItems.map((v, idx) => {
-    const vDate = v.visited_at ? new Date(v.visited_at) : new Date();
-    const dateFormatted = formatDateDDMMYYYY(vDate);
-    const outTagMatch = (v.remarks || '').match(/\[Outcome:\s*([^\]]+)\]/i);
-    const outcome = outTagMatch ? outTagMatch[1] : 'Positive';
-    const cleanRemarks = (v.remarks || '')
-      .replace(/\[Outcome:\s*[^\]]+\]/gi, '')
-      .replace(/\[Follow-up:\s*[^\]]+\]/gi, '')
-      .trim();
+    const details = extractVisitDetails(v);
     return {
       index: startIdx + idx + 1,
-      id: v.id,
-      company_name: v.customer_name || draft.company_name || 'Customer',
-      date: dateFormatted,
-      visited_at: v.visited_at,
-      person_met: v.person_met || 'Not recorded',
-      location: v.customer_address || 'Not recorded',
-      outcome: outcome,
-      remarks: cleanRemarks ? (cleanRemarks.length > 80 ? cleanRemarks.slice(0, 77) + '...' : cleanRemarks) : null,
+      id: details.id,
+      company_name: details.customer_name || draft.company_name || 'Customer',
+      date: details.date_formatted,
+      visited_at: details.visited_at,
+      person_met: details.person_met,
+      location: details.location,
+      outcome: details.outcome,
+      follow_up_action: details.follow_up_action,
+      follow_up_date: details.follow_up_date,
+      follow_up_status: details.follow_up_status,
+      remarks: details.remarks !== 'Not specified' ? (details.remarks.length > 80 ? details.remarks.slice(0, 77) + '...' : details.remarks) : null,
     };
   });
 
@@ -2961,6 +3063,15 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
         `   • *Location:* ${c.location}`,
         `   • *Outcome:* ${c.outcome}`,
       ];
+      if (c.follow_up_action) {
+        lines.push(`   • *Follow-up Action:* ${c.follow_up_action}`);
+      }
+      if (c.follow_up_date) {
+        lines.push(`   • *Follow-up Date:* ${c.follow_up_date}`);
+      }
+      if (c.follow_up_status) {
+        lines.push(`   • *Follow-up Status:* ${c.follow_up_status}`);
+      }
       if (c.remarks) {
         lines.push(`   • *Remarks:* ${c.remarks}`);
       }
@@ -3401,31 +3512,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
       scopedVisits = scopedVisits.filter(v => isCustomerMatch(cleanCustFilter, null, v.customer_name, null));
     }
 
-    return scopedVisits.map(v => {
-      const vDate = v.visited_at ? new Date(v.visited_at) : new Date();
-      const dateFormatted = formatDateDDMMYYYY(vDate);
-      const outTagMatch = (v.remarks || '').match(/\[Outcome:\s*([^\]]+)\]/i);
-      const outcome = outTagMatch ? outTagMatch[1] : (v.outcome || 'Positive');
-      const locTagMatch = (v.remarks || '').match(/\[Location:\s*([^\]]+)\]/i);
-      const location = v.customer_address || (locTagMatch ? locTagMatch[1] : 'Not specified');
-      const cleanRemarks = (v.remarks || '')
-        .replace(/\[Outcome:\s*[^\]]+\]/gi, '')
-        .replace(/\[Location:\s*[^\]]+\]/gi, '')
-        .replace(/\[Follow-up:\s*[^\]]+\]/gi, '')
-        .trim();
-
-      return {
-        id: v.id,
-        customer_name: v.customer_name || 'Customer',
-        location: location || 'Not specified',
-        outcome: outcome || 'Positive',
-        date_formatted: dateFormatted,
-        person_met: v.person_met || 'Not recorded',
-        contact_no: v.contact_no || null,
-        remarks: cleanRemarks || 'Not specified',
-        visited_at: v.visited_at,
-      };
-    });
+    return scopedVisits.map(v => extractVisitDetails(v));
   }
 
   return [];
@@ -3790,13 +3877,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
           `What details would you like to update?\n` +
           `_(e.g., "Mark as Resolved", "Update type to Specification Mismatch", "Resolution notes: Replaced material")_`;
       } else if (action === 'UPDATE_VISIT') {
-        prompt = `✏️ *Selected Field Visit for ${matchedRecord.customer_name} (${matchedRecord.date_formatted}):*\n\n` +
-          `• *Person Met:* ${matchedRecord.person_met || 'Not specified'}\n` +
-          `• *Location:* ${matchedRecord.location || 'Not specified'}\n` +
-          `• *Outcome:* ${matchedRecord.outcome || 'Positive'}\n` +
-          `• *Remarks:* ${matchedRecord.remarks || 'Not specified'}\n\n` +
-          `What details would you like to update?\n` +
-          `_(e.g., Person Met, Outcome to Positive, Remarks, or Follow-up Action)_`;
+        prompt = formatSelectedVisitPrompt(matchedRecord);
       }
 
       await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
@@ -5321,7 +5402,14 @@ function buildConfirmationSummary(action, draft) {
       summary += `• *City / Location:* ${draft.city_location || '-'}\n`;
       summary += `• *Visit Date:* ${draft.visit_date || '-'}\n`;
       summary += `• *Visit Outcome:* ${draft.visit_outcome || '-'}\n`;
-      summary += `• *Follow-up Action:* ${draft.followup_action || '-'}\n`;
+      if (draft.followup_action) {
+        summary += `• *Follow-up Action:* ${draft.followup_action}\n`;
+        const parsedFuDate = extractFollowUpDate(draft.followup_action, new Date());
+        if (parsedFuDate) {
+          summary += `• *Follow-up Date:* ${formatDateDDMMYYYY(new Date(parsedFuDate))}\n`;
+        }
+        summary += `• *Follow-up Status:* Pending\n`;
+      }
       summary += `• *Meeting Remarks:* ${draft.meeting_remarks || '-'}\n`;
       if (draft.designation) summary += `• *Designation:* ${draft.designation}\n`;
       if (draft.email) summary += `• *Email:* ${draft.email}\n`;
@@ -5359,6 +5447,15 @@ function buildConfirmationSummary(action, draft) {
           }
         } else if (k === 'gps_photo_url' || k === 'gps_latitude' || k === 'gps_longitude' || k === 'gps_accuracy') {
           // Handled separately below
+        } else if (k === 'followup_action' || k === 'follow_up_action') {
+          if (v) {
+            summary += `  • *Follow-up Action* → ${v}\n`;
+            const parsedFuDate = extractFollowUpDate(v, new Date());
+            if (parsedFuDate) {
+              summary += `  • *Follow-up Date* → ${formatDateDDMMYYYY(new Date(parsedFuDate))}\n`;
+            }
+            summary += `  • *Follow-up Status* → Pending\n`;
+          }
         } else if (v) {
           const label = k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
           summary += `  • *${label}* → ${v}\n`;
@@ -7123,6 +7220,15 @@ async function executeAction(action, draft, senderPhone) {
         if (draft.delivery_location) extDetails += `• *Delivery Location:* ${draft.delivery_location}\n`;
         if (draft.next_purchase_expected) extDetails += `• *Next Purchase Expected:* ${draft.next_purchase_expected}\n`;
 
+        let fuLines = '';
+        if (draft.followup_action) {
+          fuLines += `• *Follow-up Action:* ${draft.followup_action}\n`;
+          if (parsedFollowUpDate) {
+            fuLines += `• *Follow-up Date:* ${formatDateDDMMYYYY(new Date(parsedFollowUpDate))}\n`;
+          }
+          fuLines += `• *Follow-up Status:* Pending\n`;
+        }
+
         return `*Customer Field Visit Logged Successfully!*\n\n` +
           `• *Customer / Company:* ${companyName}\n` +
           `• *Person Met:* ${draft.person_met}\n` +
@@ -7131,7 +7237,7 @@ async function executeAction(action, draft, senderPhone) {
           `• *Visit Date:* ${draft.visit_date}\n` +
           `• *Visit Outcome:* ${draft.visit_outcome}\n` +
           extDetails +
-          (draft.followup_action ? `• *Follow-up Action:* ${draft.followup_action}\n` : '') +
+          fuLines +
           `• *Meeting Remarks:* ${draft.meeting_remarks}\n\n` +
           `Logged to Customer Visits Card!`;
       }
@@ -7363,8 +7469,19 @@ async function executeAction(action, draft, senderPhone) {
         if (visitUpdates.delivery_location) updatesSummary += `• *Delivery Location:* ${visitUpdates.delivery_location}\n`;
         if (visitUpdates.preferred_make) updatesSummary += `• *Preferred Make:* ${visitUpdates.preferred_make}\n`;
         if (visitUpdates.payment_terms) updatesSummary += `• *Payment Terms:* ${visitUpdates.payment_terms}\n`;
-        if (updates.followup_action) updatesSummary += `• *Follow-up Action:* ${visitUpdates.follow_up_action}\n`;
-        if (newFollowupStatus && (isExplicitCompleted || isRemarksCompleted)) updatesSummary += `• *Follow-up Status:* Completed\n`;
+        if (updates.followup_action) {
+          updatesSummary += `• *Follow-up Action:* ${visitUpdates.follow_up_action}\n`;
+          if (visitUpdates.follow_up_date) {
+            const fuDateObj = new Date(visitUpdates.follow_up_date);
+            const fuDateStr = !isNaN(fuDateObj.getTime()) ? formatDateDDMMYYYY(fuDateObj) : visitUpdates.follow_up_date;
+            updatesSummary += `• *Follow-up Date:* ${fuDateStr}\n`;
+          }
+          if (visitUpdates.follow_up_status) {
+            updatesSummary += `• *Follow-up Status:* ${visitUpdates.follow_up_status.charAt(0).toUpperCase() + visitUpdates.follow_up_status.slice(1)}\n`;
+          }
+        } else if (newFollowupStatus && (isExplicitCompleted || isRemarksCompleted)) {
+          updatesSummary += `• *Follow-up Status:* Completed\n`;
+        }
         if (updates.meeting_remarks) updatesSummary += `• *Meeting Remarks:* ${updates.meeting_remarks}\n`;
 
         // Log to activity_logs
@@ -9937,29 +10054,37 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         const pageItems = pool.slice(startIdx, startIdx + pageSize);
 
         const candidateSummaries = pageItems.map((v, idx) => {
-          const vDate = v.visited_at ? new Date(v.visited_at) : new Date();
-          const dateFormatted = formatDateDDMMYYYY(vDate);
-          const outTagMatch = (v.remarks || '').match(/\[Outcome:\s*([^\]]+)\]/i);
-          const outcome = outTagMatch ? outTagMatch[1] : 'Positive';
-          const cleanRemarks = (v.remarks || '')
-            .replace(/\[Outcome:\s*[^\]]+\]/gi, '')
-            .replace(/\[Follow-up:\s*[^\]]+\]/gi, '')
-            .trim();
+          const details = extractVisitDetails(v);
           return {
             index: startIdx + idx + 1,
-            id: v.id,
-            company_name: v.customer_name || existingDraft.company_name,
-            date: dateFormatted,
-            visited_at: v.visited_at,
-            person_met: v.person_met || 'Not recorded',
-            location: v.customer_address || 'Not recorded',
-            outcome: outcome,
-            remarks: cleanRemarks ? (cleanRemarks.length > 80 ? cleanRemarks.slice(0, 77) + '...' : cleanRemarks) : null,
+            id: details.id,
+            company_name: details.customer_name || existingDraft.company_name,
+            date: details.date_formatted,
+            visited_at: details.visited_at,
+            person_met: details.person_met,
+            location: details.location,
+            outcome: details.outcome,
+            follow_up_action: details.follow_up_action,
+            follow_up_date: details.follow_up_date,
+            follow_up_status: details.follow_up_status,
+            remarks: details.remarks !== 'Not specified' ? (details.remarks.length > 80 ? details.remarks.slice(0, 77) + '...' : details.remarks) : null,
           };
         });
 
         const choicesText = candidateSummaries
-          .map(c => `${c.index}. *Visit on ${c.date}*\n   • *Person Met:* ${c.person_met}\n   • *Location:* ${c.location}\n   • *Outcome:* ${c.outcome}${c.remarks ? `\n   • *Remarks:* ${c.remarks}` : ''}`)
+          .map(c => {
+            const lines = [
+              `${c.index}. *Visit on ${c.date}*`,
+              `   • *Person Met:* ${c.person_met}`,
+              `   • *Location:* ${c.location}`,
+              `   • *Outcome:* ${c.outcome}`,
+            ];
+            if (c.follow_up_action) lines.push(`   • *Follow-up Action:* ${c.follow_up_action}`);
+            if (c.follow_up_date) lines.push(`   • *Follow-up Date:* ${c.follow_up_date}`);
+            if (c.follow_up_status) lines.push(`   • *Follow-up Status:* ${c.follow_up_status}`);
+            if (c.remarks) lines.push(`   • *Remarks:* ${c.remarks}`);
+            return lines.join('\n');
+          })
           .join('\n\n');
 
         const headerText = `📅 *Showing ${startIdx + 1}–${startIdx + candidateSummaries.length} of ${pool.length} Visits for ${existingDraft.company_name} (Page ${nextPage} of ${totalPages}):*`;
@@ -10107,16 +10232,18 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       if (numIdx !== null) {
         if (existingDraft._all_visit_candidates && Array.isArray(existingDraft._all_visit_candidates) && numIdx >= 1 && numIdx <= existingDraft._all_visit_candidates.length) {
           const v = existingDraft._all_visit_candidates[numIdx - 1];
-          const vDate = v.visited_at ? new Date(v.visited_at) : new Date();
-          const outTagMatch = (v.remarks || '').match(/\[Outcome:\s*([^\]]+)\]/i);
+          const details = extractVisitDetails(v);
           matchedCandidate = {
-            id: v.id,
-            company_name: v.customer_name || existingDraft.company_name,
-            date: formatDateDDMMYYYY(vDate),
-            person_met: v.person_met || 'Not recorded',
-            location: v.customer_address || 'Not recorded',
-            outcome: outTagMatch ? outTagMatch[1] : 'Positive',
-            remarks: v.remarks || 'Not specified',
+            id: details.id,
+            company_name: details.customer_name || existingDraft.company_name,
+            date: details.date_formatted,
+            person_met: details.person_met,
+            location: details.location,
+            outcome: details.outcome,
+            follow_up_action: details.follow_up_action,
+            follow_up_date: details.follow_up_date,
+            follow_up_status: details.follow_up_status,
+            remarks: details.remarks,
           };
         } else if (numIdx >= 1 && numIdx <= existingDraft._visit_candidates.length) {
           matchedCandidate = existingDraft._visit_candidates[numIdx - 1];
@@ -10147,13 +10274,17 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           Boolean(existingDraft.person_met || existingDraft.contact_phone || existingDraft.visit_outcome || existingDraft.meeting_remarks);
 
         if (isPureSelect && !hasUpdates) {
-          const prompt = `✏️ **Selected Field Visit for ${matchedCandidate.company_name || 'Customer'} (${matchedCandidate.date}):**\n\n` +
-            `- **Person Met:** ${matchedCandidate.person_met || 'Not specified'}\n` +
-            `- **Location:** ${matchedCandidate.location || 'Not specified'}\n` +
-            `- **Visit Outcome:** ${matchedCandidate.outcome || 'Not specified'}\n` +
-            `- **Remarks:** ${matchedCandidate.remarks || 'Not specified'}\n\n` +
-            `What details would you like to update?\n` +
-            `_(e.g., Person Met, Outcome to Positive, Remarks, or Follow-up Action)_`;
+          const prompt = formatSelectedVisitPrompt({
+            customer_name: matchedCandidate.company_name || 'Customer',
+            date_formatted: matchedCandidate.date,
+            person_met: matchedCandidate.person_met,
+            location: matchedCandidate.location,
+            outcome: matchedCandidate.outcome,
+            follow_up_action: matchedCandidate.follow_up_action,
+            follow_up_date: matchedCandidate.follow_up_date,
+            follow_up_status: matchedCandidate.follow_up_status,
+            remarks: matchedCandidate.remarks,
+          });
 
           await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
           await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
