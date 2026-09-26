@@ -2423,101 +2423,6 @@ async function verifyDraftCustomer(action, draft, senderPhone) {
   };
 }
 
-async function validateDraftComplaintReference(draft, senderPhone) {
-  if (!draft || !draft.company_name) return { isValid: true };
-  const companyName = String(draft.company_name).trim();
-  const rawRef = (draft.linked_inquiry_or_po || draft.po_number || '').trim();
-  if (!rawRef) return { isValid: true };
-
-  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
-
-  const isExplicitInquiry = /^#?(?:INQ|DEAL)-/i.test(rawRef);
-  if (isExplicitInquiry) {
-    const cleanInqCode = rawRef.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/^#+/, '').trim().toUpperCase();
-    let dQuery = supabase
-      .from('deals')
-      .select('id, inquiry_id, customer_name, po_number, stage, salesperson_phone')
-      .ilike('customer_name', `%${companyName}%`);
-
-    let iQuery = supabase
-      .from('inquiries')
-      .select('id, sender_name, salesperson_phone, status')
-      .ilike('sender_name', `%${companyName}%`);
-
-    if (scope.phones !== null) {
-      const targetPhones = expandPhoneVariants(scope.phones);
-      if (targetPhones.length > 0) {
-        dQuery = dQuery.in('salesperson_phone', targetPhones);
-        iQuery = iQuery.in('salesperson_phone', targetPhones);
-      } else {
-        dQuery = null;
-        iQuery = null;
-      }
-    }
-
-    const { data: customerDeals } = dQuery ? await dQuery : { data: [] };
-
-    const matchedDeal = (customerDeals || []).find(d => {
-      const dId = (d.id || '').replace(/-/g, '').toUpperCase();
-      const inqId = (d.inquiry_id || '').replace(/-/g, '').toUpperCase();
-      return dId.startsWith(cleanInqCode) || inqId.startsWith(cleanInqCode) || (d.id || '').toUpperCase().startsWith(cleanInqCode);
-    });
-
-    if (!matchedDeal) {
-      const { data: customerInqs } = iQuery ? await iQuery : { data: [] };
-
-      const matchedInq = (customerInqs || []).find(i => {
-        const iId = (i.id || '').replace(/-/g, '').toUpperCase();
-        return iId.startsWith(cleanInqCode) || (i.id || '').toUpperCase().startsWith(cleanInqCode);
-      });
-
-      if (!matchedInq) {
-        const displayInq = cleanInqCode.startsWith('INQ-') ? cleanInqCode : `INQ-${cleanInqCode}`;
-        return {
-          isValid: false,
-          rejectionMessage: `Inquiry ${displayInq} was not found for ${companyName}. A complaint can only be raised against an existing PO or inquiry in your portfolio. Please verify the inquiry ID and try again.`,
-        };
-      }
-    }
-  } else {
-    // PO Number validation
-    const cleanPo = rawRef.replace(/^(?:PO|Purchase\s*Order)[\s#:-]*/i, '').replace(/^#+/, '').trim();
-    let dQuery = supabase
-      .from('deals')
-      .select('id, inquiry_id, customer_name, po_number, stage, salesperson_phone')
-      .ilike('customer_name', `%${companyName}%`);
-
-    if (scope.phones !== null) {
-      const targetPhones = expandPhoneVariants(scope.phones);
-      if (targetPhones.length > 0) {
-        dQuery = dQuery.in('salesperson_phone', targetPhones);
-      } else {
-        dQuery = null;
-      }
-    }
-
-    const { data: customerDeals } = dQuery ? await dQuery : { data: [] };
-
-    const matchedDeal = (customerDeals || []).find(d => {
-      if (!d.po_number) return false;
-      const dPo = String(d.po_number).trim().toUpperCase();
-      const cPo = cleanPo.toUpperCase();
-      const dPoClean = dPo.replace(/^(?:PO|Purchase\s*Order)[\s#:-]*/i, '').replace(/^#+/, '');
-      return dPo === cPo || dPoClean === cPo || dPo.includes(cPo) || cPo.includes(dPoClean);
-    });
-
-    if (!matchedDeal) {
-      const displayPo = cleanPo.startsWith('PO') || cleanPo.startsWith('#') ? cleanPo : `#${cleanPo}`;
-      return {
-        isValid: false,
-        rejectionMessage: `PO ${displayPo} was not found in the Orders records for ${companyName}. A complaint can only be raised against an existing PO or inquiry in your portfolio. Please verify the PO number and try again.`,
-      };
-    }
-  }
-
-  return { isValid: true };
-}
-
 // ── VALIDATE ORDER INQUIRY STAGE GATE ───────────────────────────────────────
 
 /**
@@ -2657,18 +2562,20 @@ async function validateOrderInquiryStage(draft, senderPhone) {
 
   // 1. Customer Name
   if (!draft.company_name) {
-    draft.company_name = matchedDeal?.customer_name || matchedInq?.sender_name || matchedInq?.ai_extraction_json?.customer_name || matchedInq?.ai_extraction_json?.companyName || 'Customer';
+    draft.company_name = matchedDeal?.customer_name || matchedInq?.sender_name || matchedInq?.ai_extraction_json?.customer_name || matchedInq?.ai_extraction_json?.companyName || null;
   }
-  draft._customer_verified = true;
+  if (draft.company_name) {
+    draft._customer_verified = true;
+  }
 
   // 2. Delivery Location
   if (!draft.delivery_location) {
-    draft.delivery_location = matchedDeal?.delivery_location || matchedInq?.ai_extraction_json?.delivery_location || matchedInq?.ai_extraction_json?.deliveryLocation || matchedInq?.ai_extraction_json?.delivery_address || 'Standard / Ex-Works';
+    draft.delivery_location = matchedDeal?.delivery_location || matchedInq?.ai_extraction_json?.delivery_location || matchedInq?.ai_extraction_json?.deliveryLocation || matchedInq?.ai_extraction_json?.delivery_address || null;
   }
 
   // 3. Payment Terms
   if (!draft.payment_terms) {
-    draft.payment_terms = matchedDeal?.payment_terms || matchedInq?.ai_extraction_json?.payment_terms || matchedInq?.ai_extraction_json?.paymentTerms || 'Standard Terms';
+    draft.payment_terms = matchedDeal?.payment_terms || matchedInq?.ai_extraction_json?.payment_terms || matchedInq?.ai_extraction_json?.paymentTerms || null;
   }
 
   // 4. PO Date
@@ -2677,14 +2584,8 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   }
 
   // 5. PO Number
-  if (!draft.po_number) {
-    if (matchedDeal?.po_number) {
-      draft.po_number = matchedDeal.po_number;
-    } else {
-      const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      const randomNum = Math.floor(1000 + Math.random() * 9000);
-      draft.po_number = `PO-${todayStr}-${randomNum}`;
-    }
+  if (!draft.po_number && matchedDeal?.po_number) {
+    draft.po_number = matchedDeal.po_number;
   }
 
   // 6. Fetch DB line items
@@ -8541,17 +8442,6 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
     if (!draft.po_date) {
       draft.po_date = formatDateDDMMYYYY(new Date());
     }
-    if (!draft.po_number) {
-      const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      const randomNum = Math.floor(1000 + Math.random() * 9000);
-      draft.po_number = `PO-${todayStr}-${randomNum}`;
-    }
-    if (!draft.delivery_location) {
-      draft.delivery_location = 'Standard / Ex-Works';
-    }
-    if (!draft.payment_terms) {
-      draft.payment_terms = 'Standard Terms';
-    }
 
     const missing = validateMandatoryFields('LOG_ORDER', draft);
     if (missing.length === 0) {
@@ -8784,60 +8674,6 @@ function detectOperationalAction(text) {
   return null;
 }
 
-/**
- * Intelligent Fast LLM Intent Classifier
- * Used as a fallback when rule-based patterns do not trigger, ensuring NO inquiry or CRM prompt is ever missed.
- */
-async function detectOperationalActionWithLLM(text) {
-  if (!text || typeof text !== 'string' || text.trim().length < 5) return null;
-  const clean = text.trim();
-
-  const prompt = `You are the Intent Classification Router for Enlight Metals CRM WhatsApp Bot.
-Classify the operational action intended in this salesperson message:
-"${clean}"
-
-Possible Actions:
-- LOG_INQUIRY: User is sharing a customer inquiry, steel requirement, RFQ, price quote request, customer needing steel material/quantities, multi-item specification, or rate request.
-- LOG_ORDER: User is recording a confirmed purchase order with PO number / date.
-- LOG_VISIT: User is reporting a customer site visit, field meeting, or discussion notes.
-- LOG_COMPLAINT: User is reporting damaged material, quality issue, shortage, or customer complaint.
-- LOG_NEW_CUSTOMER: User is creating/onboarding a brand new customer company.
-- UPDATE_INQUIRY: User is modifying an existing inquiry or changing fields of an inquiry.
-- UPDATE_ORDER: User is updating an order or attaching a PO to an inquiry.
-- UPDATE_VISIT: User is updating an existing visit report.
-- UPDATE_COMPLAINT: User is updating an existing complaint.
-- QUERY: User is asking a question or querying database records.
-- NONE: General casual text, greeting, or unclear.
-
-Respond ONLY with the single exact action name (e.g. LOG_INQUIRY) or NONE. No formatting, no extra text.`;
-
-  try {
-    const res = await invokeWithFallback([new HumanMessage(prompt)]);
-    const rawAction = (typeof res.content === 'string' ? res.content : '').trim().replace(/[*_`]/g, '').toUpperCase();
-    const validActions = [
-      'LOG_INQUIRY',
-      'LOG_ORDER',
-      'LOG_VISIT',
-      'LOG_COMPLAINT',
-      'LOG_NEW_CUSTOMER',
-      'UPDATE_INQUIRY',
-      'UPDATE_ORDER',
-      'UPDATE_VISIT',
-      'UPDATE_COMPLAINT',
-    ];
-
-    for (const act of validActions) {
-      if (rawAction === act || rawAction.startsWith(act)) {
-        return act;
-      }
-    }
-  } catch (err) {
-    console.warn('[CatalogFlow] LLM intent detection notice:', err.message);
-  }
-
-  return null;
-}
-
 const DIRECT_ACTION_MAP = [
   // 1. Customer Acquisition
   { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|record|add|create|onboard|acquire)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?customer\b/i, action: 'LOG_NEW_CUSTOMER' },
@@ -9037,37 +8873,6 @@ function detectOutOfScopeActionAttempt(currentAction, text) {
         return entry.action;
       }
     }
-  }
-
-  return null;
-}
-
-async function detectNewOperationalIntent(text) {
-  if (!text || typeof text !== 'string') return null;
-  const lower = text.toLowerCase().trim();
-
-  // If message is a pure query / search, do not intercept
-  if (isOperationalQuery(lower)) return null;
-
-  // 1. Menu selection
-  const matchedMenuAction = matchActionFromInput(text);
-  if (matchedMenuAction) return matchedMenuAction;
-
-  // 2. Direct action regex map
-  for (const { pattern, action } of DIRECT_ACTION_MAP) {
-    if (pattern.test(text)) {
-      return action;
-    }
-  }
-
-  // 3. Operational action detector
-  const opAction = detectOperationalAction(text);
-  if (opAction) return opAction;
-
-  // 4. Fallback fast LLM intent classifier
-  if (text.length >= 8) {
-    const llmAction = await detectOperationalActionWithLLM(text);
-    if (llmAction && llmAction !== 'QUERY') return llmAction;
   }
 
   return null;
@@ -10155,7 +9960,18 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
         const startIdx = (nextPage - 1) * pageSize;
         const pageDeals = pool.slice(startIdx, startIdx + pageSize);
-        const orderList = pageDeals.map(formatOrderCandidate).join('\n\n');
+        const orderList = pageDeals.map((d, idx) => {
+          const poRef = d.po_number ? `PO: *${d.po_number}* (${d.deal_code || d.displayId || d.id})` : `*${d.deal_code || d.displayId || d.id}*`;
+          const lines = [
+            `${startIdx + idx + 1}. ${poRef} — _${d.stage ? (d.stage.charAt(0).toUpperCase() + d.stage.slice(1)) : 'Won'}_`,
+          ];
+          if (d.product_summary) lines.push(`   • *Product:* ${d.product_summary}`);
+          if (d.location || d.delivery_location) lines.push(`   • *Delivery Location:* ${d.location || d.delivery_location}`);
+          if (d.payment_terms) lines.push(`   • *Payment Terms:* ${d.payment_terms}`);
+          if (d.total_amount > 0) lines.push(`   • *Total Value:* ₹${d.total_amount.toLocaleString('en-IN')}`);
+          if (d.date_formatted) lines.push(`   • *Date:* ${d.date_formatted}`);
+          return lines.join('\n');
+        }).join('\n\n');
 
         const headerText = `⚠️ *Showing ${startIdx + 1}–${startIdx + pageDeals.length} of ${pool.length} Confirmed Orders (Page ${nextPage} of ${totalPages}):*`;
         const footerText = `👉 Reply with the *Number* (1–${pool.length}) or the *Inquiry ID* / *PO Number*.`;
