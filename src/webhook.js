@@ -263,17 +263,159 @@ router.post('/', async (req, res) => {
         }
         // ── END CATALOG FLOW ─────────────────────────────────────────────────────────────────
 
-        // --- CHECK ACTIVE REJECTION & PENDING STATE FLOWS (multi-turn logic) ---
-        const isMedia = messageType === 'image' || messageType === 'document' || (media_urls && media_urls.length > 0);
-        if (isMedia) {
-          await saveActiveSession(senderPhone, 'Unknown', 'general');
-        } else {
-          const { handlePendingSessionState } = require('./core/pendingStateManager');
-          const pendingReply = await handlePendingSessionState(raw_text, senderPhone);
-          if (pendingReply) {
-            await sendTextMessage(senderPhone, pendingReply);
-            return;
+        // ── MEDIA (IMAGE / DOCUMENT) HANDLING: STRICT FLOW GATING ───────────
+        if (messageType === 'image' || messageType === 'document') {
+          const activeSession = await getFullActiveSession(senderPhone);
+          const lastIntent = activeSession?.last_intent || '';
+
+          const isInquiryFlow = lastIntent.startsWith('catalog_flow|LOG_INQUIRY') ||
+            lastIntent.startsWith('catalog_editing|LOG_INQUIRY') ||
+            lastIntent.startsWith('catalog_confirm|LOG_INQUIRY') ||
+            lastIntent.startsWith('catalog_selection|LOG_INQUIRY');
+
+          const isOrderFlow = lastIntent.startsWith('catalog_flow|LOG_ORDER') ||
+            lastIntent.startsWith('catalog_editing|LOG_ORDER') ||
+            lastIntent.startsWith('catalog_confirm|LOG_ORDER') ||
+            lastIntent.startsWith('catalog_selection|LOG_ORDER');
+
+          const isVisitFlow = messageType === 'image' && (
+            lastIntent.startsWith('catalog_flow|LOG_VISIT') ||
+            lastIntent.startsWith('catalog_flow|UPDATE_VISIT') ||
+            lastIntent.startsWith('catalog_confirm|LOG_VISIT') ||
+            lastIntent.startsWith('catalog_confirm|UPDATE_VISIT') ||
+            lastIntent.startsWith('catalog_editing|LOG_VISIT') ||
+            lastIntent.startsWith('catalog_editing|UPDATE_VISIT')
+          );
+
+          const isPaymentKeyword = messageType === 'image' && raw_text && (
+            raw_text.toLowerCase().includes('payment') ||
+            raw_text.toLowerCase().includes('paid') ||
+            raw_text.toLowerCase().includes('receipt') ||
+            raw_text.toLowerCase().includes('upi') ||
+            raw_text.toLowerCase().includes('advance')
+          );
+
+          if (isInquiryFlow && media_urls.length > 0) {
+            const mediaId = media_urls[0];
+            const mediaData = await downloadMedia(mediaId);
+            if (!mediaData || !mediaData.buffer) {
+              await sendTextMessage(senderPhone, '❌ *Failed to download the document.* Please try sending it again.');
+              return;
+            }
+            const { handleInquiryDocumentOcr } = require('./core/catalogFlow');
+            const ocrResult = await handleInquiryDocumentOcr(mediaData.buffer, mediaData.mimeType, senderPhone, raw_text);
+            if (ocrResult && ocrResult.handled && ocrResult.reply) {
+              if (ocrResult.interactiveType === 'buttons' && Array.isArray(ocrResult.interactiveButtons)) {
+                await sendInteractiveButtons(
+                  senderPhone,
+                  ocrResult.reply,
+                  ocrResult.interactiveButtons,
+                  ocrResult.interactiveOptions || {}
+                );
+              } else {
+                await sendTextMessage(senderPhone, ocrResult.reply);
+              }
+              return;
+            }
           }
+
+          if (isOrderFlow && media_urls.length > 0) {
+            const mediaId = media_urls[0];
+            const mediaData = await downloadMedia(mediaId);
+            if (!mediaData || !mediaData.buffer) {
+              await sendTextMessage(senderPhone, '❌ *Failed to download the PO document.* Please try sending it again.');
+              return;
+            }
+            const { handleOrderDocumentOcr } = require('./core/catalogFlow');
+            const ocrResult = await handleOrderDocumentOcr(mediaData.buffer, mediaData.mimeType, senderPhone, raw_text);
+            if (ocrResult && ocrResult.handled && ocrResult.reply) {
+              if (ocrResult.interactiveType === 'buttons' && Array.isArray(ocrResult.interactiveButtons)) {
+                await sendInteractiveButtons(
+                  senderPhone,
+                  ocrResult.reply,
+                  ocrResult.interactiveButtons,
+                  ocrResult.interactiveOptions || {}
+                );
+              } else if (ocrResult.interactiveType === 'list' && ocrResult.interactiveList) {
+                await sendInteractiveList(
+                  senderPhone,
+                  ocrResult.interactiveList.bodyText || ocrResult.reply,
+                  ocrResult.interactiveList.buttonText || 'Choose Option',
+                  ocrResult.interactiveList.sections || [],
+                  ocrResult.interactiveOptions || {}
+                );
+              } else {
+                await sendTextMessage(senderPhone, ocrResult.reply);
+              }
+              return;
+            }
+          }
+
+          if (isVisitFlow && media_urls.length > 0) {
+            const mediaId = media_urls[0];
+            const mediaData = await downloadMedia(mediaId);
+            let attachmentObj = null;
+            if (mediaData && mediaData.buffer) {
+              attachmentObj = {
+                type: 'image',
+                url: `data:${mediaData.mimeType || 'image/jpeg'};base64,${mediaData.buffer.toString('base64')}`,
+                mimeType: mediaData.mimeType || 'image/jpeg',
+                fileName: 'visit_site_photo.jpg',
+              };
+            }
+            const { handleCatalogFlow } = require('./core/catalogFlow');
+            const catalogResult = await handleCatalogFlow(raw_text || 'Photo uploaded', senderPhone, attachmentObj);
+            if (catalogResult && catalogResult.handled && catalogResult.reply) {
+              if (catalogResult.interactiveType === 'buttons' && Array.isArray(catalogResult.interactiveButtons)) {
+                await sendInteractiveButtons(
+                  senderPhone,
+                  catalogResult.reply,
+                  catalogResult.interactiveButtons,
+                  catalogResult.interactiveOptions || {}
+                );
+              } else if (catalogResult.interactiveType === 'list' && catalogResult.interactiveList) {
+                await sendInteractiveList(
+                  senderPhone,
+                  catalogResult.interactiveList.bodyText || catalogResult.reply,
+                  catalogResult.interactiveList.buttonText || 'Choose Action',
+                  catalogResult.interactiveList.sections || [],
+                  catalogResult.interactiveOptions || {}
+                );
+              } else {
+                await sendTextMessage(senderPhone, catalogResult.reply);
+              }
+              return;
+            }
+          }
+
+          if (isPaymentKeyword && media_urls.length > 0) {
+            const mediaId = media_urls[0];
+            const mediaData = await downloadMedia(mediaId);
+            if (mediaData && mediaData.buffer) {
+              const paymentVisionReply = await processPaymentImage(mediaData.buffer, mediaData.mimeType, senderPhone);
+              await sendTextMessage(senderPhone, paymentVisionReply);
+              return;
+            }
+          }
+
+          // Strict flow gating rejection for all other media uploads
+          const { CATALOG_MENU_SECTIONS } = require('./core/catalogFlow');
+          const gatingReply = "Documents can only be processed within an active flow. To log an inquiry from a document, select 'Log New Inquiry' from the menu. To log an order from a PO document, select 'Log New Order' from the menu.";
+          await sendInteractiveList(
+            senderPhone,
+            gatingReply,
+            'Choose Action',
+            CATALOG_MENU_SECTIONS
+          );
+          return;
+        }
+
+        // --- CHECK ACTIVE REJECTION & PENDING STATE FLOWS (multi-turn logic) ---
+        const { handlePendingSessionState } = require('./core/pendingStateManager');
+        const pendingReply = await handlePendingSessionState(raw_text, senderPhone);
+        if (pendingReply) {
+          await sendTextMessage(senderPhone, pendingReply);
+          return;
         }
 
         // ── OPERATIONAL AGENTIC ORCHESTRATOR (LangGraph + Specialized Write Agents) ──
@@ -315,35 +457,6 @@ router.post('/', async (req, res) => {
         if (messageType === 'text' && raw_text && raw_text.length > 5) {
           // Extract from text
           extraction = await extractFromText(raw_text);
-        } else if ((messageType === 'image' || messageType === 'document') && media_urls.length > 0) {
-          const mediaId = media_urls[0];
-          const mediaData = await downloadMedia(mediaId);
-          console.log('Media download result:', mediaData ? 'success' : 'failed');
-
-          if (mediaData && mediaData.buffer) {
-            const isPaymentKeyword = raw_text && (
-              raw_text.toLowerCase().includes('payment') ||
-              raw_text.toLowerCase().includes('paid') ||
-              raw_text.toLowerCase().includes('receipt') ||
-              raw_text.toLowerCase().includes('upi') ||
-              raw_text.toLowerCase().includes('advance')
-            );
-
-            if (isPaymentKeyword) {
-              // Route to Payment Collection Vision Agent (KRA 5)
-              const paymentVisionReply = await processPaymentImage(mediaData.buffer, mediaData.mimeType, senderPhone);
-              await sendTextMessage(senderPhone, paymentVisionReply);
-              return;
-            } else {
-              // Route to dedicated OCR Agent (Inquiries Tab & Orders Tab)
-              // Pass messageId so OCR Agent can save with the correct base64 image data
-              const ocrVisionReply = await processOcrDocumentImage(mediaData.buffer, mediaData.mimeType, senderPhone, messageId);
-              await sendTextMessage(senderPhone, ocrVisionReply);
-              return;
-            }
-          } else {
-            mediaDownloadFailed = true;
-          }
         } else if (messageType === 'audio' && voice_url) {
           console.log('Voice note received, downloading...');
           const mediaData = await downloadMedia(voice_url);

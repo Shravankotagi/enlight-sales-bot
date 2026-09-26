@@ -2423,6 +2423,399 @@ async function verifyDraftCustomer(action, draft, senderPhone) {
   };
 }
 
+// ── AUTO-INQUIRY MATCHING FOR PO DOCUMENT UPLOADS ───────────────────────────
+
+/**
+ * Searches the salesperson's scoped portfolio for open/quoted inquiries matching
+ * the customer name and product details extracted from a PO document.
+ */
+async function findMatchingInquiriesForPo(customerName, lineItems = [], senderPhone) {
+  if (!customerName) return { status: 'NO_MATCH', candidates: [] };
+
+  const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants } = require('../supabase');
+  const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+  const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
+  // Query deals for this salesperson
+  let dealsQuery = supabase
+    .from('deals')
+    .select('id, inquiry_id, customer_name, stage, total_amount, delivery_location, payment_terms, salesperson_phone, created_at, deal_items(*)')
+    .order('created_at', { ascending: false });
+
+  if (!scope.isAdmin && targetPhones.length > 0) {
+    dealsQuery = dealsQuery.in('salesperson_phone', targetPhones);
+  }
+
+  const { data: allDeals } = await dealsQuery.limit(200);
+  const deals = allDeals || [];
+
+  // Filter deals matching customerName and open stages
+  const custDeals = deals.filter(d => {
+    const st = String(d.stage || '').toLowerCase().trim();
+    if (st === 'won' || st === 'closed_won' || st === 'closed won' || st === 'lost' || st === 'closed_lost' || st === 'closed lost') {
+      return false;
+    }
+    return isCustomerMatch(customerName, null, d.customer_name, null);
+  });
+
+  // Query inquiries for this salesperson as fallback
+  let inqsQuery = supabase
+    .from('inquiries')
+    .select('id, sender_name, customer_name, salesperson_phone, status, stage, ai_extraction_json, created_at, inquiry_items(*), deals(*)')
+    .order('created_at', { ascending: false });
+
+  if (!scope.isAdmin && targetPhones.length > 0) {
+    inqsQuery = inqsQuery.in('salesperson_phone', targetPhones);
+  }
+
+  const { data: allInqs } = await inqsQuery.limit(200);
+  const inqs = allInqs || [];
+
+  const custInqs = inqs.filter(i => {
+    const st = String(i.stage || i.status || '').toLowerCase().trim();
+    if (st === 'won' || st === 'confirmed' || st === 'closed_won' || st === 'lost' || st === 'closed_lost') {
+      return false;
+    }
+    const cName = i.customer_name || i.sender_name || i.ai_extraction_json?.customer_name || i.ai_extraction_json?.companyName || '';
+    return isCustomerMatch(customerName, null, cName, null);
+  });
+
+  // Combine and deduplicate candidates by inquiry ID
+  const candidateMap = new Map();
+
+  for (const d of custDeals) {
+    const dId = d.inquiry_id || d.id;
+    const cleanDisplayInq = dId.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
+    const displayId = `INQ-${cleanDisplayInq}`;
+    const dDate = d.created_at ? formatDateDDMMYYYY(new Date(d.created_at)) : '';
+    const items = Array.isArray(d.deal_items) ? d.deal_items : [];
+    const prodSummary = items.map(it => `${it.sku_text || 'Steel'} (${it.quantity || ''} ${it.unit || 'MT'})`).join(', ') || 'Requirements on record';
+
+    candidateMap.set(d.id, {
+      deal_id: d.id,
+      inquiry_id: d.inquiry_id || d.id,
+      displayId,
+      company_name: d.customer_name,
+      stage: formatStageLabel ? formatStageLabel(d.stage) : d.stage,
+      dateFormatted: dDate,
+      productSummary: prodSummary,
+      delivery_location: d.delivery_location,
+      payment_terms: d.payment_terms,
+      total_amount: d.total_amount,
+      deal_items: items,
+    });
+  }
+
+  for (const i of custInqs) {
+    const linkedDeal = Array.isArray(i.deals) && i.deals.length > 0 ? i.deals[0] : null;
+    const dealId = linkedDeal ? linkedDeal.id : null;
+    if (dealId && candidateMap.has(dealId)) continue;
+
+    const inqKey = i.id;
+    if (candidateMap.has(inqKey)) continue;
+
+    const cleanDisplayInq = i.id.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase().slice(0, 6);
+    const displayId = `INQ-${cleanDisplayInq}`;
+    const dDate = i.created_at ? formatDateDDMMYYYY(new Date(i.created_at)) : '';
+    const items = Array.isArray(i.inquiry_items) ? i.inquiry_items : [];
+    const prodSummary = items.map(it => `${it.sku_text || 'Steel'} (${it.quantity || ''} ${it.unit || 'MT'})`).join(', ') || 'Requirements on record';
+    const cName = i.customer_name || i.sender_name || i.ai_extraction_json?.customer_name || i.ai_extraction_json?.companyName || customerName;
+
+    candidateMap.set(inqKey, {
+      deal_id: dealId,
+      inquiry_id: i.id,
+      displayId,
+      company_name: cName,
+      stage: formatStageLabel ? formatStageLabel(i.stage || i.status) : (i.stage || i.status),
+      dateFormatted: dDate,
+      productSummary: prodSummary,
+      delivery_location: i.ai_extraction_json?.delivery_location || i.ai_extraction_json?.deliveryLocation || null,
+      payment_terms: i.ai_extraction_json?.payment_terms || i.ai_extraction_json?.paymentTerms || null,
+      total_amount: i.ai_extraction_json?.total_amount || 0,
+      deal_items: items,
+    });
+  }
+
+  const allCustCandidates = Array.from(candidateMap.values());
+  if (allCustCandidates.length === 0) {
+    return { status: 'NO_MATCH', candidates: [] };
+  }
+
+  // Check product match overlap
+  const poProducts = (lineItems || []).map(it => {
+    const raw = it.sku_text || it.description || it.product_name || '';
+    const norm = normalizeProductToCatalog(raw);
+    return norm.isValid ? norm.catalogName.toLowerCase() : raw.toLowerCase().trim();
+  }).filter(Boolean);
+
+  let matchedCandidates = [];
+  if (poProducts.length > 0) {
+    matchedCandidates = allCustCandidates.filter(c => {
+      const items = Array.isArray(c.deal_items) ? c.deal_items : [];
+      const cProducts = items.map(it => {
+        const raw = it.sku_text || it.description || it.product_name || '';
+        const norm = normalizeProductToCatalog(raw);
+        return norm.isValid ? norm.catalogName.toLowerCase() : raw.toLowerCase().trim();
+      }).filter(Boolean);
+
+      if (cProducts.length === 0) return true;
+      return poProducts.some(p => cProducts.some(cp => cp.includes(p) || p.includes(cp) || cp === p));
+    });
+  }
+
+  // If product filter didn't match anything specific, fall back to all customer candidates
+  if (matchedCandidates.length === 0) {
+    matchedCandidates = allCustCandidates;
+  }
+
+  const finalCandidates = matchedCandidates.map((c, idx) => ({
+    ...c,
+    index: idx + 1,
+  }));
+
+  if (finalCandidates.length === 1) {
+    return {
+      status: 'SINGLE_MATCH',
+      inquiry: finalCandidates[0],
+      candidates: finalCandidates,
+    };
+  }
+
+  return {
+    status: 'MULTIPLE_MATCHES',
+    candidates: finalCandidates,
+  };
+}
+
+/**
+ * Processes an incoming Inquiry document (photo or PDF) inside an active LOG_INQUIRY flow session.
+ */
+async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, caption = '') {
+  const { extractFromImage } = require('../gemini');
+  let extraction = null;
+  try {
+    extraction = await extractFromImage(imageBuffer, mimeType);
+  } catch (err) {
+    console.error('[CatalogFlow] extractFromImage error in handleInquiryDocumentOcr:', err);
+  }
+
+  if (!extraction || extraction.error || (!extraction.customer && (!extraction.line_items || extraction.line_items.length === 0))) {
+    return {
+      handled: true,
+      reply: `⚠️ Could not clearly extract inquiry details from the document image. Please send a clearer picture or type the details (e.g. "Delta Structural Steel 50 MT HR Coil Delivery Mumbai").`,
+    };
+  }
+
+  const rawCustName = extraction.customer && extraction.customer.name ? String(extraction.customer.name).trim() : '';
+  const isGenericName = !rawCustName || rawCustName === 'null' || rawCustName === 'None' || rawCustName.length < 2;
+  const custName = isGenericName ? null : rawCustName;
+  const officialCustomerName = custName ? await verifyAndGetCustomerName(custName, senderPhone) : null;
+  const finalCustomerName = officialCustomerName || custName || null;
+
+  const photoDataUrl = `data:${mimeType || 'image/jpeg'};base64,${imageBuffer.toString('base64')}`;
+  const attachmentObj = {
+    name: `inquiry-doc-${Date.now()}.${(mimeType || '').includes('pdf') ? 'pdf' : 'jpg'}`,
+    url: photoDataUrl,
+    type: mimeType || 'image/jpeg',
+    uploaded_at: new Date().toISOString(),
+  };
+
+  const lineItems = (extraction.line_items || []).map(it => ({
+    sku_text: it.sku_text || it.product_name || it.description || 'Steel',
+    dimensions: it.dimensions || null,
+    quantity: Number(it.quantity) || 0,
+    unit: it.unit || 'MT',
+    rate: it.rate ? Number(it.rate) : null,
+    amount: it.amount ? Number(it.amount) : null,
+  }));
+
+  const draft = {
+    company_name: finalCustomerName,
+    delivery_location: extraction.delivery_location || null,
+    payment_terms: extraction.payment_terms || null,
+    line_items: lineItems,
+    attachments: [attachmentObj],
+    _customer_verified: Boolean(officialCustomerName),
+  };
+
+  if (caption && caption.length > 3) {
+    try {
+      const captionExtracted = await extractFieldsWithLLM('LOG_INQUIRY', caption, draft);
+      mergeDraft('LOG_INQUIRY', draft, captionExtracted, caption);
+    } catch (e) {}
+  }
+
+  // 1. Verify customer
+  if (draft.company_name && !draft._customer_verified) {
+    const custVerification = await verifyDraftCustomer('LOG_INQUIRY', draft, senderPhone);
+    if (custVerification.isUnrecognizedCustomer) {
+      await recordSessionMessage(senderPhone, 'assistant', custVerification.prompt, { action_type: 'LOG_INQUIRY' });
+      await saveActiveSession(
+        senderPhone,
+        draft.company_name || 'Customer',
+        `catalog_implicit_cust_ask|LOG_INQUIRY|${custVerification.unverifiedName}|${JSON.stringify(draft)}`
+      );
+      return {
+        handled: true,
+        reply: custVerification.prompt,
+        interactiveType: 'buttons',
+        interactiveButtons: NEW_CUSTOMER_BUTTONS,
+      };
+    }
+  }
+
+  // 2. Validate mandatory fields
+  const missing = validateMandatoryFields('LOG_INQUIRY', draft);
+  if (missing.length === 0) {
+    const summary = buildConfirmationSummary('LOG_INQUIRY', draft);
+    await recordSessionMessage(senderPhone, 'assistant', summary, { action_type: 'LOG_INQUIRY' });
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|LOG_INQUIRY|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: summary,
+      interactiveType: 'buttons',
+      interactiveButtons: CONFIRMATION_BUTTONS,
+    };
+  } else {
+    const missingList = missing.map(m => `• *${m}*`).join('\n');
+    const askMissing = `📄 *Extracted Inquiry Details from Document*\n\nPlease provide the remaining mandatory details for this inquiry:\n\n${missingList}`;
+    await recordSessionMessage(senderPhone, 'assistant', askMissing, { action_type: 'LOG_INQUIRY' });
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_INQUIRY|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: askMissing,
+    };
+  }
+}
+
+/**
+ * Processes an incoming Purchase Order (PO) document inside an active LOG_ORDER flow session.
+ * Auto-matches against open inquiries belonging to the salesperson.
+ */
+async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, caption = '') {
+  const { extractFromImage } = require('../gemini');
+  let extraction = null;
+  try {
+    extraction = await extractFromImage(imageBuffer, mimeType);
+  } catch (err) {
+    console.error('[CatalogFlow] extractFromImage error in handleOrderDocumentOcr:', err);
+  }
+
+  if (!extraction || extraction.error || (!extraction.customer && (!extraction.line_items || extraction.line_items.length === 0))) {
+    return {
+      handled: true,
+      reply: `⚠️ Could not clearly extract PO details from the document. Please send a clearer PO document or type the order details.`,
+    };
+  }
+
+  const rawCustName = extraction.customer && extraction.customer.name ? String(extraction.customer.name).trim() : '';
+  const isGenericName = !rawCustName || rawCustName === 'null' || rawCustName === 'None' || rawCustName.length < 2;
+  const custName = isGenericName ? null : rawCustName;
+  const officialCustomerName = custName ? await verifyAndGetCustomerName(custName, senderPhone) : null;
+  const finalCustomerName = officialCustomerName || custName || null;
+
+  const photoDataUrl = `data:${mimeType || 'image/jpeg'};base64,${imageBuffer.toString('base64')}`;
+  const attachmentObj = {
+    name: `po-doc-${Date.now()}.${(mimeType || '').includes('pdf') ? 'pdf' : 'jpg'}`,
+    url: photoDataUrl,
+    type: mimeType || 'image/jpeg',
+    uploaded_at: new Date().toISOString(),
+  };
+
+  const lineItems = (extraction.line_items || []).map(it => ({
+    sku_text: it.sku_text || it.product_name || it.description || 'Steel',
+    dimensions: it.dimensions || null,
+    quantity: Number(it.quantity) || 0,
+    unit: it.unit || 'MT',
+    rate: it.rate ? Number(it.rate) : 0,
+    amount: it.amount ? Number(it.amount) : 0,
+  }));
+
+  const poDate = extraction.po_date ? normalizeDateToDDMMYYYY(extraction.po_date) : formatDateDDMMYYYY(new Date());
+
+  const draft = {
+    company_name: finalCustomerName,
+    po_number: extraction.po_number && String(extraction.po_number).trim().length > 2 ? String(extraction.po_number).trim() : null,
+    po_date: poDate,
+    delivery_location: extraction.delivery_location || null,
+    payment_terms: extraction.payment_terms || null,
+    line_items: lineItems,
+    attachments: [attachmentObj],
+    _customer_verified: Boolean(officialCustomerName),
+  };
+
+  if (caption && caption.length > 3) {
+    try {
+      const captionExtracted = await extractFieldsWithLLM('LOG_ORDER', caption, draft);
+      mergeDraft('LOG_ORDER', draft, captionExtracted, caption);
+    } catch (e) {}
+  }
+
+  // 1. Auto-match to existing inquiries by Customer + Product
+  const matchResult = await findMatchingInquiriesForPo(draft.company_name, draft.line_items, senderPhone);
+
+  if (matchResult.status === 'SINGLE_MATCH') {
+    const matchedInq = matchResult.inquiry;
+    draft.inquiry_id = matchedInq.displayId;
+    draft._inquiry_display_id = matchedInq.displayId;
+    draft.deal_id = matchedInq.deal_id;
+    draft._matched_inquiry_id = matchedInq.inquiry_id;
+
+    if (!draft.delivery_location && matchedInq.delivery_location) {
+      draft.delivery_location = matchedInq.delivery_location;
+    }
+    if (!draft.payment_terms && matchedInq.payment_terms) {
+      draft.payment_terms = matchedInq.payment_terms;
+    }
+
+    const summary = buildConfirmationSummary('LOG_ORDER', draft);
+    const notice = `🔗 *Auto-linked to Quoted Inquiry ${matchedInq.displayId}*\n\n`;
+    const fullReply = notice + summary;
+
+    await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'LOG_ORDER' });
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|LOG_ORDER|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: fullReply,
+      interactiveType: 'buttons',
+      interactiveButtons: CONFIRMATION_BUTTONS,
+    };
+  }
+
+  if (matchResult.status === 'MULTIPLE_MATCHES') {
+    draft._inquiry_candidates = matchResult.candidates;
+    draft._all_inquiry_candidates = matchResult.candidates;
+
+    const choicesText = matchResult.candidates
+      .map(c => `${c.index}. *${c.displayId}* (${c.dateFormatted}) — _${c.stage}_\n   • *Product:* ${c.productSummary}\n   • *Delivery Location:* ${c.delivery_location || 'Not specified'}\n   • *Payment Terms:* ${c.payment_terms || 'Not specified'}`)
+      .join('\n\n');
+
+    const noneOptionNum = matchResult.candidates.length + 1;
+    const prompt = `📋 *Found ${matchResult.candidates.length} open inquiries for ${draft.company_name || 'Customer'} with matching products:*\n\nWhich inquiry is this PO against?\n\n${choicesText}\n\n${noneOptionNum}. *None* — Record order without linking to an inquiry\n\n👉 Reply with the *Number* (1–${noneOptionNum}) or the *Inquiry ID*.`;
+
+    await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: 'LOG_ORDER' });
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_ORDER|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: prompt,
+    };
+  }
+
+  // NO_MATCH case
+  const notice = `ℹ️ *No matching inquiry found for this customer and product. Order will be recorded without an inquiry link.*\n\n`;
+  const summary = buildConfirmationSummary('LOG_ORDER', draft);
+  const fullReply = notice + summary;
+
+  await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'LOG_ORDER' });
+  await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|LOG_ORDER|${JSON.stringify(draft)}`);
+  return {
+    handled: true,
+    reply: fullReply,
+    interactiveType: 'buttons',
+    interactiveButtons: CONFIRMATION_BUTTONS,
+  };
+}
+
 // ── VALIDATE ORDER INQUIRY STAGE GATE ───────────────────────────────────────
 
 /**
@@ -10030,10 +10423,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       (existingDraft._all_order_candidates && existingDraft._all_order_candidates.length) ||
       (existingDraft._all_complaint_candidates && existingDraft._all_complaint_candidates.length) || totalVisibleCandidates;
 
+    const maxAllowedCandidates = (action === 'LOG_ORDER' && (existingDraft._all_inquiry_candidates || existingDraft._inquiry_candidates))
+      ? (totalAllCandidates + 1)
+      : totalAllCandidates;
+
     if (totalVisibleCandidates > 0) {
-      const outOfBoundsIdx = detectOutOfBoundsCandidateIndex(text, totalAllCandidates);
+      const outOfBoundsIdx = detectOutOfBoundsCandidateIndex(text, maxAllowedCandidates);
       if (outOfBoundsIdx !== null && !text.toLowerCase().includes('rate') && !text.toLowerCase().includes('qty') && !text.toLowerCase().includes('quantity') && !text.toLowerCase().includes('₹')) {
-        const outOfBoundsReply = `⚠️ *Invalid Selection (${outOfBoundsIdx})*\n\nPlease choose a valid option number between **1 and ${totalAllCandidates}**, or type **Cancel** to exit.`;
+        const outOfBoundsReply = `⚠️ *Invalid Selection (${outOfBoundsIdx})*\n\nPlease choose a valid option number between **1 and ${maxAllowedCandidates}**, or type **Cancel** to exit.`;
         await recordSessionMessage(senderPhone, 'assistant', outOfBoundsReply, { action_type: action });
         return { handled: true, reply: outOfBoundsReply };
       }
@@ -10112,33 +10509,65 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     // ── 2. Check Inquiry Candidate Selection ─────────────────────────────────
     let inquiryCandidateResolved = false;
     if (existingDraft._inquiry_candidates && Array.isArray(existingDraft._inquiry_candidates)) {
-      const numIdx = extractCandidateIndex(text, totalAllCandidates || existingDraft._inquiry_candidates.length);
+      const candidatesList = existingDraft._all_inquiry_candidates && Array.isArray(existingDraft._all_inquiry_candidates)
+        ? existingDraft._all_inquiry_candidates
+        : existingDraft._inquiry_candidates;
+      const noneIdx = candidatesList.length + 1;
+
+      // Check if user selected "None" (option N+1 or text 'none'/'skip'/'no link' etc.)
+      const isNoneSelected = (action === 'LOG_ORDER') && (
+        extractCandidateIndex(text, noneIdx) === noneIdx ||
+        /^(?:none|skip|no\s*link|without\s*link(?:ing)?|do\s*not\s*link|unlinked|no\s*inquiry)\b/i.test(text.trim())
+      );
+
+      if (isNoneSelected) {
+        delete existingDraft._inquiry_candidates;
+        delete existingDraft._all_inquiry_candidates;
+        delete existingDraft._inquiry_candidates_page;
+        delete existingDraft.inquiry_id;
+        delete existingDraft._inquiry_display_id;
+        delete existingDraft.deal_id;
+        delete existingDraft._matched_inquiry_id;
+        inquiryCandidateResolved = true;
+
+        const notice = `ℹ️ *No matching inquiry linked. Order will be recorded without an inquiry link.*\n\n`;
+        const summary = buildConfirmationSummary('LOG_ORDER', existingDraft);
+        const fullReply = notice + summary;
+
+        await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'LOG_ORDER' });
+        await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_confirm|LOG_ORDER|${JSON.stringify(existingDraft)}`);
+        return {
+          handled: true,
+          reply: fullReply,
+          interactiveType: 'buttons',
+          interactiveButtons: CONFIRMATION_BUTTONS,
+        };
+      }
+
+      const numIdx = extractCandidateIndex(text, totalAllCandidates || candidatesList.length);
       let matchedCandidate = null;
 
-      if (numIdx !== null) {
-        if (existingDraft._all_inquiry_candidates && Array.isArray(existingDraft._all_inquiry_candidates) && numIdx >= 1 && numIdx <= existingDraft._all_inquiry_candidates.length) {
-          const inq = existingDraft._all_inquiry_candidates[numIdx - 1];
-          matchedCandidate = {
-            id: inq.inquiry_id || inq.id,
-            displayId: inq.displayId || `INQ-${(inq.inquiry_id || inq.id).slice(0, 6).toUpperCase()}`,
-            company_name: inq.company_name,
-            date: inq.dateFormatted || formatDateDDMMYYYY(new Date(inq.created_at || Date.now())),
-            stage: inq.stage || 'New Inquiry',
-            productSummary: inq.productSummary || 'Products on record',
-            payment_terms: inq.payment_terms || 'Not specified',
-            delivery_location: inq.delivery_location || 'Not specified',
-          };
-        } else if (numIdx >= 1 && numIdx <= existingDraft._inquiry_candidates.length) {
-          matchedCandidate = existingDraft._inquiry_candidates[numIdx - 1];
-        }
+      if (numIdx !== null && numIdx >= 1 && numIdx <= candidatesList.length) {
+        const inq = candidatesList[numIdx - 1];
+        matchedCandidate = {
+          id: inq.inquiry_id || inq.id,
+          displayId: inq.displayId || `INQ-${(inq.inquiry_id || inq.id).slice(0, 6).toUpperCase()}`,
+          deal_id: inq.deal_id || null,
+          company_name: inq.company_name,
+          date: inq.dateFormatted || formatDateDDMMYYYY(new Date(inq.created_at || Date.now())),
+          stage: inq.stage || 'New Inquiry',
+          productSummary: inq.productSummary || 'Products on record',
+          payment_terms: inq.payment_terms || 'Not specified',
+          delivery_location: inq.delivery_location || 'Not specified',
+        };
       }
 
       if (!matchedCandidate) {
         const cleanText = text.replace(/[^0-9A-Za-z]/g, '').toUpperCase();
         const lowerText = text.toLowerCase();
-        matchedCandidate = existingDraft._inquiry_candidates.find(c => {
+        matchedCandidate = candidatesList.find(c => {
           const cDisplay = (c.displayId || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
-          const cId = (c.id || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+          const cId = (c.inquiry_id || c.id || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
           const hasIdMatch = cleanText.length >= 3 && (cleanText.includes(cDisplay) || cDisplay.includes(cleanText) || cleanText.includes(cId) || cId.includes(cleanText));
           const hasProdMatch = c.productSummary && (
             (lowerText.includes('hr coil') && c.productSummary.toLowerCase().includes('hr coil')) ||
@@ -10154,32 +10583,63 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       }
 
       if (matchedCandidate) {
-        existingDraft.inquiry_id = matchedCandidate.id;
-        existingDraft.company_name = matchedCandidate.company_name;
-        existingDraft._inquiry_display_id = matchedCandidate.displayId;
-        existingDraft._inquiry_verified = true;
-        delete existingDraft._inquiry_candidates;
-        delete existingDraft._all_inquiry_candidates;
-        delete existingDraft._inquiry_candidates_page;
-        inquiryCandidateResolved = true;
+        if (action === 'LOG_ORDER') {
+          existingDraft.inquiry_id = matchedCandidate.displayId || matchedCandidate.id;
+          existingDraft._inquiry_display_id = matchedCandidate.displayId;
+          existingDraft.deal_id = matchedCandidate.deal_id;
+          existingDraft._matched_inquiry_id = matchedCandidate.id || matchedCandidate.inquiry_id;
+          existingDraft._inquiry_verified = true;
+          if (!existingDraft.delivery_location && matchedCandidate.delivery_location && matchedCandidate.delivery_location !== 'Not specified') {
+            existingDraft.delivery_location = matchedCandidate.delivery_location;
+          }
+          if (!existingDraft.payment_terms && matchedCandidate.payment_terms && matchedCandidate.payment_terms !== 'Not specified') {
+            existingDraft.payment_terms = matchedCandidate.payment_terms;
+          }
+          delete existingDraft._inquiry_candidates;
+          delete existingDraft._all_inquiry_candidates;
+          delete existingDraft._inquiry_candidates_page;
+          inquiryCandidateResolved = true;
 
-        const isPureSelect = isPureOptionSelectorOnly(text);
-        const hasUpdates = (existingDraft.updates && Object.values(existingDraft.updates).some(v => v !== null && v !== undefined && v !== '')) ||
-          (Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0);
+          const notice = `🔗 *Auto-linked to Quoted Inquiry ${matchedCandidate.displayId}*\n\n`;
+          const summary = buildConfirmationSummary('LOG_ORDER', existingDraft);
+          const fullReply = notice + summary;
 
-        if (isPureSelect && !hasUpdates) {
-          const prompt = `✏️ **Selected Inquiry ${matchedCandidate.displayId} (${matchedCandidate.company_name}):**\n\n` +
-            `- **Date:** ${matchedCandidate.date}\n` +
-            `- **Stage:** ${matchedCandidate.stage}\n` +
-            `- **Product / Requirement:** ${matchedCandidate.productSummary}\n` +
-            `- **Payment Terms:** ${matchedCandidate.payment_terms}\n` +
-            `- **Delivery Location:** ${matchedCandidate.delivery_location}\n\n` +
-            `What details would you like to update?\n` +
-            `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
+          await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'LOG_ORDER' });
+          await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_confirm|LOG_ORDER|${JSON.stringify(existingDraft)}`);
+          return {
+            handled: true,
+            reply: fullReply,
+            interactiveType: 'buttons',
+            interactiveButtons: CONFIRMATION_BUTTONS,
+          };
+        } else {
+          existingDraft.inquiry_id = matchedCandidate.id;
+          existingDraft.company_name = matchedCandidate.company_name;
+          existingDraft._inquiry_display_id = matchedCandidate.displayId;
+          existingDraft._inquiry_verified = true;
+          delete existingDraft._inquiry_candidates;
+          delete existingDraft._all_inquiry_candidates;
+          delete existingDraft._inquiry_candidates_page;
+          inquiryCandidateResolved = true;
 
-          await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
-          await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
-          return { handled: true, reply: prompt };
+          const isPureSelect = isPureOptionSelectorOnly(text);
+          const hasUpdates = (existingDraft.updates && Object.values(existingDraft.updates).some(v => v !== null && v !== undefined && v !== '')) ||
+            (Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0);
+
+          if (isPureSelect && !hasUpdates) {
+            const prompt = `✏️ **Selected Inquiry ${matchedCandidate.displayId} (${matchedCandidate.company_name}):**\n\n` +
+              `- **Date:** ${matchedCandidate.date}\n` +
+              `- **Stage:** ${matchedCandidate.stage}\n` +
+              `- **Product / Requirement:** ${matchedCandidate.productSummary}\n` +
+              `- **Payment Terms:** ${matchedCandidate.payment_terms}\n` +
+              `- **Delivery Location:** ${matchedCandidate.delivery_location}\n\n` +
+              `What details would you like to update?\n` +
+              `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
+
+            await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
+            await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+            return { handled: true, reply: prompt };
+          }
         }
       }
     }
@@ -10998,4 +11458,9 @@ module.exports = {
   formatRecordLineForModule,
   fetchAndRenderUpdateSelection,
   handleUpdateSelectionState,
+  findMatchingInquiriesForPo,
+  handleInquiryDocumentOcr,
+  handleOrderDocumentOcr,
+  CATALOG_MENU_SECTIONS,
+  CONFIRMATION_BUTTONS,
 };
