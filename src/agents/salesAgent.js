@@ -113,11 +113,15 @@ Extract into ONLY a JSON object (no markdown, no prose, no backticks):
   "delivery_date": "<delivery deadline in YYYY-MM-DD format using current year 2026 if mentioned e.g. 2026-08-25 for 'before 25 August', else null>",
   "payment_terms": "<payment terms e.g. 30 days credit, 45 days, 100% advance, PDC, else null>",
   "preferred_make": "<preferred make/brand if stated e.g. Tata, JSW, SAIL, Jindal, RINL, else null>",
+  "additional_notes": "<exact additional notes / remarks if mentioned e.g. 'we will be having follow up', else null>",
   "po_number": "<PO number if mentioned, else null>",
   "po_date": "<PO date / target PO date in YYYY-MM-DD format using year 2026 e.g. 2026-08-28 for '28 August', else null>",
   "loss_reason": "<inferred reason if deal was lost, else null>",
   "confidence": <float 0.0 to 1.0>
 }
+
+ZERO SUMMARIZATION OF NOTES (CRITICAL):
+- Never summarize, rephrase, or rewrite additional notes or remarks. Extract the exact literal words typed by the user.
 
 CRITICAL CONTEXT WINDOW RULE:
 The conversation history is provided ONLY to resolve ambiguous references (e.g. "it", "that deal", "same customer", "update it").
@@ -148,6 +152,7 @@ STRICT NULL RULES — when in doubt, always use null:
 - If delivery location is not explicitly stated → delivery_location: null
 - If payment terms are not explicitly stated → payment_terms: null
 - If rate is not explicitly stated → rate_per_mt: null
+- If additional notes are not explicitly stated → additional_notes: null
 - NEVER infer, guess, or derive a value from context or common knowledge
 - NEVER use a value from a previous message to fill a missing field in the current message
 - A missing field is always better than a wrong field

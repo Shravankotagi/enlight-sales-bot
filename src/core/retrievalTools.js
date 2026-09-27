@@ -889,6 +889,9 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     let lineItems = [];
     let dimensions = null;
     let deliveryLoc = null;
+    let paymentTerms = null;
+    let preferredMake = null;
+    let additionalNotes = null;
     let estTonnage = 0;
 
     if (row.ai_extraction_json) {
@@ -905,7 +908,10 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
           });
         }
         dimensions = parsed.dimensions || null;
-        deliveryLoc = parsed.delivery_location || parsed.customer?.city || null;
+        deliveryLoc = parsed.delivery_location || parsed.delivery_address || parsed.customer?.city || null;
+        paymentTerms = parsed.payment_terms || parsed.paymentTerms || null;
+        preferredMake = parsed.preferred_make || parsed.preferredMake || null;
+        additionalNotes = parsed.additional_notes || parsed.notes || parsed.remarks || null;
       } catch {}
     }
 
@@ -920,6 +926,19 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
         }));
         estTonnage = getDealTonnage(linkedDeal);
       }
+    }
+
+    if (!additionalNotes && row.raw_text) {
+      const match = row.raw_text.match(/(?:Additional Notes|Notes|Remarks?):\s*([^\r\n]+)/i);
+      if (match) additionalNotes = match[1].trim();
+    }
+    if (!paymentTerms && row.raw_text) {
+      const match = row.raw_text.match(/Payment Terms:\s*([^\r\n]+)/i);
+      if (match) paymentTerms = match[1].trim();
+    }
+    if (!preferredMake && row.raw_text) {
+      const match = row.raw_text.match(/Preferred Make:\s*([^\r\n]+)/i);
+      if (match) preferredMake = match[1].trim();
     }
 
     const shortId = `INQ-${(row.id || linkedDeal?.inquiry_id || linkedDeal?.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
@@ -944,8 +963,13 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
       is_ocr_document: isDoc,
       line_items: lineItems,
       dimensions,
-      delivery_location: deliveryLoc,
-      raw_text_snippet: (row.raw_text || '').slice(0, 150),
+      delivery_location: deliveryLoc || row.delivery_location || linkedDeal?.delivery_location || null,
+      payment_terms: paymentTerms || row.payment_terms || linkedDeal?.payment_terms || null,
+      preferred_make: preferredMake || null,
+      additional_notes: additionalNotes || null,
+      notes: additionalNotes || null,
+      raw_text: row.raw_text || '',
+      raw_text_snippet: (row.raw_text || '').slice(0, 300),
       created_at: row.created_at,
       won_at: linkedDeal?.won_at || null,
     };
