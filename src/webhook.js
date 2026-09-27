@@ -6,7 +6,9 @@ const {
   sendInteractiveButtons,
   sendInteractiveList,
   downloadMedia,
+  markMessageAsRead,
 } = require('./whatsapp');
+const { compressImageBuffer } = require('./utils/imageCompressor');
 const { extractFromText, extractFromImage, classifyIntent } = require('./gemini');
 const { transcribeAudio } = require('./assemblyai');
 const { isQuery, handleQuery } = require('./queryhandler');
@@ -132,6 +134,11 @@ router.post('/', async (req, res) => {
         const message = value.messages[0];
         const messageId = message.id;
         const senderPhone = message.from;
+
+        // Immediately acknowledge receipt with WhatsApp double blue ticks
+        if (messageId) {
+          markMessageAsRead(messageId).catch(() => {});
+        }
         
         // Safely extract sender profile name, fallback to "Customer" if missing
         const senderName = (value.contacts && value.contacts[0] && value.contacts[0].profile && value.contacts[0].profile.name) || "Customer";
@@ -365,10 +372,13 @@ router.post('/', async (req, res) => {
             const mediaData = await downloadMedia(mediaId);
             let attachmentObj = null;
             if (mediaData && mediaData.buffer) {
+              const compressed = await compressImageBuffer(mediaData.buffer, mediaData.mimeType);
+              const finalBuffer = compressed.buffer || mediaData.buffer;
+              const finalMime = compressed.mimeType || 'image/jpeg';
               attachmentObj = {
                 type: 'image',
-                url: `data:${mediaData.mimeType || 'image/jpeg'};base64,${mediaData.buffer.toString('base64')}`,
-                mimeType: mediaData.mimeType || 'image/jpeg',
+                url: `data:${finalMime};base64,${finalBuffer.toString('base64')}`,
+                mimeType: finalMime,
                 fileName: 'visit_site_photo.jpg',
               };
             }
@@ -399,57 +409,91 @@ router.post('/', async (req, res) => {
 
           if (isComplaintFlow && media_urls.length > 0) {
             const mediaId = media_urls[0];
-            const mediaData = await downloadMedia(mediaId);
-            let attachmentObj = null;
-            if (mediaData && mediaData.buffer) {
-              if (mediaData.buffer.length > 15 * 1024 * 1024) {
-                await sendTextMessage(senderPhone, '⚠️ *Photo Exceeds 15MB Limit*\n\nPlease send a photo under 15MB or tap *No*.');
-                return;
-              }
-              const isPdf = (mediaData.mimeType || '').includes('pdf');
-              attachmentObj = {
-                name: `evidence-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
-                type: isPdf ? 'document' : 'image',
-                url: `data:${mediaData.mimeType || 'image/jpeg'};base64,${mediaData.buffer.toString('base64')}`,
-                file_url: `data:${mediaData.mimeType || 'image/jpeg'};base64,${mediaData.buffer.toString('base64')}`,
-                file_name: `complaint_evidence_${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
-                file_type: mediaData.mimeType || 'image/jpeg',
-                file_size: mediaData.buffer.length,
-                uploaded_at: new Date().toISOString(),
-              };
-            }
 
-            if (!attachmentObj) {
-              await sendTextMessage(senderPhone, '❌ *Failed to download the photo.* Please try sending it again.');
-              return;
-            }
-
-            // Multi-photo batching & debouncing: buffer incoming photos for 1.2s so 1-3 photos sent in one shot are collected into 1 single confirmation message
+            // Multi-photo parallel download, sharp compression & batch settling:
+            // Meta sends 1 separate webhook per photo in a multi-image upload.
+            // We synchronously ingest each incoming mediaId task into the batch queue at t=0
+            // and run downloads + sharp compression in parallel.
             let batch = complaintUploadBatches.get(senderPhone);
-            if (batch) {
-              clearTimeout(batch.timer);
-              if (batch.attachments.length < 3) {
-                batch.attachments.push(attachmentObj);
-              }
-            } else {
+            if (!batch) {
               batch = {
-                attachments: [attachmentObj],
-                raw_text: raw_text || 'Photo uploaded',
+                pendingTasks: [],
+                timer: null,
+                raw_text: raw_text && raw_text !== 'Image received' ? raw_text : 'Evidence attachment uploaded',
               };
               complaintUploadBatches.set(senderPhone, batch);
+            } else if (raw_text && raw_text !== 'Image received') {
+              batch.raw_text = raw_text;
             }
 
+            // Clear any existing settling timer on every newly arriving photo webhook
+            if (batch.timer) {
+              clearTimeout(batch.timer);
+            }
+
+            // Start downloading and compressing immediately in background
+            const downloadTask = (async () => {
+              try {
+                const mediaData = await downloadMedia(mediaId);
+                if (!mediaData || !mediaData.buffer) {
+                  return { error: 'Failed to download media' };
+                }
+                if (mediaData.buffer.length > 15 * 1024 * 1024) {
+                  return { error: 'Photo exceeds 15MB limit' };
+                }
+
+                const isPdf = (mediaData.mimeType || '').includes('pdf');
+                const compressed = await compressImageBuffer(mediaData.buffer, mediaData.mimeType);
+                const finalBuffer = compressed.buffer || mediaData.buffer;
+                const finalMime = compressed.mimeType || (isPdf ? 'application/pdf' : 'image/jpeg');
+
+                return {
+                  name: `evidence-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
+                  type: isPdf ? 'document' : 'image',
+                  url: `data:${finalMime};base64,${finalBuffer.toString('base64')}`,
+                  file_url: `data:${finalMime};base64,${finalBuffer.toString('base64')}`,
+                  file_name: `complaint_evidence_${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
+                  file_type: finalMime,
+                  file_size: finalBuffer.length,
+                  uploaded_at: new Date().toISOString(),
+                };
+              } catch (err) {
+                console.error('[Webhook] Error downloading/compressing complaint photo:', err);
+                return { error: err.message };
+              }
+            })();
+
+            // Cap at 3 photos per complaint
+            if (batch.pendingTasks.length < 3) {
+              batch.pendingTasks.push(downloadTask);
+            }
+
+            // Settling debounce timer (1500ms after the LAST incoming photo webhook)
             batch.timer = setTimeout(async () => {
               try {
                 const currentBatch = complaintUploadBatches.get(senderPhone);
                 complaintUploadBatches.delete(senderPhone);
-                if (!currentBatch || currentBatch.attachments.length === 0) return;
+                if (!currentBatch || currentBatch.pendingTasks.length === 0) return;
+
+                // Await all parallel download & compression tasks together
+                const taskResults = await Promise.all(currentBatch.pendingTasks);
+                const validAttachments = taskResults.filter(r => r && !r.error && (r.url || r.file_url));
+                const hasOversized = taskResults.some(r => r && r.error === 'Photo exceeds 15MB limit');
+
+                if (validAttachments.length === 0) {
+                  if (hasOversized) {
+                    await sendTextMessage(senderPhone, '⚠️ *Photo Exceeds 15MB Limit*\n\nPlease send photos under 15MB or tap *No*.');
+                  } else {
+                    await sendTextMessage(senderPhone, '❌ *Failed to download the photo.* Please try sending it again.');
+                  }
+                  return;
+                }
 
                 const { handleCatalogFlow } = require('./core/catalogFlow');
                 const catalogResult = await handleCatalogFlow(
                   currentBatch.raw_text || 'Evidence attachment uploaded',
                   senderPhone,
-                  { attachments: currentBatch.attachments }
+                  { attachments: validAttachments }
                 );
 
                 if (catalogResult && catalogResult.handled && catalogResult.reply) {
@@ -475,7 +519,7 @@ router.post('/', async (req, res) => {
               } catch (batchErr) {
                 console.error('[Webhook] Error processing batched complaint attachments:', batchErr);
               }
-            }, 1200);
+            }, 1500);
 
             return;
           }

@@ -373,10 +373,45 @@ async function downloadMedia(mediaId) {
   }
 }
 
+/**
+ * Marks a WhatsApp message as read via Meta Cloud API (displays blue ticks).
+ * @param {string} messageId - The incoming WhatsApp message ID.
+ */
+async function markMessageAsRead(messageId) {
+  try {
+    const token = process.env.WHATSAPP_TOKEN;
+    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+    if (!token || !phoneNumberId || !messageId) return null;
+
+    const url = `${process.env.WHATSAPP_API_URL || 'https://graph.facebook.com/v18.0'}/${phoneNumberId}/messages`;
+    await axios.post(
+      url,
+      {
+        messaging_product: 'whatsapp',
+        status: 'read',
+        message_id: messageId,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 8000,
+        httpsAgent,
+      }
+    );
+    return true;
+  } catch (err) {
+    console.warn('[WhatsApp] Mark as read notice:', err.message);
+    return false;
+  }
+}
+
 module.exports = {
   sendTextMessage,
   sendInteractiveButtons,
   sendInteractiveList,
   downloadMedia,
+  markMessageAsRead,
   formatForWhatsApp,
 };
