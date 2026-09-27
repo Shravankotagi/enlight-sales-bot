@@ -584,14 +584,20 @@ To identify the complaint, provide ONE of the following:
 What would you like to update?
 
 **Updatable Fields:**
+- Complaint Date (e.g. 27-09-2026)
+- Complaint Raised By (Customer Contact Person)
+- Product / Material
 - Complaint Type (Quality Defect / Physical Damage / Quantity Shortage / Delivery Delay / Billing Mismatch / Specification Mismatch / Other)
+- Invoice / Challan No.
 - Description
-- Corrective Action Taken
-- Resolution Notes
+- Corrective Action
+- Customer Communication / Update
 - Status (Pending / In Progress / Resolved / Closed)
+- Resolution Date (e.g. 27-09-2026)
+- Resolution Notes
 
 Example:
-"Update complaint for Tech Industries to Specification Mismatch"`
+"Update complaint for Tech Industries to Status: Resolved, Resolution Notes: Replaced 2 MT MS Angle"`
 };
 
 // ── ACTION NAME FORMATTER FOR PROMPTS ─────────────────────────────────────────
@@ -1369,10 +1375,16 @@ UPDATE_COMPLAINT:
   "company_name": "<Customer / Company Name if mentioned, else null>",
   "linked_inquiry_or_po": "<Linked PO Number or Inquiry ID e.g. INQ-8971B1, PO-2026-TI-101 if mentioned, else null>",
   "updates": {
+    "complaint_date": "<DD-MM-YYYY format if updated, else null>",
+    "raised_by": "<Contact person name at customer if updated, else null>",
+    "affected_product": "<Product name from official catalog if updated, else null>",
     "complaint_type": "<Quality Defect | Physical Damage | Quantity Shortage | Delivery Delay | Billing Mismatch | Specification Mismatch | Other if updated, else null>",
+    "challan_no": "<Invoice or Delivery Challan number if updated, else null>",
     "complaint_description": "<if updated, else null>",
     "corrective_action": "<if updated, else null>",
+    "customer_communication": "<Communication or update shared with customer if updated, else null>",
     "status": "<Pending | In Progress | Resolved | Closed if updated, else null>",
+    "resolution_date": "<DD-MM-YYYY format if updated, else null>",
     "resolution_notes": "<if updated, else null>"
   }
 }
@@ -1491,9 +1503,9 @@ function getAllowedFieldsListForAction(action) {
     case 'UPDATE_VISIT':
       return `- *Person Met*\n- *Contact Phone*\n- *City / Location*\n- *Visit Date*\n- *Visit Outcome*\n- *Meeting Remarks & Follow-up Notes*\n- *Add Photo / Document (Attach additional site photos)*\n- *Customer Probability (Hot / Warm / Cold)*\n- *Customer Type (OEM / Fabricator / etc.)*\n- *Delivery Location & Payment Terms*\n- *Status*`;
     case 'LOG_COMPLAINT':
-      return `- *Complaint Type (Quality Defect, Physical Damage, etc.)*\n- *Affected Product*\n- *Linked Inquiry ID / PO Number*\n- *Complaint Description*\n- *Corrective Action Taken*`;
+      return `- *Complaint Date*\n- *Complaint Raised By*\n- *Linked Inquiry ID / PO Number*\n- *Affected Product*\n- *Complaint Type*\n- *Invoice / Challan No.*\n- *Complaint Description*\n- *Evidence Attachments (Max 3)*\n- *Corrective Action*\n- *Customer Communication*\n- *Resolution Notes*\n- *Resolution Date*`;
     case 'UPDATE_COMPLAINT':
-      return `- *Complaint Type*\n- *Complaint Description*\n- *Corrective Action Taken*\n- *Resolution Notes*\n- *Status (Pending, In Progress, Resolved, Closed)*`;
+      return `- *Complaint Date*\n- *Complaint Raised By*\n- *Product / Material*\n- *Complaint Type*\n- *Invoice / Challan No.*\n- *Complaint Description*\n- *Corrective Action*\n- *Customer Communication*\n- *Resolution Notes*\n- *Resolution Date*\n- *Status (Pending, In Progress, Resolved, Closed)*`;
     case 'LOG_NEW_CUSTOMER':
       return `- *Company Name*\n- *Contact Person*\n- *Mobile Number*\n- *Delivery Location / City*\n- *Email Address*\n- *GST Number*`;
     default:
@@ -1540,10 +1552,13 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
 
   // 3. Customer / Company Name in Record Update flows (UPDATE_INQUIRY, UPDATE_ORDER, UPDATE_VISIT, UPDATE_COMPLAINT)
   if (['UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(action)) {
-    const isCustomerChange =
+    const isCustomerSubField = /\b(?:customer\s+(?:communication|update|type|probability|requirement|feedback|notes)|contact\s+(?:person|phone|mobile|number))\b/i.test(clean);
+
+    const isCustomerChange = !isCustomerSubField && (
       /\b(?:change|edit|update|modify|set|alter|switch|replace)\b.*?\b(?:customer(?:\s*name)?|company(?:\s*name)?|party(?:\s*name)?|client(?:\s*name)?)\b/i.test(clean) ||
       /\b(?:customer(?:\s*name)?|company(?:\s*name)?|party(?:\s*name)?|client(?:\s*name)?)\b.*?\b(?:change|edit|update|set|modify|to|is|=|karo|badlo)\b/i.test(clean) ||
-      /^(?:change|edit|update|modify|set)\s+(?:the\s+)?(?:customer|company|party|client)\s+(?:name\s+)?(?:to|as|=|is)\s+[A-Za-z0-9\s]+/i.test(clean);
+      /^(?:change|edit|update|modify|set)\s+(?:the\s+)?(?:customer|company|party|client)\s+(?:name\s+)?(?:to|as|=|is)\s+[A-Za-z0-9\s]+/i.test(clean)
+    );
 
     if (isCustomerChange) {
       let currentCust = draft.company_name;
@@ -1671,6 +1686,22 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
         isNonEditable: true,
         fieldName: 'Photo Attachment',
         message: `*Previously uploaded photos cannot be replaced or removed.*\n\n- Existing photos are permanent records preserved for verified visit audit compliance.\n- You can always attach additional photos to this visit report.`,
+        allowedFieldsList: getAllowedFieldsListForAction(action),
+      };
+    }
+  }
+
+  // 12. Photo / Attachment edit attempt on Complaints (Attachments locked to initial log)
+  if (action === 'UPDATE_COMPLAINT') {
+    const isPhotoChangeAttempt =
+      /\b(?:replace|delete|remove|overwrite|swap|change|add|upload)\b.*?\b(?:photo|pic|picture|image|attachment|evidence)s?\b/i.test(clean) ||
+      /\b(?:photo|pic|picture|image|attachment|evidence)s?\b.*?\b(?:replace|delete|remove|overwrite|swap|badlo|hatao|change|add|upload)\b/i.test(clean);
+
+    if (isPhotoChangeAttempt) {
+      return {
+        isNonEditable: true,
+        fieldName: 'Evidence / Attachments',
+        message: `*Attachments cannot be edited or added during a complaint update.*\n\n- Evidence photos and documents are permanent records preserved from the initial complaint log.\n- To view attached photos/documents, please open the complaint on the dashboard.`,
         allowedFieldsList: getAllowedFieldsListForAction(action),
       };
     }
@@ -2140,11 +2171,19 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.updates) {
       Object.assign(merged.updates, newExtracted.updates);
     }
-    if (newExtracted.status && !merged.updates.status) merged.updates.status = newExtracted.status;
-    if (newExtracted.resolution_notes && !merged.updates.resolution_notes) merged.updates.resolution_notes = newExtracted.resolution_notes;
+    if (newExtracted.complaint_date && !merged.updates.complaint_date) merged.updates.complaint_date = normalizeDateToDDMMYYYY(newExtracted.complaint_date);
+    if (newExtracted.raised_by && !merged.updates.raised_by) merged.updates.raised_by = newExtracted.raised_by;
+    if (newExtracted.contact_person && !merged.updates.raised_by) merged.updates.raised_by = newExtracted.contact_person;
+    if (newExtracted.affected_product && !merged.updates.affected_product) merged.updates.affected_product = newExtracted.affected_product;
+    if (newExtracted.product_name && !merged.updates.affected_product) merged.updates.affected_product = newExtracted.product_name;
     if (newExtracted.complaint_type && !merged.updates.complaint_type) merged.updates.complaint_type = newExtracted.complaint_type;
+    if (newExtracted.challan_no && !merged.updates.challan_no) merged.updates.challan_no = newExtracted.challan_no;
     if (newExtracted.complaint_description && !merged.updates.complaint_description) merged.updates.complaint_description = newExtracted.complaint_description;
     if (newExtracted.corrective_action && !merged.updates.corrective_action) merged.updates.corrective_action = newExtracted.corrective_action;
+    if (newExtracted.customer_communication && !merged.updates.customer_communication) merged.updates.customer_communication = newExtracted.customer_communication;
+    if (newExtracted.status && !merged.updates.status) merged.updates.status = newExtracted.status;
+    if (newExtracted.resolution_date && !merged.updates.resolution_date) merged.updates.resolution_date = normalizeDateToDDMMYYYY(newExtracted.resolution_date);
+    if (newExtracted.resolution_notes && !merged.updates.resolution_notes) merged.updates.resolution_notes = newExtracted.resolution_notes;
 
     // Direct resolution note fallback if user supplied notes as free text
     if (!merged.updates.resolution_notes && merged.updates.status && ['resolved', 'closed'].includes(String(merged.updates.status).toLowerCase())) {
@@ -3830,6 +3869,14 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         complaint_type: typeLabel,
         status: statusLabel,
         date_formatted: dateFormatted,
+        complaint_date: c.complaint_date ? formatDateDDMMYYYY(new Date(c.complaint_date)) : dateFormatted,
+        raised_by: c.raised_by || c.contact_person || null,
+        product_name: c.product_name || c.affected_product || null,
+        challan_no: c.challan_no || null,
+        corrective_action: c.corrective_action || null,
+        customer_communication: c.customer_communication || null,
+        resolution_notes: c.resolution_notes || null,
+        resolution_date: c.resolution_date ? formatDateDDMMYYYY(new Date(c.resolution_date)) : null,
         description: c.description || null,
         po_number: c.po_number || null,
         deal_id: c.deal_id || null,
@@ -3987,7 +4034,11 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
     }
   }
 
-  const footerText = `Reply with the serial number or Inquiry ID to update that record. Type "Next" for the next 7 records, or tell me the customer name to search their records.`;
+  let footerIdLabel = 'Inquiry ID';
+  if (action === 'UPDATE_ORDER') footerIdLabel = 'Order / PO Number';
+  else if (action === 'UPDATE_COMPLAINT') footerIdLabel = 'Complaint / Ticket ID';
+  else if (action === 'UPDATE_VISIT') footerIdLabel = 'Customer Name';
+  const footerText = `Reply with the serial number or ${footerIdLabel} to update that record. Type "Next" for the next 7 records, or tell me the customer name to search their records.`;
 
   const fullReply = `${headerText}\n\n${listText}\n\n${footerText}`;
 
@@ -4243,12 +4294,20 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
           `_(e.g., "Change rate to 48000", "Update quantity to 35 MT", "Change rate to 52000 and quantity to 40 MT")_`;
       } else if (action === 'UPDATE_COMPLAINT') {
         prompt = `✏️ *Selected Complaint ${matchedRecord.displayId} (${matchedRecord.customer_name}):*\n\n` +
+          `• *Date:* ${matchedRecord.complaint_date || matchedRecord.date_formatted}\n` +
+          (matchedRecord.raised_by ? `• *Raised By:* ${matchedRecord.raised_by}\n` : '') +
+          (matchedRecord.product_name ? `• *Product:* ${matchedRecord.product_name}\n` : '') +
+          (matchedRecord.challan_no ? `• *Invoice / Challan No:* ${matchedRecord.challan_no}\n` : '') +
           (matchedRecord.po_number ? `• *Linked Ref:* PO: ${matchedRecord.po_number}\n` : '') +
           `• *Type:* ${matchedRecord.complaint_type || 'Quality Defect'}\n` +
           `• *Status:* ${matchedRecord.status || 'Open'}\n` +
-          (matchedRecord.description ? `• *Description:* ${matchedRecord.description}\n\n` : '\n') +
-          `What details would you like to update?\n` +
-          `_(e.g., "Mark as Resolved", "Update type to Specification Mismatch", "Resolution notes: Replaced material")_`;
+          (matchedRecord.description ? `• *Description:* ${matchedRecord.description}\n` : '') +
+          (matchedRecord.corrective_action ? `• *Corrective Action:* ${matchedRecord.corrective_action}\n` : '') +
+          (matchedRecord.customer_communication ? `• *Customer Communication:* ${matchedRecord.customer_communication}\n` : '') +
+          (matchedRecord.resolution_notes ? `• *Resolution Notes:* ${matchedRecord.resolution_notes}\n` : '') +
+          (matchedRecord.resolution_date ? `• *Resolution Date:* ${matchedRecord.resolution_date}\n` : '') +
+          `\nWhat details would you like to update?\n` +
+          `_(e.g., "Mark as Resolved", "Update type to Specification Mismatch", "Resolution notes: Replaced material", "Change date to 25-09-2026", "Update raised by to Ramesh", "Corrective action: Reworked on site")_`;
       } else if (action === 'UPDATE_VISIT') {
         prompt = formatSelectedVisitPrompt(matchedRecord);
       }
@@ -8211,8 +8270,25 @@ async function executeAction(action, draft, senderPhone) {
         const updates = draft.updates || {};
         const cmpUpdates = {};
 
+        if (updates.complaint_date) {
+          const parsed = parseDDMMYYYYtoISO(updates.complaint_date);
+          if (parsed) {
+            cmpUpdates.complaint_date = parsed;
+          }
+        }
+        if (updates.raised_by || updates.contact_person) {
+          cmpUpdates.raised_by = (updates.raised_by || updates.contact_person).trim();
+        }
+        if (updates.challan_no) cmpUpdates.challan_no = updates.challan_no.trim();
+        if (updates.customer_communication) cmpUpdates.customer_communication = updates.customer_communication.trim();
+        if (updates.resolution_date) {
+          const parsedRes = parseDDMMYYYYtoISO(updates.resolution_date);
+          if (parsedRes) {
+            cmpUpdates.resolution_date = parsedRes;
+          }
+        }
         if (updates.complaint_type) cmpUpdates.complaint_type = normalizeComplaintType(updates.complaint_type);
-        if (updates.complaint_description) cmpUpdates.description = updates.complaint_description;
+        if (updates.complaint_description || updates.description) cmpUpdates.description = updates.complaint_description || updates.description;
         if (updates.corrective_action) cmpUpdates.corrective_action = updates.corrective_action;
         if (updates.resolution_notes) cmpUpdates.resolution_notes = updates.resolution_notes;
         if (updates.product_name || updates.affected_product || updates.product) {
@@ -8274,8 +8350,27 @@ async function executeAction(action, draft, senderPhone) {
           .eq('id', matchedCmp.id);
 
         if (updateErr) {
-          console.error('[CatalogFlow] Supabase complaint update error:', updateErr);
-          return `❌ *Failed to update complaint for ${matchedCmp.customer_name}.*\n\nReason: ${updateErr.message || 'Database write error'}. Please try again.`;
+          console.error('[CatalogFlow] Supabase complaint update error, retrying without optional columns:', updateErr.message);
+          const fallbackUpdates = { ...cmpUpdates };
+          delete fallbackUpdates.complaint_date;
+          delete fallbackUpdates.raised_by;
+          delete fallbackUpdates.challan_no;
+          delete fallbackUpdates.customer_communication;
+          delete fallbackUpdates.resolution_notes;
+          delete fallbackUpdates.resolution_date;
+
+          if (Object.keys(fallbackUpdates).length > 0) {
+            const { error: fbErr } = await supabase
+              .from('complaints')
+              .update(fallbackUpdates)
+              .eq('id', matchedCmp.id);
+            if (fbErr) {
+              console.error('[CatalogFlow] Fallback complaint update error:', fbErr.message);
+              return `❌ *Failed to update complaint for ${matchedCmp.customer_name}.*\n\nReason: ${fbErr.message || updateErr.message || 'Database write error'}. Please try again.`;
+            }
+          } else {
+            return `❌ *Failed to update complaint for ${matchedCmp.customer_name}.*\n\nReason: ${updateErr.message || 'Database write error'}. Please try again.`;
+          }
         }
 
         // Log to activity_logs
@@ -8303,23 +8398,34 @@ async function executeAction(action, draft, senderPhone) {
           const isSlaCompliant = resolutionHrs <= 48;
           return `✅ *Customer Complaint Resolved Successfully!*\n\n` +
             `• *Customer / Company:* ${matchedCmp.customer_name}\n` +
+            (updates.complaint_date ? `• *Complaint Date:* ${updates.complaint_date}\n` : '') +
+            (cmpUpdates.raised_by ? `• *Complaint Raised By:* ${cmpUpdates.raised_by}\n` : '') +
             (linkedOrderRef ? `• *Linked Order / Ref:* ${linkedOrderRef}\n` : '') +
-            `• *Product / Material:* ${matchedCmp.product_name || matchedCmp.affected_product || 'Steel Material'}\n` +
+            `• *Product / Material:* ${cmpUpdates.product_name || matchedCmp.product_name || matchedCmp.affected_product || 'Steel Material'}\n` +
             `• *Complaint Type:* ${cmpUpdates.complaint_type || matchedCmp.complaint_type || 'Quality Defect'}\n` +
+            (cmpUpdates.challan_no ? `• *Invoice / Challan No.:* ${cmpUpdates.challan_no}\n` : '') +
+            (cmpUpdates.corrective_action ? `• *Corrective Action:* ${cmpUpdates.corrective_action}\n` : '') +
+            (cmpUpdates.customer_communication ? `• *Customer Communication:* ${cmpUpdates.customer_communication}\n` : '') +
             `• *Status:* ${updates.status || 'Resolved'}\n` +
             `• *Resolution Notes:* ${cmpUpdates.resolution_notes || 'Resolved'}\n` +
+            (updates.resolution_date ? `• *Resolution Date:* ${updates.resolution_date}\n` : '') +
             `• *Resolution Time:* ${resolutionHrs} Hours\n` +
             `• *SLA Target (48h):* ${isSlaCompliant ? '✅ Achieved - Within SLA Target!' : '⚠️ Breached - Escalated!'}\n\n` +
             `Updated details saved to Customer Complaints Card! ✅`;
         }
 
         let fieldsSummary = '';
-        if (cmpUpdates.complaint_type) fieldsSummary += `• *Complaint Type:* ${cmpUpdates.complaint_type}\n`;
+        if (updates.complaint_date) fieldsSummary += `• *Complaint Date:* ${updates.complaint_date}\n`;
+        if (cmpUpdates.raised_by) fieldsSummary += `• *Complaint Raised By:* ${cmpUpdates.raised_by}\n`;
         if (cmpUpdates.product_name) fieldsSummary += `• *Product:* ${cmpUpdates.product_name}\n`;
-        if (updates.status) fieldsSummary += `• *Status:* ${updates.status}\n`;
+        if (cmpUpdates.complaint_type) fieldsSummary += `• *Complaint Type:* ${cmpUpdates.complaint_type}\n`;
+        if (cmpUpdates.challan_no) fieldsSummary += `• *Invoice / Challan No.:* ${cmpUpdates.challan_no}\n`;
         if (cmpUpdates.description) fieldsSummary += `• *Description:* ${cmpUpdates.description}\n`;
         if (cmpUpdates.corrective_action) fieldsSummary += `• *Corrective Action:* ${cmpUpdates.corrective_action}\n`;
+        if (cmpUpdates.customer_communication) fieldsSummary += `• *Customer Communication:* ${cmpUpdates.customer_communication}\n`;
+        if (updates.status) fieldsSummary += `• *Status:* ${updates.status}\n`;
         if (cmpUpdates.resolution_notes) fieldsSummary += `• *Resolution Notes:* ${cmpUpdates.resolution_notes}\n`;
+        if (updates.resolution_date) fieldsSummary += `• *Resolution Date:* ${updates.resolution_date}\n`;
 
         return `✅ *Customer Complaint Updated Successfully!*\n\n` +
           `• *Customer / Company:* ${matchedCmp.customer_name}\n` +
