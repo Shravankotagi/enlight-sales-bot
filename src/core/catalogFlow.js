@@ -3418,6 +3418,19 @@ function formatStageLabel(st) {
   return 'New Inquiry';
 }
 
+function formatDetailedInquiryItemsList(items) {
+  if (!Array.isArray(items) || items.length === 0) return '';
+  return items.map((item, idx) => {
+    const name = item.sku_text || item.description || item.product_name || 'Steel Item';
+    const spec = item.dimensions || item.spec ? ` (${item.dimensions || item.spec})` : (item.grade ? ` (${item.grade})` : '');
+    const qty = item.quantity !== undefined && item.quantity !== null && item.quantity !== '' ? `${item.quantity} ${item.unit || 'MT'}` : '';
+    const rate = Number(item.rate || 0);
+    const rateText = rate > 0 ? ` @ ₹${rate.toLocaleString('en-IN')}/${item.unit || 'MT'}` : '';
+    const qtyRate = [qty, rateText].filter(Boolean).join('');
+    return `${idx + 1}. *${name}${spec}*${qtyRate ? ` — ${qtyRate}` : ''}`;
+  }).join('\n');
+}
+
 function formatProductSummaryCompact(item) {
   if (!item) return 'Steel Material';
 
@@ -3433,15 +3446,29 @@ function formatProductSummaryCompact(item) {
           : [];
 
   if (items.length > 0) {
+    const formatItemLabel = (it) => {
+      const name = it.sku_text || it.description || it.product_name || 'Item';
+      const dim = it.dimensions || it.spec;
+      if (dim) {
+        const thkMatch = dim.match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+        const shortSpec = thkMatch ? thkMatch[0].trim().toUpperCase() : dim.split(/[\s(,]/)[0].trim();
+        if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
+          return `${name} (${shortSpec})`;
+        }
+      }
+      return name;
+    };
+
     if (items.length === 1) {
       const it = items[0];
-      const name = it.sku_text || it.description || it.product_name || 'Metal Item';
+      const name = formatItemLabel(it);
       const qtyStr = it.quantity ? `${it.quantity} ${it.unit || 'MT'}` : '';
       return qtyStr ? `${qtyStr} ${name}` : name;
     }
     const totalQty = items.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
-    const names = items.slice(0, 2).map(it => it.sku_text || it.description || 'Item').join(', ');
-    return `${items.length} Items${totalQty > 0 ? ` (${totalQty} MT)` : ''} — ${names}`;
+    const names = items.slice(0, 3).map(formatItemLabel).join(', ');
+    const more = items.length > 3 ? ` +${items.length - 3} more` : '';
+    return `${items.length} Items${totalQty > 0 ? ` (${totalQty} MT)` : ''} — ${names}${more}`;
   }
 
   if (item.product_summary) return item.product_summary;
@@ -4088,10 +4115,12 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
 
     let draft = {};
     if (action === 'UPDATE_INQUIRY') {
+      const inqItems = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
       draft = {
         inquiry_id: matchedRecord.inquiry_id || matchedRecord.id,
         deal_id: matchedRecord.deal_id || null,
         company_name: matchedRecord.customer_name,
+        existing_items: inqItems,
         _inquiry_display_id: matchedRecord.displayId,
         _inquiry_verified: true,
       };
@@ -4128,12 +4157,20 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     if (isPureSelect) {
       let prompt = '';
       if (action === 'UPDATE_INQUIRY') {
+        let itemsListText = '';
+        const items = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
+        if (items.length > 0) {
+          itemsListText = formatDetailedInquiryItemsList(items);
+        } else {
+          itemsListText = `1. *${matchedRecord.product_summary || 'Steel Material'}*`;
+        }
+
         prompt = `✏️ *Selected Inquiry ${matchedRecord.displayId} (${matchedRecord.customer_name}):*\n\n` +
           `• *Date:* ${matchedRecord.date_formatted}\n` +
           `• *Stage:* ${matchedRecord.stage}\n` +
-          `• *Product / Requirement:* ${matchedRecord.product_summary}\n` +
           `• *Payment Terms:* ${matchedRecord.payment_terms || 'Not specified'}\n` +
           `• *Delivery Location:* ${matchedRecord.delivery_location || 'Not specified'}\n\n` +
+          `*Current Line Items:*\n${itemsListText}\n\n` +
           `What details would you like to update?\n` +
           `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
       } else if (action === 'UPDATE_ORDER') {
@@ -4832,17 +4869,41 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
   };
 
   const formatProductSummary = (item) => {
-    if (Array.isArray(item.deal_items) && item.deal_items.length > 0) {
-      if (item.deal_items.length === 1) {
-        const it = item.deal_items[0];
-        const name = it.sku_text || it.description || 'Metal Item';
+    const items = (Array.isArray(item.deal_items) && item.deal_items.length > 0)
+      ? item.deal_items
+      : (item.ai_extraction_json && Array.isArray(item.ai_extraction_json.line_items) && item.ai_extraction_json.line_items.length > 0)
+        ? item.ai_extraction_json.line_items
+        : (item.ai_extraction_json && Array.isArray(item.ai_extraction_json.lineItems) && item.ai_extraction_json.lineItems.length > 0)
+          ? item.ai_extraction_json.lineItems
+          : (Array.isArray(item.line_items) && item.line_items.length > 0)
+            ? item.line_items
+            : [];
+
+    if (items.length > 0) {
+      const formatItemLabel = (it) => {
+        const name = it.sku_text || it.description || it.product_name || 'Item';
+        const dim = it.dimensions || it.spec;
+        if (dim) {
+          const thkMatch = dim.match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+          const shortSpec = thkMatch ? thkMatch[0].trim().toUpperCase() : dim.split(/[\s(,]/)[0].trim();
+          if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
+            return `${name} (${shortSpec})`;
+          }
+        }
+        return name;
+      };
+
+      if (items.length === 1) {
+        const it = items[0];
+        const name = formatItemLabel(it);
         const qtyStr = it.quantity ? ` (${it.quantity} ${it.unit || 'MT'})` : '';
         const rateStr = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}/${it.unit || 'MT'}` : '';
         return `${name}${qtyStr}${rateStr}`;
       }
-      const totalQty = item.deal_items.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
-      const names = item.deal_items.slice(0, 2).map(it => it.sku_text || it.description || 'Item').join(', ');
-      return `${item.deal_items.length} Items${totalQty > 0 ? ` (${totalQty} MT Total)` : ''} — ${names}`;
+      const totalQty = items.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+      const names = items.slice(0, 3).map(formatItemLabel).join(', ');
+      const more = items.length > 3 ? ` +${items.length - 3} more` : '';
+      return `${items.length} Items${totalQty > 0 ? ` (${totalQty} MT Total)` : ''} — ${names}${more}`;
     }
     if (item.raw_text) {
       const firstLine = item.raw_text.split('\n')[0].trim();
@@ -4903,9 +4964,11 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
   // ── Case B: Exactly 1 Editable Inquiry Found ──
   if (editable.length === 1 && hasFilter) {
     const single = editable[0];
+    const singleItems = Array.isArray(single.deal_items) ? single.deal_items : [];
     draft.inquiry_id = single.inquiry_id || single.id;
     draft.deal_id = single.deal_id || null;
     draft.company_name = single.company_name;
+    draft.existing_items = singleItems;
     draft._inquiry_display_id = single.displayId;
 
     const hasUpdates = (draft.updates && Object.values(draft.updates).some(v => v !== null && v !== undefined && v !== '')) ||
@@ -4914,15 +4977,20 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
 
     // If user has not specified what to update yet, show current inquiry details & ask
     if (!hasUpdates) {
-      const prodSummary = formatProductSummary(single);
+      let itemsListText = '';
+      if (singleItems.length > 0) {
+        itemsListText = formatDetailedInquiryItemsList(singleItems);
+      } else {
+        itemsListText = `1. *${formatProductSummary(single)}*`;
+      }
       const stageLabel = formatStageLabel(single.stage);
       const prompt = `✏️ *Editable Inquiry Found for ${single.company_name}:*\n\n` +
         `• *Inquiry ID:* ${single.displayId}\n` +
         `• *Date:* ${single.dateFormatted}\n` +
         `• *Stage:* ${stageLabel}\n` +
-        `• *Product / Requirement:* ${prodSummary}\n` +
         `• *Payment Terms:* ${single.payment_terms}\n` +
         `• *Delivery Location:* ${single.delivery_location}\n\n` +
+        `*Current Line Items:*\n${itemsListText}\n\n` +
         `What details would you like to update?\n` +
         `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
 
@@ -4969,6 +5037,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       date: inq.dateFormatted,
       stage: formatStageLabel(inq.stage),
       productSummary: formatProductSummary(inq),
+      deal_items: inq.deal_items || [],
       payment_terms: inq.payment_terms || 'Not specified',
       delivery_location: inq.delivery_location || 'Not specified',
       rate: rateStr,
@@ -10557,6 +10626,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           date: inq.dateFormatted || formatDateDDMMYYYY(new Date(inq.created_at || Date.now())),
           stage: inq.stage || 'New Inquiry',
           productSummary: inq.productSummary || 'Products on record',
+          deal_items: inq.deal_items || [],
           payment_terms: inq.payment_terms || 'Not specified',
           delivery_location: inq.delivery_location || 'Not specified',
         };
@@ -10617,6 +10687,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           existingDraft.company_name = matchedCandidate.company_name;
           existingDraft._inquiry_display_id = matchedCandidate.displayId;
           existingDraft._inquiry_verified = true;
+          const candidateItems = Array.isArray(matchedCandidate.deal_items) ? matchedCandidate.deal_items : [];
+          if (candidateItems.length > 0) {
+            existingDraft.existing_items = candidateItems;
+          }
           delete existingDraft._inquiry_candidates;
           delete existingDraft._all_inquiry_candidates;
           delete existingDraft._inquiry_candidates_page;
@@ -10627,12 +10701,19 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
             (Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0);
 
           if (isPureSelect && !hasUpdates) {
-            const prompt = `✏️ **Selected Inquiry ${matchedCandidate.displayId} (${matchedCandidate.company_name}):**\n\n` +
-              `- **Date:** ${matchedCandidate.date}\n` +
-              `- **Stage:** ${matchedCandidate.stage}\n` +
-              `- **Product / Requirement:** ${matchedCandidate.productSummary}\n` +
-              `- **Payment Terms:** ${matchedCandidate.payment_terms}\n` +
-              `- **Delivery Location:** ${matchedCandidate.delivery_location}\n\n` +
+            let itemsListText = '';
+            if (candidateItems.length > 0) {
+              itemsListText = formatDetailedInquiryItemsList(candidateItems);
+            } else {
+              itemsListText = `1. *${matchedCandidate.productSummary || 'Steel Material'}*`;
+            }
+
+            const prompt = `✏️ *Selected Inquiry ${matchedCandidate.displayId} (${matchedCandidate.company_name}):*\n\n` +
+              `• *Date:* ${matchedCandidate.date}\n` +
+              `• *Stage:* ${matchedCandidate.stage}\n` +
+              `• *Payment Terms:* ${matchedCandidate.payment_terms}\n` +
+              `• *Delivery Location:* ${matchedCandidate.delivery_location}\n\n` +
+              `*Current Line Items:*\n${itemsListText}\n\n` +
               `What details would you like to update?\n` +
               `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
 
