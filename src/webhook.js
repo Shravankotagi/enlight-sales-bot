@@ -287,6 +287,12 @@ router.post('/', async (req, res) => {
             lastIntent.startsWith('catalog_editing|UPDATE_VISIT')
           );
 
+          const isComplaintFlow = (
+            lastIntent.startsWith('catalog_flow|LOG_COMPLAINT') ||
+            lastIntent.startsWith('catalog_confirm|LOG_COMPLAINT') ||
+            lastIntent.startsWith('catalog_editing|LOG_COMPLAINT')
+          );
+
           const isPaymentKeyword = messageType === 'image' && raw_text && (
             raw_text.toLowerCase().includes('payment') ||
             raw_text.toLowerCase().includes('paid') ||
@@ -365,6 +371,44 @@ router.post('/', async (req, res) => {
             }
             const { handleCatalogFlow } = require('./core/catalogFlow');
             const catalogResult = await handleCatalogFlow(raw_text || 'Photo uploaded', senderPhone, attachmentObj);
+            if (catalogResult && catalogResult.handled && catalogResult.reply) {
+              if (catalogResult.interactiveType === 'buttons' && Array.isArray(catalogResult.interactiveButtons)) {
+                await sendInteractiveButtons(
+                  senderPhone,
+                  catalogResult.reply,
+                  catalogResult.interactiveButtons,
+                  catalogResult.interactiveOptions || {}
+                );
+              } else if (catalogResult.interactiveType === 'list' && catalogResult.interactiveList) {
+                await sendInteractiveList(
+                  senderPhone,
+                  catalogResult.interactiveList.bodyText || catalogResult.reply,
+                  catalogResult.interactiveList.buttonText || 'Choose Action',
+                  catalogResult.interactiveList.sections || [],
+                  catalogResult.interactiveOptions || {}
+                );
+              } else {
+                await sendTextMessage(senderPhone, catalogResult.reply);
+              }
+              return;
+            }
+          }
+
+          if (isComplaintFlow && media_urls.length > 0) {
+            const mediaId = media_urls[0];
+            const mediaData = await downloadMedia(mediaId);
+            let attachmentObj = null;
+            if (mediaData && mediaData.buffer) {
+              const isPdf = (mediaData.mimeType || '').includes('pdf');
+              attachmentObj = {
+                type: isPdf ? 'document' : 'image',
+                url: `data:${mediaData.mimeType || 'image/jpeg'};base64,${mediaData.buffer.toString('base64')}`,
+                mimeType: mediaData.mimeType || 'image/jpeg',
+                fileName: `complaint_evidence_${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
+              };
+            }
+            const { handleCatalogFlow } = require('./core/catalogFlow');
+            const catalogResult = await handleCatalogFlow(raw_text || 'Evidence attachment uploaded', senderPhone, attachmentObj);
             if (catalogResult && catalogResult.handled && catalogResult.reply) {
               if (catalogResult.interactiveType === 'buttons' && Array.isArray(catalogResult.interactiveButtons)) {
                 await sendInteractiveButtons(
