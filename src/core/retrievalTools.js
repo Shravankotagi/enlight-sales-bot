@@ -2589,6 +2589,10 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
       salesperson_name: repName,
       salesperson_phone: r.reported_by || '',
       sla_met_48h: slaMet,
+      attachments_count: Array.isArray(r.attachments) ? r.attachments.length : 0,
+      attachments_notice: (Array.isArray(r.attachments) && r.attachments.length > 0)
+        ? "Attachments for this complaint are stored in the system. Please visit the dashboard and open the complaint record to view all attached photos and documents using the 'Show Attachments' button."
+        : null,
       reported_at: r.reported_at || r.created_at,
       resolved_at: r.resolved_at || null,
     };
@@ -2960,6 +2964,10 @@ async function executeGetComplaints(args, callerContext, supabaseAdmin = supabas
             salesperson_name: repName,
             salesperson_phone: r.reported_by || '',
             sla_met_48h: false,
+            attachments_count: Array.isArray(r.attachments) ? r.attachments.length : 0,
+            attachments_notice: (Array.isArray(r.attachments) && r.attachments.length > 0)
+              ? "Attachments for this complaint are stored in the system. Please visit the dashboard and open the complaint record to view all attached photos and documents using the 'Show Attachments' button."
+              : null,
             reported_at: r.reported_at || r.created_at,
             resolved_at: r.resolved_at || null,
           };

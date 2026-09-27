@@ -559,14 +559,21 @@ Example:
 Please provide the following details:
 
 - **Customer / Company:** *
+- **Complaint Date:** (optional — default: today's date)
+- **Complaint Raised By:** * (Contact person name at customer's side)
 - **Linked Order / Ref:** (optional, auto-linked if customer has active orders)
 - **Product / Material:** (e.g. 12 MT MS angle)
 - **Complaint Type:** (optional: Quality Defect / Physical Damage / Quantity Shortage / Delivery Delay / Billing Mismatch / Specification Mismatch / Other)
+- **Invoice / Challan No.:** (optional)
 - **Description:** * (e.g. 12 MT MS angle with bending damage and edge cuts)
+- **Evidence / Attachments:** (optional — send up to 3 photos/PDFs)
 - **Corrective Action:** (optional)
+- **Customer Communication / Update:** (optional)
+- **Resolution Notes:** (optional)
+- **Resolution Date:** (optional)
 
 Example:
-"Shree Balaji Pre-Engineered Buildings received 12 MT MS angle with bending damage and edge cuts during truck unloading"`,
+"Apex Steel, Raised By: Rajesh Sharma, 12 MT MS angle with bending damage, Challan: CH-9081"`,
 
   UPDATE_COMPLAINT: `✏️ **Update Complaint**
 
@@ -1327,20 +1334,31 @@ LOG_COMPLAINT:
 {
   "action": "LOG_COMPLAINT",
   "company_name": "<Company / Customer Name, else null>",
+  "complaint_date": "<Complaint Date in DD-MM-YYYY format e.g. 27-09-2026 if mentioned, else null>",
+  "raised_by": "<Contact person name at customer's side who raised the complaint e.g. 'Rajesh Sharma', else null>",
   "affected_product": "<Product name from the official 22 catalog products list (e.g. 'HR Coil', 'HR Sheet', 'CR Sheet', 'MS Angle', etc.) if explicitly named, or null if only generic words like '2 coils', 'material', 'defective goods' are mentioned>",
   "linked_inquiry_or_po": "<Linked Inquiry ID e.g. INQ-8971B1 or PO Number e.g. PO-Apex-4567, 6712 if mentioned, else null>",
   "complaint_type": "<Quality Defect | Physical Damage | Quantity Shortage | Delivery Delay | Billing Mismatch | Specification Mismatch | Other, if mentioned or inferred from issue, else null>",
+  "challan_no": "<Invoice or Delivery Challan number e.g. 'CH-9081', 'INV-1029', else null>",
   "complaint_description": "<Detailed complaint description including issue details and any quantities mentioned, else null>",
-  "corrective_action": "<Corrective action taken if mentioned, else null>",
+  "corrective_action": "<Corrective action taken or proposed if mentioned, else null>",
+  "customer_communication": "<Communication or update shared with customer if mentioned, else null>",
+  "resolution_notes": "<Resolution notes if mentioned, else null>",
+  "resolution_date": "<Resolution date in DD-MM-YYYY format if mentioned, else null>",
   "entries": [
     {
       "company_name": "<Company Name>",
+      "complaint_date": "<DD-MM-YYYY>",
+      "raised_by": "<Raised By>",
       "affected_product": "<Product from official catalog, else null>",
       "linked_inquiry_or_po": "<Linked ID, else null>",
       "complaint_type": "<Type>",
+      "challan_no": "<Challan/Invoice No>",
       "complaint_description": "<Description>",
       "corrective_action": "<Action>",
-      "initial_status": "<Status>"
+      "customer_communication": "<Communication>",
+      "resolution_notes": "<Resolution Notes>",
+      "resolution_date": "<Resolution Date>"
     }
   ]
 }
@@ -1875,9 +1893,9 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
           }
         } else if (key === 'attachments' && Array.isArray(val)) {
           const prevAtts = Array.isArray(baseDraft.attachments) ? baseDraft.attachments : [];
-          const existingUrls = new Set(prevAtts.map(a => a && a.url).filter(Boolean));
-          const newlyAdded = val.filter(a => a && a.url && !existingUrls.has(a.url));
-          merged.attachments = [...prevAtts, ...newlyAdded];
+          const existingUrls = new Set(prevAtts.map(a => a && (a.url || a.file_url)).filter(Boolean));
+          const newlyAdded = val.filter(a => a && (a.url || a.file_url) && !existingUrls.has(a.url || a.file_url));
+          merged.attachments = [...prevAtts, ...newlyAdded].slice(0, 3);
         } else if (key === 'gps_photo_url' && typeof val === 'string') {
           // Keep baseDraft photo if already set (never replace previously added photo)
           merged.gps_photo_url = baseDraft.gps_photo_url || val;
@@ -1889,8 +1907,10 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   }
 
   // Fallback date injection if date field is empty and user mentioned relative date
-  if (!merged.visit_date && !merged.po_date) {
-    const targetDateKey = action.includes('ORDER') ? 'po_date' : 'visit_date';
+  if (!merged.visit_date && !merged.po_date && !merged.complaint_date) {
+    let targetDateKey = 'visit_date';
+    if (action.includes('ORDER')) targetDateKey = 'po_date';
+    else if (action.includes('COMPLAINT')) targetDateKey = 'complaint_date';
     if (/\b(?:day before yesterday|parso)\b/i.test(userInput)) {
       merged[targetDateKey] = formatDateDDMMYYYY(new Date(Date.now() - 48 * 3600 * 1000));
     } else if (/\b(?:yesterday|kal)\b/i.test(userInput)) {
@@ -1898,6 +1918,16 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     } else if (/\b(?:today|now|just now|aaj)\b/i.test(userInput)) {
       merged[targetDateKey] = formatDateDDMMYYYY(new Date());
     }
+  }
+
+  // Default complaint_date to today if not provided for LOG_COMPLAINT
+  if (action === 'LOG_COMPLAINT' && !merged.complaint_date) {
+    merged.complaint_date = formatDateDDMMYYYY(new Date());
+  }
+
+  // Ensure raised_by is mapped from contact_person/person_met if present
+  if (action === 'LOG_COMPLAINT' && !merged.raised_by && (merged.contact_person || merged.person_met)) {
+    merged.raised_by = merged.contact_person || merged.person_met;
   }
 
   // Fallback inquiry_id injection if missing and user mentioned INQ- or DEAL- ID
@@ -2353,9 +2383,18 @@ function validateMandatoryFields(action, draft) {
       break;
 
     case 'LOG_COMPLAINT':
+      if (!draft.complaint_date) {
+        draft.complaint_date = formatDateDDMMYYYY(new Date());
+      }
+      if (!draft.raised_by && (draft.contact_person || draft.person_met)) {
+        draft.raised_by = draft.contact_person || draft.person_met;
+      }
       if (!draft.company_name) missing.push('Company / Customer Name');
-      if (!draft.complaint_description && !draft.affected_product) {
-        missing.push('Complaint Description & Affected Material');
+      if (!draft.raised_by) {
+        missing.push('Complaint Raised By (Contact person name at customer)');
+      }
+      if (!draft.complaint_description && !draft.description && !draft.affected_product) {
+        missing.push('Complaint Description');
       }
       break;
 
@@ -3948,7 +3987,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
     }
   }
 
-  const footerText = `Reply with the serial number or record ID to update that record. Type "Next" for the next 7 records, or tell me the customer name to search their records.`;
+  const footerText = `Reply with the serial number or Inquiry ID to update that record. Type "Next" for the next 7 records, or tell me the customer name to search their records.`;
 
   const fullReply = `${headerText}\n\n${listText}\n\n${footerText}`;
 
@@ -5851,12 +5890,30 @@ function buildConfirmationSummary(action, draft) {
     }
 
     case 'LOG_COMPLAINT': {
+      const attCount = Array.isArray(draft.attachments) ? draft.attachments.length : 0;
       summary += `• *Customer / Company:* ${draft.company_name || '-'}\n`;
-      summary += `• *Linked Order / Ref:* ${draft.linked_inquiry_or_po || '-'}\n`;
+      summary += `• *Complaint Date:* ${draft.complaint_date || formatDateDDMMYYYY(new Date())}\n`;
+      summary += `• *Complaint Raised By:* ${draft.raised_by || draft.contact_person || draft.person_met || '-'}\n`;
+      summary += `• *Linked Order / Ref:* ${draft.linked_inquiry_or_po || (draft.po_number ? `PO: ${draft.po_number}` : '-')}\n`;
       summary += `• *Product / Material:* ${draft.affected_product || draft.product_name || '-'}\n`;
       summary += `• *Complaint Type:* ${draft.complaint_type || 'Quality Defect'}\n`;
-      summary += `• *Description:* ${draft.complaint_description || draft.affected_product || '-'}\n`;
-      summary += `• *Corrective Action:* ${draft.corrective_action || '-'}\n`;
+      if (draft.challan_no) {
+        summary += `• *Invoice / Challan No.:* ${draft.challan_no}\n`;
+      }
+      summary += `• *Description:* ${draft.complaint_description || draft.description || draft.affected_product || '-'}\n`;
+      summary += `• *Evidence:* ${attCount > 0 ? `${attCount} file(s) attached` : 'None'}\n`;
+      if (draft.corrective_action) {
+        summary += `• *Corrective Action:* ${draft.corrective_action}\n`;
+      }
+      if (draft.customer_communication) {
+        summary += `• *Customer Communication:* ${draft.customer_communication}\n`;
+      }
+      if (draft.resolution_notes) {
+        summary += `• *Resolution Notes:* ${draft.resolution_notes}\n`;
+      }
+      if (draft.resolution_date) {
+        summary += `• *Resolution Date:* ${draft.resolution_date}\n`;
+      }
       summary += `• *Status:* Open (48-Hour SLA Clock Started)\n`;
       break;
     }
@@ -8013,25 +8070,71 @@ async function executeAction(action, draft, senderPhone) {
           .trim() || draft.complaint_description || product;
 
         // 1. Insert into complaints (ALWAYS status: 'open')
-        const { error: cmpErr } = await supabase.from('complaints').insert({
+        let cmpDateIso = nowIso;
+        if (draft.complaint_date) {
+          const parsed = parseDDMMYYYYtoISO(draft.complaint_date);
+          if (parsed) cmpDateIso = parsed;
+        }
+
+        let resDateIso = null;
+        if (draft.resolution_date) {
+          const parsedRes = parseDDMMYYYYtoISO(draft.resolution_date);
+          if (parsedRes) resDateIso = parsedRes;
+        }
+
+        const attachmentsPayload = Array.isArray(draft.attachments) && draft.attachments.length > 0
+          ? draft.attachments.map(a => ({
+              file_url: a.file_url || a.url,
+              file_name: a.file_name || a.name || `evidence-${Date.now()}`,
+              file_type: a.file_type || a.type || 'image/jpeg',
+              file_size: a.file_size || null,
+              uploaded_at: a.uploaded_at || nowIso,
+            }))
+          : [];
+
+        const mediaUrls = attachmentsPayload.map(a => a.file_url).filter(Boolean);
+
+        const complaintPayload = {
           customer_name: companyName,
+          complaint_date: cmpDateIso,
+          raised_by: (draft.raised_by || draft.contact_person || draft.person_met || '').trim() || null,
           complaint_type: normalizedType,
           description: sanitizedDesc,
           reported_by: senderPhone,
           status: 'open',
           po_number: targetPoNumber,
           deal_id: targetDealId,
+          challan_no: (draft.challan_no || '').trim() || null,
           product_name: product || null,
           affected_product: product || null,
           corrective_action: draft.corrective_action || null,
+          customer_communication: draft.customer_communication || null,
+          resolution_notes: draft.resolution_notes || null,
+          resolution_date: resDateIso,
+          attachments: attachmentsPayload.length > 0 ? attachmentsPayload : null,
+          media_urls: mediaUrls.length > 0 ? mediaUrls : null,
           reported_at: nowIso,
           created_at: nowIso,
           sla_due_at: slaDueAt,
-        });
+        };
+
+        const { error: cmpErr } = await supabase.from('complaints').insert(complaintPayload);
 
         if (cmpErr) {
-          console.error('[CatalogFlow] Complaint insert error:', cmpErr);
-          return `❌ *Failed to log complaint for ${companyName}.*\n\nReason: ${cmpErr.message || 'Database write error'}. Please try again.`;
+          console.error('[CatalogFlow] Complaint insert error, retrying without optional columns:', cmpErr.message);
+          delete complaintPayload.complaint_date;
+          delete complaintPayload.raised_by;
+          delete complaintPayload.challan_no;
+          delete complaintPayload.customer_communication;
+          delete complaintPayload.resolution_notes;
+          delete complaintPayload.resolution_date;
+          delete complaintPayload.attachments;
+          delete complaintPayload.media_urls;
+          const { error: fbErr } = await supabase.from('complaints').insert(complaintPayload);
+          if (fbErr) {
+            console.error('[CatalogFlow] Fallback complaint insert error:', fbErr.message);
+            return `❌ *Failed to log complaint for ${companyName}.*\n\nReason: ${fbErr.message || cmpErr.message || 'Database write error'}. Please try again.`;
+          }
         }
 
         // 2. Log KRA 7 (Quality Complaint)
@@ -8078,13 +8181,21 @@ async function executeAction(action, draft, senderPhone) {
           linkedDisplay = `• *Linked Order / Ref:* ${draft.linked_inquiry_or_po}\n`;
         }
 
+        const attCount = attachmentsPayload.length;
         return `⚠️ *Customer Complaint Logged Successfully!*\n\n` +
           `• *Customer / Company:* ${companyName}\n` +
+          `• *Complaint Date:* ${draft.complaint_date || formatDateDDMMYYYY(new Date())}\n` +
+          `• *Complaint Raised By:* ${draft.raised_by || draft.contact_person || draft.person_met || 'N/A'}\n` +
           linkedDisplay +
           (product ? `• *Product / Material:* ${product}\n` : '') +
           `• *Complaint Type:* ${normalizedType}\n` +
+          (draft.challan_no ? `• *Invoice / Challan No.:* ${draft.challan_no}\n` : '') +
           `• *Description:* ${sanitizedDesc}\n` +
+          `• *Evidence:* ${attCount > 0 ? `${attCount} file(s) attached` : 'None'}\n` +
           (draft.corrective_action ? `• *Corrective Action:* ${draft.corrective_action}\n` : '') +
+          (draft.customer_communication ? `• *Customer Communication:* ${draft.customer_communication}\n` : '') +
+          (draft.resolution_notes ? `• *Resolution Notes:* ${draft.resolution_notes}\n` : '') +
+          (draft.resolution_date ? `• *Resolution Date:* ${draft.resolution_date}\n` : '') +
           `• *Status:* Open (48-Hour SLA Clock Started)\n\n` +
           `Logged to Customer Complaints Card! (48h SLA Active) ⏱️`;
       }
@@ -10935,6 +11046,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       'visit_id', 'visit_date', 'inquiry_id', '_inquiry_display_id', '_inquiry_verified',
       'deal_id', 'po_number', 'linked_inquiry_or_po', 'affected_product', '_order_verified',
       'complaint_type', 'complaint_description', 'company_name', 'complaint_id', '_complaint_verified',
+      'complaint_date', 'raised_by', 'challan_no', 'customer_communication', 'resolution_notes', 'resolution_date', 'corrective_action',
+      '_attachments_asked', '_attachments_completed',
       'rate', '_customer_verified', '_new_customer_created',
       'gps_photo_url', 'gps_latitude', 'gps_longitude', 'gps_accuracy', 'attachments'
     ];
@@ -10977,6 +11090,40 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           updatedDraft.updates.gps_longitude = gpsData.longitude;
           updatedDraft.updates.gps_accuracy = gpsData.accuracy;
         }
+      }
+    } else if (action === 'LOG_COMPLAINT') {
+      if (attachmentObj) {
+        const prevAtts = Array.isArray(updatedDraft.attachments) ? updatedDraft.attachments : (Array.isArray(existingDraft.attachments) ? existingDraft.attachments : []);
+        if (prevAtts.length >= 3) {
+          const maxReply = `⚠️ *Maximum 3 attachments allowed per complaint. First 3 have been preserved.*`;
+          await recordSessionMessage(senderPhone, 'assistant', maxReply, { action_type: action });
+          await saveActiveSession(senderPhone, updatedDraft.company_name || existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+          return { handled: true, reply: maxReply };
+        }
+        const fileUrl = attachmentObj.url || attachmentObj.file_url;
+        if (!prevAtts.some(a => (a.url === fileUrl || a.file_url === fileUrl))) {
+          const compAtt = {
+            name: attachmentObj.name || `evidence-${Date.now()}.jpg`,
+            url: fileUrl,
+            file_url: fileUrl,
+            file_name: attachmentObj.name || `evidence-${Date.now()}`,
+            file_type: attachmentObj.type || attachmentObj.file_type || 'image/jpeg',
+            file_size: attachmentObj.file_size || null,
+            uploaded_at: new Date().toISOString(),
+          };
+          updatedDraft.attachments = [...prevAtts, compAtt];
+        }
+        updatedDraft._attachments_asked = true;
+        const currentCount = updatedDraft.attachments.length;
+        const ackReply = `📎 *Evidence attachment received (${currentCount}/3).* \n\nYou can send another photo/document (max 3), type *'Done'* when finished, or type *'Skip'* to proceed without more attachments.`;
+        await recordSessionMessage(senderPhone, 'assistant', ackReply, { action_type: action });
+        await saveActiveSession(senderPhone, updatedDraft.company_name || existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: ackReply };
+      }
+
+      const isDoneOrSkip = /^(?:done|skip|proceed|next|no|nah|none|no\s*photos?|no\s*evidence)\b/i.test(text.trim());
+      if (isDoneOrSkip && (existingDraft._attachments_asked || !existingDraft.complaint_description)) {
+        updatedDraft._attachments_completed = true;
       }
     }
 
@@ -11134,6 +11281,21 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           return { handled: true, reply: ordCheck.reply };
         }
         if (ordCheck && ordCheck.draft) Object.assign(updatedDraft, ordCheck.draft);
+      }
+
+      // Evidence / Attachments question for LOG_COMPLAINT before final confirmation
+      if (action === 'LOG_COMPLAINT' && !updatedDraft._attachments_asked && (!Array.isArray(updatedDraft.attachments) || updatedDraft.attachments.length === 0) && !updatedDraft._attachments_completed) {
+        updatedDraft._attachments_asked = true;
+        const askAttachmentsPrompt = `📸 *Evidence / Photo Attachments (Optional)*\n\nDo you have any photos or documents as evidence? If yes, send them now. You can send multiple photos one after another.\n\n👉 Type *'Done'* or *'Skip'* to proceed to confirmation without attachments.`;
+        await recordSessionMessage(senderPhone, 'assistant', askAttachmentsPrompt, {
+          action_type: action,
+          customer_name: updatedDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+        return {
+          handled: true,
+          reply: askAttachmentsPrompt,
+        };
       }
 
       // All mandatory fields present -> Show confirmation summary
