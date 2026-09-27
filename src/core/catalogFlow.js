@@ -8175,29 +8175,53 @@ async function executeAction(action, draft, senderPhone) {
           customer_communication: draft.customer_communication || null,
           resolution_notes: draft.resolution_notes || null,
           resolution_date: resDateIso,
-          attachments: attachmentsPayload.length > 0 ? attachmentsPayload : null,
-          media_urls: mediaUrls.length > 0 ? mediaUrls : null,
           reported_at: nowIso,
           created_at: nowIso,
           sla_due_at: slaDueAt,
         };
 
-        const { error: cmpErr } = await supabase.from('complaints').insert(complaintPayload);
+        const { data: insertedCmp, error: cmpErr } = await supabase
+          .from('complaints')
+          .insert(complaintPayload)
+          .select()
+          .single();
+
+        let createdComplaint = insertedCmp;
 
         if (cmpErr) {
           console.error('[CatalogFlow] Complaint insert error, retrying without optional columns:', cmpErr.message);
-          delete complaintPayload.complaint_date;
-          delete complaintPayload.raised_by;
-          delete complaintPayload.challan_no;
-          delete complaintPayload.customer_communication;
-          delete complaintPayload.resolution_notes;
-          delete complaintPayload.resolution_date;
-          delete complaintPayload.attachments;
-          delete complaintPayload.media_urls;
-          const { error: fbErr } = await supabase.from('complaints').insert(complaintPayload);
+          const fallbackPayload = { ...complaintPayload };
+          delete fallbackPayload.complaint_date;
+          delete fallbackPayload.raised_by;
+          delete fallbackPayload.challan_no;
+          delete fallbackPayload.customer_communication;
+          delete fallbackPayload.resolution_notes;
+          delete fallbackPayload.resolution_date;
+          const { data: fbData, error: fbErr } = await supabase
+            .from('complaints')
+            .insert(fallbackPayload)
+            .select()
+            .single();
           if (fbErr) {
             console.error('[CatalogFlow] Fallback complaint insert error:', fbErr.message);
             return `❌ *Failed to log complaint for ${companyName}.*\n\nReason: ${fbErr.message || cmpErr.message || 'Database write error'}. Please try again.`;
+          }
+          createdComplaint = fbData;
+        }
+
+        // Insert evidence attachments into complaint_attachments table
+        if (createdComplaint?.id && attachmentsPayload.length > 0) {
+          try {
+            const attRows = attachmentsPayload.map(a => ({
+              complaint_id: createdComplaint.id,
+              file_url: a.file_url,
+              file_name: a.file_name,
+              file_type: a.file_type,
+              uploaded_at: a.uploaded_at || nowIso,
+            }));
+            await supabase.from('complaint_attachments').insert(attRows);
+          } catch (attErr) {
+            console.warn('[CatalogFlow] Non-blocking complaint_attachments insert notice:', attErr?.message);
           }
         }
 
