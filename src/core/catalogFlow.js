@@ -158,6 +158,10 @@ const RESUME_QUERY_BUTTONS = [
   { id: 'btn_resume_no', title: 'No, Go to Menu' },
 ];
 
+const ATTACHMENT_PROMPT_BUTTONS = [
+  { id: 'btn_att_no', title: 'No' },
+];
+
 function getPostActivityButtons(action) {
   switch (action) {
     case 'LOG_COMPLAINT':
@@ -5965,7 +5969,9 @@ function buildConfirmationSummary(action, draft) {
         summary += `• *Invoice / Challan No.:* ${draft.challan_no}\n`;
       }
       summary += `• *Description:* ${draft.complaint_description || draft.description || draft.affected_product || '-'}\n`;
-      summary += `• *Evidence:* ${attCount > 0 ? `${attCount} file(s) attached` : 'None'}\n`;
+      if (attCount > 0) {
+        summary += `• *Evidence:* ${attCount} file(s) attached\n`;
+      }
       if (draft.corrective_action) {
         summary += `• *Corrective Action:* ${draft.corrective_action}\n`;
       }
@@ -8279,7 +8285,7 @@ async function executeAction(action, draft, senderPhone) {
           `• *Complaint Type:* ${normalizedType}\n` +
           (draft.challan_no ? `• *Invoice / Challan No.:* ${draft.challan_no}\n` : '') +
           `• *Description:* ${sanitizedDesc}\n` +
-          `• *Evidence:* ${attCount > 0 ? `${attCount} file(s) attached` : 'None'}\n` +
+          (attCount > 0 ? `• *Evidence:* ${attCount} file(s) attached\n` : '') +
           (draft.corrective_action ? `• *Corrective Action:* ${draft.corrective_action}\n` : '') +
           (draft.customer_communication ? `• *Customer Communication:* ${draft.customer_communication}\n` : '') +
           (draft.resolution_notes ? `• *Resolution Notes:* ${draft.resolution_notes}\n` : '') +
@@ -11153,8 +11159,13 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       }
     }
 
-    // Check if user wants to abort / switch (only if not resolving candidate selection)
-    if (isDiscardOrCancelIntent(text)) {
+    // Check if user replied "No" to complaint attachment prompt (this is NOT a discard intent)
+    const isAttachmentNo = action === 'LOG_COMPLAINT' &&
+      (existingDraft._attachments_asked || text.trim() === 'btn_att_no' || /^(?:btn_att_no|no|nah|none|no\s*photos?|no\s*evidence|skip|done|proceed|next|nahi)\b/i.test(text.trim())) &&
+      /^(?:btn_att_no|no|nah|none|no\s*photos?|no\s*evidence|skip|done|proceed|next|nahi)\b/i.test(text.trim());
+
+    // Check if user wants to abort / switch (only if not resolving candidate selection or skipping attachments)
+    if (!isAttachmentNo && isDiscardOrCancelIntent(text)) {
       const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
       await recordSessionMessage(senderPhone, 'user', text);
       await recordSessionMessage(senderPhone, 'assistant', cancelReply);
@@ -11213,7 +11224,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     // Extract fields from user message
     const isPureCandidateSelection = (candidateResolved || inquiryCandidateResolved || orderCandidateResolved) && isPureOptionSelectorOnly(text);
 
-    const updatedDraft = isPureCandidateSelection
+    const updatedDraft = (isPureCandidateSelection || isAttachmentNo)
       ? { ...existingDraft }
       : await extractFieldsWithLLM(action, text, existingDraft);
 
@@ -11286,11 +11297,13 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           }
         }
         updatedDraft._attachments_asked = true;
+        updatedDraft._attachments_completed = true;
       }
 
-      const isDoneOrSkip = /^(?:done|skip|proceed|next|no|nah|none|no\s*photos?|no\s*evidence)\b/i.test(text.trim());
+      const isDoneOrSkip = isAttachmentNo || /^(?:done|skip|proceed|next|no|nah|none|no\s*photos?|no\s*evidence|btn_att_no)\b/i.test(text.trim());
       if (isDoneOrSkip && (existingDraft._attachments_asked || !existingDraft.complaint_description)) {
         updatedDraft._attachments_completed = true;
+        updatedDraft._attachments_asked = true;
       }
     }
 
@@ -11453,7 +11466,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       // Evidence / Attachments question for LOG_COMPLAINT before final confirmation
       if (action === 'LOG_COMPLAINT' && !updatedDraft._attachments_asked && (!Array.isArray(updatedDraft.attachments) || updatedDraft.attachments.length === 0) && !updatedDraft._attachments_completed) {
         updatedDraft._attachments_asked = true;
-        const askAttachmentsPrompt = `📸 *Evidence / Photo Attachments (Optional)*\n\nDo you have any photos or documents as evidence? If yes, send them now. You can send multiple photos one after another.\n\n👉 Type *'Done'* or *'Skip'* to proceed to confirmation without attachments.`;
+        const askAttachmentsPrompt = `Do you want to attach photos for this complaint? You can send 1 to 3 photos (max 15MB each) in one shot. If no attachments, tap 'No'.`;
         await recordSessionMessage(senderPhone, 'assistant', askAttachmentsPrompt, {
           action_type: action,
           customer_name: updatedDraft.company_name,
@@ -11462,6 +11475,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         return {
           handled: true,
           reply: askAttachmentsPrompt,
+          interactiveType: 'buttons',
+          interactiveButtons: ATTACHMENT_PROMPT_BUTTONS,
         };
       }
 

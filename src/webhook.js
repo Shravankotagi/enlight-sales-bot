@@ -399,12 +399,17 @@ router.post('/', async (req, res) => {
             const mediaData = await downloadMedia(mediaId);
             let attachmentObj = null;
             if (mediaData && mediaData.buffer) {
+              if (mediaData.buffer.length > 15 * 1024 * 1024) {
+                await sendTextMessage(senderPhone, '⚠️ *Photo Exceeds 15MB Limit*\n\nPlease send a photo under 15MB or tap *No*.');
+                return;
+              }
               const isPdf = (mediaData.mimeType || '').includes('pdf');
               attachmentObj = {
                 type: isPdf ? 'document' : 'image',
                 url: `data:${mediaData.mimeType || 'image/jpeg'};base64,${mediaData.buffer.toString('base64')}`,
                 mimeType: mediaData.mimeType || 'image/jpeg',
                 fileName: `complaint_evidence_${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
+                file_size: mediaData.buffer.length,
               };
             }
             const { handleCatalogFlow } = require('./core/catalogFlow');
