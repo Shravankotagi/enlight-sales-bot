@@ -41,6 +41,9 @@ function isDuplicateMessageId(messageId) {
   return false;
 }
 
+// In-memory debounce map for batch media uploads per sender phone (e.g. multi-photo complaint attachments)
+const complaintUploadBatches = new Map();
+
 /**
  * KRA 6 - CRM Compliance Logger
  * Logs every business activity by a salesperson as a daily CRM touch.
@@ -405,36 +408,76 @@ router.post('/', async (req, res) => {
               }
               const isPdf = (mediaData.mimeType || '').includes('pdf');
               attachmentObj = {
+                name: `evidence-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
                 type: isPdf ? 'document' : 'image',
                 url: `data:${mediaData.mimeType || 'image/jpeg'};base64,${mediaData.buffer.toString('base64')}`,
-                mimeType: mediaData.mimeType || 'image/jpeg',
-                fileName: `complaint_evidence_${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
+                file_url: `data:${mediaData.mimeType || 'image/jpeg'};base64,${mediaData.buffer.toString('base64')}`,
+                file_name: `complaint_evidence_${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
+                file_type: mediaData.mimeType || 'image/jpeg',
                 file_size: mediaData.buffer.length,
+                uploaded_at: new Date().toISOString(),
               };
             }
-            const { handleCatalogFlow } = require('./core/catalogFlow');
-            const catalogResult = await handleCatalogFlow(raw_text || 'Evidence attachment uploaded', senderPhone, attachmentObj);
-            if (catalogResult && catalogResult.handled && catalogResult.reply) {
-              if (catalogResult.interactiveType === 'buttons' && Array.isArray(catalogResult.interactiveButtons)) {
-                await sendInteractiveButtons(
-                  senderPhone,
-                  catalogResult.reply,
-                  catalogResult.interactiveButtons,
-                  catalogResult.interactiveOptions || {}
-                );
-              } else if (catalogResult.interactiveType === 'list' && catalogResult.interactiveList) {
-                await sendInteractiveList(
-                  senderPhone,
-                  catalogResult.interactiveList.bodyText || catalogResult.reply,
-                  catalogResult.interactiveList.buttonText || 'Choose Action',
-                  catalogResult.interactiveList.sections || [],
-                  catalogResult.interactiveOptions || {}
-                );
-              } else {
-                await sendTextMessage(senderPhone, catalogResult.reply);
-              }
+
+            if (!attachmentObj) {
+              await sendTextMessage(senderPhone, '❌ *Failed to download the photo.* Please try sending it again.');
               return;
             }
+
+            // Multi-photo batching & debouncing: buffer incoming photos for 1.2s so 1-3 photos sent in one shot are collected into 1 single confirmation message
+            let batch = complaintUploadBatches.get(senderPhone);
+            if (batch) {
+              clearTimeout(batch.timer);
+              if (batch.attachments.length < 3) {
+                batch.attachments.push(attachmentObj);
+              }
+            } else {
+              batch = {
+                attachments: [attachmentObj],
+                raw_text: raw_text || 'Photo uploaded',
+              };
+              complaintUploadBatches.set(senderPhone, batch);
+            }
+
+            batch.timer = setTimeout(async () => {
+              try {
+                const currentBatch = complaintUploadBatches.get(senderPhone);
+                complaintUploadBatches.delete(senderPhone);
+                if (!currentBatch || currentBatch.attachments.length === 0) return;
+
+                const { handleCatalogFlow } = require('./core/catalogFlow');
+                const catalogResult = await handleCatalogFlow(
+                  currentBatch.raw_text || 'Evidence attachment uploaded',
+                  senderPhone,
+                  { attachments: currentBatch.attachments }
+                );
+
+                if (catalogResult && catalogResult.handled && catalogResult.reply) {
+                  if (catalogResult.interactiveType === 'buttons' && Array.isArray(catalogResult.interactiveButtons)) {
+                    await sendInteractiveButtons(
+                      senderPhone,
+                      catalogResult.reply,
+                      catalogResult.interactiveButtons,
+                      catalogResult.interactiveOptions || {}
+                    );
+                  } else if (catalogResult.interactiveType === 'list' && catalogResult.interactiveList) {
+                    await sendInteractiveList(
+                      senderPhone,
+                      catalogResult.interactiveList.bodyText || catalogResult.reply,
+                      catalogResult.interactiveList.buttonText || 'Choose Action',
+                      catalogResult.interactiveList.sections || [],
+                      catalogResult.interactiveOptions || {}
+                    );
+                  } else {
+                    await sendTextMessage(senderPhone, catalogResult.reply);
+                  }
+                }
+              } catch (batchErr) {
+                console.error('[Webhook] Error processing batched complaint attachments:', batchErr);
+              }
+            }, 1200);
+
+            return;
           }
 
           if (isPaymentKeyword && media_urls.length > 0) {

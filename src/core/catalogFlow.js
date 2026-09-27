@@ -113,7 +113,11 @@ function extractPhotoAndGps(rawText, options = {}) {
     };
   }
 
-  return { photoDataUrl, gpsData, attachmentObj };
+  const incomingAttachments = Array.isArray(options.attachments) && options.attachments.length > 0
+    ? options.attachments
+    : (attachmentObj ? [attachmentObj] : []);
+
+  return { photoDataUrl, gpsData, attachmentObj: incomingAttachments[0] || attachmentObj, incomingAttachments };
 }
 
 const CATALOG_MENU = `👋 Welcome to **SalesOS Assistant**!
@@ -9608,7 +9612,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   const text = rawText.trim();
   if (text.length === 0) return { handled: false };
 
-  const { photoDataUrl, gpsData, attachmentObj } = extractPhotoAndGps(rawText, options);
+  const { photoDataUrl, gpsData, attachmentObj, incomingAttachments } = extractPhotoAndGps(rawText, options);
 
   // ── 1. FETCH ACTIVE SESSION STATE ──────────────────────────────────────────
   const activeSession = await getFullActiveSession(senderPhone);
@@ -10346,24 +10350,27 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         }
       }
     } else if (action === 'LOG_COMPLAINT') {
-      if (attachmentObj) {
+      if (incomingAttachments.length > 0) {
         const prevAtts = Array.isArray(updatedDraft.attachments) ? updatedDraft.attachments : (Array.isArray(draft.attachments) ? draft.attachments : []);
-        if (prevAtts.length < 3) {
-          const fileUrl = attachmentObj.url || attachmentObj.file_url;
-          if (!prevAtts.some(a => (a.url === fileUrl || a.file_url === fileUrl))) {
-            const isPdf = (attachmentObj.type || '').includes('pdf');
+        const newAtts = [...prevAtts];
+        for (const att of incomingAttachments) {
+          if (newAtts.length >= 3) break;
+          const fileUrl = att.url || att.file_url;
+          if (!newAtts.some(a => (a.url === fileUrl || a.file_url === fileUrl))) {
+            const isPdf = (att.type || att.file_type || '').includes('pdf');
             const compAtt = {
-              name: attachmentObj.name || `evidence-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
+              name: att.name || att.file_name || `evidence-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
               url: fileUrl,
               file_url: fileUrl,
-              file_name: attachmentObj.name || `evidence-${Date.now()}`,
-              file_type: attachmentObj.type || attachmentObj.file_type || 'image/jpeg',
-              file_size: attachmentObj.file_size || null,
-              uploaded_at: new Date().toISOString(),
+              file_name: att.name || att.file_name || `evidence-${Date.now()}`,
+              file_type: att.type || att.file_type || 'image/jpeg',
+              file_size: att.file_size || null,
+              uploaded_at: att.uploaded_at || new Date().toISOString(),
             };
-            updatedDraft.attachments = [...prevAtts, compAtt];
+            newAtts.push(compAtt);
           }
         }
+        updatedDraft.attachments = newAtts;
       }
     }
 
@@ -10505,24 +10512,27 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         }
       }
     } else if (action === 'LOG_COMPLAINT') {
-      if (attachmentObj) {
+      if (incomingAttachments.length > 0) {
         const prevAtts = Array.isArray(updatedDraft.attachments) ? updatedDraft.attachments : (Array.isArray(draft.attachments) ? draft.attachments : []);
-        if (prevAtts.length < 3) {
-          const fileUrl = attachmentObj.url || attachmentObj.file_url;
-          if (!prevAtts.some(a => (a.url === fileUrl || a.file_url === fileUrl))) {
-            const isPdf = (attachmentObj.type || '').includes('pdf');
+        const newAtts = [...prevAtts];
+        for (const att of incomingAttachments) {
+          if (newAtts.length >= 3) break;
+          const fileUrl = att.url || att.file_url;
+          if (!newAtts.some(a => (a.url === fileUrl || a.file_url === fileUrl))) {
+            const isPdf = (att.type || att.file_type || '').includes('pdf');
             const compAtt = {
-              name: attachmentObj.name || `evidence-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
+              name: att.name || att.file_name || `evidence-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
               url: fileUrl,
               file_url: fileUrl,
-              file_name: attachmentObj.name || `evidence-${Date.now()}`,
-              file_type: attachmentObj.type || attachmentObj.file_type || 'image/jpeg',
-              file_size: attachmentObj.file_size || null,
-              uploaded_at: new Date().toISOString(),
+              file_name: att.name || att.file_name || `evidence-${Date.now()}`,
+              file_type: att.type || att.file_type || 'image/jpeg',
+              file_size: att.file_size || null,
+              uploaded_at: att.uploaded_at || new Date().toISOString(),
             };
-            updatedDraft.attachments = [...prevAtts, compAtt];
+            newAtts.push(compAtt);
           }
         }
+        updatedDraft.attachments = newAtts;
       }
     }
 
@@ -11223,8 +11233,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     // Extract fields from user message
     const isPureCandidateSelection = (candidateResolved || inquiryCandidateResolved || orderCandidateResolved) && isPureOptionSelectorOnly(text);
+    const isGenericMediaCaption = /^(?:image\s*received|document\s*received|photo\s*uploaded|evidence\s*(?:attachment|photo|photos|document)?\s*uploaded|uploaded\s*photo|attachment\s*uploaded)$/i.test(text.trim());
 
-    const updatedDraft = (isPureCandidateSelection || isAttachmentNo)
+    const updatedDraft = (isPureCandidateSelection || isAttachmentNo || (incomingAttachments.length > 0 && isGenericMediaCaption))
       ? { ...existingDraft }
       : await extractFieldsWithLLM(action, text, existingDraft);
 
@@ -11278,24 +11289,27 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         }
       }
     } else if (action === 'LOG_COMPLAINT') {
-      if (attachmentObj) {
+      if (incomingAttachments.length > 0) {
         const prevAtts = Array.isArray(updatedDraft.attachments) ? updatedDraft.attachments : (Array.isArray(existingDraft.attachments) ? existingDraft.attachments : []);
-        if (prevAtts.length < 3) {
-          const fileUrl = attachmentObj.url || attachmentObj.file_url;
-          if (!prevAtts.some(a => (a.url === fileUrl || a.file_url === fileUrl))) {
-            const isPdf = (attachmentObj.type || '').includes('pdf');
+        const newAtts = [...prevAtts];
+        for (const att of incomingAttachments) {
+          if (newAtts.length >= 3) break;
+          const fileUrl = att.url || att.file_url;
+          if (!newAtts.some(a => (a.url === fileUrl || a.file_url === fileUrl))) {
+            const isPdf = (att.type || att.file_type || '').includes('pdf');
             const compAtt = {
-              name: attachmentObj.name || `evidence-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
+              name: att.name || att.file_name || `evidence-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
               url: fileUrl,
               file_url: fileUrl,
-              file_name: attachmentObj.name || `evidence-${Date.now()}`,
-              file_type: attachmentObj.type || attachmentObj.file_type || 'image/jpeg',
-              file_size: attachmentObj.file_size || null,
-              uploaded_at: new Date().toISOString(),
+              file_name: att.name || att.file_name || `evidence-${Date.now()}`,
+              file_type: att.type || att.file_type || 'image/jpeg',
+              file_size: att.file_size || null,
+              uploaded_at: att.uploaded_at || new Date().toISOString(),
             };
-            updatedDraft.attachments = [...prevAtts, compAtt];
+            newAtts.push(compAtt);
           }
         }
+        updatedDraft.attachments = newAtts;
         updatedDraft._attachments_asked = true;
         updatedDraft._attachments_completed = true;
       }
