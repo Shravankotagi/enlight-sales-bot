@@ -3229,9 +3229,25 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.payment_terms && !merged.updates.payment_terms) merged.updates.payment_terms = newExtracted.payment_terms;
     if (newExtracted.stage && !merged.updates.stage) merged.updates.stage = newExtracted.stage;
     if (newExtracted.status && !merged.updates.stage) merged.updates.stage = newExtracted.status;
+    if (newExtracted.new_stage && !merged.updates.stage) merged.updates.stage = newExtracted.new_stage;
     if (newExtracted.preferred_make && !merged.updates.preferred_make) merged.updates.preferred_make = newExtracted.preferred_make;
     if (newExtracted.additional_notes && !merged.updates.additional_notes) merged.updates.additional_notes = newExtracted.additional_notes;
     if (newExtracted.updates?.additional_notes) merged.updates.additional_notes = newExtracted.updates.additional_notes;
+
+    if (!merged.updates.stage) {
+      const stageMatch = userInput.match(/\b(?:mark|move|put|change|update|set|stage|status)?\s*(?:the\s+|an?\s+)?(?:stage|status)?\s*(?:to|as|:|=)?\s*(won|lost|negotiation|quoted|on\s+hold|hold|review|new\s+inquiry)\b/i);
+      if (stageMatch) {
+        merged.updates.stage = normalizeDealStageKey(stageMatch[1]) || stageMatch[1].trim();
+      }
+    }
+
+    let lineUpdates = Array.isArray(newExtracted.line_item_updates) ? newExtracted.line_item_updates : [];
+    if (lineUpdates.length === 0 && Array.isArray(merged.line_item_updates)) {
+      lineUpdates = merged.line_item_updates;
+    }
+    if (lineUpdates.length > 0) {
+      merged.line_item_updates = lineUpdates;
+    }
   } else if (action === 'UPDATE_VISIT') {
     if (!merged.updates) merged.updates = {};
     if (newExtracted.person_met && !merged.updates.person_met && (newExtracted.person_met !== baseDraft.person_met || /\b(?:person|met|name|contact)\b/i.test(userInput))) {
@@ -8413,6 +8429,9 @@ async function executeAction(action, draft, senderPhone) {
 
         if (itemsUpdated && totalAmount > 0) {
           dealUpdates.total_amount = totalAmount;
+          if (!dealUpdates.stage && (!deal.stage || deal.stage === 'new_inquiry' || deal.stage === 'review')) {
+            dealUpdates.stage = 'quoted';
+          }
         }
 
         if (Object.keys(dealUpdates).length > 0) {
@@ -8533,17 +8552,43 @@ async function executeAction(action, draft, senderPhone) {
             }
           }
 
-        let fieldsSummary = '';
-        if (updates.delivery_location) fieldsSummary += `• *Delivery Location:* ${updates.delivery_location}\n`;
-        if (updates.payment_terms) fieldsSummary += `• *Payment Terms:* ${updates.payment_terms}\n`;
-        if (updates.stage || updates.status) {
-          fieldsSummary += dealUpdates.stage
-            ? `• *Stage / Status:* ${dealUpdates.stage}\n`
-            : `• *Stage / Status:* not changed ("${updates.stage || updates.status}" is not a valid pipeline stage)\n`;
+        // Fetch latest line items for the inquiry/deal
+        let finalItems = [];
+        const { data: latestDealItems } = await supabase.from('deal_items').select('*').eq('deal_id', deal.id);
+        if (latestDealItems && latestDealItems.length > 0) {
+          finalItems = latestDealItems;
+        } else if (Array.isArray(dItems) && dItems.length > 0) {
+          finalItems = dItems;
+        } else if (Array.isArray(draft.existing_items) && draft.existing_items.length > 0) {
+          finalItems = draft.existing_items;
         }
-        if (itemsUpdated && totalAmount > 0) fieldsSummary += `• *Quotation Total:* ₹${totalAmount.toLocaleString('en-IN')}\n`;
-        if (updates.preferred_make) fieldsSummary += `• *Preferred Make:* ${updates.preferred_make}\n`;
-        if (updates.additional_notes) fieldsSummary += `• *Additional Notes:* ${updates.additional_notes}\n`;
+
+        let itemsListText = '';
+        if (finalItems.length > 0) {
+          itemsListText = formatDetailedInquiryItemsList(finalItems);
+        } else if (draft.product_summary) {
+          itemsListText = `1. *${draft.product_summary}*`;
+        }
+
+        let finalTotalAmt = totalAmount || Number(dealUpdates.total_amount || deal.total_amount || 0);
+        if (!finalTotalAmt && finalItems.length > 0) {
+          finalTotalAmt = finalItems.reduce((s, it) => {
+            const q = Number(it.quantity || 0);
+            const r = Number(it.rate || 0);
+            const a = Number(it.amount || 0);
+            return s + (a || (q * r));
+          }, 0);
+        }
+
+        const quoteTotalBlock = finalTotalAmt > 0 ? `\n\nQuotation Total: ₹${finalTotalAmt.toLocaleString('en-IN')}` : '';
+
+        const effectiveStage = dealUpdates.stage || deal.stage || draft.new_stage || draft.stage || inqRow?.status || 'Quoted';
+        const stageLabel = formatStageLabel(effectiveStage);
+
+        const effectivePaymentTerms = dealUpdates.payment_terms || deal.payment_terms || draft.updates?.payment_terms || draft.payment_terms || inqRow?.payment_terms || null;
+        const effectiveDeliveryLocation = dealUpdates.delivery_location || deal.delivery_location || draft.updates?.delivery_location || draft.delivery_location || inqRow?.delivery_location || null;
+        const effectivePreferredMake = draft.updates?.preferred_make || draft.preferred_make || deal.preferred_make || inqRow?.ai_extraction_json?.preferred_make || null;
+        const effectiveAdditionalNotes = draft.updates?.additional_notes || draft.additional_notes || deal.additional_notes || inqRow?.ai_extraction_json?.additional_notes || null;
 
         // Log to activity_logs
         try {
@@ -8561,11 +8606,26 @@ async function executeAction(action, draft, senderPhone) {
           console.warn('[CatalogFlow] Activity log notice for UPDATE_INQUIRY:', actErr?.message);
         }
 
+        let inquiryDetailsBlock = `✏️ *Selected Inquiry ${displayInqId} (${displayCustName}):*\n\n` +
+          `• *Stage:* ${formatAttributeValue(stageLabel)}\n` +
+          `• *Payment Terms:* ${formatAttributeValue(effectivePaymentTerms)}\n` +
+          `• *Delivery Location:* ${formatAttributeValue(effectiveDeliveryLocation)}\n`;
+
+        if (effectivePreferredMake && formatAttributeValue(effectivePreferredMake) !== '-') {
+          inquiryDetailsBlock += `• *Preferred Make:* ${formatAttributeValue(effectivePreferredMake)}\n`;
+        }
+        if (effectiveAdditionalNotes && formatAttributeValue(effectiveAdditionalNotes) !== '-') {
+          inquiryDetailsBlock += `• *Additional Notes:* ${formatAttributeValue(effectiveAdditionalNotes)}\n`;
+        }
+
+        if (itemsListText) {
+          inquiryDetailsBlock += `\n*Current Line Items:*\n\n${itemsListText}`;
+        }
+        inquiryDetailsBlock += quoteTotalBlock;
+
         return `✅ *Inquiry Updated Successfully!*\n\n` +
-          `• *Inquiry ID:* ${displayInqId}\n` +
-          `• *Customer / Company:* ${displayCustName}\n` +
-          (fieldsSummary ? `${fieldsSummary}` : '') +
-          `\nUpdated details saved to Sales Pipeline & Inquiries! 📈`;
+          `${inquiryDetailsBlock}\n\n` +
+          `Updated details saved to Sales Pipeline & Inquiries! 📈`;
       }
 
       case 'LOG_ORDER': {
@@ -11138,8 +11198,9 @@ function detectOperationalAction(text) {
 
   // 5. Direct sales agent operations (stage transitions on existing deals) -> UPDATE_INQUIRY
   if (
-    /\b(?:mark|move|put)\b.*?\b(negotiation|won|lost|quoted|quotated|on\s+hold|hold)\b/i.test(lower) ||
-    /\b(?:is\s+on\s+hold|is\s+lost|is\s+won|is\s+negotiation|is\s+quoted|deal\s+won|deal\s+lost)\b/i.test(lower)
+    /\b(?:mark|move|put|change|update|set)\b.*?\b(?:stage|status)?.*?\b(negotiation|won|lost|quoted|quotated|on\s+hold|hold|review|new\s+inquiry)\b/i.test(lower) ||
+    /\b(?:is\s+on\s+hold|is\s+lost|is\s+won|is\s+negotiation|is\s+quoted|deal\s+won|deal\s+lost|stage\s+won|stage\s+lost|stage\s+quoted|stage\s+negotiation)\b/i.test(lower) ||
+    /^\s*(?:stage|status)\s*(?:to|as|:|=)?\s*(?:won|lost|negotiation|quoted|on\s+hold|hold|review|new\s+inquiry)\b/i.test(lower)
   ) {
     return 'UPDATE_INQUIRY';
   }
@@ -11253,7 +11314,8 @@ const DIRECT_ACTION_MAP = [
 
   // 8. Inquiries Update
   { pattern: /^\s*(?:i\s+want\s+to\s+|please\s+|kindly\s+|can\s+you\s+)?(?:update|edit|modify|change|correct|revise|amend)\s+(?:an?\s+|the\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i, action: 'UPDATE_INQUIRY' },
-  { pattern: /^\s*(?:mark|move|put)\s+(?:the\s+|a\s+)?(?:deal|inquiry)?\s*(?:as\s+|to\s+)?(?:won|lost|negotiation|quoted|on\s+hold|hold)\b/i, action: 'UPDATE_INQUIRY' },
+  { pattern: /^\s*(?:i\s+want\s+to\s+|please\s+|kindly\s+|can\s+you\s+)?(?:mark|move|put|change|update|set)\s+(?:the\s+|a\s+|an\s+)?(?:deal|inquiry)?\s*(?:stage|status)?\s*(?:as\s+|to\s+)?(?:won|lost|negotiation|quoted|on\s+hold|hold|review|new\s+inquiry)\b/i, action: 'UPDATE_INQUIRY' },
+  { pattern: /^\s*(?:stage|status)\s*(?:to|as|:|=)?\s*(?:won|lost|negotiation|quoted|on\s+hold|hold|review|new\s+inquiry)\b/i, action: 'UPDATE_INQUIRY' },
 
   // 9. Inquiries Log
   { pattern: /^\s*(?:i\s+want\s+to\s+|please\s+|kindly\s+|can\s+you\s+)?(?:log|create|new|add|record|enter|save)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|deal)\b/i, action: 'LOG_INQUIRY' },
@@ -13393,6 +13455,15 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // 1. UPDATE_INQUIRY candidate check & ID verification
+    if (action === 'UPDATE_INQUIRY' && !updatedDraft.inquiry_id && !updatedDraft.company_name) {
+      const recent = lastInactiveDraftMetadata.get(cleanPhone(senderPhone || ''));
+      if (recent && recent.action === 'UPDATE_INQUIRY' && recent.status === 'saved' && (Date.now() - recent.timestamp < 15 * 60 * 1000)) {
+        if (recent.inquiry_id) updatedDraft.inquiry_id = recent.inquiry_id;
+        if (recent.company_name) updatedDraft.company_name = recent.company_name;
+        if (recent.draft?._inquiry_display_id) updatedDraft._inquiry_display_id = recent.draft._inquiry_display_id;
+      }
+    }
+
     if (action === 'UPDATE_INQUIRY' && (updatedDraft.inquiry_id || updatedDraft.company_name)) {
       const inqCheck = await checkInquiriesForUpdate(action, updatedDraft, senderPhone, text);
       if (inqCheck && inqCheck.handled) {

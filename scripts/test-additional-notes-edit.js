@@ -345,6 +345,22 @@ async function runTests() {
 
   console.log('  -> PASS: Rate, Line Total & Quotation Total Display tests passed.\n');
 
+  // Test 10: Stage Update Direct Actions & Stage Transition Extraction
+  console.log('Test 10: Stage Update Direct Actions & Stage Transition Extraction');
+  const stageMerged1 = mergeDraft('UPDATE_INQUIRY', {}, {}, 'change stage to won');
+  assert.strictEqual(stageMerged1.updates.stage, 'won', 'Should extract won stage from "change stage to won"');
+
+  const stageMerged2 = mergeDraft('UPDATE_INQUIRY', {}, {}, 'mark as negotiation');
+  assert.strictEqual(stageMerged2.updates.stage, 'negotiation', 'Should extract negotiation stage from "mark as negotiation"');
+
+  const stageMerged3 = mergeDraft('UPDATE_INQUIRY', {}, {}, 'update stage to quoted');
+  assert.strictEqual(stageMerged3.updates.stage, 'quoted', 'Should extract quoted stage from "update stage to quoted"');
+
+  const stageMerged4 = mergeDraft('UPDATE_INQUIRY', {}, {}, 'set status to lost');
+  assert.strictEqual(stageMerged4.updates.stage, 'lost', 'Should extract lost stage from "set status to lost"');
+
+  console.log('  -> PASS: Stage Update Direct Actions & Stage Transition tests passed.\n');
+
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');
 }
 
