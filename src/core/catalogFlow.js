@@ -1753,6 +1753,8 @@ LOG_INQUIRY:
 {
   "action": "LOG_INQUIRY",
   "company_name": "<Customer / Company Name, else null>",
+  "contact_person": "<Customer Contact Person / Name if mentioned e.g. 'Sheetal Kumari', else null>",
+  "contact_phone": "<10-digit mobile number if mentioned, else null>",
   "product_description": "<Summary of all products/quantities, else null>",
   "rate": <numeric target rate/price per unit if mentioned, else null>,
   "preferred_make": "<JSW, SAIL, Tata, any, etc. if mentioned, else null>",
@@ -1775,6 +1777,8 @@ LOG_INQUIRY:
   "entries": [
     {
       "company_name": "<Company Name>",
+      "contact_person": "<Contact Person or null>",
+      "contact_phone": "<Phone or null>",
       "product_description": "<Product description>",
       "rate": <rate or null>,
       "preferred_make": "<make or null>",
@@ -3109,13 +3113,13 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     }
   }
 
-  // Fallback contact_person and mobile_number for LOG_NEW_CUSTOMER / LOG_VISIT / UPDATE_VISIT
-  if (['LOG_NEW_CUSTOMER', 'LOG_VISIT', 'UPDATE_VISIT'].includes(action)) {
+  // Fallback contact_person and mobile_number for LOG_NEW_CUSTOMER / LOG_VISIT / UPDATE_VISIT / LOG_INQUIRY / LOG_ORDER
+  if (['LOG_NEW_CUSTOMER', 'LOG_VISIT', 'UPDATE_VISIT', 'LOG_INQUIRY', 'LOG_ORDER'].includes(action)) {
     if (!merged.mobile_number && !merged.contact_phone) {
       const phoneMatch = userInput.match(/\b([6-9]\d{9})\b/);
       if (phoneMatch) {
         merged.mobile_number = phoneMatch[1];
-        if (action.includes('VISIT')) merged.contact_phone = phoneMatch[1];
+        if (action.includes('VISIT') || action === 'LOG_INQUIRY') merged.contact_phone = phoneMatch[1];
       }
     }
     if (!merged.contact_person && !merged.person_met) {
@@ -3123,6 +3127,15 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
       if (namePhoneMatch) {
         merged.contact_person = namePhoneMatch[1].trim();
         if (action.includes('VISIT')) merged.person_met = namePhoneMatch[1].trim();
+      } else {
+        const nameMatch = userInput.match(/(?:my\s+name\s+is|i\s+am|contact\s+person\s*(?:is|:)?|person\s+name\s*(?:is|:)?)\s+([A-Za-z][A-Za-z\s]{1,35}[A-Za-z])(?=[,.\n]|\s+(?:and|once|from|with|mobile|phone|delivery|location)|$)/i);
+        if (nameMatch) {
+          const extractedName = nameMatch[1].trim();
+          if (extractedName && !/^(?:a|an|the|inquiring|inquiry|visiting|interested|planning)$/i.test(extractedName)) {
+            merged.contact_person = extractedName;
+            if (action.includes('VISIT')) merged.person_met = extractedName;
+          }
+        }
       }
     }
   }
@@ -11276,9 +11289,14 @@ function detectOperationalAction(text) {
   }
 
   // 4. Visit / Meeting patterns
+  const hasFutureVisitIntent = /\b(?:plan(?:ning)?\s+to\s+visit|will\s+(?:surely\s+)?visit|want\s+to\s+visit|hope\s+to\s+visit|future\s+visit|schedule\s+(?:a\s+)?visit|visit\s+(?:you|u)\s+later|plan\s+to\s+visit\s+(?:you|u))\b/i.test(lower);
+  const hasExplicitInquiryIntent = /\b(?:i\s+want\s+to\s+inquir(?:y|e)|want\s+to\s+inquir(?:y|e)|inquir(?:y|ies)|enquir(?:y|ies)|rfq|pricing|price\s+quote|bhav|rates?)\b/i.test(lower) ||
+    (/\b(?:coil|coils|sheet|sheets|plate|plates|structural|beam|beams|channel|channels|pipe|pipes|tube|tubes|tmt|angle|angles|round|flat|square|metal|steel|hr|cr|hrpo|gp|galvalume|chequered)\b/i.test(lower) && /\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|pcs|nos|pieces|sheets|plates|coils|bundles|lengths)\b/i.test(lower));
+
   if (
-    /\b(?:visit(?:ed|ing|s)?|met\b|meet(?:ing)?(?:\s+(?:with|at|in|up|to))?|had\s+a\s+visit|had\s+a\s+meeting|site\s+visit|field\s+visit|client\s+visit|market\s+visit|office\s+visit|factory\s+visit|went\s+to(?:\s+meet)?|gaya\s+tha|mila\s+aaj|milne\s+gaye|visit\s+kiya|visit\s+report)\b/i.test(lower) ||
-    /\b(?:visit\s+outcome|person\s+met|discussion\s+notes|meeting\s+remarks|neutral\s+response|positive\s+response|negative\s+response)\b/i.test(lower)
+    !hasFutureVisitIntent &&
+    (/\b(?:visit(?:ed|ing|s)?|met\b|meet(?:ing)?(?:\s+(?:with|at|in|up|to))?|had\s+a\s+visit|had\s+a\s+meeting|site\s+visit|field\s+visit|client\s+visit|market\s+visit|office\s+visit|factory\s+visit|went\s+to(?:\s+meet)?|gaya\s+tha|mila\s+aaj|milne\s+gaye|visit\s+kiya|visit\s+report)\b/i.test(lower) ||
+    /\b(?:visit\s+outcome|person\s+met|discussion\s+notes|meeting\s+remarks|neutral\s+response|positive\s+response|negative\s+response)\b/i.test(lower))
   ) {
     if (/\b(?:update|change|modify|edit|correct|amend)\b/i.test(lower)) {
       return 'UPDATE_VISIT';
@@ -12051,11 +12069,29 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           return { handled: true, reply: resumeMsg };
         }
       } else {
+        const alreadyProvided = [];
+        if (custDraft.contact_person) {
+          alreadyProvided.push(`• *Contact Person:* ${custDraft.contact_person} (from your message)`);
+        }
+        if (custDraft.delivery_location) {
+          alreadyProvided.push(`• *Delivery Location:* ${custDraft.delivery_location} (from your message)`);
+        }
+        if (custDraft.mobile_number) {
+          alreadyProvided.push(`• *Mobile Number:* ${custDraft.mobile_number} (from your message)`);
+        }
+
         const missingList = custMissing.map(m => `• *${m}*`).join('\n');
-        const askCustMsg = `👤 *New Customer Acquisition — ${unrecognizedName}*\n\n` +
-          `Please provide the required customer details before we continue with your ${getActionFriendlyName(originalAction)}:\n\n` +
-          `${missingList}\n\n` +
-          `_(e.g. "Contact Person: Rajesh Sharma, Mobile: 9820123456, Delivery Location: Bhosari Pune")_`;
+        let askCustMsg = `👤 *New Customer Acquisition — ${unrecognizedName}*\n\n`;
+        if (alreadyProvided.length > 0) {
+          askCustMsg += `${alreadyProvided.join('\n')}\n\n` +
+            `Please provide the remaining details:\n\n` +
+            `${missingList}\n\n` +
+            `_(e.g. "Mobile: 9820123456, Delivery Location: Bhosari Pune")_`;
+        } else {
+          askCustMsg += `Please provide the required customer details before we continue with your ${getActionFriendlyName(originalAction)}:\n\n` +
+            `${missingList}\n\n` +
+            `_(e.g. "Contact Person: Rajesh Sharma, Mobile: 9820123456, Delivery Location: Bhosari Pune")_`;
+        }
 
         await recordSessionMessage(senderPhone, 'assistant', askCustMsg, {
           action_type: 'LOG_NEW_CUSTOMER',
@@ -12229,8 +12265,23 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         return { handled: true, reply: resumeMsg };
       }
     } else {
+      const alreadyProvided = [];
+      if (updatedCustDraft.contact_person) {
+        alreadyProvided.push(`• *Contact Person:* ${updatedCustDraft.contact_person}`);
+      }
+      if (updatedCustDraft.delivery_location) {
+        alreadyProvided.push(`• *Delivery Location:* ${updatedCustDraft.delivery_location}`);
+      }
+      if (updatedCustDraft.mobile_number) {
+        alreadyProvided.push(`• *Mobile Number:* ${updatedCustDraft.mobile_number}`);
+      }
+
       const missingList = custMissing.map(m => `• *${m}*`).join('\n');
-      const askRemaining = `Please provide the remaining customer details for *${updatedCustDraft.company_name}*:\n\n${missingList}`;
+      let askRemaining = `👤 *New Customer Acquisition — ${updatedCustDraft.company_name}*\n\n`;
+      if (alreadyProvided.length > 0) {
+        askRemaining += `${alreadyProvided.join('\n')}\n\n`;
+      }
+      askRemaining += `Please provide the remaining customer details for *${updatedCustDraft.company_name}*:\n\n${missingList}`;
       await recordSessionMessage(senderPhone, 'assistant', askRemaining, {
         action_type: 'LOG_NEW_CUSTOMER',
         customer_name: updatedCustDraft.company_name,
