@@ -39,6 +39,7 @@ const {
   startNewCatalogSession,
   recordSessionMessage,
   finalizeCurrentSession,
+  getSessionEnvelope,
 } = require('./sessionManager');
 const { logBotActivity } = require('../utils/activityLogger');
 
@@ -362,6 +363,212 @@ function isRecentConfirmedSave(senderPhone) {
 const SAVE_CONFIRM_WORDS = new Set([
   'btn_confirm_yes', 'save / yes', 'save/yes', 'yes', 'y', '1', 'confirm', 'save', 'haan', 'sahi hai', 'ok', 'sure',
 ]);
+
+// ── INACTIVE DRAFT & STALE BUTTON TRACKING ──────────────────────────────────
+const lastInactiveDraftMetadata = new Map();
+
+function recordInactiveDraft(senderPhone, action, draft, status = 'discarded') {
+  if (!senderPhone) return;
+  const canonicalPhone = cleanPhone(senderPhone);
+  const d = (typeof draft === 'object' && draft !== null) ? draft : {};
+  lastInactiveDraftMetadata.set(canonicalPhone, {
+    action: action || d._action || null,
+    draft: d,
+    status: status || 'discarded',
+    company_name: d.company_name || d.customer_name || null,
+    inquiry_id: d.inquiry_id || d.deal_id || null,
+    po_number: d.po_number || null,
+    order_id: d.order_id || null,
+    complaint_id: d.complaint_id || null,
+    visit_id: d.visit_id || null,
+    timestamp: Date.now(),
+  });
+}
+
+function getModuleCatalogName(action) {
+  switch (action) {
+    case 'LOG_INQUIRY': return 'Log New Inquiry';
+    case 'UPDATE_INQUIRY': return 'Update Inquiry';
+    case 'LOG_ORDER': return 'Log New Order';
+    case 'UPDATE_ORDER': return 'Update Order';
+    case 'LOG_VISIT': return 'Log Field Visit';
+    case 'UPDATE_VISIT': return 'Update Field Visit';
+    case 'LOG_NEW_CUSTOMER': return 'Log New Customer';
+    case 'LOG_COMPLAINT': return 'Log Complaint';
+    case 'UPDATE_COMPLAINT': return 'Update Complaint';
+    default: return 'the relevant activity';
+  }
+}
+
+function formatDraftContextLabel(meta) {
+  if (!meta) return '';
+  let id = meta.inquiry_id || meta.po_number || meta.order_id || meta.complaint_id || meta.visit_id || meta.deal_id;
+  if (id && meta.action === 'UPDATE_INQUIRY' && !String(id).toUpperCase().startsWith('INQ-')) {
+    id = `INQ-${String(id).toUpperCase()}`;
+  }
+  const company = meta.company_name;
+
+  if (id && company) {
+    return `for ${id} (${company})`;
+  } else if (id) {
+    return `for ${id}`;
+  } else if (company) {
+    return `for ${company}`;
+  }
+  return '';
+}
+
+async function getLastInactiveDraft(senderPhone) {
+  if (!senderPhone) return null;
+  const canonicalPhone = cleanPhone(senderPhone);
+  const mem = lastInactiveDraftMetadata.get(canonicalPhone);
+  if (mem) {
+    return mem;
+  }
+  try {
+    const envelope = await getSessionEnvelope(senderPhone);
+    if (envelope && envelope.last_completed_activity) {
+      const act = envelope.last_completed_activity;
+      const isDiscarded = Boolean(
+        act.summary && (
+          act.summary.toLowerCase().includes('cancelled') ||
+          act.summary.toLowerCase().includes('discarded')
+        )
+      );
+      return {
+        action: act.action_type || null,
+        draft: act.extracted_data || {},
+        status: isDiscarded ? 'discarded' : 'saved',
+        company_name: act.customer_name || null,
+        inquiry_id: act.inquiry_id || act.deal_id || null,
+        po_number: act.po_number || null,
+        timestamp: act.completed_at ? new Date(act.completed_at).getTime() : Date.now(),
+      };
+    }
+  } catch (err) {
+    // Ignore error
+  }
+  return null;
+}
+
+const STALE_CONFIRM_ACTIONS = new Set([
+  'btn_confirm_yes',
+  'btn_cust_yes',
+  'save / yes',
+  'save/yes',
+  'save yes',
+  'save changes',
+  'confirm',
+  'save',
+  'yes',
+  'y',
+  'haan',
+  'sahi hai',
+]);
+
+const STALE_EDIT_ACTIONS = new Set([
+  'btn_confirm_edit',
+  'edit details',
+  'edit',
+  'change details',
+  'modify details',
+  'modify',
+  'change',
+  'update',
+]);
+
+const STALE_DISCARD_ACTIONS = new Set([
+  'btn_confirm_cancel',
+  'btn_flow_discard',
+  'btn_cust_no',
+  'discard draft',
+  'cancel draft',
+]);
+
+const STALE_RESUME_YES_ACTIONS = new Set([
+  'btn_resume_yes',
+  'yes, continue',
+  'yes continue',
+]);
+
+const STALE_RESUME_NO_ACTIONS = new Set([
+  'btn_resume_no',
+  'btn_post_menu',
+  'no, go to menu',
+  'no go to menu',
+]);
+
+function isStaleDraftButtonAction(cleanInput) {
+  if (!cleanInput) return false;
+  return (
+    STALE_CONFIRM_ACTIONS.has(cleanInput) ||
+    STALE_EDIT_ACTIONS.has(cleanInput) ||
+    STALE_DISCARD_ACTIONS.has(cleanInput) ||
+    STALE_RESUME_YES_ACTIONS.has(cleanInput)
+  );
+}
+
+function isStaleResumeNoAction(cleanInput) {
+  if (!cleanInput) return false;
+  return STALE_RESUME_NO_ACTIONS.has(cleanInput);
+}
+
+async function handleStaleDraftButton(text, senderPhone, canUpdateVisits) {
+  const meta = await getLastInactiveDraft(senderPhone);
+  const userMenu = getCatalogMenu(canUpdateVisits);
+  const userSections = getCatalogMenuSections(canUpdateVisits);
+
+  let explanation = '';
+  if (meta && meta.timestamp && (Date.now() - meta.timestamp <= 48 * 60 * 60 * 1000)) {
+    const contextLabel = formatDraftContextLabel(meta);
+    const targetModule = getModuleCatalogName(meta.action);
+    if (meta.status === 'saved') {
+      explanation = contextLabel
+        ? `This draft ${contextLabel} was already saved. To make further changes, please start again with ${targetModule}.`
+        : `This draft was already saved. To make further changes, please start again with ${targetModule}.`;
+    } else {
+      explanation = contextLabel
+        ? `This draft ${contextLabel} was already discarded, so nothing was saved. To make these changes, please start again with ${targetModule}.`
+        : `This draft was already discarded, so nothing was saved. To make these changes, please start again with ${targetModule}.`;
+    }
+  } else {
+    explanation = `This draft was already discarded or expired, so nothing was saved. To make these changes, please start again with the relevant activity.`;
+  }
+
+  const fullReply = `${explanation}\n\nHere is the menu to start a new activity:\n\n${userMenu}`;
+  await recordSessionMessage(senderPhone, 'user', text);
+  await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'CATALOG_MENU' });
+
+  return {
+    handled: true,
+    reply: fullReply,
+    interactiveType: 'list',
+    interactiveList: {
+      bodyText: 'Here is the menu to start a new activity:',
+      buttonText: 'Choose Action',
+      sections: userSections,
+    },
+  };
+}
+
+async function handleResumeMenuButton(text, senderPhone, canUpdateVisits) {
+  const userMenu = getCatalogMenu(canUpdateVisits);
+  const userSections = getCatalogMenuSections(canUpdateVisits);
+  const fullReply = `Activity cancelled.\n\n${userMenu}`;
+  await recordSessionMessage(senderPhone, 'user', text);
+  await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'CATALOG_MENU' });
+
+  return {
+    handled: true,
+    reply: fullReply,
+    interactiveType: 'list',
+    interactiveList: {
+      bodyText: 'Here is the menu to start a new activity:',
+      buttonText: 'Choose Action',
+      sections: userSections,
+    },
+  };
+}
 
 function isDiscardOrCancelIntent(text) {
   if (!text || typeof text !== 'string') return false;
@@ -1247,6 +1454,31 @@ function isExplicitMenuSelection(text, hasActiveSession = false, isAuthorizedFor
   return null;
 }
 
+const BARE_NUMBER_FIELD_INPUT_REPLY = `Please describe what you'd like to update in more detail. For example: 'update rate to 3000' or 'change quantity to 45 MT'.`;
+const BARE_NUMBER_NO_SESSION_REPLY = `Please send 'Hi' or 'Menu' to get started.`;
+
+function isBareCatalogNumber(text) {
+  return typeof text === 'string' && /^\s*(?:option\s*|choice\s*)?(?:[1-9]|10)\s*[.)]?\s*$/i.test(text);
+}
+
+// True when the latest bot message in the current session is a catalog menu / numbered start prompt.
+async function isCatalogMenuAwaitingSelection(senderPhone) {
+  try {
+    const envelope = await getSessionEnvelope(senderPhone);
+    const msgs = envelope?.current_session?.messages;
+    if (!Array.isArray(msgs) || msgs.length === 0) return false;
+    const last = msgs[msgs.length - 1];
+    if (!last || last.role !== 'assistant') return false;
+    const content = String(last.content || '');
+    return last.agent === 'catalog_menu' ||
+      /Reply with a number \(1\s*[–-]/i.test(content) ||
+      /\breply with \*(?:[1-9]|10)\*/i.test(content);
+  } catch (err) {
+    console.warn('[CatalogFlow] Menu-awaiting check failed, allowing selection:', err.message);
+    return true;
+  }
+}
+
 // ── DATE NORMALIZATION ───────────────────────────────────────────────────────
 
 function normalizeDateToDDMMYYYY(dateStr) {
@@ -1556,6 +1788,7 @@ LOG_INQUIRY:
 UPDATE_INQUIRY:
 {
   "action": "UPDATE_INQUIRY",
+  "non_editable_field_requested": "<If the user asked to change a SYSTEM-GENERATED field (Inquiry ID, Inquiry Date, Logged By), its name e.g. 'Inquiry Date', else null>",
   "inquiry_id": "<Inquiry ID e.g. INQ-2026-0042, INQ-1BB6F1, INQ-B76516, INQ-0042, else null>",
   "company_name": "<Customer / Company Name e.g. 'SS Industries', else null>",
   "updates": {
@@ -1826,6 +2059,12 @@ If only a single company is mentioned or if filling missing fields for an existi
 - Customer / Company Name in update workflows (UPDATE_INQUIRY, UPDATE_ORDER, UPDATE_VISIT, UPDATE_COMPLAINT) is tied to the existing database record and cannot be changed.
 - If the user's message is ONLY asking to change/edit a system-generated or non-editable field (e.g. 'change inquiry id to IN879', 'change ticket id to 101', 'change customer to ABC'), return null for all updates. NEVER hallucinate, guess, or populate unmentioned fields (like payment_terms, rate, etc.)!
 - Other system-generated fields that CANNOT be edited: Deal ID, Enquiry Number, Logged By / Created By, Creation Date, Salesperson.
+- UPDATE_INQUIRY FIELD OWNERSHIP (use this to decide every request):
+  * SYSTEM-GENERATED (never editable): Inquiry ID, Inquiry Date / date of the inquiry / created date (the inquiry has NO editable date field), Logged By / Salesperson, Total Value.
+  * USER-ENTERED (editable): Stage / Status, Quantity, Rate, Delivery Location, Payment Terms, Preferred Make, Additional Notes, product line items.
+  * For a request like 'update the date of the inquiry to tomorrow', 'change inquiry date to 25-09-2026', 'date badlo', 'backdate this inquiry', set "non_editable_field_requested" to 'Inquiry Date' and leave ALL updates null. NEVER convert the requested date into additional_notes, payment_terms, or any other field.
+  * For 'change inquiry id to IN897' set "non_editable_field_requested" to 'Inquiry ID'; for 'change logged by to Ramesh' set it to 'Logged By'.
+  * If the message ALSO contains a valid user-entered change, extract that change normally AND still set "non_editable_field_requested".
 - Recognise these requests in any phrasing, word order, or Hinglish, e.g. 'edit inquiry id for Rajeshwari Shah Industries to In897', 'inquiry number badlo to 897', 'INQ-F2785B ko IN897 kar do', 'rename deal id', 'set enquiry no as 12', 'change created date to 01-09-2026', 'change logged by to Ramesh'.
 - The NEW value the user wants for a system-generated field (e.g. 'In897', 'IN879', '897') is NOT data: NEVER put it into 'inquiry_id', 'company_name', 'updates', 'line_item_updates', or any other field. 'inquiry_id' may ONLY hold an EXISTING inquiry ID the user references to pick a record (e.g. 'update INQ-F2785B rate to 50000' -> inquiry_id 'INQ-F2785B').
 - If the same message ALSO requests a valid editable change (e.g. 'change inquiry id to IN897 and rate to 50000'), extract ONLY the valid editable change (rate) and ignore the system-generated part.
@@ -1875,7 +2114,14 @@ User Message:
     }
 
     if (parsed) {
-      return mergeDraft(action, existingDraft, parsed, userInput);
+      const nonEditableRequested = action === 'UPDATE_INQUIRY' ? normalizeInquirySystemFieldLabel(parsed.non_editable_field_requested) : null;
+      delete parsed.non_editable_field_requested;
+      const merged = mergeDraft(action, existingDraft, parsed, userInput);
+      if (merged && typeof merged === 'object') {
+        delete merged._non_editable_request;
+        if (nonEditableRequested) merged._non_editable_request = nonEditableRequested;
+      }
+      return merged;
     }
   } catch (err) {
     console.error('[CatalogFlow] LLM extraction error:', err.message);
@@ -2209,10 +2455,36 @@ function detectInquirySystemFieldEdit(text) {
     return { field: 'inquiry_id', label: 'Inquiry ID' };
   }
 
+  // Inquiry date (UPDATE_INQUIRY has no editable date field). Dates of other things (follow-up, PO, visit...) are left alone.
+  if (!/\b(?:follow[\s-]*up|po|visit|payment|resolution|complaint|dispatch|due|expected|closing|next|purchase|order|invoice|challan|reminder)\s+date\b/i.test(clean)) {
+    const DATE_TARGET = '(?:(?:inquiry|enquiry|inq)\\s+date|date\\s+of\\s+(?:the\\s+|this\\s+|my\\s+|that\\s+)?(?:inquiry|enquiry|inq)|date|dated)';
+    if (new RegExp(`\\b(?:${VERB.slice(3, -1)}|shift|move|backdate|prepone|postpone)\\b.*?\\b${DATE_TARGET}\\b`, 'i').test(clean) ||
+        /^(?:(?:the\s+)?(?:inquiry|enquiry|inq)\s+)?date\s*(?:to|as|=|:|->)\s*\S/i.test(clean) ||
+        /\b(?:inquiry\s+|enquiry\s+|inq\s+)?date\s+(?:ko\s+)?(?:change|badlo|badal|update|edit|modify)\b/i.test(clean)) {
+      return { field: 'inquiry_date', label: 'Inquiry Date' };
+    }
+  }
+
+  return null;
+}
+
+// Maps the free-text field name Gemini reports in `non_editable_field_requested` onto a known inquiry system field.
+function normalizeInquirySystemFieldLabel(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const v = raw.toLowerCase().trim();
+  if (!v || v === 'null' || v === 'none') return null;
+  if (/logged|created\s*by|salesperson|owner/.test(v)) return 'Logged By';
+  if (/date|dated|created\s*(?:on|at)|creation/.test(v)) return 'Inquiry Date';
+  if (/\bid\b|number|\bno\b|code|reference/.test(v)) return 'Inquiry ID';
   return null;
 }
 
 function buildInquirySystemFieldReply(label, displayId = null) {
+  if (displayId && label !== 'Inquiry ID') {
+    return `*${label} (${displayId}) is system-generated and can't be edited.*\n` +
+      `Please select an editable option from below:\n\n` +
+      `• *At least one field to update (e.g. Rate, Quantity, Delivery Location, Payment Terms, or Additional Notes)*`;
+  }
   if (displayId) {
     const subject = label === 'Inquiry ID' ? `Inquiry ID (${displayId})` : `${label} of ${displayId}`;
     return `*${subject} is system-generated and can't be edited.*\n` +
@@ -5204,6 +5476,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     const userSections = getCatalogMenuSections(canUpdate);
     const cancelReply = `Activity cancelled.\n\n` + userMenu;
     await recordSessionMessage(senderPhone, 'assistant', cancelReply, { action_type: 'CATALOG_MENU' });
+    recordInactiveDraft(senderPhone, action, null, 'discarded');
     await finalizeCurrentSession(senderPhone, `Cancelled ${getActionFriendlyName(action)} selection`);
     await saveActiveSession(senderPhone, 'Unknown', 'general');
     return {
@@ -5221,6 +5494,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
   // 1b. Direct cross-module action / menu selection preemption
   const explicitAction = isExplicitMenuSelection(clean, true);
   if (explicitAction && explicitAction !== action) {
+    recordInactiveDraft(senderPhone, action, null, 'discarded');
     await finalizeCurrentSession(senderPhone, `Switched from ${getActionFriendlyName(action)} to ${getActionFriendlyName(explicitAction)}`);
     return await handleCatalogFlow(text, senderPhone);
   }
@@ -10213,6 +10487,7 @@ async function handleMidFlowComplaintResolution(text, senderPhone, activeState, 
       action_type: action,
       customer_name: draft?.company_name || null,
     });
+    recordInactiveDraft(senderPhone, action, draft, 'saved');
     await finalizeCurrentSession(senderPhone, 'Complaint resolved directly', { action_type: action });
     await saveActiveSession(senderPhone, 'Unknown', 'general');
     return {
@@ -10913,7 +11188,7 @@ async function classifyActiveSessionIntent(activeActivity, text) {
   }
 
   // 2. Candidate disambiguation selections (1, 2, option 1, date strings) are field inputs
-  if (/^(?:option\s*|choice\s*|#\s*)?[1-9]\.?$/i.test(trimmed)) {
+  if (/^(?:option\s*|choice\s*|#\s*)?(?:[1-9]|10)\s*[.)]?$/i.test(trimmed)) {
     return { classification: 'SAME_ACTIVITY' };
   }
 
@@ -10946,7 +11221,7 @@ The user is currently in the active [${activeActivity}] (${activityDisplayName})
 Incoming message: "${trimmed}"
 
 Classify this incoming message:
-- If this message asks to change, edit, rename, or set a SYSTEM-GENERATED field of the current record (Inquiry ID, Deal ID, Enquiry Number, Order ID, Complaint Ticket ID, Visit ID, Customer ID, Logged By / Created By, Creation Date, Salesperson), e.g. "edit inquiry id for ABC Steels to IN897", "change inquiry number to 897", "INQ-F2785B ko IN897 kar do", "change created date" -> SAME_ACTIVITY (the active workflow will explain that the field can't be edited). NEVER classify these as STAGE_UPDATE, RETRIEVAL_QUERY, or DIFFERENT_ACTIVITY.
+- If this message asks to change, edit, rename, or set a SYSTEM-GENERATED field of the current record (Inquiry ID, Deal ID, Enquiry Number, Inquiry Date / date of the inquiry, Order ID, Complaint Ticket ID, Visit ID, Customer ID, Logged By / Created By, Creation Date, Salesperson), e.g. "edit inquiry id for ABC Steels to IN897", "change inquiry number to 897", "INQ-F2785B ko IN897 kar do", "change created date", "update the date of the inquiry to tomorrow" -> SAME_ACTIVITY (the active workflow will explain that the field can't be edited). NEVER classify these as STAGE_UPDATE, RETRIEVAL_QUERY, or DIFFERENT_ACTIVITY.
 - If this message is requesting to update, change, set, move, or mark the stage/status of an inquiry or deal (e.g. "update the stage to price quote for above inquiry", "update stage to quoted", "mark as negotiation", "move to on hold", "set status to price quote", "stage won", "set stage to lost") -> STAGE_UPDATE
 - If this message is reporting or logging a customer complaint, quality issue, defect, damage, rust, shortage, service problem, or delivery issue -> DIFFERENT_ACTIVITY:LOG_COMPLAINT
 - If this message is recording or logging a purchase order / PO -> DIFFERENT_ACTIVITY:LOG_ORDER
@@ -11043,8 +11318,9 @@ function detectOutOfScopeActionAttempt(currentAction, text) {
     return null;
   }
 
-  // 2. If user sent an explicit menu command (1-10 or menu_X)
-  const menuAction = matchActionFromInput(trimmed);
+  // 2. If user sent an explicit menu command (menu_X / action keywords). Called only with an active flow,
+  // so bare numbers are field input here, not catalog selections.
+  const menuAction = matchActionFromInput(trimmed, true);
   if (menuAction && menuAction !== currentAction) {
     const menuFamily = getModuleFamily(menuAction);
     if (menuFamily !== 'OTHER' && menuFamily !== currentFamily) {
@@ -11098,15 +11374,19 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     return { handled: false };
   }
 
-  if ((!lastIntent || lastIntent === 'general') && isRecentConfirmedSave(senderPhone) &&
-      SAVE_CONFIRM_WORDS.has(text.toLowerCase().replace(/[!.,?*]/g, '').trim())) {
-    return {
-      handled: true,
-      reply: '✅ This entry was already saved. No duplicate record was created.',
-    };
-  }
-
   const hasActiveCatalogSession = lastIntent.startsWith('catalog_');
+
+  // ── 2-0. BARE NUMBER WITH NO OPEN SESSION ──
+  // Only a displayed catalog menu (or a "reply with N" prompt) makes "1".."10" a catalog selection.
+  // Legacy payload states (e.g. "duplicate_check|...") keep their existing handling.
+  if (!hasActiveCatalogSession && !lastIntent.includes('|') && isBareCatalogNumber(text)) {
+    const menuAwaiting = await isCatalogMenuAwaitingSelection(senderPhone);
+    if (!menuAwaiting) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      await recordSessionMessage(senderPhone, 'assistant', BARE_NUMBER_NO_SESSION_REPLY, { action_type: 'BARE_NUMBER_NO_SESSION' });
+      return { handled: true, reply: BARE_NUMBER_NO_SESSION_REPLY };
+    }
+  }
 
   // ── 2a. DIRECT EXPLICIT MENU SELECTION (PREEMPTION) ────────────────────────
   // When user selects any option from catalog list ([Choose Action] or direct action commands),
@@ -11114,6 +11394,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   const explicitAction = isExplicitMenuSelection(text, hasActiveCatalogSession, canUpdateVisits);
   if (explicitAction) {
     if (hasActiveCatalogSession) {
+      try {
+        const parts = (lastIntent || '').split('|');
+        const prevAction = parts[1];
+        const prevDraft = parts[2] ? safeParseJSON(parts[2], {}) : {};
+        recordInactiveDraft(senderPhone, prevAction, prevDraft, 'discarded');
+      } catch (e) {}
       await finalizeCurrentSession(senderPhone, `Switched to ${getActionFriendlyName(explicitAction)}`);
     }
     await recordSessionMessage(senderPhone, 'user', text);
@@ -11159,6 +11445,17 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         handled: true,
         reply: initialPrompt,
       };
+    }
+  }
+
+  // ── 2-stale. STALE BUTTON / INACTIVE DRAFT INTERCEPTOR ─────────────────────
+  const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').replace(/\s+/g, ' ').trim();
+  if (!hasActiveCatalogSession && !lastIntent.includes('|')) {
+    if (isStaleDraftButtonAction(cleanInput)) {
+      return await handleStaleDraftButton(text, senderPhone, canUpdateVisits);
+    }
+    if (isStaleResumeNoAction(cleanInput)) {
+      return await handleResumeMenuButton(text, senderPhone, canUpdateVisits);
     }
   }
 
@@ -11368,6 +11665,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       isDiscardOrCancelIntent(text)
     ) {
       await recordSessionMessage(senderPhone, 'user', text);
+      recordInactiveDraft(senderPhone, action, draft, 'discarded');
       await finalizeCurrentSession(senderPhone, `Cancelled ${getActionFriendlyName(action)} draft after query interruption`);
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       const userMenu = getCatalogMenu(canUpdateVisits);
@@ -11399,6 +11697,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // 4. User directly provides field data / response for the interrupted flow
+    // The record-selection handler (2c) sits above this block, so hand a bare number back to it directly.
+    if (interruptedState === 'catalog_update_select' && isBareCatalogNumber(text)) {
+      await saveActiveSession(senderPhone, draft.customerFilter || 'Customer', `catalog_update_select|${action}|${draftJsonStr}`);
+      return await handleUpdateSelectionState(text, senderPhone, action, draft);
+    }
     lastIntent = `${interruptedState}|${action}|${draftJsonStr}`;
   }
 
@@ -11614,6 +11917,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (isDiscardOrCancelIntent(text)) {
       const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
       await recordSessionMessage(senderPhone, 'assistant', cancelReply);
+      recordInactiveDraft(senderPhone, originalAction, custDraft, 'discarded');
       await finalizeCurrentSession(senderPhone, `Discarded customer onboarding flow`);
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return { handled: true, reply: cancelReply };
@@ -11822,6 +12126,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         }
       }
 
+      recordInactiveDraft(senderPhone, action, draft, 'saved');
       await finalizeCurrentSession(senderPhone, null, {
         action_type: action,
         customer_name: draft.company_name,
@@ -11867,6 +12172,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       await recordSessionMessage(senderPhone, 'user', text);
       const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
       await recordSessionMessage(senderPhone, 'assistant', cancelReply);
+      recordInactiveDraft(senderPhone, action, draft, 'discarded');
       await finalizeCurrentSession(senderPhone, `Cancelled ${getActionFriendlyName(action)} draft for ${draft.company_name || 'customer'}`);
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return {
@@ -11880,6 +12186,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (outOfScopeAction) {
       console.log(`[CatalogFlow] Strict activity scope guard in catalog_confirm: active=${action} (${getModuleFamily(action)}), incoming=${outOfScopeAction} (${getModuleFamily(outOfScopeAction)})`);
       return buildOutOfScopeActivityResponse(action, outOfScopeAction);
+    }
+
+    if (isBareCatalogNumber(text)) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      await recordSessionMessage(senderPhone, 'assistant', BARE_NUMBER_FIELD_INPUT_REPLY, { action_type: action });
+      return { handled: true, reply: BARE_NUMBER_FIELD_INPUT_REPLY };
     }
 
     // Check if user is attempting to edit a non-editable or system-generated field
@@ -12030,6 +12342,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       await recordSessionMessage(senderPhone, 'user', text);
       const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
       await recordSessionMessage(senderPhone, 'assistant', cancelReply);
+      recordInactiveDraft(senderPhone, action, draft, 'discarded');
       await finalizeCurrentSession(senderPhone, `Cancelled ${getActionFriendlyName(action)} draft during edit`);
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return { handled: true, reply: cancelReply };
@@ -12046,6 +12359,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (outOfScopeAction) {
       console.log(`[CatalogFlow] Strict activity scope guard in catalog_editing: active=${action} (${getModuleFamily(action)}), incoming=${outOfScopeAction} (${getModuleFamily(outOfScopeAction)})`);
       return buildOutOfScopeActivityResponse(action, outOfScopeAction);
+    }
+
+    if (isBareCatalogNumber(text)) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      await recordSessionMessage(senderPhone, 'assistant', BARE_NUMBER_FIELD_INPUT_REPLY, { action_type: action });
+      return { handled: true, reply: BARE_NUMBER_FIELD_INPUT_REPLY };
     }
 
     // Check if user is attempting to edit a non-editable or system-generated field
@@ -12423,6 +12742,18 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       }
     }
 
+    // A bare number in an update flow whose record is already selected (no list awaiting a pick) carries no field.
+    const isUpdateRecordSelected =
+      (action === 'UPDATE_INQUIRY' && existingDraft._inquiry_verified) ||
+      (action === 'UPDATE_ORDER' && existingDraft._order_verified) ||
+      (action === 'UPDATE_VISIT' && existingDraft._visit_verified) ||
+      (action === 'UPDATE_COMPLAINT' && existingDraft._complaint_verified);
+    if (isUpdateRecordSelected && totalAllCandidates === 0 && !existingDraft._pending_line_choice && isBareCatalogNumber(text)) {
+      await recordSessionMessage(senderPhone, 'assistant', BARE_NUMBER_FIELD_INPUT_REPLY, { action_type: action });
+      await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+      return { handled: true, reply: BARE_NUMBER_FIELD_INPUT_REPLY };
+    }
+
     // ── 1. Check Visit Candidate Selection ───────────────────────────────────
     let candidateResolved = false;
     if (existingDraft._visit_candidates && Array.isArray(existingDraft._visit_candidates)) {
@@ -12781,6 +13112,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
       await recordSessionMessage(senderPhone, 'user', text);
       await recordSessionMessage(senderPhone, 'assistant', cancelReply);
+      recordInactiveDraft(senderPhone, action, existingDraft, 'discarded');
       await finalizeCurrentSession(senderPhone, `Discarded ${getActionFriendlyName(action)} flow`);
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return {
@@ -13114,6 +13446,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       };
     } else {
       // Missing mandatory fields -> Ask only for missing fields
+      const llmSystemField = updatedDraft._non_editable_request || null;
+      delete updatedDraft._non_editable_request;
+      if (action === 'UPDATE_INQUIRY' && llmSystemField && missing.some(m => /^At least one field to update/.test(m))) {
+        const sysReply = buildInquirySystemFieldReply(llmSystemField, updatedDraft._inquiry_display_id || null);
+        await recordSessionMessage(senderPhone, 'assistant', sysReply, { action_type: action, customer_name: updatedDraft.company_name });
+        await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+        return { handled: true, reply: sysReply };
+      }
       const missingList = missing.map((m) => `- **${m}**`).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
@@ -13136,6 +13476,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         reply: askMissing,
       };
     }
+  }
+
+  // A bare number inside an open session is field input, never a catalog selection.
+  if (hasActiveCatalogSession && isBareCatalogNumber(text)) {
+    await recordSessionMessage(senderPhone, 'assistant', BARE_NUMBER_FIELD_INPUT_REPLY, { action_type: 'BARE_NUMBER_FIELD_INPUT' });
+    return { handled: true, reply: BARE_NUMBER_FIELD_INPUT_REPLY };
   }
 
   // ── 6. DIRECT ACTION ROUTING (Menu Selection 1-10 or Action Keywords) ────────
@@ -13551,4 +13897,12 @@ module.exports = {
   formatAttributeValue,
   extractInquiryAttributes,
   formatSelectedInquiryPrompt,
+  recordInactiveDraft,
+  getLastInactiveDraft,
+  getModuleCatalogName,
+  formatDraftContextLabel,
+  isStaleDraftButtonAction,
+  isStaleResumeNoAction,
+  handleStaleDraftButton,
+  handleResumeMenuButton,
 };

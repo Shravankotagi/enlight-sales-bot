@@ -188,10 +188,100 @@ async function runTests() {
 
   console.log('  -> PASS: formatSelectedInquiryPrompt & extractInquiryAttributes tests passed.\n');
 
+  // Test 8: Stale Draft Button & Inactive Session Feedback
+  console.log('Test 8: Stale Draft Button & Inactive Session Feedback');
+  const {
+    isStaleDraftButtonAction,
+    isStaleResumeNoAction,
+    formatDraftContextLabel,
+    getModuleCatalogName,
+    recordInactiveDraft,
+    handleStaleDraftButton,
+    handleResumeMenuButton,
+  } = require('../src/core/catalogFlow');
+
+  // 8a. Helper functions
+  assert.strictEqual(isStaleDraftButtonAction('btn_confirm_yes'), true);
+  assert.strictEqual(isStaleDraftButtonAction('save / yes'), true);
+  assert.strictEqual(isStaleDraftButtonAction('save yes'), true);
+  assert.strictEqual(isStaleDraftButtonAction('yes'), true);
+  assert.strictEqual(isStaleDraftButtonAction('btn_confirm_edit'), true);
+  assert.strictEqual(isStaleDraftButtonAction('edit details'), true);
+  assert.strictEqual(isStaleDraftButtonAction('btn_confirm_cancel'), true);
+  assert.strictEqual(isStaleDraftButtonAction('discard draft'), true);
+  assert.strictEqual(isStaleDraftButtonAction('btn_resume_yes'), true);
+  assert.strictEqual(isStaleDraftButtonAction('yes continue'), true);
+  assert.strictEqual(isStaleDraftButtonAction('update inquiry'), false);
+  assert.strictEqual(isStaleDraftButtonAction('1'), false);
+
+  assert.strictEqual(isStaleResumeNoAction('btn_resume_no'), true);
+  assert.strictEqual(isStaleResumeNoAction('no go to menu'), true);
+  assert.strictEqual(isStaleResumeNoAction('save / yes'), false);
+
+  assert.strictEqual(formatDraftContextLabel({ inquiry_id: 'INQ-B63652', company_name: 'Sanjay Motors', action: 'UPDATE_INQUIRY' }), 'for INQ-B63652 (Sanjay Motors)');
+  assert.strictEqual(formatDraftContextLabel({ inquiry_id: 'b63652', company_name: 'Sanjay Motors', action: 'UPDATE_INQUIRY' }), 'for INQ-B63652 (Sanjay Motors)');
+  assert.strictEqual(formatDraftContextLabel({ company_name: 'Sanjay Motors', action: 'LOG_INQUIRY' }), 'for Sanjay Motors');
+  assert.strictEqual(formatDraftContextLabel({ po_number: 'PO-99123', company_name: 'Menon Industries', action: 'LOG_ORDER' }), 'for PO-99123 (Menon Industries)');
+  assert.strictEqual(formatDraftContextLabel({}), '');
+
+  assert.strictEqual(getModuleCatalogName('LOG_INQUIRY'), 'Log New Inquiry');
+  assert.strictEqual(getModuleCatalogName('UPDATE_INQUIRY'), 'Update Inquiry');
+  assert.strictEqual(getModuleCatalogName('LOG_ORDER'), 'Log New Order');
+  assert.strictEqual(getModuleCatalogName('UPDATE_ORDER'), 'Update Order');
+  assert.strictEqual(getModuleCatalogName('LOG_VISIT'), 'Log Field Visit');
+  assert.strictEqual(getModuleCatalogName('UPDATE_VISIT'), 'Update Field Visit');
+  assert.strictEqual(getModuleCatalogName('LOG_COMPLAINT'), 'Log Complaint');
+  assert.strictEqual(getModuleCatalogName('UPDATE_COMPLAINT'), 'Update Complaint');
+  assert.strictEqual(getModuleCatalogName(null), 'the relevant activity');
+
+  // 8b. Discarded draft feedback
+  const testPhone1 = '919876543210';
+  recordInactiveDraft(testPhone1, 'UPDATE_INQUIRY', {
+    inquiry_id: 'INQ-B63652',
+    company_name: 'Sanjay Motors',
+  }, 'discarded');
+
+  const staleDiscardRes1 = await handleStaleDraftButton('btn_confirm_yes', testPhone1, true);
+  assert.strictEqual(staleDiscardRes1.handled, true);
+  assert(staleDiscardRes1.reply.includes('This draft for INQ-B63652 (Sanjay Motors) was already discarded, so nothing was saved. To make these changes, please start again with Update Inquiry.'));
+  assert(staleDiscardRes1.reply.includes('Here is the menu to start a new activity:'));
+  assert.strictEqual(staleDiscardRes1.interactiveType, 'list');
+
+  const staleDiscardRes2 = await handleStaleDraftButton('btn_confirm_edit', testPhone1, true);
+  assert(staleDiscardRes2.reply.includes('This draft for INQ-B63652 (Sanjay Motors) was already discarded, so nothing was saved. To make these changes, please start again with Update Inquiry.'));
+
+  // 8c. Saved draft feedback
+  const testPhone2 = '919876543211';
+  recordInactiveDraft(testPhone2, 'UPDATE_INQUIRY', {
+    inquiry_id: 'INQ-B63652',
+    company_name: 'Sanjay Motors',
+  }, 'saved');
+
+  const staleSavedRes = await handleStaleDraftButton('btn_confirm_yes', testPhone2, true);
+  assert.strictEqual(staleSavedRes.handled, true);
+  assert(staleSavedRes.reply.includes('This draft for INQ-B63652 (Sanjay Motors) was already saved. To make further changes, please start again with Update Inquiry.'));
+  assert(staleSavedRes.reply.includes('Here is the menu to start a new activity:'));
+
+  // 8d. Unknown/expired draft feedback
+  const testPhone3 = '919876543299';
+  const staleExpiredRes = await handleStaleDraftButton('btn_confirm_yes', testPhone3, true);
+  assert.strictEqual(staleExpiredRes.handled, true);
+  assert(staleExpiredRes.reply.includes('This draft was already discarded or expired, so nothing was saved. To make these changes, please start again with the relevant activity.'));
+  assert(staleExpiredRes.reply.includes('Here is the menu to start a new activity:'));
+
+  // 8e. Resume No / Menu button
+  const resumeNoRes = await handleResumeMenuButton('btn_resume_no', testPhone1, true);
+  assert.strictEqual(resumeNoRes.handled, true);
+  assert(resumeNoRes.reply.includes('Activity cancelled.'));
+
+  console.log('  -> PASS: Stale Draft Button & Inactive Session Feedback tests passed.\n');
+
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');
 }
 
-runTests().catch(err => {
+runTests().then(() => {
+  process.exit(0);
+}).catch(err => {
   console.error('❌ Test failed:', err);
   process.exit(1);
 });

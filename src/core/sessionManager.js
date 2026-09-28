@@ -134,6 +134,10 @@ async function getSessionEnvelope(senderPhone) {
     return sessionCache.get(pKey);
   }
 
+  if (!process.env.SUPABASE_URL || process.env.SUPABASE_URL.includes('placeholder')) {
+    return { current_session: null, last_completed_activity: null, rolling_messages: [], saved_sessions: [] };
+  }
+
   try {
     const variants = getCanonicalPhoneVariants(senderPhone);
     const { data: rows, error } = await supabase
@@ -178,6 +182,10 @@ async function persistSessionEnvelope(senderPhone, envelope) {
   }
 
   sessionCache.set(pKey, envelope);
+
+  if (!process.env.SUPABASE_URL || process.env.SUPABASE_URL.includes('placeholder')) {
+    return;
+  }
 
   try {
     const variants = getCanonicalPhoneVariants(senderPhone);
