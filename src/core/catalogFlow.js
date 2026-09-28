@@ -1825,6 +1825,10 @@ If only a single company is mentioned or if filling missing fields for an existi
 - Inquiry ID (e.g. INQ-XXXXXX), Order ID, Complaint Ticket ID, Visit Log ID, and Customer ID are system-generated record identifiers. They CANNOT be edited, renamed, or modified.
 - Customer / Company Name in update workflows (UPDATE_INQUIRY, UPDATE_ORDER, UPDATE_VISIT, UPDATE_COMPLAINT) is tied to the existing database record and cannot be changed.
 - If the user's message is ONLY asking to change/edit a system-generated or non-editable field (e.g. 'change inquiry id to IN879', 'change ticket id to 101', 'change customer to ABC'), return null for all updates. NEVER hallucinate, guess, or populate unmentioned fields (like payment_terms, rate, etc.)!
+- Other system-generated fields that CANNOT be edited: Deal ID, Enquiry Number, Logged By / Created By, Creation Date, Salesperson.
+- Recognise these requests in any phrasing, word order, or Hinglish, e.g. 'edit inquiry id for Rajeshwari Shah Industries to In897', 'inquiry number badlo to 897', 'INQ-F2785B ko IN897 kar do', 'rename deal id', 'set enquiry no as 12', 'change created date to 01-09-2026', 'change logged by to Ramesh'.
+- The NEW value the user wants for a system-generated field (e.g. 'In897', 'IN879', '897') is NOT data: NEVER put it into 'inquiry_id', 'company_name', 'updates', 'line_item_updates', or any other field. 'inquiry_id' may ONLY hold an EXISTING inquiry ID the user references to pick a record (e.g. 'update INQ-F2785B rate to 50000' -> inquiry_id 'INQ-F2785B').
+- If the same message ALSO requests a valid editable change (e.g. 'change inquiry id to IN897 and rate to 50000'), extract ONLY the valid editable change (rate) and ignore the system-generated part.
 14. STRICT UPDATE EXTRACTION IN UPDATE FLOWS (CRITICAL):
 - In UPDATE_VISIT, UPDATE_ORDER, UPDATE_INQUIRY, UPDATE_COMPLAINT: 'updates' MUST contain ONLY the fields that the user EXPLICITLY requested to change/update in their message.
 - If the user says 'update contact person phone to 5612788945', populate ONLY 'updates.contact_phone'. Do NOT put 'visit_date', 'person_met', 'city_location', etc. into 'updates' unless the user explicitly requested to update those specific fields.
@@ -1928,7 +1932,7 @@ function getAllowedFieldsListForAction(action) {
     case 'LOG_INQUIRY':
       return `- *Rate / Target Price*\n- *Quantity & Unit (e.g. 25 MT)*\n- *Product Specifications / Dimensions*\n- *Payment Terms (e.g. 30 Days Credit)*\n- *Delivery Location*\n- *Preferred Make (e.g. JSW, SAIL)*\n- *Additional Notes*`;
     case 'UPDATE_INQUIRY':
-      return `- *Rate / Target Price*\n- *Quantity / Line Items*\n- *Payment Terms (e.g. 30 Days)*\n- *Delivery Location*\n- *Preferred Make*\n- *Stage / Status (Open, Quoted, Won, Lost, On Hold)*\n- *Additional Notes*`;
+      return `- *Rate / Target Price*\n- *Quantity / Line Items*\n- *Payment Terms (e.g. 30 Days)*\n- *Delivery Location*\n- *Preferred Make*\n- *Additional Notes*`;
     case 'LOG_ORDER':
       return `- *PO Number (e.g. PO-2026-001)*\n- *PO Date*\n- *Delivery Location*\n- *Payment Terms*\n- *Product Rates & Quantities*`;
     case 'UPDATE_ORDER':
@@ -1973,6 +1977,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
       fieldName: 'Inquiry ID',
       message: `*Inquiry ID is system-generated and cannot be edited.*\n\n- Inquiry IDs (e.g. *${currentInq}*) are generated automatically by the CRM and cannot be modified or renamed.\n- If you meant to update a *different* inquiry, please reply *Cancel* and start an update for that Inquiry ID or Customer Name.`,
       allowedFieldsList: getAllowedFieldsListForAction(action),
+      compactReply: action === 'UPDATE_INQUIRY' ? buildInquirySystemFieldReply('Inquiry ID', draft._inquiry_display_id || null) : null,
     };
   }
 
@@ -2101,6 +2106,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
       fieldName: 'Audit Metadata',
       message: `*Audit metadata (Logged By / Creation Date) is system-generated and cannot be edited.*`,
       allowedFieldsList: getAllowedFieldsListForAction(action),
+      compactReply: action === 'UPDATE_INQUIRY' ? buildInquirySystemFieldReply('Logged By / Creation Date', draft._inquiry_display_id || null) : null,
     };
   }
 
@@ -2150,6 +2156,71 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
   }
 
   return { isNonEditable: false };
+}
+
+const INQUIRY_EDITABLE_FIELDS_INLINE = 'Stage, Quantity, Rate, Delivery Location, Payment Terms, Preferred Make, Additional Notes';
+
+// Strict detector for "rename / change the inquiry ID (or its audit fields)" requests.
+// Selections such as "update inquiry no 3", "inquiry id INQ-F2785B" or "update INQ-F2785B rate to 500"
+// must NOT match, so the normal selection / update flow keeps working for them.
+function detectInquirySystemFieldEdit(text) {
+  if (!text || typeof text !== 'string') return null;
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (!clean || clean.length > 300) return null;
+
+  const editableFieldMention = /\b(?:rate|price|bhav|qty|quantity|tonnage|mt|tons?|kg|payment|terms?|credit|delivery|location|city|stage|status|make|brand|notes?|remarks?|won|lost|quoted|quote|negotiation|hold|review)\b/i;
+  if (editableFieldMention.test(clean)) return null;
+
+  const VERB = '(?:change|edit|update|modify|rename|set|alter|replace|correct|fix|amend|revise|badlo|badal)';
+  const ID_TERM = '(?:inquiry|enquiry|inq|deal)\\s*(?:id|number|no\\.?|code|ref(?:erence)?\\s*(?:id|no\\.?|number)?)';
+  const isSelectorOnly = (s) => /^\s*[:#-]?\s*\d{1,4}\s*[.!?]?\s*$/.test(s);
+
+  const auditMatch = new RegExp(`\\b${VERB}\\b.*?\\b(created\\s*(?:by|date|on|at)|creation\\s*date|logged\\s*(?:by|on|date)|salesperson(?:\\s*(?:name|phone|id))?)\\b`, 'i').exec(clean);
+  if (auditMatch) {
+    const term = auditMatch[1].toLowerCase();
+    const label = /by|salesperson/.test(term) ? 'Logged By' : 'Creation Date';
+    return { field: 'audit', label };
+  }
+
+  const verbBefore = new RegExp(`\\b${VERB}\\b.*?\\b(?:the\\s+)?${ID_TERM}\\b(.*)$`, 'i').exec(clean);
+  if (verbBefore) {
+    const rest = verbBefore[1] || '';
+    if (!isSelectorOnly(rest)) {
+      if (/(?:^|\s)(?:to|as|into|=|->|se)\s*\S/i.test(rest)) return { field: 'inquiry_id', label: 'Inquiry ID' };
+      if (!rest.trim() || /^\s*[.!?]*\s*$/.test(rest) || /^\s*(?:for|of)\s+\S/i.test(rest)) return { field: 'inquiry_id', label: 'Inquiry ID' };
+    }
+  }
+
+  if (new RegExp(`\\b${ID_TERM}\\s+(?:ko\\s+|ka\\s+)?(?:change|badlo|badal|rename|modify|edit)\\b`, 'i').test(clean)) {
+    return { field: 'inquiry_id', label: 'Inquiry ID' };
+  }
+
+  if (new RegExp(`^${ID_TERM}\\s*(?:to|as|=|->)\\s*\\S`, 'i').test(clean) ||
+      new RegExp(`^${ID_TERM}\\s*[:#]?\\s*#?(?:INQ|DEAL)?-?[A-Z0-9]+\\s+(?:to|->)\\s+\\S`, 'i').test(clean)) {
+    return { field: 'inquiry_id', label: 'Inquiry ID' };
+  }
+
+  const codeRename = new RegExp(`\\b${VERB}\\b\\s+#?(?:INQ|DEAL)-[A-Z0-9]+\\s+(?:to|->|into)\\s+([A-Za-z0-9_-]+)\\s*[.!]?$`, 'i').exec(clean);
+  if (codeRename && /^[A-Za-z]{2,}[-_]?\d+[A-Za-z0-9]*$/.test(codeRename[1])) {
+    return { field: 'inquiry_id', label: 'Inquiry ID' };
+  }
+
+  if (/\b(?:INQ|DEAL)-[A-Z0-9]+\s+(?:ko|se)\s+[A-Za-z]{2,}[-_]?\d+[A-Za-z0-9]*\s+(?:kar|karo|kardo|badlo|badal|change)\b/i.test(clean)) {
+    return { field: 'inquiry_id', label: 'Inquiry ID' };
+  }
+
+  return null;
+}
+
+function buildInquirySystemFieldReply(label, displayId = null) {
+  if (displayId) {
+    const subject = label === 'Inquiry ID' ? `Inquiry ID (${displayId})` : `${label} of ${displayId}`;
+    return `*${subject} is system-generated and can't be edited.*\n` +
+      `Which field would you like to update? (${INQUIRY_EDITABLE_FIELDS_INLINE})`;
+  }
+  return `*${label} is system-generated and can't be edited.*\n` +
+    `You can update: ${INQUIRY_EDITABLE_FIELDS_INLINE}.\n` +
+    `Reply with the inquiry serial number or customer name to continue.`;
 }
 
 function scoreLineItemAgainstUpdate(item, upd) {
@@ -3106,7 +3177,7 @@ function validateMandatoryFields(action, draft) {
       const hasInqUpdate = Object.values(inqUpdates).some(v => v !== null && v !== undefined && v !== '') ||
                            Boolean(draft.rate || draft.quantity || draft.new_stage || draft.stage || draft.payment_terms || draft.delivery_location);
       const hasInqLineUpdates = Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0;
-      if (!hasInqUpdate && !hasInqLineUpdates) missing.push('At least one field to update (e.g. Rate, Quantity, Delivery Location, Payment Terms, or Stage)');
+      if (!hasInqUpdate && !hasInqLineUpdates) missing.push('At least one field to update (e.g. Rate, Quantity, Delivery Location, Payment Terms, or Additional Notes)');
       const inqProdCheck = validateDraftProducts('UPDATE_INQUIRY', draft);
       if (!inqProdCheck.isValid) {
         missing.push(`Valid Product Name (Unrecognized: "${inqProdCheck.invalidProducts.join(', ')}")`);
@@ -10677,6 +10748,7 @@ The user is currently in the active [${activeActivity}] (${activityDisplayName})
 Incoming message: "${trimmed}"
 
 Classify this incoming message:
+- If this message asks to change, edit, rename, or set a SYSTEM-GENERATED field of the current record (Inquiry ID, Deal ID, Enquiry Number, Order ID, Complaint Ticket ID, Visit ID, Customer ID, Logged By / Created By, Creation Date, Salesperson), e.g. "edit inquiry id for ABC Steels to IN897", "change inquiry number to 897", "INQ-F2785B ko IN897 kar do", "change created date" -> SAME_ACTIVITY (the active workflow will explain that the field can't be edited). NEVER classify these as STAGE_UPDATE, RETRIEVAL_QUERY, or DIFFERENT_ACTIVITY.
 - If this message is requesting to update, change, set, move, or mark the stage/status of an inquiry or deal (e.g. "update the stage to price quote for above inquiry", "update stage to quoted", "mark as negotiation", "move to on hold", "set status to price quote", "stage won", "set stage to lost") -> STAGE_UPDATE
 - If this message is reporting or logging a customer complaint, quality issue, defect, damage, rust, shortage, service problem, or delivery issue -> DIFFERENT_ACTIVITY:LOG_COMPLAINT
 - If this message is recording or logging a purchase order / PO -> DIFFERENT_ACTIVITY:LOG_ORDER
@@ -10918,6 +10990,56 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       handled: true,
       reply: outOfScopeMsg,
     };
+  }
+
+  // ── 2d. INQUIRY SYSTEM-GENERATED FIELD EDIT GUARD (runs before AI classification / record search) ──
+  const inqSystemFieldEdit = detectInquirySystemFieldEdit(text);
+  if (inqSystemFieldEdit) {
+    const sysParts = lastIntent.split('|');
+    const sysState = sysParts[0];
+    const sysAction = sysParts[1];
+    const mentionsInquiry = /\b(?:inquiry|enquiry|inq|deal)\b|\b(?:INQ|DEAL)-[A-Z0-9]+/i.test(text);
+
+    if (sysState === 'catalog_update_select' && sysAction === 'UPDATE_INQUIRY') {
+      const sysReply = buildInquirySystemFieldReply(inqSystemFieldEdit.label);
+      await recordSessionMessage(senderPhone, 'user', text);
+      await recordSessionMessage(senderPhone, 'assistant', sysReply, { action_type: sysAction });
+      return { handled: true, reply: sysReply };
+    }
+
+    if (['catalog_flow', 'catalog_editing', 'catalog_confirm'].includes(sysState) && sysAction === 'UPDATE_INQUIRY') {
+      const sysDraft = safeParseJSON(sysParts.slice(2).join('|'), {});
+      const sysReply = buildInquirySystemFieldReply(inqSystemFieldEdit.label, sysDraft._inquiry_display_id || null);
+      await recordSessionMessage(senderPhone, 'user', text);
+      await recordSessionMessage(senderPhone, 'assistant', sysReply, { action_type: sysAction, customer_name: sysDraft.company_name || null });
+      return { handled: true, reply: sysReply };
+    }
+
+    if (!hasActiveCatalogSession && (inqSystemFieldEdit.field === 'inquiry_id' || mentionsInquiry)) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      let custFilter = null;
+      const custMatch = text.match(/\b(?:for|of|regarding)\s+([A-Za-z0-9\s&.,'-]+?)(?:,|\s+change|\s+edit|\s+update|\s+set|\s+modify|\s+to\b|$)/i);
+      if (custMatch && custMatch[1]) {
+        const candidateName = custMatch[1].trim().replace(/[.,\s]+$/, '');
+        if (candidateName.length >= 2 && !/^(?:the|a|an|this|that|my|customer|inquiry|enquiry|inq|deal)$/i.test(candidateName)) {
+          const hits = await fetchEditableRecordsForModule('UPDATE_INQUIRY', senderPhone, { customerFilter: candidateName });
+          if (hits.length > 0) custFilter = candidateName;
+        }
+      }
+      const sysHeader = buildInquirySystemFieldReply(inqSystemFieldEdit.label);
+      const selectionRes = await fetchAndRenderUpdateSelection('UPDATE_INQUIRY', senderPhone, { page: 1, customerFilter: custFilter });
+      const sysReply = selectionRes.hasRecords
+        ? `${sysHeader}\n\n${selectionRes.reply}`
+        : `*${inqSystemFieldEdit.label} is system-generated and can't be edited.*\n\n${selectionRes.reply}`;
+      await startNewCatalogSession(senderPhone, sysReply);
+      await recordSessionMessage(senderPhone, 'assistant', sysReply, { action_type: 'UPDATE_INQUIRY' });
+      if (selectionRes.hasRecords) {
+        await saveActiveSession(senderPhone, custFilter || 'Unknown', `catalog_update_select|UPDATE_INQUIRY|${JSON.stringify(selectionRes.state)}`);
+      } else {
+        await saveActiveSession(senderPhone, 'Unknown', 'general');
+      }
+      return { handled: true, reply: sysReply };
+    }
   }
 
   // ── 2b. ACTIVE SESSION SCOPE GUARD (AI INTENT CLASSIFICATION) ──────────────
@@ -11565,7 +11687,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const nonEditableCheckConfirm = detectNonEditableFieldAttempt(action, text, draft);
     if (nonEditableCheckConfirm.isNonEditable) {
       await recordSessionMessage(senderPhone, 'user', text);
-      const fullReply = `${nonEditableCheckConfirm.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheckConfirm.allowedFieldsList}\n\nWhich editable field would you like to change?`;
+      const fullReply = nonEditableCheckConfirm.compactReply || `${nonEditableCheckConfirm.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheckConfirm.allowedFieldsList}\n\nWhich editable field would you like to change?`;
       await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: action });
       await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_editing|${action}|${draftJsonStr}`);
       return {
@@ -11731,7 +11853,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const nonEditableCheck = detectNonEditableFieldAttempt(action, text, draft);
     if (nonEditableCheck.isNonEditable) {
       await recordSessionMessage(senderPhone, 'user', text);
-      const fullReply = `${nonEditableCheck.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheck.allowedFieldsList}\n\nWhich editable field would you like to change?`;
+      const fullReply = nonEditableCheck.compactReply || `${nonEditableCheck.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheck.allowedFieldsList}\n\nWhich editable field would you like to change?`;
       await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: action });
       await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_editing|${action}|${draftJsonStr}`);
       return {
@@ -12606,7 +12728,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     // Check if user is attempting to edit a non-editable or system-generated field
     const nonEditableCheckFlow = detectNonEditableFieldAttempt(action, text, updatedDraft);
     if (nonEditableCheckFlow.isNonEditable) {
-      const fullReply = `${nonEditableCheckFlow.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheckFlow.allowedFieldsList}\n\nWhich editable field would you like to change?`;
+      const fullReply = nonEditableCheckFlow.compactReply || `${nonEditableCheckFlow.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheckFlow.allowedFieldsList}\n\nWhich editable field would you like to change?`;
       await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: action });
       await saveActiveSession(senderPhone, updatedDraft.company_name || existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
       return {
