@@ -9,6 +9,7 @@ const {
   buildResumePrompt,
   formatAttributeValue,
   extractInquiryAttributes,
+  formatDetailedInquiryItemsList,
   formatSelectedInquiryPrompt,
 } = require('../src/core/catalogFlow');
 
@@ -158,7 +159,7 @@ async function runTests() {
   assert(formattedPrompt.includes('• *Payment Terms:* 90 days terms'));
   assert(formattedPrompt.includes('• *Delivery Location:* maharastra'));
   assert(formattedPrompt.includes('• *Additional Notes:* we are inquirying about the product so we can get more detais'));
-  assert(formattedPrompt.includes('*Current Line Items:*\n1. *HR Coil (9mm)* — 89 MT'));
+  assert(formattedPrompt.includes('*Current Line Items:*\n\n1. *HR Coil (9mm)* — 89 MT'));
 
   // Test missing fields fallback to '-'
   const sparseInquiryRecord = {
@@ -275,6 +276,74 @@ async function runTests() {
   assert(resumeNoRes.reply.includes('Activity cancelled.'));
 
   console.log('  -> PASS: Stale Draft Button & Inactive Session Feedback tests passed.\n');
+
+  // Test 9: Rate, Line Total & Quotation Total Display across Inquiry Views
+  console.log('Test 9: Rate, Line Total & Quotation Total Display across Inquiry Views');
+
+  // 9a. formatDetailedInquiryItemsList with rated single item
+  const ratedSingleItem = [
+    { sku_text: 'HR Coil', dimensions: '7mm', quantity: 45, unit: 'MT', rate: 88, amount: 3960 }
+  ];
+  const formattedRatedSingle = formatDetailedInquiryItemsList(ratedSingleItem);
+  assert.strictEqual(formattedRatedSingle, 'HR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹3,960', 'Rated single item must format with rate and line total');
+
+  // 9b. formatDetailedInquiryItemsList with multiple items (some rated, some unrated)
+  const mixedItems = [
+    { sku_text: 'HR Coil', dimensions: '7mm', quantity: 45, unit: 'MT', rate: 88, amount: 3960 },
+    { sku_text: 'CR Sheet', dimensions: '2mm', quantity: 20, unit: 'MT', rate: 90, amount: 1800 }
+  ];
+  const formattedMixed = formatDetailedInquiryItemsList(mixedItems);
+  assert.strictEqual(
+    formattedMixed,
+    '1. HR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹3,960\n2. CR Sheet (2mm) | 20 MT | ₹90 /MT | Line Total: ₹1,800',
+    'Multiple rated items must include line numbers, rates, and line totals'
+  );
+
+  // 9c. formatDetailedInquiryItemsList with unrated item
+  const unratedItem = [
+    { sku_text: 'HR Coil', dimensions: '9mm', quantity: 89, unit: 'MT', rate: 0, amount: 0 }
+  ];
+  const formattedUnrated = formatDetailedInquiryItemsList(unratedItem);
+  assert.strictEqual(formattedUnrated, '*HR Coil (9mm)* — 89 MT', 'Unrated item must format as *Name (Spec)* — Qty Unit');
+
+  // 9d. formatSelectedInquiryPrompt with rate, line total, and quotation total (e.g. INQ-4535CA Sana Shah)
+  const sanaShahInqRecord = {
+    displayId: 'INQ-4535CA',
+    customer_name: 'Sana Shah',
+    date_formatted: '28-09-2026',
+    stage: 'Quoted',
+    preferred_make: 'Tata steel',
+    payment_terms: '70 Days',
+    delivery_location: 'Satara',
+    additional_notes: null,
+    total_amount: 3960,
+    deal_items: ratedSingleItem,
+  };
+  const sanaShahPrompt = formatSelectedInquiryPrompt(sanaShahInqRecord, formattedRatedSingle);
+  assert(sanaShahPrompt.includes('✏️ *Selected Inquiry INQ-4535CA (Sana Shah):*'));
+  assert(sanaShahPrompt.includes('• *Date:* 28-09-2026'));
+  assert(sanaShahPrompt.includes('• *Stage:* Quoted'));
+  assert(sanaShahPrompt.includes('• *Preferred Make:* Tata steel'));
+  assert(sanaShahPrompt.includes('• *Payment Terms:* 70 Days'));
+  assert(sanaShahPrompt.includes('• *Delivery Location:* Satara'));
+  assert(sanaShahPrompt.includes('• *Additional Notes:* -'));
+  assert(sanaShahPrompt.includes('*Current Line Items:*\n\nHR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹3,960'));
+  assert(sanaShahPrompt.includes('Quotation Total: ₹3,960'));
+  assert(sanaShahPrompt.includes('Want to update Stage (Negotiation, Won, Lost, On Hold), Rate, Quantity or other details?'));
+
+  // 9e. formatSelectedInquiryPrompt when total_amount needs to be calculated from items
+  const inqWithoutHeaderTotal = {
+    displayId: 'INQ-4535CA',
+    customer_name: 'Sana Shah',
+    date_formatted: '28-09-2026',
+    stage: 'Quoted',
+    deal_items: mixedItems,
+  };
+  const promptCalcTotal = formatSelectedInquiryPrompt(inqWithoutHeaderTotal, formattedMixed);
+  assert(promptCalcTotal.includes('Quotation Total: ₹5,760'), 'Quotation total must be computed from line items (3960 + 1800 = 5760)');
+  assert(promptCalcTotal.includes('Want to update Stage (Negotiation, Won, Lost, On Hold), Rate, Quantity or other details?'));
+
+  console.log('  -> PASS: Rate, Line Total & Quotation Total Display tests passed.\n');
 
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');
 }

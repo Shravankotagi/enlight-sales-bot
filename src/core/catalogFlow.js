@@ -4708,12 +4708,33 @@ function formatDetailedInquiryItemsList(items) {
   if (!Array.isArray(items) || items.length === 0) return '';
   return items.map((item, idx) => {
     const name = item.sku_text || item.description || item.product_name || 'Steel Item';
-    const spec = item.dimensions || item.spec ? ` (${item.dimensions || item.spec})` : (item.grade ? ` (${item.grade})` : '');
-    const qty = item.quantity !== undefined && item.quantity !== null && item.quantity !== '' ? `${item.quantity} ${item.unit || 'MT'}` : '';
+    const dim = item.dimensions || item.spec;
+    let spec = '';
+    if (dim) {
+      const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+      const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
+      if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
+        spec = ` (${shortSpec})`;
+      } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
+        spec = ` (${dim})`;
+      }
+    } else if (item.grade && !name.toLowerCase().includes(String(item.grade).toLowerCase())) {
+      spec = ` (${item.grade})`;
+    }
+
+    const qty = (item.quantity !== undefined && item.quantity !== null && item.quantity !== '') ? `${item.quantity} ${item.unit || 'MT'}` : '';
     const rate = Number(item.rate || 0);
-    const rateText = rate > 0 ? ` @ ₹${rate.toLocaleString('en-IN')}/${item.unit || 'MT'}` : '';
-    const qtyRate = [qty, rateText].filter(Boolean).join('');
-    return `${idx + 1}. *${name}${spec}*${qtyRate ? ` — ${qtyRate}` : ''}`;
+    const itQty = Number(item.quantity || 0);
+    const lineTotal = Number(item.amount || 0) || (rate > 0 && itQty > 0 ? rate * itQty : 0);
+
+    const prefix = items.length > 1 ? `${idx + 1}. ` : '';
+
+    if (rate > 0) {
+      const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
+      return `${prefix}${name}${spec}${qty ? ` | ${qty}` : ''} | ₹${rate.toLocaleString('en-IN')} /${item.unit || 'MT'}${lineTotalStr}`;
+    }
+
+    return `${prefix}*${name}${spec}*${qty ? ` — ${qty}` : ''}`;
   }).join('\n');
 }
 
@@ -4791,12 +4812,29 @@ function extractInquiryAttributes(inq, linkedDeal = null) {
  * Formats the selected inquiry card when chosen for update.
  * Guarantees that Date, Stage, Preferred Make, Payment Terms, Delivery Location,
  * and Additional Notes are always displayed in compulsory order, using '-' for any missing value.
+ * Displays line item rates, line totals, and overall Quotation Total whenever pricing exists.
  */
 function formatSelectedInquiryPrompt(matchedRecord, itemsListText) {
   const displayId = matchedRecord.displayId || `INQ-${(matchedRecord.inquiry_id || matchedRecord.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase()}`;
   const custName = matchedRecord.customer_name || matchedRecord.company_name || 'Customer';
   const dateStr = matchedRecord.date_formatted || matchedRecord.dateFormatted || matchedRecord.date || (matchedRecord.created_at ? formatDateDDMMYYYY(matchedRecord.created_at) : '-');
   const stageStr = matchedRecord.stage || 'New Inquiry';
+
+  // Calculate quotation total / total amount
+  let totalAmt = Number(matchedRecord.total_amount || matchedRecord.totalAmount || 0);
+  const items = Array.isArray(matchedRecord.deal_items)
+    ? matchedRecord.deal_items
+    : (Array.isArray(matchedRecord.existing_items) ? matchedRecord.existing_items : []);
+  if (!totalAmt && items.length > 0) {
+    totalAmt = items.reduce((s, it) => {
+      const q = Number(it.quantity || 0);
+      const r = Number(it.rate || 0);
+      const a = Number(it.amount || 0);
+      return s + (a || (q * r));
+    }, 0);
+  }
+
+  const quoteTotalBlock = totalAmt > 0 ? `\n\nQuotation Total: ₹${totalAmt.toLocaleString('en-IN')}` : '';
 
   return `✏️ *Selected Inquiry ${displayId} (${custName}):*\n\n` +
     `• *Date:* ${formatAttributeValue(dateStr)}\n` +
@@ -4805,9 +4843,9 @@ function formatSelectedInquiryPrompt(matchedRecord, itemsListText) {
     `• *Payment Terms:* ${formatAttributeValue(matchedRecord.payment_terms)}\n` +
     `• *Delivery Location:* ${formatAttributeValue(matchedRecord.delivery_location)}\n` +
     `• *Additional Notes:* ${formatAttributeValue(matchedRecord.additional_notes)}\n\n` +
-    `*Current Line Items:*\n${itemsListText}\n\n` +
-    `What details would you like to update?\n` +
-    `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Additional Notes)_`;
+    `*Current Line Items:*\n\n${itemsListText}` +
+    quoteTotalBlock + `\n\n` +
+    `Want to update Stage (Negotiation, Won, Lost, On Hold), Rate, Quantity or other details?`;
 }
 
 function formatProductSummaryCompact(item) {
@@ -4998,7 +5036,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
 
     let inqsQuery = supabase
       .from('inquiries')
-      .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, inquiry_type, created_at, salesperson_phone')
+      .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, inquiry_type, created_at, salesperson_phone, inquiry_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
       .neq('inquiry_type', 'purchase_order')
       .order('created_at', { ascending: false });
 
@@ -5042,6 +5080,13 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
           dealByInqId.set(d.inquiry_id, d);
         }
       }
+      if (d.id) {
+        if (isTerminal) {
+          wonOrClosedInqIds.add(d.id);
+        } else if (!dealByInqId.has(d.id)) {
+          dealByInqId.set(d.id, d);
+        }
+      }
     });
 
     const matched = [];
@@ -5066,6 +5111,26 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
       const dateFormatted = formatDateDDMMYYYY(inq.created_at);
       const inqAttrs = extractInquiryAttributes(inq, linkedDeal);
 
+      const inqDealItems = (linkedDeal?.deal_items && linkedDeal.deal_items.length > 0)
+        ? linkedDeal.deal_items
+        : (inq.inquiry_items && inq.inquiry_items.length > 0)
+          ? inq.inquiry_items
+          : (ai.line_items && ai.line_items.length > 0)
+            ? ai.line_items
+            : (ai.lineItems && ai.lineItems.length > 0)
+              ? ai.lineItems
+              : [];
+
+      let calculatedTotalAmt = Number(linkedDeal?.total_amount) || Number(ai.totalAmount) || Number(ai.total_amount) || 0;
+      if (!calculatedTotalAmt && inqDealItems.length > 0) {
+        calculatedTotalAmt = inqDealItems.reduce((s, it) => {
+          const q = Number(it.quantity || 0);
+          const r = Number(it.rate || 0);
+          const a = Number(it.amount || 0);
+          return s + (a || (q * r));
+        }, 0);
+      }
+
       matched.push({
         id: inq.id,
         deal_id: linkedDeal?.id || null,
@@ -5081,8 +5146,8 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         delivery_location: inqAttrs.delivery_location || 'Not specified',
         preferred_make: inqAttrs.preferred_make || null,
         additional_notes: inqAttrs.additional_notes || null,
-        total_amount: Number(linkedDeal?.total_amount) || Number(ai.totalAmount) || 0,
-        deal_items: linkedDeal?.deal_items || ai.lineItems || ai.line_items || [],
+        total_amount: calculatedTotalAmt,
+        deal_items: inqDealItems,
         created_at: inq.created_at,
       });
       seenInqIds.add(inq.id);
@@ -5102,6 +5167,17 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
       const dateFormatted = formatDateDDMMYYYY(d.created_at);
       const dealAttrs = extractInquiryAttributes(null, d);
 
+      const dDealItems = Array.isArray(d.deal_items) ? d.deal_items : [];
+      let calculatedDealTotalAmt = Number(d.total_amount) || 0;
+      if (!calculatedDealTotalAmt && dDealItems.length > 0) {
+        calculatedDealTotalAmt = dDealItems.reduce((s, it) => {
+          const q = Number(it.quantity || 0);
+          const r = Number(it.rate || 0);
+          const a = Number(it.amount || 0);
+          return s + (a || (q * r));
+        }, 0);
+      }
+
       matched.push({
         id: d.id,
         deal_id: d.id,
@@ -5117,8 +5193,8 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         delivery_location: dealAttrs.delivery_location || d.delivery_location || 'Not specified',
         preferred_make: dealAttrs.preferred_make || null,
         additional_notes: dealAttrs.additional_notes || null,
-        total_amount: Number(d.total_amount) || 0,
-        deal_items: d.deal_items || [],
+        total_amount: calculatedDealTotalAmt,
+        deal_items: dDealItems,
         created_at: d.created_at,
       });
     });
@@ -6541,6 +6617,17 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         itemsListText = `1. *${formatProductSummary(single)}*`;
       }
       const stageLabel = formatStageLabel(single.stage);
+      let totalAmt = Number(single.total_amount || single.totalAmount || 0);
+      if (!totalAmt && singleItems.length > 0) {
+        totalAmt = singleItems.reduce((s, it) => {
+          const q = Number(it.quantity || 0);
+          const r = Number(it.rate || 0);
+          const a = Number(it.amount || 0);
+          return s + (a || (q * r));
+        }, 0);
+      }
+      const quoteTotalBlock = totalAmt > 0 ? `\n\nQuotation Total: ₹${totalAmt.toLocaleString('en-IN')}` : '';
+
       const prompt = `✏️ *Editable Inquiry Found for ${single.company_name}:*\n\n` +
         `• *Inquiry ID:* ${single.displayId}\n` +
         `• *Date:* ${formatAttributeValue(single.dateFormatted || single.date_formatted)}\n` +
@@ -6549,9 +6636,9 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         `• *Payment Terms:* ${formatAttributeValue(single.payment_terms)}\n` +
         `• *Delivery Location:* ${formatAttributeValue(single.delivery_location)}\n` +
         `• *Additional Notes:* ${formatAttributeValue(single.additional_notes)}\n\n` +
-        `*Current Line Items:*\n${itemsListText}\n\n` +
-        `What details would you like to update?\n` +
-        `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Additional Notes)_`;
+        `*Current Line Items:*\n\n${itemsListText}` +
+        quoteTotalBlock + `\n\n` +
+        `Want to update Stage (Negotiation, Won, Lost, On Hold), Rate, Quantity or other details?`;
 
       return {
         handled: true,
@@ -13896,6 +13983,7 @@ module.exports = {
   buildResumePrompt,
   formatAttributeValue,
   extractInquiryAttributes,
+  formatDetailedInquiryItemsList,
   formatSelectedInquiryPrompt,
   recordInactiveDraft,
   getLastInactiveDraft,
