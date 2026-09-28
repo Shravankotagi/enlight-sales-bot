@@ -914,7 +914,7 @@ You can reply in any format — just include the field names or values in order.
 Which fields do you want to update? Mention the field name and new value.
 
 **Updatable Fields:**
-- Product Description / Quantity
+- Product Description / Quantity / Specification (e.g. 8mm, 78 MT)
 - Rate
 - Preferred Make
 - Payment Terms
@@ -1114,7 +1114,7 @@ function getEditPromptForAction(action) {
     case 'LOG_INQUIRY':
       return `Which field would you like to change? (e.g. "Rate: 55000", "Delivery location: Pune", "Quantity: 25 MT", or "Additional notes: ...")`;
     case 'UPDATE_INQUIRY':
-      return `Which field would you like to change? (e.g. "Rate: 55000", "Payment terms: 30 days", or "Additional notes: ...")`;
+      return `Which field would you like to change? (e.g. "Rate: 55000", "Quantity / Spec: 78 MT 8mm", "Payment terms: 30 days", "Delivery location: Mumbai", or "Additional notes: ...")`;
     case 'LOG_ORDER':
       return `Which field would you like to change? (e.g. "Rate: 54000", "Delivery location: Pune", or "PO Number: PO-2026-001")`;
     case 'UPDATE_ORDER':
@@ -1802,16 +1802,19 @@ UPDATE_INQUIRY:
   },
   "line_item_updates": [
     {
-      "sku_text": "<Product SKU or Name e.g. 'MS Sheet 5MM', 'MS Sheet 6MM'>",
-      "description": "<Product description>",
+      "sku_text": "<Product SKU or Name e.g. 'MS Sheet 5MM', 'MS Sheet 6MM', 'HR Coil', else null>",
+      "description": "<Product description, else null>",
+      "spec": "<Dimensions / specifications / thickness / size e.g. '8mm', '6mm', '1250 x 2500', else null>",
+      "dimensions": "<Dimensions / specifications / thickness / size e.g. '8mm', '6mm', else null>",
       "rate": <numeric rate if specified for this product e.g. 20, 30, 54000, else null>,
-      "quantity": <numeric quantity if specified for this product e.g. 15, 20, else null>,
+      "quantity": <numeric quantity if specified for this product e.g. 15, 20, 78, else null>,
       "unit": "<MT | KG | PCS | Sheets, default MT>"
     }
   ]
 }
 
 IMPORTANT RULES FOR INQUIRIES:
+- If a user provides line item updates with specifications, thickness, or dimensions (e.g. 'Line item: 78MT 8mm', 'HR Coil 8mm 78MT', 'change thickness to 8mm', 'change spec to 8mm'), extract the dimension/thickness into 'spec' and 'dimensions' ('8mm'), quantity into 'quantity' (78), and unit into 'unit' ('MT')! If product name is not explicitly mentioned (e.g. 'Line item: 78MT 8mm'), set sku_text and description to null or generic, while preserving spec/dimensions and quantity.
 - If a user provides multiple products with individual rates (e.g. 'rate \n MS Sheet 5MM - 20 \n MS Sheet 6MM - 30'), put each product with its specific rate into 'line_item_updates' array! Do NOT put 20 as updates.rate, and do NOT put 'MS Sheet 5MM, MS Sheet 6MM' into updates.product_description.
 - If a user provides multiple products with quantities (e.g. 'MS Sheet 5MM - 15 MT, MS Sheet 6MM - 20 MT'), parse each into line_items/line_item_updates with its respective quantity and unit.
 - If a single rate is provided along with multiple products, apply that rate to all line items.
@@ -2178,7 +2181,7 @@ function getAllowedFieldsListForAction(action) {
     case 'LOG_INQUIRY':
       return `- *Rate / Target Price*\n- *Quantity & Unit (e.g. 25 MT)*\n- *Product Specifications / Dimensions*\n- *Payment Terms (e.g. 30 Days Credit)*\n- *Delivery Location*\n- *Preferred Make (e.g. JSW, SAIL)*\n- *Additional Notes*`;
     case 'UPDATE_INQUIRY':
-      return `- *Rate / Target Price*\n- *Quantity / Line Items*\n- *Payment Terms (e.g. 30 Days)*\n- *Delivery Location*\n- *Preferred Make*\n- *Additional Notes*`;
+      return `- *Rate / Target Price*\n- *Quantity & Product Specifications / Dimensions (e.g. 8mm, 78 MT)*\n- *Payment Terms (e.g. 30 Days)*\n- *Delivery Location*\n- *Preferred Make*\n- *Additional Notes*`;
     case 'LOG_ORDER':
       return `- *PO Number (e.g. PO-2026-001)*\n- *PO Date*\n- *Delivery Location*\n- *Payment Terms*\n- *Product Rates & Quantities*`;
     case 'UPDATE_ORDER':
@@ -2404,7 +2407,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
   return { isNonEditable: false };
 }
 
-const INQUIRY_EDITABLE_FIELDS_INLINE = 'Stage, Quantity, Rate, Delivery Location, Payment Terms, Preferred Make, Additional Notes';
+const INQUIRY_EDITABLE_FIELDS_INLINE = 'Stage, Quantity / Specifications, Rate, Delivery Location, Payment Terms, Preferred Make, Additional Notes';
 
 // Strict detector for "rename / change the inquiry ID (or its audit fields)" requests.
 // Selections such as "update inquiry no 3", "inquiry id INQ-F2785B" or "update INQ-F2785B rate to 500"
@@ -2945,11 +2948,11 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
         }
       } else if (key === 'line_item_updates' && Array.isArray(val)) {
         let validUpdates = val;
-        if (action === 'UPDATE_ORDER') {
+        if (action === 'UPDATE_ORDER' || action === 'UPDATE_INQUIRY') {
           validUpdates = val.filter(item => {
             if (!item) return false;
-            // Reject items where only amount is given without any item reference, product, rate, or quantity
-            if (item.amount && !item.rate && !item.quantity && !item.item_reference && !item.description && !item.sku_text) {
+            // Reject items where only amount is given without any item reference, product, rate, quantity, or spec
+            if (item.amount && !item.rate && !item.quantity && !item.item_reference && !item.description && !item.sku_text && !item.spec && !item.dimensions) {
               return false;
             }
             return Boolean(item.item_reference || item.description || item.sku_text || item.rate || item.quantity || item.spec || item.dimensions);
@@ -2966,6 +2969,11 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             if (normalized.quantity !== null && normalized.quantity !== undefined && normalized.quantity !== '') {
               const parsedQty = parseNumericValue(normalized.quantity);
               if (parsedQty !== null) normalized.quantity = parsedQty;
+            }
+            if (normalized.dimensions && !normalized.spec) {
+              normalized.spec = normalized.dimensions;
+            } else if (normalized.spec && !normalized.dimensions) {
+              normalized.dimensions = normalized.spec;
             }
             return normalized;
           });
@@ -3246,7 +3254,44 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
       lineUpdates = merged.line_item_updates;
     }
     if (lineUpdates.length > 0) {
-      merged.line_item_updates = lineUpdates;
+      if (Array.isArray(baseDraft.line_item_updates) && baseDraft.line_item_updates.length > 0) {
+        const mergedList = [...baseDraft.line_item_updates];
+        for (const newUpd of lineUpdates) {
+          const matchedPrevIdx = mergedList.findIndex((prev, pIdx) => {
+            const match = matchLineItemUpdate(prev, pIdx, mergedList.length, [newUpd]);
+            return match !== null;
+          });
+          if (matchedPrevIdx >= 0) {
+            const mergedUpd = { ...mergedList[matchedPrevIdx], ...newUpd };
+            if (newUpd.spec || newUpd.dimensions) {
+              delete mergedUpd._target_indexes;
+              delete mergedUpd._target_item_ids;
+            }
+            mergedList[matchedPrevIdx] = mergedUpd;
+          } else {
+            mergedList.push(newUpd);
+          }
+        }
+        merged.line_item_updates = mergedList;
+      } else {
+        merged.line_item_updates = lineUpdates;
+      }
+    } else {
+      const thkMatch = userInput.match(/(?:line\s*item[\s:=-]*)?.*?(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i) || userInput.match(/\b(\d+X\d+X\d+|\d+\s*x\s*\d+(?:\s*x\s*\d+)?)\b/i);
+      const qtyMatch = userInput.match(/(\d+(?:\.\d+)?)\s*(?:mt|ton|tonne|kg|pcs|nos|sheets?|plates?|coils?)\b/i) || userInput.match(/(?:qty|quantity)[\s:=-]*(\d+(?:\.\d+)?)/i);
+      if (thkMatch || qtyMatch) {
+        const extractedSpec = thkMatch ? thkMatch[1].trim() : null;
+        const extractedQty = qtyMatch ? Number(qtyMatch[1]) : null;
+        const extractedUnit = userInput.match(/\b(mt|ton|tonne|kg|pcs|nos|sheets?|plates?|coils?)\b/i)?.[1]?.toUpperCase() || 'MT';
+        if (extractedSpec || extractedQty) {
+          merged.line_item_updates = [{
+            operation: 'update',
+            item_reference: 'Line Item',
+            ...(extractedQty !== null ? { quantity: extractedQty, unit: extractedUnit } : {}),
+            ...(extractedSpec ? { spec: extractedSpec, dimensions: extractedSpec } : {}),
+          }];
+        }
+      }
     }
   } else if (action === 'UPDATE_VISIT') {
     if (!merged.updates) merged.updates = {};
@@ -4348,7 +4393,7 @@ function validateDraftProducts(action, draft) {
     for (const item of draft.line_item_updates) {
       const pName = item.sku_text || item.description || item.item_reference || '';
       const dim = item.dimensions || item.spec || '';
-      if (pName && pName.trim() && !/^(?:item\s*\d+|\d+)$/i.test(pName.trim())) {
+      if (pName && pName.trim() && !isGenericLineUpdateRef(pName) && !/^(?:item\s*\d+|\d+|line\s*#?\d+)$/i.test(pName.trim())) {
         const norm = normalizeProductToCatalog(pName, dim);
         if (!norm.isValid) {
           invalidProducts.push(pName.trim());
@@ -7394,22 +7439,47 @@ function buildConfirmationSummary(action, draft) {
         draft.line_item_updates.forEach((it, i) => {
           const targets = Array.isArray(it._target_indexes)
             ? it._target_indexes.map(idx => existingInqItems[idx]).filter(Boolean)
-            : [];
+            : (existingInqItems.length === 1 ? [existingInqItems[0]] : []);
           const hasValue = (v) => v !== null && v !== undefined && v !== '';
-          const renderLine = (name, unit) => {
+          const renderLine = (name, unit, oldSpec = null, newSpec = null) => {
             const parts = [];
             if (hasValue(it.quantity)) parts.push(`Qty: ${it.quantity} ${unit}`);
             if (hasValue(it.rate)) parts.push(`Rate: ₹${(parseIndianAmount(it.rate) ?? 0).toLocaleString('en-IN')}/${unit}`);
-            summary += `  • *${name}* → ${parts.join(' | ')}\n`;
+            if (parts.length > 0) {
+              summary += `  • *${name}* → ${parts.join(' | ')}\n`;
+            } else if (newSpec && (!oldSpec || newSpec.toLowerCase() !== oldSpec.toLowerCase())) {
+              summary += `  • *${name}* → Spec: ${newSpec}\n`;
+            } else {
+              summary += `  • *${name}*\n`;
+            }
           };
           if (targets.length > 0) {
             targets.forEach(target => {
               const baseName = target.sku_text || target.description || it.sku_text || it.description || `Item ${i + 1}`;
-              const spec = target.dimensions || target.spec;
-              renderLine(spec ? `${baseName} (${spec})` : baseName, target.unit || it.unit || 'MT');
+              const oldSpec = target.dimensions || target.spec || '';
+              const newSpec = it.dimensions || it.spec || '';
+
+              let displayName = baseName;
+              if (oldSpec && displayName.toLowerCase().includes(oldSpec.toLowerCase())) {
+                const regex = new RegExp(`\\s*\\(?\\s*${oldSpec.replace('.', '\\.')}\\s*\\)?`, 'gi');
+                displayName = displayName.replace(regex, '').trim();
+              }
+
+              if (newSpec && oldSpec && newSpec.toLowerCase() !== oldSpec.toLowerCase()) {
+                displayName = `${displayName} (${oldSpec} → ${newSpec})`;
+              } else if (newSpec) {
+                displayName = `${displayName} (${newSpec})`;
+              } else if (oldSpec) {
+                displayName = `${displayName} (${oldSpec})`;
+              }
+
+              renderLine(displayName, target.unit || it.unit || 'MT', oldSpec, newSpec);
             });
           } else {
-            renderLine(it.sku_text || it.description || `Item ${i + 1}`, it.unit || 'MT');
+            const baseName = it.sku_text || it.description || `Item ${i + 1}`;
+            const newSpec = it.dimensions || it.spec || '';
+            const displayName = newSpec ? `${baseName} (${newSpec})` : baseName;
+            renderLine(displayName, it.unit || 'MT', null, newSpec);
           }
         });
       }
@@ -8396,6 +8466,8 @@ async function executeAction(action, draft, senderPhone) {
 
             let itRate = Number(currentItem.rate) || 0;
             let itQty = Number(currentItem.quantity) || 0;
+            let itDim = currentItem.dimensions || currentItem.spec || null;
+            let newSkuText = currentItem.sku_text;
 
             if (matchedUpd) {
               if (matchedUpd.rate !== null && matchedUpd.rate !== undefined && matchedUpd.rate !== '') {
@@ -8403,6 +8475,25 @@ async function executeAction(action, draft, senderPhone) {
               }
               if (matchedUpd.quantity !== null && matchedUpd.quantity !== undefined && matchedUpd.quantity !== '') {
                 itQty = parseNumericValue(matchedUpd.quantity) ?? itQty;
+              }
+              const newDim = matchedUpd.dimensions || matchedUpd.spec;
+              if (newDim !== null && newDim !== undefined && String(newDim).trim() !== '') {
+                itDim = String(newDim).trim();
+              }
+
+              if (matchedUpd.sku_text && !isGenericLineUpdateRef(matchedUpd.sku_text)) {
+                newSkuText = matchedUpd.sku_text;
+              } else if (matchedUpd.description && !isGenericLineUpdateRef(matchedUpd.description)) {
+                newSkuText = matchedUpd.description;
+              } else if (newDim && newSkuText) {
+                const oldThk = (currentItem.dimensions || '').match(/\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g)/i)?.[0];
+                if (oldThk) {
+                  const regex = new RegExp(`\\s*\\(?\\s*${oldThk.replace('.', '\\.')}\\s*\\)?`, 'gi');
+                  const cleaned = newSkuText.replace(regex, '').trim();
+                  if (cleaned.length > 2) {
+                    newSkuText = cleaned;
+                  }
+                }
               }
             } else if (spillGeneralRate) {
               const globalRate = parseIndianAmount(updates.rate) || 0;
@@ -8416,6 +8507,8 @@ async function executeAction(action, draft, senderPhone) {
               rate: itRate,
               quantity: itQty,
               amount: itAmt,
+              dimensions: itDim,
+              sku_text: newSkuText,
             }).eq('id', currentItem.id);
 
             if (dItemErr) {
@@ -14099,4 +14192,6 @@ module.exports = {
   isStaleResumeNoAction,
   handleStaleDraftButton,
   handleResumeMenuButton,
+  getAllowedFieldsListForAction,
+  getEditPromptForAction,
 };
