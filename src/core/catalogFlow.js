@@ -905,9 +905,9 @@ function getTargetActionVerb(action) {
 function getEditPromptForAction(action) {
   switch (action) {
     case 'LOG_INQUIRY':
-      return `Which field would you like to change? (e.g. "Rate: 55000", "Delivery location: Pune", or "Quantity: 25 MT")`;
+      return `Which field would you like to change? (e.g. "Rate: 55000", "Delivery location: Pune", "Quantity: 25 MT", or "Additional notes: ...")`;
     case 'UPDATE_INQUIRY':
-      return `Which field would you like to change? (e.g. "Rate: 55000" or "Payment terms: 30 days")`;
+      return `Which field would you like to change? (e.g. "Rate: 55000", "Payment terms: 30 days", or "Additional notes: ...")`;
     case 'LOG_ORDER':
       return `Which field would you like to change? (e.g. "Rate: 54000", "Delivery location: Pune", or "PO Number: PO-2026-001")`;
     case 'UPDATE_ORDER':
@@ -1470,6 +1470,25 @@ function extractFollowUpDate(followupText, baseDate = new Date()) {
   return null;
 }
 
+// ── VERBATIM NOTES EXTRACTION HELPER ────────────────────────────────────────
+
+function extractVerbatimNotes(text) {
+  if (!text || typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const noteMatch = trimmed.match(
+    /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|comments?)\s*(?:to|as|is|:|=|\s+-)\s*(.+)$/is
+  );
+  if (noteMatch && noteMatch[1]) {
+    const val = noteMatch[1].trim();
+    if (val.length > 0) {
+      return val;
+    }
+  }
+  return null;
+}
+
 // ── LLM FIELD EXTRACTION ENGINE ──────────────────────────────────────────────
 
 async function extractFieldsWithLLM(action, userInput, existingDraft = {}) {
@@ -1507,7 +1526,7 @@ LOG_INQUIRY:
   "preferred_make": "<JSW, SAIL, Tata, any, etc. if mentioned, else null>",
   "payment_terms": "<e.g. 30 Days Credit, 100% Advance, else null>",
   "delivery_location": "<e.g. Chakan Pune, Taloja, Aurangabad, else null>",
-  "additional_notes": "<any extra notes if mentioned, else null>",
+  "additional_notes": "<Exact literal text provided by user. NEVER summarize, rephrase, or alter user notes, else null>",
   "line_items": [
     {
       "sku_text": "<Literal product name mentioned by user e.g. 'Sheet', 'CR Sheet', 'HR Coil', 'MS Angle', 'Pipe', 'TMT Bar'>",
@@ -1545,7 +1564,7 @@ UPDATE_INQUIRY:
     "preferred_make": "<if user requested update, else null>",
     "payment_terms": "<if user requested update, else null>",
     "delivery_location": "<if user requested update, else null>",
-    "additional_notes": "<if user requested update, else null>",
+    "additional_notes": "<Exact literal text provided by user if update requested. NEVER summarize, rephrase, or alter user notes, else null>",
     "status": "<Open | Quoted | Won | Lost | On Hold if mentioned, else null>"
   },
   "line_item_updates": [
@@ -1821,6 +1840,8 @@ ${JSON.stringify(cleanDraftForLLM, null, 2)}
 User Message:
 "${userInput}"`;
 
+  const verbatimNotes = extractVerbatimNotes(userInput);
+
   try {
     const response = await invokeWithFallback([
       new SystemMessage(systemPrompt),
@@ -1831,12 +1852,45 @@ User Message:
     if (raw.startsWith('```json')) raw = raw.replace(/^```json/, '').replace(/```$/, '').trim();
     else if (raw.startsWith('```')) raw = raw.replace(/^```/, '').replace(/```$/, '').trim();
 
-    const parsed = safeParseJSON(raw, null);
+    let parsed = safeParseJSON(raw, null);
+    if (verbatimNotes) {
+      if (!parsed) parsed = {};
+      if (action === 'LOG_INQUIRY') {
+        parsed.additional_notes = verbatimNotes;
+      } else if (action === 'UPDATE_INQUIRY') {
+        parsed.updates = parsed.updates || {};
+        parsed.updates.additional_notes = verbatimNotes;
+        parsed.additional_notes = verbatimNotes;
+      } else if (action === 'LOG_VISIT') {
+        parsed.meeting_remarks = verbatimNotes;
+      } else if (action === 'UPDATE_VISIT') {
+        parsed.updates = parsed.updates || {};
+        parsed.updates.meeting_remarks = verbatimNotes;
+        parsed.meeting_remarks = verbatimNotes;
+      }
+    }
+
     if (parsed) {
       return mergeDraft(action, existingDraft, parsed, userInput);
     }
   } catch (err) {
     console.error('[CatalogFlow] LLM extraction error:', err.message);
+  }
+
+  if (verbatimNotes) {
+    const fallbackParsed = {};
+    if (action === 'LOG_INQUIRY') {
+      fallbackParsed.additional_notes = verbatimNotes;
+    } else if (action === 'UPDATE_INQUIRY') {
+      fallbackParsed.updates = { additional_notes: verbatimNotes };
+      fallbackParsed.additional_notes = verbatimNotes;
+    } else if (action === 'LOG_VISIT') {
+      fallbackParsed.meeting_remarks = verbatimNotes;
+    } else if (action === 'UPDATE_VISIT') {
+      fallbackParsed.updates = { meeting_remarks: verbatimNotes };
+      fallbackParsed.meeting_remarks = verbatimNotes;
+    }
+    return mergeDraft(action, existingDraft, fallbackParsed, userInput);
   }
 
   return existingDraft;
@@ -1897,6 +1951,13 @@ function getAllowedFieldsListForAction(action) {
 function detectNonEditableFieldAttempt(action, text, draft = {}) {
   if (!text || typeof text !== 'string') return { isNonEditable: false };
   const clean = text.trim();
+  if (!clean) return { isNonEditable: false };
+
+  // Fast bypass: If user is explicitly targeting an editable field (notes, remarks, rate, qty, payment terms, delivery location, etc.)
+  const isExplicitEditableField = /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|resolution\s*notes?|comments?|description|rate|price|target\s*price|bhav|quantity|qty|payment\s*terms?|delivery\s*location|location|city|person\s*met|contact\s*person|contact\s*phone|phone|mobile|visit\s*date|po\s*number|po\s*no|po\s*date|status|stage|preferred\s*make|make)\s*(?:to|as|is|:|=|\s+-)\s*/i.test(clean);
+  if (isExplicitEditableField) {
+    return { isNonEditable: false };
+  }
 
   // 1. Inquiry ID attempt
   const isInqIdChange =
@@ -1936,9 +1997,9 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
     const isCustomerSubField = /\b(?:customer\s+(?:communication|update|type|probability|requirement|feedback|notes)|contact\s+(?:person|phone|mobile|number))\b/i.test(clean);
 
     const isCustomerChange = !isCustomerSubField && (
-      /\b(?:change|edit|update|modify|set|alter|switch|replace)\b.*?\b(?:customer(?:\s*name)?|company(?:\s*name)?|party(?:\s*name)?|client(?:\s*name)?)\b/i.test(clean) ||
-      /\b(?:customer(?:\s*name)?|company(?:\s*name)?|party(?:\s*name)?|client(?:\s*name)?)\b.*?\b(?:change|edit|update|set|modify|to|is|=|karo|badlo)\b/i.test(clean) ||
-      /^(?:change|edit|update|modify|set)\s+(?:the\s+)?(?:customer|company|party|client)\s+(?:name\s+)?(?:to|as|=|is)\s+[A-Za-z0-9\s]+/i.test(clean)
+      /^(?:change|edit|update|modify|set|alter|switch|replace)\s+(?:the\s+)?(?:customer(?:\s*name)?|company(?:\s*name)?|party(?:\s*name)?|client(?:\s*name)?)\s*(?:to|as|=|is|:|\s)\s*[A-Za-z0-9]/i.test(clean) ||
+      /^(?:customer(?:\s*name)?|company(?:\s*name)?|party(?:\s*name)?|client(?:\s*name)?)\s*(?:to|as|=|is|:)\s*[A-Za-z0-9]/i.test(clean) ||
+      /^(?:change|switch|replace)\s+(?:the\s+)?(?:customer|company|party|client)\b/i.test(clean)
     );
 
     if (isCustomerChange) {
@@ -2825,6 +2886,9 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.payment_terms && !merged.updates.payment_terms) merged.updates.payment_terms = newExtracted.payment_terms;
     if (newExtracted.stage && !merged.updates.stage) merged.updates.stage = newExtracted.stage;
     if (newExtracted.status && !merged.updates.stage) merged.updates.stage = newExtracted.status;
+    if (newExtracted.preferred_make && !merged.updates.preferred_make) merged.updates.preferred_make = newExtracted.preferred_make;
+    if (newExtracted.additional_notes && !merged.updates.additional_notes) merged.updates.additional_notes = newExtracted.additional_notes;
+    if (newExtracted.updates?.additional_notes) merged.updates.additional_notes = newExtracted.updates.additional_notes;
   } else if (action === 'UPDATE_VISIT') {
     if (!merged.updates) merged.updates = {};
     if (newExtracted.person_met && !merged.updates.person_met && (newExtracted.person_met !== baseDraft.person_met || /\b(?:person|met|name|contact)\b/i.test(userInput))) {
@@ -2920,6 +2984,24 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
       merged.updates.new_attachments = [...prevNew, ...distinct];
     } else if (baseDraft.updates?.new_attachments) {
       merged.updates.new_attachments = baseDraft.updates.new_attachments;
+    }
+  }
+
+  // Verbatim note enforcement directly from user input (zero summarization/distortion)
+  const verbatimNotes = extractVerbatimNotes(userInput);
+  if (verbatimNotes) {
+    if (action === 'LOG_INQUIRY') {
+      merged.additional_notes = verbatimNotes;
+    } else if (action === 'UPDATE_INQUIRY') {
+      merged.updates = merged.updates || {};
+      merged.updates.additional_notes = verbatimNotes;
+      merged.additional_notes = verbatimNotes;
+    } else if (action === 'LOG_VISIT') {
+      merged.meeting_remarks = verbatimNotes;
+    } else if (action === 'UPDATE_VISIT') {
+      merged.updates = merged.updates || {};
+      merged.updates.meeting_remarks = verbatimNotes;
+      merged.meeting_remarks = verbatimNotes;
     }
   }
 
@@ -7840,6 +7922,13 @@ async function executeAction(action, draft, senderPhone) {
                 updatedRawText = updatedRawText.replace(/Rate\s*[:=-]\s*([^\n|]+)/i, `Rate: ₹${updates.rate}/MT`);
               }
             }
+            if (updates.additional_notes) {
+              if (/(?:notes?|additional\s*notes?|remarks?)\s*[:=-]\s*([^\n|]+)/i.test(updatedRawText)) {
+                updatedRawText = updatedRawText.replace(/(?:notes?|additional\s*notes?|remarks?)\s*[:=-]\s*([^\n|]+)/i, `Notes: ${updates.additional_notes}`);
+              } else {
+                updatedRawText += `\nNotes: ${updates.additional_notes}`;
+              }
+            }
 
             const inqUpdatePayload = {
               ai_extraction_json: aiJson,
@@ -10504,39 +10593,39 @@ function detectOperationalAction(text) {
 
 const DIRECT_ACTION_MAP = [
   // 1. Customer Acquisition
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|record|add|create|onboard|acquire)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?customer\b/i, action: 'LOG_NEW_CUSTOMER' },
+  { pattern: /^\s*(?:i\s+want\s+to\s+|please\s+|kindly\s+|can\s+you\s+)?(?:log|record|add|create|onboard|acquire)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?customer\b/i, action: 'LOG_NEW_CUSTOMER' },
   { pattern: /^\s*(?:new\s+customer\s+acquisition|customer\s+acquisition|new\s+customer\s+onboarding)\b/i, action: 'LOG_NEW_CUSTOMER' },
 
   // 2. Complaints Update
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:update|resolve|change|modify|close|reopen|set|mark)\s+(?:the\s+|a\s+)?(?:customer\s+)?complaint\b/i, action: 'UPDATE_COMPLAINT' },
-  { pattern: /\b(?:mark|set)\s+(?:the\s+)?complaint\s+(?:as\s+)?(?:resolved|closed|pending|in progress|reopened)\b/i, action: 'UPDATE_COMPLAINT' },
-  { pattern: /\b(?:resolve|close|reopen)\s+(?:the\s+)?complaint\b/i, action: 'UPDATE_COMPLAINT' },
+  { pattern: /^\s*(?:i\s+want\s+to\s+|please\s+|kindly\s+|can\s+you\s+)?(?:update|resolve|change|modify|close|reopen|set|mark)\s+(?:the\s+|a\s+)?(?:customer\s+)?complaint\b/i, action: 'UPDATE_COMPLAINT' },
+  { pattern: /^\s*(?:mark|set)\s+(?:the\s+)?complaint\s+(?:as\s+)?(?:resolved|closed|pending|in progress|reopened)\b/i, action: 'UPDATE_COMPLAINT' },
+  { pattern: /^\s*(?:resolve|close|reopen)\s+(?:the\s+)?complaint\b/i, action: 'UPDATE_COMPLAINT' },
 
   // 3. Complaints Log
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|record|raise|report|register|create)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?complaint\b/i, action: 'LOG_COMPLAINT' },
+  { pattern: /^\s*(?:i\s+want\s+to\s+|please\s+|kindly\s+|can\s+you\s+)?(?:log|record|raise|report|register|create)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?complaint\b/i, action: 'LOG_COMPLAINT' },
   { pattern: /^\s*(?:log|record|raise|register|new)\s+complaint\b/i, action: 'LOG_COMPLAINT' },
 
   // 4. Visits Update
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:update|change|modify|set|correct|fix|edit|amend|revise)\s+(?:the\s+|a\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'UPDATE_VISIT' },
+  { pattern: /^\s*(?:i\s+want\s+to\s+|please\s+|kindly\s+|can\s+you\s+)?(?:update|change|modify|set|correct|fix|edit|amend|revise)\s+(?:the\s+|a\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'UPDATE_VISIT' },
 
   // 5. Visits Log
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|record|add|create)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'LOG_VISIT' },
+  { pattern: /^\s*(?:i\s+want\s+to\s+|please\s+|kindly\s+|can\s+you\s+)?(?:log|record|add|create)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i, action: 'LOG_VISIT' },
   { pattern: /^\s*(?:log|record|new)\s+(?:field\s*|customer\s*|site\s*)?visit\b/i, action: 'LOG_VISIT' },
 
   // 6. Orders Update
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:update|change|modify)\s+(?:the\s+|a\s+)?(?:purchase\s+)?order\b/i, action: 'UPDATE_ORDER' },
-  { pattern: /\b(?:attach|link|update)\s+(?:the\s+)?po\s*(?:no|number|#)?\s+(?:to|for)\b/i, action: 'UPDATE_ORDER' },
+  { pattern: /^\s*(?:i\s+want\s+to\s+|please\s+|kindly\s+|can\s+you\s+)?(?:update|change|modify)\s+(?:the\s+|a\s+)?(?:purchase\s+)?order\b/i, action: 'UPDATE_ORDER' },
+  { pattern: /^\s*(?:attach|link|update)\s+(?:the\s+)?po\s*(?:no|number|#)?\s+(?:to|for)\b/i, action: 'UPDATE_ORDER' },
 
   // 7. Orders Log
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:record|log|create|add|place|enter)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:purchase\s+)?order\b/i, action: 'LOG_ORDER' },
+  { pattern: /^\s*(?:i\s+want\s+to\s+|please\s+|kindly\s+|can\s+you\s+)?(?:record|log|create|add|place|enter)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:purchase\s+)?order\b/i, action: 'LOG_ORDER' },
   { pattern: /^\s*(?:log|record|create|new)\s+(?:purchase\s+)?order\b/i, action: 'LOG_ORDER' },
 
   // 8. Inquiries Update
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:update|edit|modify|change|correct|revise|amend)\s+(?:an?\s+|the\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i, action: 'UPDATE_INQUIRY' },
-  { pattern: /\b(?:mark|move|put)\s+(?:the\s+|a\s+)?(?:deal|inquiry)?\s*(?:as\s+|to\s+)?(?:won|lost|negotiation|quoted|on\s+hold|hold)\b/i, action: 'UPDATE_INQUIRY' },
+  { pattern: /^\s*(?:i\s+want\s+to\s+|please\s+|kindly\s+|can\s+you\s+)?(?:update|edit|modify|change|correct|revise|amend)\s+(?:an?\s+|the\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|deal|deals)\b/i, action: 'UPDATE_INQUIRY' },
+  { pattern: /^\s*(?:mark|move|put)\s+(?:the\s+|a\s+)?(?:deal|inquiry)?\s*(?:as\s+|to\s+)?(?:won|lost|negotiation|quoted|on\s+hold|hold)\b/i, action: 'UPDATE_INQUIRY' },
 
   // 9. Inquiries Log
-  { pattern: /\b(?:i\s+want\s+(?:to\s+)?)?(?:log|create|new|add|record|enter|save)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|deal)\b/i, action: 'LOG_INQUIRY' },
+  { pattern: /^\s*(?:i\s+want\s+to\s+|please\s+|kindly\s+|can\s+you\s+)?(?:log|create|new|add|record|enter|save)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:customer\s+)?(?:inquiry|inquiries|enquiry|enquiries|requirement|requirements|rfq|deal)\b/i, action: 'LOG_INQUIRY' },
   { pattern: /^\s*(?:log|create|new)\s+(?:inquiry|enquiry|rfq|deal)\b/i, action: 'LOG_INQUIRY' },
 ];
 
@@ -10674,9 +10763,17 @@ Classification:`;
 function detectOutOfScopeActionAttempt(currentAction, text) {
   if (!text || typeof text !== 'string') return null;
   const trimmed = text.trim();
+  if (!trimmed) return null;
   const currentFamily = getModuleFamily(currentAction);
 
-  // 1. If user sent an explicit menu command (1-10 or menu_X)
+  // 1. Fast guard: If message is explicitly targeting a field edit/update (notes, remarks, rate, qty, etc.),
+  // it is data/edit for the current active flow, NEVER a module switch!
+  const isExplicitFieldEdit = /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|resolution\s*notes?|comments?|description|rate|price|target\s*price|bhav|quantity|qty|payment\s*terms?|delivery\s*location|location|city|person\s*met|contact\s*person|contact\s*phone|phone|mobile|visit\s*date|po\s*number|po\s*no|po\s*date|status|stage|preferred\s*make|make)\s*(?:to|as|is|:|=|\s+-)\s*/i.test(trimmed);
+  if (isExplicitFieldEdit) {
+    return null;
+  }
+
+  // 2. If user sent an explicit menu command (1-10 or menu_X)
   const menuAction = matchActionFromInput(trimmed);
   if (menuAction && menuAction !== currentAction) {
     const menuFamily = getModuleFamily(menuAction);
@@ -10685,7 +10782,7 @@ function detectOutOfScopeActionAttempt(currentAction, text) {
     }
   }
 
-  // 2. If the input is primarily a reference ID (INQ-*, PO-*, VIS-*, CMP-*, or hex code),
+  // 3. If the input is primarily a reference ID (INQ-*, PO-*, VIS-*, CMP-*, or hex code),
   // it is data for the active draft (e.g. inquiry_id for LOG_ORDER, po_number for LOG_COMPLAINT).
   // Do NOT treat reference IDs as a switch action!
   const isPureRefId = /^#?(?:INQ|DEAL|PO|VIS|CMP)-[A-Z0-9-]+$/i.test(trimmed) ||
@@ -10693,7 +10790,7 @@ function detectOutOfScopeActionAttempt(currentAction, text) {
     /^#?[A-F0-9]{6,8}$/i.test(trimmed);
   if (isPureRefId) return null;
 
-  // 3. Check DIRECT_ACTION_MAP for explicit cross-module action intents
+  // 4. Check DIRECT_ACTION_MAP for explicit cross-module action intents
   for (const entry of DIRECT_ACTION_MAP) {
     if (entry.pattern.test(trimmed) && entry.action !== currentAction) {
       const targetFamily = getModuleFamily(entry.action);
@@ -13128,4 +13225,6 @@ module.exports = {
   getCatalogMenuSections,
   extractVisitDetails,
   formatSelectedVisitPrompt,
+  extractVerbatimNotes,
+  detectOutOfScopeActionAttempt,
 };
