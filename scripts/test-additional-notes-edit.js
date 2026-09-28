@@ -7,6 +7,9 @@ const {
   buildConfirmationSummary,
   handleCatalogFlow,
   buildResumePrompt,
+  formatAttributeValue,
+  extractInquiryAttributes,
+  formatSelectedInquiryPrompt,
 } = require('../src/core/catalogFlow');
 
 async function runTests() {
@@ -125,6 +128,65 @@ async function runTests() {
   assert.strictEqual(rPrompt10, 'You were in the middle of onboarding *Menon Industries* — do you want to continue?');
 
   console.log('  -> PASS: buildResumePrompt contextual prompt tests passed.\n');
+
+  // Test 7: Selected Inquiry prompt format & attributes
+  console.log('Test 7: formatSelectedInquiryPrompt & extractInquiryAttributes');
+  assert.strictEqual(formatAttributeValue(null), '-');
+  assert.strictEqual(formatAttributeValue(undefined), '-');
+  assert.strictEqual(formatAttributeValue('Not specified'), '-');
+  assert.strictEqual(formatAttributeValue('None'), '-');
+  assert.strictEqual(formatAttributeValue('Tata steel'), 'Tata steel');
+  assert.strictEqual(formatAttributeValue('90 days terms'), '90 days terms');
+
+  const fullInquiryRecord = {
+    displayId: 'INQ-8E15BC',
+    customer_name: 'Menon Industries',
+    date_formatted: '28-09-2026',
+    stage: 'New Inquiry',
+    preferred_make: 'Tata steel',
+    payment_terms: '90 days terms',
+    delivery_location: 'maharastra',
+    additional_notes: 'we are inquirying about the product so we can get more detais',
+  };
+  const itemsText = '1. *HR Coil (9mm)* — 89 MT';
+  const formattedPrompt = formatSelectedInquiryPrompt(fullInquiryRecord, itemsText);
+
+  assert(formattedPrompt.includes('✏️ *Selected Inquiry INQ-8E15BC (Menon Industries):*'));
+  assert(formattedPrompt.includes('• *Date:* 28-09-2026'));
+  assert(formattedPrompt.includes('• *Stage:* New Inquiry'));
+  assert(formattedPrompt.includes('• *Preferred Make:* Tata steel'));
+  assert(formattedPrompt.includes('• *Payment Terms:* 90 days terms'));
+  assert(formattedPrompt.includes('• *Delivery Location:* maharastra'));
+  assert(formattedPrompt.includes('• *Additional Notes:* we are inquirying about the product so we can get more detais'));
+  assert(formattedPrompt.includes('*Current Line Items:*\n1. *HR Coil (9mm)* — 89 MT'));
+
+  // Test missing fields fallback to '-'
+  const sparseInquiryRecord = {
+    displayId: 'INQ-8E15BC',
+    customer_name: 'Menon Industries',
+    date_formatted: '22-09-2026',
+    stage: 'New Inquiry',
+    payment_terms: '60 Days',
+    delivery_location: 'Chakan Pune',
+  };
+  const sparsePrompt = formatSelectedInquiryPrompt(sparseInquiryRecord, itemsText);
+  assert(sparsePrompt.includes('• *Preferred Make:* -'), 'Missing preferred make must display -');
+  assert(sparsePrompt.includes('• *Additional Notes:* -'), 'Missing additional notes must display -');
+  assert(sparsePrompt.includes('• *Payment Terms:* 60 Days'));
+  assert(sparsePrompt.includes('• *Delivery Location:* Chakan Pune'));
+
+  // Test extractInquiryAttributes from raw_text
+  const rawTextInq = {
+    raw_text: 'Customer: ABC Corp\nPreferred Make: JSW Steel\nPayment Terms: 45 Days\nDelivery Location: Mumbai\nNotes: Urgent requirement',
+    ai_extraction_json: {}
+  };
+  const extractedAttrs = extractInquiryAttributes(rawTextInq);
+  assert.strictEqual(extractedAttrs.preferred_make, 'JSW Steel');
+  assert.strictEqual(extractedAttrs.payment_terms, '45 Days');
+  assert.strictEqual(extractedAttrs.delivery_location, 'Mumbai');
+  assert.strictEqual(extractedAttrs.additional_notes, 'Urgent requirement');
+
+  console.log('  -> PASS: formatSelectedInquiryPrompt & extractInquiryAttributes tests passed.\n');
 
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');
 }

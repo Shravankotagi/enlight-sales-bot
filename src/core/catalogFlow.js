@@ -4445,6 +4445,99 @@ function formatDetailedInquiryItemsList(items) {
   }).join('\n');
 }
 
+/**
+ * Normalizes attribute values for display in inquiry update prompts.
+ * If empty, null, undefined, 'Not specified', 'none', or 'null', returns '-'.
+ */
+function formatAttributeValue(val) {
+  if (val === null || val === undefined) return '-';
+  const str = String(val).trim();
+  if (!str || str.toLowerCase() === 'not specified' || str.toLowerCase() === 'none' || str.toLowerCase() === 'null') {
+    return '-';
+  }
+  return str;
+}
+
+/**
+ * Extracts all core attributes (Preferred Make, Additional Notes, Payment Terms, Delivery Location)
+ * from an inquiry row, AI extraction JSON, raw text, and linked deal.
+ */
+function extractInquiryAttributes(inq, linkedDeal = null) {
+  if (!inq && !linkedDeal) {
+    return { preferred_make: null, additional_notes: null, payment_terms: null, delivery_location: null };
+  }
+
+  const ai = inq?.ai_extraction_json
+    ? (typeof inq.ai_extraction_json === 'string' ? safeParseJSON(inq.ai_extraction_json, {}) : inq.ai_extraction_json)
+    : {};
+
+  // 1. Preferred Make
+  let preferredMake = linkedDeal?.preferred_make || ai.preferred_make || ai.preferredMake || ai.make || null;
+  if (!preferredMake && Array.isArray(linkedDeal?.deal_items)) {
+    const firstWithMake = linkedDeal.deal_items.find(it => it.preferred_make || it.make);
+    if (firstWithMake) preferredMake = firstWithMake.preferred_make || firstWithMake.make;
+  }
+  if (!preferredMake && Array.isArray(ai.line_items || ai.lineItems)) {
+    const firstWithMake = (ai.line_items || ai.lineItems).find(it => it.preferred_make || it.make || it.preferredMake);
+    if (firstWithMake) preferredMake = firstWithMake.preferred_make || firstWithMake.make || firstWithMake.preferredMake;
+  }
+  if (!preferredMake && inq?.raw_text) {
+    const match = inq.raw_text.match(/(?:Preferred Make|Make):\s*([^\r\n]+)/i);
+    if (match) preferredMake = match[1].trim();
+  }
+
+  // 2. Additional Notes
+  let additionalNotes = linkedDeal?.additional_notes || linkedDeal?.notes || linkedDeal?.remarks || ai.additional_notes || ai.additionalNotes || ai.notes || ai.remarks || null;
+  if (!additionalNotes && inq?.raw_text) {
+    const match = inq.raw_text.match(/(?:Additional Notes|Notes|Remarks?):\s*([^\r\n]+)/i);
+    if (match) additionalNotes = match[1].trim();
+  }
+
+  // 3. Payment Terms
+  let paymentTerms = linkedDeal?.payment_terms || inq?.payment_terms || ai.paymentTerms || ai.payment_terms || null;
+  if (!paymentTerms && inq?.raw_text) {
+    const match = inq.raw_text.match(/Payment Terms:\s*([^\r\n]+)/i);
+    if (match) paymentTerms = match[1].trim();
+  }
+
+  // 4. Delivery Location
+  let deliveryLocation = linkedDeal?.delivery_location || inq?.delivery_location || ai.deliveryLocation || ai.delivery_location || ai.delivery_address || null;
+  if (!deliveryLocation && inq?.raw_text) {
+    const match = inq.raw_text.match(/Delivery Location:\s*([^\r\n]+)/i);
+    if (match) deliveryLocation = match[1].trim();
+  }
+
+  return {
+    preferred_make: preferredMake,
+    additional_notes: additionalNotes,
+    payment_terms: paymentTerms,
+    delivery_location: deliveryLocation,
+  };
+}
+
+/**
+ * Formats the selected inquiry card when chosen for update.
+ * Guarantees that Date, Stage, Preferred Make, Payment Terms, Delivery Location,
+ * and Additional Notes are always displayed in compulsory order, using '-' for any missing value.
+ */
+function formatSelectedInquiryPrompt(matchedRecord, itemsListText) {
+  const displayId = matchedRecord.displayId || `INQ-${(matchedRecord.inquiry_id || matchedRecord.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase()}`;
+  const custName = matchedRecord.customer_name || matchedRecord.company_name || 'Customer';
+  const dateStr = matchedRecord.date_formatted || matchedRecord.dateFormatted || matchedRecord.date || (matchedRecord.created_at ? formatDateDDMMYYYY(matchedRecord.created_at) : '-');
+  const stageStr = matchedRecord.stage || 'New Inquiry';
+
+  return `✏️ *Selected Inquiry ${displayId} (${custName}):*\n\n` +
+    `• *Date:* ${formatAttributeValue(dateStr)}\n` +
+    `• *Stage:* ${formatAttributeValue(stageStr)}\n` +
+    `• *Preferred Make:* ${formatAttributeValue(matchedRecord.preferred_make)}\n` +
+    `• *Payment Terms:* ${formatAttributeValue(matchedRecord.payment_terms)}\n` +
+    `• *Delivery Location:* ${formatAttributeValue(matchedRecord.delivery_location)}\n` +
+    `• *Additional Notes:* ${formatAttributeValue(matchedRecord.additional_notes)}\n\n` +
+    `*Current Line Items:*\n${itemsListText}\n\n` +
+    `What details would you like to update?\n` +
+    `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Additional Notes)_`;
+}
+
 function formatProductSummaryCompact(item) {
   if (!item) return 'Steel Material';
 
@@ -4699,6 +4792,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
       const prodSummary = linkedDeal ? formatProductSummaryCompact(linkedDeal) : formatProductSummaryCompact(inq);
       const stageLabel = formatStageLabel(stage);
       const dateFormatted = formatDateDDMMYYYY(inq.created_at);
+      const inqAttrs = extractInquiryAttributes(inq, linkedDeal);
 
       matched.push({
         id: inq.id,
@@ -4711,8 +4805,10 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         stage: stageLabel,
         raw_stage: stage,
         date_formatted: dateFormatted,
-        payment_terms: linkedDeal?.payment_terms || ai.paymentTerms || ai.payment_terms || 'Not specified',
-        delivery_location: linkedDeal?.delivery_location || ai.deliveryLocation || ai.delivery_location || 'Not specified',
+        payment_terms: inqAttrs.payment_terms || 'Not specified',
+        delivery_location: inqAttrs.delivery_location || 'Not specified',
+        preferred_make: inqAttrs.preferred_make || null,
+        additional_notes: inqAttrs.additional_notes || null,
         total_amount: Number(linkedDeal?.total_amount) || Number(ai.totalAmount) || 0,
         deal_items: linkedDeal?.deal_items || ai.lineItems || ai.line_items || [],
         created_at: inq.created_at,
@@ -4732,6 +4828,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
       const prodSummary = formatProductSummaryCompact(d);
       const stageLabel = formatStageLabel(stage);
       const dateFormatted = formatDateDDMMYYYY(d.created_at);
+      const dealAttrs = extractInquiryAttributes(null, d);
 
       matched.push({
         id: d.id,
@@ -4744,8 +4841,10 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         stage: stageLabel,
         raw_stage: stage,
         date_formatted: dateFormatted,
-        payment_terms: d.payment_terms || 'Not specified',
-        delivery_location: d.delivery_location || 'Not specified',
+        payment_terms: dealAttrs.payment_terms || d.payment_terms || 'Not specified',
+        delivery_location: dealAttrs.delivery_location || d.delivery_location || 'Not specified',
+        preferred_make: dealAttrs.preferred_make || null,
+        additional_notes: dealAttrs.additional_notes || null,
         total_amount: Number(d.total_amount) || 0,
         deal_items: d.deal_items || [],
         created_at: d.created_at,
@@ -5255,6 +5354,10 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
         existing_items: inqItems,
         _inquiry_display_id: matchedRecord.displayId,
         _inquiry_verified: true,
+        delivery_location: matchedRecord.delivery_location || null,
+        payment_terms: matchedRecord.payment_terms || null,
+        preferred_make: matchedRecord.preferred_make || null,
+        additional_notes: matchedRecord.additional_notes || null,
       };
     } else if (action === 'UPDATE_ORDER') {
       const orderItems = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
@@ -5298,14 +5401,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
           itemsListText = `1. *${matchedRecord.product_summary || 'Steel Material'}*`;
         }
 
-        prompt = `✏️ *Selected Inquiry ${matchedRecord.displayId} (${matchedRecord.customer_name}):*\n\n` +
-          `• *Date:* ${matchedRecord.date_formatted}\n` +
-          `• *Stage:* ${matchedRecord.stage}\n` +
-          `• *Payment Terms:* ${matchedRecord.payment_terms || 'Not specified'}\n` +
-          `• *Delivery Location:* ${matchedRecord.delivery_location || 'Not specified'}\n\n` +
-          `*Current Line Items:*\n${itemsListText}\n\n` +
-          `What details would you like to update?\n` +
-          `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Additional Notes)_`;
+        prompt = formatSelectedInquiryPrompt(matchedRecord, itemsListText);
       } else if (action === 'UPDATE_ORDER') {
         let itemsListText = '';
         const items = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
@@ -5799,6 +5895,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       if (dId.startsWith(cleanInqId) || inqId.startsWith(cleanInqId) || (cleanInqId.length >= 4 && (dId.includes(cleanInqId) || inqId.includes(cleanInqId)))) {
         const stage = (d.stage || 'new_inquiry').toLowerCase();
         const displayId = `INQ-${(d.inquiry_id || d.id).slice(0, 6).toUpperCase()}`;
+        const dealAttrs = extractInquiryAttributes(null, d);
         matchedCandidates.push({
           id: d.inquiry_id || d.id,
           deal_id: d.id,
@@ -5806,8 +5903,10 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
           displayId,
           company_name: d.customer_name || 'Customer',
           stage,
-          payment_terms: d.payment_terms || 'Not specified',
-          delivery_location: d.delivery_location || 'Not specified',
+          payment_terms: dealAttrs.payment_terms || d.payment_terms || 'Not specified',
+          delivery_location: dealAttrs.delivery_location || d.delivery_location || 'Not specified',
+          preferred_make: dealAttrs.preferred_make || null,
+          additional_notes: dealAttrs.additional_notes || null,
           total_amount: Number(d.total_amount) || 0,
           deal_items: d.deal_items || [],
           created_at: d.created_at,
@@ -5826,15 +5925,18 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         const ai = inq.ai_extraction_json || {};
         const stage = (inq.status || 'new_inquiry').toLowerCase();
         const displayId = `INQ-${inq.id.slice(0, 6).toUpperCase()}`;
+        const inqAttrs = extractInquiryAttributes(inq, dealMapByInqId.get(inq.id));
         matchedCandidates.push({
           id: inq.id,
-          deal_id: null,
+          deal_id: dealMapByInqId.get(inq.id)?.id || null,
           inquiry_id: inq.id,
           displayId,
           company_name: inq.sender_name || ai.companyName || ai.customer_name || 'Customer',
           stage,
-          payment_terms: ai.paymentTerms || ai.payment_terms || 'Not specified',
-          delivery_location: ai.deliveryLocation || ai.delivery_location || 'Not specified',
+          payment_terms: inqAttrs.payment_terms || 'Not specified',
+          delivery_location: inqAttrs.delivery_location || 'Not specified',
+          preferred_make: inqAttrs.preferred_make || null,
+          additional_notes: inqAttrs.additional_notes || null,
           total_amount: Number(ai.totalAmount) || Number(ai.grandTotal) || 0,
           deal_items: ai.lineItems || ai.line_items || [],
           created_at: inq.created_at,
@@ -5849,7 +5951,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     if (matchedCandidates.length === 0) {
       const { data: fallbackDeals } = await supabase
         .from('deals')
-        .select('id, inquiry_id, customer_name, customer_phone, stage, total_amount, payment_terms, delivery_location, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+        .select('id, inquiry_id, customer_name, customer_phone, stage, total_amount, payment_terms, delivery_location, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount, preferred_make, make)')
         .order('created_at', { ascending: false })
         .limit(500);
 
@@ -5859,6 +5961,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         if (dId.startsWith(cleanInqId) || inqId.startsWith(cleanInqId) || (cleanInqId.length >= 4 && (dId.includes(cleanInqId) || inqId.includes(cleanInqId)))) {
           const stage = (d.stage || 'new_inquiry').toLowerCase();
           const displayId = `INQ-${(d.inquiry_id || d.id).slice(0, 6).toUpperCase()}`;
+          const dealAttrs = extractInquiryAttributes(null, d);
           matchedCandidates.push({
             id: d.inquiry_id || d.id,
             deal_id: d.id,
@@ -5866,8 +5969,10 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
             displayId,
             company_name: d.customer_name || 'Customer',
             stage,
-            payment_terms: d.payment_terms || 'Not specified',
-            delivery_location: d.delivery_location || 'Not specified',
+            payment_terms: dealAttrs.payment_terms || d.payment_terms || 'Not specified',
+            delivery_location: dealAttrs.delivery_location || d.delivery_location || 'Not specified',
+            preferred_make: dealAttrs.preferred_make || null,
+            additional_notes: dealAttrs.additional_notes || null,
             total_amount: Number(d.total_amount) || 0,
             deal_items: d.deal_items || [],
             created_at: d.created_at,
@@ -5893,6 +5998,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
             const ai = inq.ai_extraction_json || {};
             const stage = (inq.status || 'new_inquiry').toLowerCase();
             const displayId = `INQ-${inq.id.slice(0, 6).toUpperCase()}`;
+            const inqAttrs = extractInquiryAttributes(inq, null);
             matchedCandidates.push({
               id: inq.id,
               deal_id: null,
@@ -5900,8 +6006,10 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
               displayId,
               company_name: inq.sender_name || ai.companyName || ai.customer_name || 'Customer',
               stage,
-              payment_terms: ai.paymentTerms || ai.payment_terms || 'Not specified',
-              delivery_location: ai.deliveryLocation || ai.delivery_location || 'Not specified',
+              payment_terms: inqAttrs.payment_terms || 'Not specified',
+              delivery_location: inqAttrs.delivery_location || 'Not specified',
+              preferred_make: inqAttrs.preferred_make || null,
+              additional_notes: inqAttrs.additional_notes || null,
               total_amount: Number(ai.totalAmount) || Number(ai.grandTotal) || 0,
               deal_items: ai.lineItems || ai.line_items || [],
               created_at: inq.created_at,
@@ -5924,6 +6032,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         const linkedDeal = dealMapByInqId.get(inq.id);
         const stage = (linkedDeal?.stage || inq.status || 'new_inquiry').toLowerCase();
         const displayId = `INQ-${(inq.id || linkedDeal?.id).slice(0, 6).toUpperCase()}`;
+        const inqAttrs = extractInquiryAttributes(inq, linkedDeal);
         matchedCandidates.push({
           id: inq.id,
           deal_id: linkedDeal?.id || null,
@@ -5931,8 +6040,10 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
           displayId,
           company_name: linkedDeal?.customer_name || candidateName || companyName,
           stage,
-          payment_terms: linkedDeal?.payment_terms || ai.paymentTerms || ai.payment_terms || 'Not specified',
-          delivery_location: linkedDeal?.delivery_location || ai.deliveryLocation || ai.delivery_location || 'Not specified',
+          payment_terms: inqAttrs.payment_terms || 'Not specified',
+          delivery_location: inqAttrs.delivery_location || 'Not specified',
+          preferred_make: inqAttrs.preferred_make || null,
+          additional_notes: inqAttrs.additional_notes || null,
           total_amount: Number(linkedDeal?.total_amount) || Number(ai.totalAmount) || Number(ai.grandTotal) || 0,
           deal_items: linkedDeal?.deal_items || ai.lineItems || ai.line_items || [],
           created_at: inq.created_at,
@@ -5949,6 +6060,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       if (isCustomerMatch(companyName, null, d.customer_name, d.customer_phone)) {
         const stage = (d.stage || 'new_inquiry').toLowerCase();
         const displayId = `INQ-${(d.inquiry_id || d.id).slice(0, 6).toUpperCase()}`;
+        const dealAttrs = extractInquiryAttributes(null, d);
         matchedCandidates.push({
           id: d.inquiry_id || d.id,
           deal_id: d.id,
@@ -5956,8 +6068,10 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
           displayId,
           company_name: d.customer_name || companyName,
           stage,
-          payment_terms: d.payment_terms || 'Not specified',
-          delivery_location: d.delivery_location || 'Not specified',
+          payment_terms: dealAttrs.payment_terms || d.payment_terms || 'Not specified',
+          delivery_location: dealAttrs.delivery_location || d.delivery_location || 'Not specified',
+          preferred_make: dealAttrs.preferred_make || null,
+          additional_notes: dealAttrs.additional_notes || null,
           total_amount: Number(d.total_amount) || 0,
           deal_items: d.deal_items || [],
           created_at: d.created_at,
@@ -5974,6 +6088,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     scopedDeals.forEach(d => {
       const stage = (d.stage || 'new_inquiry').toLowerCase();
       const displayId = `INQ-${(d.inquiry_id || d.id).slice(0, 6).toUpperCase()}`;
+      const dealAttrs = extractInquiryAttributes(null, d);
       matchedCandidates.push({
         id: d.inquiry_id || d.id,
         deal_id: d.id,
@@ -5981,8 +6096,10 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         displayId,
         company_name: d.customer_name || 'Customer',
         stage,
-        payment_terms: d.payment_terms || 'Not specified',
-        delivery_location: d.delivery_location || 'Not specified',
+        payment_terms: dealAttrs.payment_terms || d.payment_terms || 'Not specified',
+        delivery_location: dealAttrs.delivery_location || d.delivery_location || 'Not specified',
+        preferred_make: dealAttrs.preferred_make || null,
+        additional_notes: dealAttrs.additional_notes || null,
         total_amount: Number(d.total_amount) || 0,
         deal_items: d.deal_items || [],
         created_at: d.created_at,
@@ -5998,15 +6115,18 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       const ai = inq.ai_extraction_json || {};
       const stage = (inq.status || 'new_inquiry').toLowerCase();
       const displayId = `INQ-${inq.id.slice(0, 6).toUpperCase()}`;
+      const inqAttrs = extractInquiryAttributes(inq, dealMapByInqId.get(inq.id));
       matchedCandidates.push({
         id: inq.id,
-        deal_id: null,
+        deal_id: dealMapByInqId.get(inq.id)?.id || null,
         inquiry_id: inq.id,
         displayId,
         company_name: inq.sender_name || ai.companyName || ai.customer_name || 'Customer',
         stage,
-        payment_terms: ai.paymentTerms || ai.payment_terms || 'Not specified',
-        delivery_location: ai.deliveryLocation || ai.delivery_location || 'Not specified',
+        payment_terms: inqAttrs.payment_terms || 'Not specified',
+        delivery_location: inqAttrs.delivery_location || 'Not specified',
+        preferred_make: inqAttrs.preferred_make || null,
+        additional_notes: inqAttrs.additional_notes || null,
         total_amount: Number(ai.totalAmount) || Number(ai.grandTotal) || 0,
         deal_items: ai.lineItems || ai.line_items || [],
         created_at: inq.created_at,
@@ -6129,6 +6249,10 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     draft.company_name = single.company_name;
     draft.existing_items = singleItems;
     draft._inquiry_display_id = single.displayId;
+    draft.delivery_location = single.delivery_location || null;
+    draft.payment_terms = single.payment_terms || null;
+    draft.preferred_make = single.preferred_make || null;
+    draft.additional_notes = single.additional_notes || null;
 
     const hasUpdates = (draft.updates && Object.values(draft.updates).some(v => v !== null && v !== undefined && v !== '')) ||
       (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0) ||
@@ -6145,10 +6269,12 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       const stageLabel = formatStageLabel(single.stage);
       const prompt = `✏️ *Editable Inquiry Found for ${single.company_name}:*\n\n` +
         `• *Inquiry ID:* ${single.displayId}\n` +
-        `• *Date:* ${single.dateFormatted}\n` +
-        `• *Stage:* ${stageLabel}\n` +
-        `• *Payment Terms:* ${single.payment_terms}\n` +
-        `• *Delivery Location:* ${single.delivery_location}\n\n` +
+        `• *Date:* ${formatAttributeValue(single.dateFormatted || single.date_formatted)}\n` +
+        `• *Stage:* ${formatAttributeValue(stageLabel)}\n` +
+        `• *Preferred Make:* ${formatAttributeValue(single.preferred_make)}\n` +
+        `• *Payment Terms:* ${formatAttributeValue(single.payment_terms)}\n` +
+        `• *Delivery Location:* ${formatAttributeValue(single.delivery_location)}\n` +
+        `• *Additional Notes:* ${formatAttributeValue(single.additional_notes)}\n\n` +
         `*Current Line Items:*\n${itemsListText}\n\n` +
         `What details would you like to update?\n` +
         `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Additional Notes)_`;
@@ -6178,13 +6304,13 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
 
   const candidateSummaries = pageItems.map((inq, idx) => {
     let rateStr = null;
-    let makeStr = null;
+    let makeStr = inq.preferred_make || null;
     if (Array.isArray(inq.deal_items) && inq.deal_items.length > 0) {
       const firstItem = inq.deal_items[0];
       if (firstItem.rate) {
         rateStr = `₹${Number(firstItem.rate).toLocaleString('en-IN')}${firstItem.unit ? `/${firstItem.unit}` : '/MT'}`;
       }
-      if (firstItem.preferred_make || firstItem.make) {
+      if (!makeStr && (firstItem.preferred_make || firstItem.make)) {
         makeStr = firstItem.preferred_make || firstItem.make;
       }
     }
@@ -6193,12 +6319,14 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
       id: inq.inquiry_id || inq.id,
       displayId: inq.displayId,
       company_name: inq.company_name,
-      date: inq.dateFormatted,
+      date: inq.dateFormatted || inq.date_formatted,
       stage: formatStageLabel(inq.stage),
       productSummary: formatProductSummary(inq),
       deal_items: inq.deal_items || [],
       payment_terms: inq.payment_terms || 'Not specified',
       delivery_location: inq.delivery_location || 'Not specified',
+      preferred_make: makeStr,
+      additional_notes: inq.additional_notes || null,
       rate: rateStr,
       make: makeStr,
     };
@@ -12463,10 +12591,16 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
             interactiveButtons: CONFIRMATION_BUTTONS,
           };
         } else {
-          existingDraft.inquiry_id = matchedCandidate.id;
+          existingDraft.inquiry_id = matchedCandidate.id || matchedCandidate.inquiry_id;
+          existingDraft.deal_id = matchedCandidate.deal_id || null;
           existingDraft.company_name = matchedCandidate.company_name;
           existingDraft._inquiry_display_id = matchedCandidate.displayId;
           existingDraft._inquiry_verified = true;
+          if (matchedCandidate.delivery_location) existingDraft.delivery_location = matchedCandidate.delivery_location;
+          if (matchedCandidate.payment_terms) existingDraft.payment_terms = matchedCandidate.payment_terms;
+          if (matchedCandidate.preferred_make) existingDraft.preferred_make = matchedCandidate.preferred_make;
+          if (matchedCandidate.additional_notes) existingDraft.additional_notes = matchedCandidate.additional_notes;
+
           const candidateItems = Array.isArray(matchedCandidate.deal_items) ? matchedCandidate.deal_items : [];
           if (candidateItems.length > 0) {
             existingDraft.existing_items = candidateItems;
@@ -12488,14 +12622,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
               itemsListText = `1. *${matchedCandidate.productSummary || 'Steel Material'}*`;
             }
 
-            const prompt = `✏️ *Selected Inquiry ${matchedCandidate.displayId} (${matchedCandidate.company_name}):*\n\n` +
-              `• *Date:* ${matchedCandidate.date}\n` +
-              `• *Stage:* ${matchedCandidate.stage}\n` +
-              `• *Payment Terms:* ${matchedCandidate.payment_terms}\n` +
-              `• *Delivery Location:* ${matchedCandidate.delivery_location}\n\n` +
-              `*Current Line Items:*\n${itemsListText}\n\n` +
-              `What details would you like to update?\n` +
-              `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Additional Notes)_`;
+            const prompt = formatSelectedInquiryPrompt(matchedCandidate, itemsListText);
 
             await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
             await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
@@ -13421,4 +13548,7 @@ module.exports = {
   extractVerbatimNotes,
   detectOutOfScopeActionAttempt,
   buildResumePrompt,
+  formatAttributeValue,
+  extractInquiryAttributes,
+  formatSelectedInquiryPrompt,
 };
