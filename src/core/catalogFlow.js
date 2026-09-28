@@ -5706,6 +5706,21 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     );
   }
 
+  // 4d. Candidate matching by customer name / single record context if update provided
+  if (!matchedRecord) {
+    const hasFieldUpdateIntent = /^(?:update|change|set|modify|make|revise|rate|price|qty|quantity|payment|terms|notes|location|delivery|stage)\b/i.test(clean) ||
+      /\b(?:rate|price|qty|quantity|payment\s*terms?|delivery\s*location)\b/i.test(clean);
+
+    if (cached.length === 1 && hasFieldUpdateIntent) {
+      matchedRecord = cached[0];
+    } else if (cached.length > 1) {
+      const custMatch = cached.find(r => r.customer_name && lower.includes(r.customer_name.toLowerCase()));
+      if (custMatch) {
+        matchedRecord = custMatch;
+      }
+    }
+  }
+
   // 5. If a record was matched:
   if (matchedRecord) {
     await recordSessionMessage(senderPhone, 'user', text);
@@ -10419,19 +10434,29 @@ function isOperationalQuery(text) {
     return false;
   }
 
+  // Strip leading entity ID prefix if present: e.g. "INQ-27D7BD, show this inquiry in more detail" -> "show this inquiry in more detail"
+  const strippedOfId = lower.replace(/^#?(?:inq|deal|po|ord|cmp|vis)[-_][a-z0-9]+[,\s:-]*/i, '').trim();
+
   // 3. Clear Read / Retrieval / Question Patterns
   if (
-    /^(?:show|list|get|check|find|filter|tell me|give me|display|fetch|search|lookup|query|view|see|read|retrieve|track)\b/i.test(lower) ||
+    /^(?:show|shoe|shw|sho|list|get|check|find|filter|tell me|give me|display|fetch|search|lookup|query|view|see|read|retrieve|track)\b/i.test(lower) ||
+    /^(?:show|shoe|shw|sho|list|get|check|find|filter|tell me|give me|display|fetch|search|lookup|query|view|see|read|retrieve|track)\b/i.test(strippedOfId) ||
     /^(?:what|which|who|whom|whose|when|where|why|how|how many|how much|did we|is there|are there|can you show|can you tell|can you list|can you find|could you show|could you tell|could you list|do we have|have we)\b/i.test(lower) ||
+    /^(?:what|which|who|whom|whose|when|where|why|how|how many|how much|did we|is there|are there|can you show|can you tell|can you list|can you find|could you show|could you tell|could you list|do we have|have we)\b/i.test(strippedOfId) ||
     /\b(?:kya hai|batao|dikhao|dikhaye|kitne|kitna|kaun hai|kaun tha|kiska|kab hua|kahan|list karo|check karo|details batao|kya chal raha hai|kya rate hai|rate kya hai)\b/i.test(lower) ||
     /\b(?:what is the|what was the|what are the|how many|how much|status of|status for|status kya hai|outcome of|last rate|rates? quoted|pending complaints|closed complaints|my visits|my inquiries|my orders|my deals|details of|details for|history of|history for|summary of|summary for|info on|info about|report on|report for)\b/i.test(lower) ||
-    lower.endsWith('?')
+    /\b(?:what is the|what was the|what are the|how many|how much|status of|status for|status kya hai|outcome of|last rate|rates? quoted|pending complaints|closed complaints|my visits|my inquiries|my orders|my deals|details of|details for|history of|history for|summary of|summary for|info on|info about|report on|report for)\b/i.test(strippedOfId) ||
+    lower.endsWith('?') ||
+    (strippedOfId && strippedOfId.endsWith('?'))
   ) {
     return true;
   }
 
-  // 4. Standalone lookup terms
+  // 4. Standalone lookup terms (or stripped ID lookup terms like "INQ-27D7BD details", "INQ-27D7BD status")
   if (/^(?:inquiry id|inquiry ids|deal id|deal ids|order id|order ids|complaint id|complaint ids|visit id|visit ids|summary|leaderboard|pipeline|radar|360|knowledge base|sop|moq|pricing sheet)\b/i.test(lower)) {
+    return true;
+  }
+  if (strippedOfId && strippedOfId !== lower && /^(?:details?|more details?|status|rate|rates|quotation|quote|summary|items|info|information)$/i.test(strippedOfId)) {
     return true;
   }
 
@@ -10501,9 +10526,19 @@ async function isMidFlowReadQuery(text) {
   const clean = text.trim();
 
   // Standalone IDs or references for form fields are NOT mid-flow read queries
-  if (/^(?:inq|po|ord|cmp|vis)[-_][a-z0-9]+/i.test(clean)) return false;
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}/i.test(clean)) return false;
+  if (/^#?(?:inq|po|ord|cmp|vis)[-_][a-z0-9]+$/i.test(clean)) return false;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clean)) return false;
+  if (/^[0-9a-f]{6,8}$/i.test(clean)) return false;
   if (/^(?:option\s*)?[1-9]\.?$/i.test(clean)) return false;
+
+  // Pure payment terms, credit terms, or durations are form field values, NOT read queries
+  if (/^\s*(?:\d+\s*(?:days?|din|months?|weeks?)(?:\s*(?:credit|term|terms|advance|net|payment|after\s+delivery))?|100%\s*advance|advance|immediate|pdc|lc|cad|credit|online|rtgs|neft|against\s+delivery|cash\s+on\s+delivery|cod)\s*$/i.test(clean)) return false;
+
+  // Contact inputs (e.g. "tarak mehta,8945561223") are form field values
+  if (/^[a-zA-Z\s]{2,40}[,\s]+[6-9]\d{9}$/i.test(clean)) return false;
+
+  // Pure numeric quantities / rates / dimensions are form field values
+  if (/^\s*₹?\s*\d+(?:,\d+)*(?:\.\d+)?\s*(?:\/\s*mt|\/\s*ton|\/\s*kg|per\s*mt|per\s*ton|mt|ton|tons|tonne|kg|pcs|nos|pieces|mm)?\s*$/i.test(clean)) return false;
 
   if (isOperationalQuery(clean)) return true;
   if (clean.length >= 8 && !/^(?:log|record|add|create|new|onboard|acquire|update|modify|change|set|mark|resolve|close|upadte|edit|cancel|save|yes|no|discard|btn_)\b/i.test(clean)) {
@@ -11846,8 +11881,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // 4. User directly provides field data / response for the interrupted flow
-    // The record-selection handler (2c) sits above this block, so hand a bare number back to it directly.
-    if (interruptedState === 'catalog_update_select' && isBareCatalogNumber(text)) {
+    // If interrupted state was catalog_update_select, delegate directly to handleUpdateSelectionState!
+    if (interruptedState === 'catalog_update_select') {
       await saveActiveSession(senderPhone, draft.customerFilter || 'Customer', `catalog_update_select|${action}|${draftJsonStr}`);
       return await handleUpdateSelectionState(text, senderPhone, action, draft);
     }
