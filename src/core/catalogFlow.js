@@ -284,6 +284,62 @@ function formatLineItemsTonnage(items) {
 
 // executeAction reports database write failures with these prefixes; "not found" style
 // replies are intentionally not treated as retryable failures.
+/**
+ * True when remarks say the follow-up was actually completed ("quote sent", "done").
+ * Negated phrases ("not done", "quote not sent yet", "done nahi hua", "yet to be completed") do not count.
+ */
+function isAffirmativeCompletionRemark(text) {
+  const s = String(text || '').toLowerCase();
+  const completionRe = /\b(?:quote sent|quotation sent|sent quote|sent official price quotation|po received|order placed|resolved|done|completed)\b/g;
+  const negBefore = /\b(?:not|no|never|yet\s+to(?:\s+be)?|still\s+not|pending|isn'?t|is\s+not|hasn'?t(?:\s+been)?|has\s+not(?:\s+been)?|haven'?t(?:\s+been)?|have\s+not(?:\s+been)?|wasn'?t|was\s+not|didn'?t|did\s+not|don'?t|do\s+not|without)\s+(?:yet\s+|been\s+|be\s+|fully\s+|properly\s+)*$/;
+  const negAfter = /^\s*(?:yet\s+)?(?:nahi|nahin|nai|not|na)\b/;
+  let m;
+  while ((m = completionRe.exec(s)) !== null) {
+    const before = s.slice(Math.max(0, m.index - 40), m.index);
+    const after = s.slice(m.index + m[0].length, m.index + m[0].length + 15);
+    if (negBefore.test(before) || negAfter.test(after)) continue;
+    return true;
+  }
+  return false;
+}
+
+const VALID_DEAL_STAGES = ['new_inquiry', 'review', 'quoted', 'negotiation', 'on_hold', 'won', 'lost'];
+
+/** Returns the canonical deal stage key for a raw stage value, or null if it is not a pipeline stage. */
+function normalizeDealStageKey(raw) {
+  const key = String(raw || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return VALID_DEAL_STAGES.includes(key) ? key : null;
+}
+
+/**
+ * Maps an order status update to { stage, fulfillment }.
+ * Delivery progress (pending / processing / dispatched / delivered) never becomes a deal stage.
+ */
+function mapOrderStatusUpdate(raw) {
+  const s = String(raw || '').toLowerCase().trim();
+  if (!s) return { stage: null, fulfillment: null };
+  if (/\bpo\s+received\b/.test(s)) return { stage: 'won', fulfillment: null };
+  if (/\b(?:delivered|delivery\s+(?:done|completed))\b/.test(s) && !/\b(?:not|pending|yet\s+to)\b|\bundelivered\b/.test(s)) {
+    return { stage: null, fulfillment: 'delivered' };
+  }
+  if (/\b(?:dispatch(?:ed)?|shipped|in\s+transit|transit)\b/.test(s)) return { stage: null, fulfillment: 'dispatched' };
+  if (/\bprocessing\b|\bin\s+process\b|\bin\s+production\b/.test(s)) return { stage: null, fulfillment: 'processing' };
+  if (/^pending\b/.test(s)) return { stage: null, fulfillment: 'pending' };
+  if (s.includes('won') || s.includes('order') || s.includes('confirm')) return { stage: 'won', fulfillment: null };
+  if (s.includes('lost') || s.includes('cancel')) return { stage: 'lost', fulfillment: null };
+  if (s.includes('negot')) return { stage: 'negotiation', fulfillment: null };
+  if (s.includes('hold')) return { stage: 'on_hold', fulfillment: null };
+  if (s.includes('quote') || s.includes('price')) return { stage: 'quoted', fulfillment: null };
+  return { stage: normalizeDealStageKey(raw), fulfillment: null };
+}
+
+/** True when a general rate is just a repeat of a rate already given on a specific line item. */
+function isGeneralRateDuplicateOfLineRate(generalRate, lineUpdates) {
+  const general = parseIndianAmount(generalRate);
+  if (!(general > 0) || !Array.isArray(lineUpdates)) return false;
+  return lineUpdates.some(upd => parseIndianAmount(upd && upd.rate) === general);
+}
+
 function isExecutionFailureReply(reply) {
   if (typeof reply !== 'string') return false;
   return /^\s*(?:❌\s*)?\*?(?:Failed to\b|An error occurred while saving\b)/.test(reply);
@@ -1238,13 +1294,39 @@ function normalizeDateToDDMMYYYY(dateStr) {
   return clean;
 }
 
+// Calendar dates are always IST (UTC+5:30), independent of the server timezone.
+const IST_OFFSET_MS = 330 * 60 * 1000;
+const DAY_MS = 24 * 3600 * 1000;
+
+function toIstShifted(dObj) {
+  return new Date(dObj.getTime() + IST_OFFSET_MS);
+}
+
+/** YYYY-MM-DD of the IST calendar day containing this instant. */
+function formatIsoDateIST(d = new Date()) {
+  const s = toIstShifted(d instanceof Date ? d : new Date(d));
+  return `${s.getUTCFullYear()}-${String(s.getUTCMonth() + 1).padStart(2, '0')}-${String(s.getUTCDate()).padStart(2, '0')}`;
+}
+
+/** "02:30 PM" in IST, or '' when the value is not a valid timestamp. */
+function formatVisitTimeIST(value) {
+  if (!value) return '';
+  const dObj = value instanceof Date ? value : new Date(value);
+  if (isNaN(dObj.getTime())) return '';
+  const s = toIstShifted(dObj);
+  const h24 = s.getUTCHours();
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${String(h12).padStart(2, '0')}:${String(s.getUTCMinutes()).padStart(2, '0')} ${h24 < 12 ? 'AM' : 'PM'}`;
+}
+
 function formatDateDDMMYYYY(d) {
   if (!d) return '';
   const dObj = d instanceof Date ? d : new Date(d);
   if (isNaN(dObj.getTime())) return typeof d === 'string' ? d : '';
-  const day = String(dObj.getDate()).padStart(2, '0');
-  const month = String(dObj.getMonth() + 1).padStart(2, '0');
-  const year = dObj.getFullYear();
+  const s = toIstShifted(dObj);
+  const day = String(s.getUTCDate()).padStart(2, '0');
+  const month = String(s.getUTCMonth() + 1).padStart(2, '0');
+  const year = s.getUTCFullYear();
   return `${day}-${month}-${year}`;
 }
 
@@ -1268,13 +1350,40 @@ function parseDDMMYYYYtoISO(dStr) {
     const day = parseInt(m[1], 10);
     const month = parseInt(m[2], 10) - 1;
     const year = parseInt(m[3], 10);
-    const targetDate = new Date(Date.UTC(year, month, day, now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds(), now.getUTCMilliseconds()));
+    // IST midnight of that day + the current IST time of day
+    const istTimeOfDayMs = (now.getTime() + IST_OFFSET_MS) % DAY_MS;
+    const targetDate = new Date(Date.UTC(year, month, day) - IST_OFFSET_MS + istTimeOfDayMs);
     return targetDate.toISOString();
   }
 
   const parsed = new Date(dStr);
   if (!isNaN(parsed.getTime())) return parsed.toISOString();
   return now.toISOString();
+}
+
+/**
+ * ISO timestamp for a user-supplied date, or null when it cannot be understood.
+ * Unlike parseDDMMYYYYtoISO this never falls back to "now", so updates can keep the existing date.
+ */
+function parseUserDateToISOStrict(dStr) {
+  if (dStr === null || dStr === undefined) return null;
+  const raw = String(dStr).trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) {
+    const p = new Date(raw);
+    return isNaN(p.getTime()) ? null : p.toISOString();
+  }
+  const isRelativeWord = /^(?:today|now|nonw|just now|aaj|current|yesterday|day before yesterday|parso)$/i.test(raw);
+  if (!isRelativeWord && !/\b(?:19|20)\d{2}\b/.test(raw)) return null;
+  const norm = normalizeDateToDDMMYYYY(raw);
+  const m = String(norm || '').match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (!m) return null;
+  const day = parseInt(m[1], 10);
+  const month = parseInt(m[2], 10);
+  const year = parseInt(m[3], 10);
+  const check = new Date(Date.UTC(year, month - 1, day));
+  if (year < 2000 || check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) return null;
+  return parseDDMMYYYYtoISO(norm);
 }
 
 function extractFollowUpDate(followupText, baseDate = new Date()) {
@@ -1316,13 +1425,13 @@ function extractFollowUpDate(followupText, baseDate = new Date()) {
   if (daysMatch) {
     const days = parseInt(daysMatch[1], 10);
     const target = new Date(base.getTime() + days * 24 * 3600 * 1000);
-    return target.toISOString().split('T')[0];
+    return formatIsoDateIST(target);
   }
 
   // 3. "tomorrow" / "kal"
   if (/\b(?:tomorrow|kal)\b/i.test(lower)) {
     const target = new Date(base.getTime() + 1 * 24 * 3600 * 1000);
-    return target.toISOString().split('T')[0];
+    return formatIsoDateIST(target);
   }
 
   // 4. Relative "in X weeks" / "within X weeks" / "next week" / "agle hafte"
@@ -1330,11 +1439,11 @@ function extractFollowUpDate(followupText, baseDate = new Date()) {
   if (weeksMatch) {
     const weeks = parseInt(weeksMatch[1], 10);
     const target = new Date(base.getTime() + weeks * 7 * 24 * 3600 * 1000);
-    return target.toISOString().split('T')[0];
+    return formatIsoDateIST(target);
   }
   if (/\b(?:next\s+week|agle\s+hafte)\b/i.test(lower)) {
     const target = new Date(base.getTime() + 7 * 24 * 3600 * 1000);
-    return target.toISOString().split('T')[0];
+    return formatIsoDateIST(target);
   }
 
   // 5. Relative "in X months" / "within X months"
@@ -1342,7 +1451,7 @@ function extractFollowUpDate(followupText, baseDate = new Date()) {
   if (monthsMatch) {
     const months = parseInt(monthsMatch[1], 10);
     const target = new Date(base.getTime() + months * 30 * 24 * 3600 * 1000);
-    return target.toISOString().split('T')[0];
+    return formatIsoDateIST(target);
   }
 
   // 6. Day of week (e.g. "on monday", "next tuesday")
@@ -1350,11 +1459,11 @@ function extractFollowUpDate(followupText, baseDate = new Date()) {
   for (let i = 0; i < daysOfWeek.length; i++) {
     const dayName = daysOfWeek[i];
     if (new RegExp(`\\b(?:on\\s+|next\\s+)?${dayName}\\b`, 'i').test(lower)) {
-      const currentDay = base.getDay();
+      const currentDay = toIstShifted(base).getUTCDay();
       let diff = i - currentDay;
       if (diff <= 0) diff += 7;
       const target = new Date(base.getTime() + diff * 24 * 3600 * 1000);
-      return target.toISOString().split('T')[0];
+      return formatIsoDateIST(target);
     }
   }
 
@@ -1380,7 +1489,7 @@ REAL-TIME REFERENCE DATES (CRITICAL - ALWAYS USE THESE):
 - Today: ${todayStr} (DD-MM-YYYY)
 - Yesterday: ${yesterdayStr} (DD-MM-YYYY)
 - Day Before Yesterday / Parso: ${dayBeforeYesterdayStr} (DD-MM-YYYY)
-- Current Year: ${now.getFullYear()}
+- Current Year: ${todayStr.slice(-4)}
 - All relative dates like "today", "yesterday", "day before yesterday", "kal", "parso", "now" MUST be calculated relative to Today (${todayStr}) and Yesterday (${yesterdayStr}).
 - NEVER output past years like 2024 or 2025 unless the user explicitly typed that specific year.
 
@@ -2196,12 +2305,10 @@ function resolveLineItemUpdateTargets(draft) {
   }
 
   // A rate that was only meant for a line item must not also be applied to every other item
-  const toNum = v => Number(String(v ?? '').replace(/[^\d.]/g, '')) || 0;
-  const lineRates = updates.map(upd => toNum(upd?.rate)).filter(r => r > 0);
-  if (draft.updates && toNum(draft.updates.rate) > 0 && lineRates.includes(toNum(draft.updates.rate))) {
+  if (isGeneralRateDuplicateOfLineRate(draft.updates && draft.updates.rate, updates)) {
     delete draft.updates.rate;
   }
-  if (toNum(draft.rate) > 0 && lineRates.includes(toNum(draft.rate))) {
+  if (isGeneralRateDuplicateOfLineRate(draft.rate, updates)) {
     delete draft.rate;
   }
 
@@ -2937,10 +3044,14 @@ function validateMandatoryFields(action, draft) {
       if (!Array.isArray(draft.line_items) || draft.line_items.length === 0) {
         missing.push('Line Items (Product Name, Quantity, Rate)');
       } else {
-        const first = draft.line_items[0];
-        if (!first.description && !first.sku_text) missing.push('Product Name for line item');
-        if (!first.quantity) missing.push('Quantity for line item');
-        if (!first.rate) missing.push('Rate (₹ per unit) for line item');
+        const isMultiItem = draft.line_items.length > 1;
+        draft.line_items.forEach((it, idx) => {
+          const itemName = it.sku_text || it.description;
+          const itemLabel = isMultiItem ? ` ${idx + 1}${itemName ? ` (${itemName})` : ''}` : '';
+          if (!itemName) missing.push(`Product Name for line item${isMultiItem ? ` ${idx + 1}` : ''}`);
+          if (!(parseNumericValue(it.quantity) > 0)) missing.push(`Quantity for line item${itemLabel}`);
+          if (!(parseIndianAmount(it.rate) > 0)) missing.push(`Rate (₹ per unit) for line item${itemLabel}`);
+        });
         const ordProdCheck = validateDraftProducts('LOG_ORDER', draft);
         if (!ordProdCheck.isValid) {
           missing.push(`Valid Product Name (Unrecognized: "${ordProdCheck.invalidProducts.join(', ')}")`);
@@ -3879,7 +3990,8 @@ function extractVisitDetails(v) {
   let followUpStatus = null;
   if (rawFuStatus) {
     const sLower = rawFuStatus.toLowerCase();
-    if (['completed', 'done', 'resolved', 'closed'].some(st => sLower.includes(st))) {
+    const isNegatedStatus = /\b(?:not|no|never|pending|yet|nahi|nahin|incomplete|un-?resolved)\b/.test(sLower);
+    if (!isNegatedStatus && ['completed', 'done', 'resolved', 'closed'].some(st => sLower.includes(st))) {
       followUpStatus = 'Completed';
     } else {
       followUpStatus = 'Pending';
@@ -4050,7 +4162,8 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
 
   // A visit date narrows the choice; several visits on that date still need a pick
   if (selectorDateIso) {
-    const sameDay = pool.filter(v => v.visited_at && v.visited_at.startsWith(selectorDateIso.slice(0, 10)));
+    const selectorDay = formatIsoDateIST(new Date(selectorDateIso));
+    const sameDay = pool.filter(v => v.visited_at && formatIsoDateIST(new Date(v.visited_at)) === selectorDay);
     if (sameDay.length === 1) {
       draft.visit_id = sameDay[0].id;
       return { needsDisambiguation: false };
@@ -4087,16 +4200,20 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
       ...details,
       company_name: details.customer_name || draft.company_name || 'Customer',
       date: details.date_formatted,
+      time: formatVisitTimeIST(v.visited_at || v.created_at),
       remarks: details.remarks !== 'Not specified' ? (details.remarks.length > 80 ? details.remarks.slice(0, 77) + '...' : details.remarks) : null,
     };
   });
 
   const hasMixedCustomers = new Set(pool.map(v => String(v.customer_name || '').trim().toLowerCase())).size > 1;
+  const dateCounts = candidateSummaries.reduce((acc, c) => acc.set(c.date, (acc.get(c.date) || 0) + 1), new Map());
   const choicesText = candidateSummaries
     .map(c => {
       const companyLabel = hasCompanyName && !hasMixedCustomers ? '' : ` (${c.company_name})`;
+      // Several visits on the same date: show the time so they can be told apart
+      const timeLabel = dateCounts.get(c.date) > 1 && c.time ? `, ${c.time}` : '';
       const lines = [
-        `${c.index}. *Visit on ${c.date}*${companyLabel}`,
+        `${c.index}. *Visit on ${c.date}${timeLabel}*${companyLabel}`,
         `   • *Person Met:* ${c.person_met}`,
         `   • *Location:* ${c.location}`,
         `   • *Outcome:* ${c.outcome}`,
@@ -4265,6 +4382,49 @@ function getAssignedPhoneFromCustomerMap(customerName, customerOwnerMap) {
  * owner phone is in scope, or (when customerField is given) when the customer is
  * assigned to someone in scope.
  */
+/**
+ * Inserts a deal that shares its id with the linked inquiry (INQ-XXXXXX == DEAL-XXXXXX).
+ * If a deal already owns that id: 'reuse' returns it untouched, 'update' applies the payload to it.
+ * Falls back to a generated id only when the same-id insert fails for another reason.
+ * Returns { data: row | null, error }.
+ */
+async function insertDealMirroringInquiry(payload, { onExisting = 'reuse' } = {}) {
+  const inquiryId = payload && payload.inquiry_id;
+  if (!inquiryId) {
+    const { data, error } = await supabase.from('deals').insert(payload).select();
+    return { data: (data && data[0]) || null, error };
+  }
+
+  const { data: sameIdRows, error: sameIdErr } = await supabase
+    .from('deals')
+    .insert({ id: inquiryId, ...payload })
+    .select();
+  if (!sameIdErr && sameIdRows && sameIdRows.length > 0) return { data: sameIdRows[0], error: null };
+
+  const { data: existingRows } = await supabase
+    .from('deals')
+    .select('*')
+    .eq('id', inquiryId)
+    .limit(1);
+  if (existingRows && existingRows.length > 0) {
+    if (onExisting === 'update') {
+      // Keep the existing owner / record status of the deal
+      const { created_at, salesperson_phone, status, ...updatePayload } = payload;
+      const { data: updRows, error: updErr } = await supabase
+        .from('deals')
+        .update(updatePayload)
+        .eq('id', inquiryId)
+        .select();
+      return { data: (updRows && updRows[0]) || null, error: updErr || null };
+    }
+    return { data: existingRows[0], error: null };
+  }
+
+  console.warn('[CatalogFlow] Deal insert with inquiry id failed, falling back to generated id:', sameIdErr?.message);
+  const { data: fbRows, error: fbErr } = await supabase.from('deals').insert(payload).select();
+  return { data: (fbRows && fbRows[0]) || null, error: fbErr || null };
+}
+
 async function filterRecordsToCallerScope(records, scope, { phoneField = 'salesperson_phone', customerField = null } = {}) {
   const list = Array.isArray(records) ? records : [];
   if (list.length === 0) return [];
@@ -6292,8 +6452,11 @@ async function checkComplaintsForUpdate(action, draft, senderPhone, originalText
       complaintsQuery = complaintsQuery.in('reported_by', targetPhones);
     }
 
-    const { data: allComplaints } = await complaintsQuery.limit(50);
-    const complaints = allComplaints || [];
+    const { data: allComplaints } = await complaintsQuery.limit(200);
+    // Active only: same rule as the update-selection list (excludes Resolved / Closed / Cancelled)
+    const complaints = (allComplaints || [])
+      .filter(c => !['resolved', 'closed', 'cancelled'].includes(String(c.status || '').toLowerCase().trim()))
+      .slice(0, 50);
 
     if (complaints.length === 0) {
       const reply = `ℹ️ *No Active Complaints Found*\n\nThere are no active customer complaints recorded in your portfolio.\n\nIf you would like to log a new complaint, reply with *8* or send the complaint details.`;
@@ -7155,7 +7318,22 @@ async function executeAction(action, draft, senderPhone) {
             confidence: 0.95,
             created_at: new Date().toISOString(),
           }));
-          await supabase.from('inquiry_items').insert(inqItemsPayload);
+          let { error: inqItemsErr } = await supabase.from('inquiry_items').insert(inqItemsPayload);
+          if (inqItemsErr) {
+            console.warn('[CatalogFlow] inquiry_items insert failed, retrying once:', inqItemsErr.message);
+            ({ error: inqItemsErr } = await supabase.from('inquiry_items').insert(inqItemsPayload));
+          }
+          if (inqItemsErr) {
+            // Products are the core of the inquiry: roll back the header so a retry does not leave a product-less duplicate
+            console.error('[CatalogFlow] inquiry_items insert failed, rolling back inquiry:', inqItemsErr.message);
+            try {
+              await supabase.from('inquiry_items').delete().eq('inquiry_id', inqRow.id);
+              await supabase.from('inquiries').delete().eq('id', inqRow.id);
+            } catch (rbErr) {
+              console.error('[CatalogFlow] Inquiry rollback error:', rbErr?.message);
+            }
+            return `❌ *Failed to log inquiry for ${companyName}.*\n\nReason: product line items could not be saved (${inqItemsErr.message || 'Database write error'}). Please try again.`;
+          }
         }
 
         // 3. Mirror into deals & deal_items (with id = inqRow.id, inquiry_id = inqRow.id for 100% backward-compatibility)
@@ -7191,7 +7369,12 @@ async function executeAction(action, draft, senderPhone) {
             confidence: 0.95,
             created_at: new Date().toISOString(),
           }));
-          await supabase.from('deal_items').insert(itemsPayload);
+          let { error: dealItemsErr } = await supabase.from('deal_items').insert(itemsPayload);
+          if (dealItemsErr && !dealErr) {
+            console.warn('[CatalogFlow] deal_items mirror insert failed, retrying once:', dealItemsErr.message);
+            ({ error: dealItemsErr } = await supabase.from('deal_items').insert(itemsPayload));
+          }
+          if (dealItemsErr) console.error('[CatalogFlow] deal_items mirror insert failed:', dealItemsErr.message);
         }
 
         // 4. Log KRA 6 (CRM Compliance)
@@ -7415,23 +7598,21 @@ async function executeAction(action, draft, senderPhone) {
         // 6. Ensure deal record exists if matchedInquiryRecord was found
         if (!deal && matchedInquiryRecord) {
           const inqJson = matchedInquiryRecord.ai_extraction_json || {};
-          const { data: newDealRows, error: newDealErr } = await supabase
-            .from('deals')
-            .insert({
-              inquiry_id: matchedInquiryRecord.id,
-              customer_name: matchedInquiryRecord.sender_name || inqJson.customer_name || inqJson.companyName || companyName || 'Customer',
-              salesperson_phone: matchedInquiryRecord.salesperson_phone || senderPhone,
-              stage: 'new_inquiry',
-              total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0) || null,
-              delivery_location: inqJson.delivery_location || inqJson.location || null,
-              customer_address: inqJson.delivery_location || inqJson.location || null,
-              payment_terms: inqJson.payment_terms || null,
-              status: 'active',
-              created_at: new Date().toISOString(),
-            })
-            .select();
-          if (!newDealErr && newDealRows && newDealRows.length > 0) {
-            deal = newDealRows[0];
+          const newDealPayload = {
+            inquiry_id: matchedInquiryRecord.id,
+            customer_name: matchedInquiryRecord.sender_name || inqJson.customer_name || inqJson.companyName || companyName || 'Customer',
+            salesperson_phone: matchedInquiryRecord.salesperson_phone || senderPhone,
+            stage: 'new_inquiry',
+            total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0) || null,
+            delivery_location: inqJson.delivery_location || inqJson.location || null,
+            customer_address: inqJson.delivery_location || inqJson.location || null,
+            payment_terms: inqJson.payment_terms || null,
+            status: 'active',
+            created_at: new Date().toISOString(),
+          };
+          const { data: newDealRow, error: newDealErr } = await insertDealMirroringInquiry(newDealPayload, { onExisting: 'reuse' });
+          if (!newDealErr && newDealRow) {
+            deal = newDealRow;
           }
         }
 
@@ -7461,7 +7642,10 @@ async function executeAction(action, draft, senderPhone) {
           else if (s.includes('negot')) dealUpdates.stage = 'negotiation';
           else if (s.includes('hold')) dealUpdates.stage = 'on_hold';
           else if (s.includes('quote') || s.includes('price')) dealUpdates.stage = 'quoted';
-          else dealUpdates.stage = updates.status || updates.stage;
+          else {
+            const stageKey = normalizeDealStageKey(updates.status || updates.stage);
+            if (stageKey) dealUpdates.stage = stageKey;
+          }
         }
 
         // Synchronize inquiries table (ai_extraction_json AND raw_text)
@@ -7532,6 +7716,7 @@ async function executeAction(action, draft, senderPhone) {
 
         // 1. Specific line item updates
         if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0 && dItems && dItems.length > 0) {
+          const spillGeneralRate = updates.rate && !isGeneralRateDuplicateOfLineRate(updates.rate, draft.line_item_updates);
           for (let i = 0; i < dItems.length; i++) {
             const currentItem = dItems[i];
             const matchedUpd = matchLineItemUpdate(currentItem, i, dItems.length, draft.line_item_updates);
@@ -7546,7 +7731,7 @@ async function executeAction(action, draft, senderPhone) {
               if (matchedUpd.quantity !== null && matchedUpd.quantity !== undefined && matchedUpd.quantity !== '') {
                 itQty = parseNumericValue(matchedUpd.quantity) ?? itQty;
               }
-            } else if (updates.rate) {
+            } else if (spillGeneralRate) {
               const globalRate = parseIndianAmount(updates.rate) || 0;
               if (globalRate > 0) itRate = globalRate;
             }
@@ -7702,7 +7887,11 @@ async function executeAction(action, draft, senderPhone) {
         let fieldsSummary = '';
         if (updates.delivery_location) fieldsSummary += `• *Delivery Location:* ${updates.delivery_location}\n`;
         if (updates.payment_terms) fieldsSummary += `• *Payment Terms:* ${updates.payment_terms}\n`;
-        if (updates.stage || updates.status) fieldsSummary += `• *Stage / Status:* ${dealUpdates.stage}\n`;
+        if (updates.stage || updates.status) {
+          fieldsSummary += dealUpdates.stage
+            ? `• *Stage / Status:* ${dealUpdates.stage}\n`
+            : `• *Stage / Status:* not changed ("${updates.stage || updates.status}" is not a valid pipeline stage)\n`;
+        }
         if (itemsUpdated && totalAmount > 0) fieldsSummary += `• *Quotation Total:* ₹${totalAmount.toLocaleString('en-IN')}\n`;
         if (updates.preferred_make) fieldsSummary += `• *Preferred Make:* ${updates.preferred_make}\n`;
         if (updates.additional_notes) fieldsSummary += `• *Additional Notes:* ${updates.additional_notes}\n`;
@@ -7936,26 +8125,22 @@ async function executeAction(action, draft, senderPhone) {
             return `❌ *Failed to record order for ${companyName}.*\n\nReason: ${updErr.message || 'Database write error'}. Please try again.`;
           }
         } else {
-          const { data: newDealRow, error: dealErr } = await supabase
-            .from('deals')
-            .insert({
-              inquiry_id: finalInquiryId || null,
-              stage: 'won',
-              won_at: new Date().toISOString(),
-              po_number: draft.po_number,
-              po_date: draft.po_date,
-              customer_name: companyName,
-              customer_address: draft.delivery_location || null,
-              delivery_location: draft.delivery_location,
-              payment_terms: draft.payment_terms,
-              total_amount: totalAmount,
-              inquiry_type: 'purchase_order',
-              status: 'auto_created',
-              salesperson_phone: senderPhone,
-              created_at: new Date().toISOString(),
-            })
-            .select()
-            .single();
+          const { data: newDealRow, error: dealErr } = await insertDealMirroringInquiry({
+            inquiry_id: finalInquiryId || null,
+            stage: 'won',
+            won_at: new Date().toISOString(),
+            po_number: draft.po_number,
+            po_date: draft.po_date,
+            customer_name: companyName,
+            customer_address: draft.delivery_location || null,
+            delivery_location: draft.delivery_location,
+            payment_terms: draft.payment_terms,
+            total_amount: totalAmount,
+            inquiry_type: 'purchase_order',
+            status: 'auto_created',
+            salesperson_phone: senderPhone,
+            created_at: new Date().toISOString(),
+          }, { onExisting: 'update' });
 
           if (dealErr || !newDealRow) {
             console.error('[CatalogFlow] Order deal insert error:', dealErr);
@@ -8132,25 +8317,22 @@ async function executeAction(action, draft, senderPhone) {
                   deal = inq.deals[0];
                 } else {
                   const inqJson = inq.ai_extraction_json || {};
-                  const { data: newDealRows } = await supabase
-                    .from('deals')
-                    .insert({
-                      inquiry_id: inq.id,
-                      customer_name: inq.sender_name || inqJson.customer_name || inqJson.companyName || 'Customer',
-                      salesperson_phone: inq.salesperson_phone || senderPhone,
-                      stage: 'won',
-                      won_at: new Date().toISOString(),
-                      po_number: rawPo || null,
-                      po_date: new Date().toISOString().split('T')[0],
-                      total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0),
-                      delivery_location: inqJson.delivery_location || inqJson.location || null,
-                      customer_address: inqJson.delivery_location || inqJson.location || null,
-                      payment_terms: inqJson.payment_terms || null,
-                      status: 'active',
-                    })
-                    .select();
-                  if (newDealRows && newDealRows.length > 0) {
-                    deal = newDealRows[0];
+                  const { data: newDealRow } = await insertDealMirroringInquiry({
+                    inquiry_id: inq.id,
+                    customer_name: inq.sender_name || inqJson.customer_name || inqJson.companyName || 'Customer',
+                    salesperson_phone: inq.salesperson_phone || senderPhone,
+                    stage: 'won',
+                    won_at: new Date().toISOString(),
+                    po_number: rawPo || null,
+                    po_date: formatIsoDateIST(new Date()),
+                    total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0),
+                    delivery_location: inqJson.delivery_location || inqJson.location || null,
+                    customer_address: inqJson.delivery_location || inqJson.location || null,
+                    payment_terms: inqJson.payment_terms || null,
+                    status: 'active',
+                  }, { onExisting: 'reuse' });
+                  if (newDealRow) {
+                    deal = newDealRow;
                   }
                 }
                 break;
@@ -8202,25 +8384,22 @@ async function executeAction(action, draft, senderPhone) {
                     deal = inq.deals[0];
                   } else {
                     const inqJson = inq.ai_extraction_json || {};
-                    const { data: newDealRows } = await supabase
-                      .from('deals')
-                      .insert({
-                        inquiry_id: inq.id,
-                        customer_name: inq.sender_name || inqJson.customer_name || inqJson.companyName || 'Customer',
-                        salesperson_phone: inq.salesperson_phone || senderPhone,
-                        stage: 'won',
-                        won_at: new Date().toISOString(),
-                        po_number: rawPo || null,
-                        po_date: new Date().toISOString().split('T')[0],
-                        total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0),
-                        delivery_location: inqJson.delivery_location || inqJson.location || null,
-                        customer_address: inqJson.delivery_location || inqJson.location || null,
-                        payment_terms: inqJson.payment_terms || null,
-                        status: 'active',
-                      })
-                      .select();
-                    if (newDealRows && newDealRows.length > 0) {
-                      deal = newDealRows[0];
+                    const { data: newDealRow } = await insertDealMirroringInquiry({
+                      inquiry_id: inq.id,
+                      customer_name: inq.sender_name || inqJson.customer_name || inqJson.companyName || 'Customer',
+                      salesperson_phone: inq.salesperson_phone || senderPhone,
+                      stage: 'won',
+                      won_at: new Date().toISOString(),
+                      po_number: rawPo || null,
+                      po_date: formatIsoDateIST(new Date()),
+                      total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0),
+                      delivery_location: inqJson.delivery_location || inqJson.location || null,
+                      customer_address: inqJson.delivery_location || inqJson.location || null,
+                      payment_terms: inqJson.payment_terms || null,
+                      status: 'active',
+                    }, { onExisting: 'reuse' });
+                    if (newDealRow) {
+                      deal = newDealRow;
                     }
                   }
                   break;
@@ -8248,6 +8427,16 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.po_date) {
           dealUpdates.po_date = updates.po_date;
         }
+        const orderNotices = [];
+        const rawDeliveryDate = updates.delivery_date || draft.delivery_date;
+        if (rawDeliveryDate) {
+          const deliveryIso = parseUserDateToISOStrict(rawDeliveryDate);
+          if (deliveryIso) {
+            dealUpdates.delivery_date = formatIsoDateIST(new Date(deliveryIso));
+          } else {
+            orderNotices.push(`⚠️ Delivery date "${rawDeliveryDate}" was not understood, so the existing delivery date was kept. Please send it as DD-MM-YYYY.`);
+          }
+        }
         if (updates.delivery_location) {
           dealUpdates.delivery_location = updates.delivery_location;
           dealUpdates.customer_address = updates.delivery_location;
@@ -8256,14 +8445,12 @@ async function executeAction(action, draft, senderPhone) {
           dealUpdates.payment_terms = updates.payment_terms;
         }
 
+        // Stage only takes pipeline values; delivery progress (Delivered / Dispatched / ...) is tracked separately
+        let fulfillmentStatus = null;
         if (updates.status || updates.stage) {
-          const s = String(updates.status || updates.stage).toLowerCase();
-          if (s.includes('won') || s.includes('order') || s.includes('confirm')) dealUpdates.stage = 'won';
-          else if (s.includes('lost') || s.includes('cancel')) dealUpdates.stage = 'lost';
-          else if (s.includes('negot')) dealUpdates.stage = 'negotiation';
-          else if (s.includes('hold')) dealUpdates.stage = 'on_hold';
-          else if (s.includes('quote') || s.includes('price')) dealUpdates.stage = 'quoted';
-          else dealUpdates.stage = updates.status || updates.stage;
+          const mappedStatus = mapOrderStatusUpdate(updates.status || updates.stage);
+          if (mappedStatus.stage) dealUpdates.stage = mappedStatus.stage;
+          fulfillmentStatus = mappedStatus.fulfillment;
         }
 
         // When deal is won, ensure won_at and po_date are set
@@ -8272,7 +8459,7 @@ async function executeAction(action, draft, senderPhone) {
             dealUpdates.won_at = new Date().toISOString();
           }
           if (!deal.po_date && !dealUpdates.po_date) {
-            dealUpdates.po_date = new Date().toISOString().split('T')[0];
+            dealUpdates.po_date = formatIsoDateIST(new Date());
           }
         }
 
@@ -8352,6 +8539,12 @@ async function executeAction(action, draft, senderPhone) {
             const aiJson = inqRow.ai_extraction_json || {};
             if (rawPo) aiJson.po_number = rawPo;
             if (updates.po_date) aiJson.po_date = updates.po_date;
+            if (dealUpdates.delivery_date) aiJson.delivery_date = dealUpdates.delivery_date;
+            if (fulfillmentStatus) {
+              aiJson.fulfillment_status = fulfillmentStatus;
+              aiJson.fulfillment_updated_at = new Date().toISOString();
+              if (fulfillmentStatus === 'delivered') aiJson.delivered_at = aiJson.fulfillment_updated_at;
+            }
             if (updates.delivery_location) {
               aiJson.delivery_location = updates.delivery_location;
               aiJson.deliveryLocation = updates.delivery_location;
@@ -8409,12 +8602,17 @@ async function executeAction(action, draft, senderPhone) {
         const displayLoc = dealUpdates.delivery_location || deal.delivery_location;
         const displayPayment = dealUpdates.payment_terms || deal.payment_terms;
         const displayPoDate = dealUpdates.po_date || deal.po_date;
+        const displayDeliveryDate = dealUpdates.delivery_date ? formatDateDDMMYYYY(new Date(dealUpdates.delivery_date)) : null;
+        const fulfillmentLabel = fulfillmentStatus ? fulfillmentStatus.charAt(0).toUpperCase() + fulfillmentStatus.slice(1) : null;
+        if (fulfillmentStatus && !deal.inquiry_id) {
+          orderNotices.push(`⚠️ Delivery status "${fulfillmentLabel}" could not be recorded because this order has no linked inquiry.`);
+        }
 
         // Log to activity_logs
         try {
           logBotActivity({
             salesperson_phone: senderPhone,
-            description: `Order ${finalDisplayPo} updated for ${displayCust}${dealUpdates.stage ? ` (Stage: ${dealUpdates.stage})` : ''}`,
+            description: `Order ${finalDisplayPo} updated for ${displayCust}${dealUpdates.stage ? ` (Stage: ${dealUpdates.stage})` : ''}${fulfillmentLabel && deal.inquiry_id ? ` (Delivery Status: ${fulfillmentLabel})` : ''}`,
             module: 'Orders',
             customer_name: displayCust,
             entity_id: deal.id,
@@ -8431,9 +8629,12 @@ async function executeAction(action, draft, senderPhone) {
           `• *Customer / Company:* ${displayCust}\n` +
           `• *PO Number:* ${finalDisplayPo}\n` +
           (displayPoDate ? `• *PO Date:* ${displayPoDate}\n` : '') +
+          (displayDeliveryDate ? `• *Delivery Date:* ${displayDeliveryDate}\n` : '') +
+          (fulfillmentLabel && deal.inquiry_id ? `• *Delivery Status:* ${fulfillmentLabel}\n` : '') +
           (displayLoc ? `• *Delivery Location:* ${displayLoc}\n` : '') +
           (displayPayment ? `• *Payment Terms:* ${displayPayment}\n` : '') +
           (displayTotal > 0 ? `• *Total Order Value:* ₹${Number(displayTotal).toLocaleString('en-IN')}\n` : '') +
+          (orderNotices.length > 0 ? `\n${orderNotices.join('\n')}\n` : '') +
           `\nAttached PO number to won order and logged in Orders module! 🏆`;
       }
 
@@ -8650,7 +8851,8 @@ async function executeAction(action, draft, senderPhone) {
           }
         }
         if (!targetVisit && targetDateIso) {
-          const sameDay = pool.filter(v => v.visited_at && v.visited_at.startsWith(targetDateIso.slice(0, 10)));
+          const targetDay = formatIsoDateIST(new Date(targetDateIso));
+          const sameDay = pool.filter(v => v.visited_at && formatIsoDateIST(new Date(v.visited_at)) === targetDay);
           if (sameDay.length === 1) targetVisit = sameDay[0];
           else if (sameDay.length > 1) return ambiguousVisitReply(sameDay.length);
         }
@@ -8691,7 +8893,7 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.followup_action !== undefined && updates.followup_action !== null && updates.followup_action !== '') {
           newFollowup = updates.followup_action;
           newFollowupStatus = 'pending';
-          const visitBaseDate = updates.visit_date || targetVisit.visited_at || targetVisit.created_at || Date.now();
+          const visitBaseDate = (updates.visit_date && parseUserDateToISOStrict(updates.visit_date)) || targetVisit.visited_at || targetVisit.created_at || Date.now();
           const parsedFuDate = extractFollowUpDate(updates.followup_action, visitBaseDate);
           if (parsedFuDate) {
             newFollowupDate = parsedFuDate;
@@ -8700,7 +8902,7 @@ async function executeAction(action, draft, senderPhone) {
 
         // Completion detection
         const isExplicitCompleted = updates.status && /^(?:completed|done|resolved|closed)$/i.test(String(updates.status).trim());
-        const isRemarksCompleted = updates.meeting_remarks && /\b(?:quote sent|quotation sent|sent quote|sent official price quotation|po received|order placed|resolved|done|completed)\b/i.test(updates.meeting_remarks) && !updates.followup_action;
+        const isRemarksCompleted = updates.meeting_remarks && isAffirmativeCompletionRemark(updates.meeting_remarks) && !updates.followup_action;
 
         if (isExplicitCompleted || isRemarksCompleted) {
           newFollowupStatus = 'completed';
@@ -8728,7 +8930,15 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.person_met) visitUpdates.person_met = updates.person_met;
         if (updates.contact_phone) visitUpdates.contact_no = cleanPhone(updates.contact_phone) || updates.contact_phone;
         if (newLocation) visitUpdates.customer_address = newLocation;
-        if (updates.visit_date) visitUpdates.visited_at = parseDDMMYYYYtoISO(updates.visit_date);
+        const visitNotices = [];
+        if (updates.visit_date) {
+          const visitDateIsoStrict = parseUserDateToISOStrict(updates.visit_date);
+          if (visitDateIsoStrict) {
+            visitUpdates.visited_at = visitDateIsoStrict;
+          } else {
+            visitNotices.push(`⚠️ Visit date "${updates.visit_date}" was not understood, so the existing visit date was kept. Please send it as DD-MM-YYYY.`);
+          }
+        }
         if (updates.visit_outcome) visitUpdates.outcome = newOutcome;
         if (updates.email) visitUpdates.email = updates.email;
         if (updates.designation) visitUpdates.designation = updates.designation;
@@ -8878,6 +9088,7 @@ async function executeAction(action, draft, senderPhone) {
         return `*Field Visit Updated Successfully!*\n\n` +
           `• *Customer / Company:* ${resolvedCust}\n` +
           updatesSummary +
+          (visitNotices.length > 0 ? `\n${visitNotices.join('\n')}\n` : '') +
           `\nVisit details updated in Customer Visits Card!`;
       }
 
@@ -9188,11 +9399,14 @@ async function executeAction(action, draft, senderPhone) {
 
         const updates = draft.updates || {};
         const cmpUpdates = {};
+        const cmpNotices = [];
 
         if (updates.complaint_date) {
-          const parsed = parseDDMMYYYYtoISO(updates.complaint_date);
+          const parsed = parseUserDateToISOStrict(updates.complaint_date);
           if (parsed) {
             cmpUpdates.complaint_date = parsed;
+          } else {
+            cmpNotices.push(`⚠️ Complaint date "${updates.complaint_date}" was not understood, so the existing date was kept. Please send it as DD-MM-YYYY.`);
           }
         }
         if (updates.raised_by || updates.contact_person) {
@@ -9201,9 +9415,11 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.challan_no) cmpUpdates.challan_no = updates.challan_no.trim();
         if (updates.customer_communication) cmpUpdates.customer_communication = updates.customer_communication.trim();
         if (updates.resolution_date) {
-          const parsedRes = parseDDMMYYYYtoISO(updates.resolution_date);
+          const parsedRes = parseUserDateToISOStrict(updates.resolution_date);
           if (parsedRes) {
             cmpUpdates.resolution_date = parsedRes;
+          } else {
+            cmpNotices.push(`⚠️ Resolution date "${updates.resolution_date}" was not understood, so the existing date was kept. Please send it as DD-MM-YYYY.`);
           }
         }
         if (updates.complaint_type) cmpUpdates.complaint_type = normalizeComplaintType(updates.complaint_type);
@@ -9219,8 +9435,15 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.deal_id) cmpUpdates.deal_id = updates.deal_id;
         const isResolved = updates.status && ['resolved', 'closed'].includes(String(updates.status).toLowerCase());
         if (updates.status) {
-          const st = String(updates.status).toLowerCase();
+          let st = String(updates.status).toLowerCase().trim();
+          if (st === 'reopen' || st === 're-open' || st === 're-opened') st = 'reopened';
           cmpUpdates.status = st;
+          // Reopening: the complaint must no longer look resolved anywhere (resolved_at drives "resolved" checks)
+          const wasResolved = Boolean(matchedCmp.resolved_at) || ['resolved', 'closed'].includes(String(matchedCmp.status || '').toLowerCase());
+          if (!isResolved && wasResolved && ['reopened', 'open', 'pending', 'in progress', 'in_progress'].includes(st)) {
+            cmpUpdates.resolved_at = null;
+            cmpUpdates.resolution_time_hrs = null;
+          }
           if (isResolved) {
             const { isInvalidOrGenericResolutionNotes } = require('../kra8');
             if (isInvalidOrGenericResolutionNotes(updates.resolution_notes, matchedCmp.customer_name)) {
@@ -9260,7 +9483,7 @@ async function executeAction(action, draft, senderPhone) {
         }
 
         if (Object.keys(cmpUpdates).length === 0) {
-          return `ℹ️ No updates were provided for the complaint of *${matchedCmp.customer_name}*.`;
+          return `ℹ️ No updates were provided for the complaint of *${matchedCmp.customer_name}*.${cmpNotices.length > 0 ? `\n\n${cmpNotices.join('\n')}` : ''}`;
         }
 
         const { error: updateErr } = await supabase
@@ -9317,7 +9540,7 @@ async function executeAction(action, draft, senderPhone) {
           const isSlaCompliant = resolutionHrs <= 48;
           return `✅ *Customer Complaint Resolved Successfully!*\n\n` +
             `• *Customer / Company:* ${matchedCmp.customer_name}\n` +
-            (updates.complaint_date ? `• *Complaint Date:* ${updates.complaint_date}\n` : '') +
+            (cmpUpdates.complaint_date ? `• *Complaint Date:* ${updates.complaint_date}\n` : '') +
             (cmpUpdates.raised_by ? `• *Complaint Raised By:* ${cmpUpdates.raised_by}\n` : '') +
             (linkedOrderRef ? `• *Linked Order / Ref:* ${linkedOrderRef}\n` : '') +
             `• *Product / Material:* ${cmpUpdates.product_name || matchedCmp.product_name || matchedCmp.affected_product || 'Steel Material'}\n` +
@@ -9327,14 +9550,15 @@ async function executeAction(action, draft, senderPhone) {
             (cmpUpdates.customer_communication ? `• *Customer Communication:* ${cmpUpdates.customer_communication}\n` : '') +
             `• *Status:* ${updates.status || 'Resolved'}\n` +
             `• *Resolution Notes:* ${cmpUpdates.resolution_notes || 'Resolved'}\n` +
-            (updates.resolution_date ? `• *Resolution Date:* ${updates.resolution_date}\n` : '') +
+            (cmpUpdates.resolution_date ? `• *Resolution Date:* ${updates.resolution_date}\n` : '') +
             `• *Resolution Time:* ${resolutionHrs} Hours\n` +
             `• *SLA Target (48h):* ${isSlaCompliant ? '✅ Achieved - Within SLA Target!' : '⚠️ Breached - Escalated!'}\n\n` +
+            (cmpNotices.length > 0 ? `${cmpNotices.join('\n')}\n\n` : '') +
             `Updated details saved to Customer Complaints Card! ✅`;
         }
 
         let fieldsSummary = '';
-        if (updates.complaint_date) fieldsSummary += `• *Complaint Date:* ${updates.complaint_date}\n`;
+        if (cmpUpdates.complaint_date) fieldsSummary += `• *Complaint Date:* ${updates.complaint_date}\n`;
         if (cmpUpdates.raised_by) fieldsSummary += `• *Complaint Raised By:* ${cmpUpdates.raised_by}\n`;
         if (cmpUpdates.product_name) fieldsSummary += `• *Product:* ${cmpUpdates.product_name}\n`;
         if (cmpUpdates.complaint_type) fieldsSummary += `• *Complaint Type:* ${cmpUpdates.complaint_type}\n`;
@@ -9344,12 +9568,13 @@ async function executeAction(action, draft, senderPhone) {
         if (cmpUpdates.customer_communication) fieldsSummary += `• *Customer Communication:* ${cmpUpdates.customer_communication}\n`;
         if (updates.status) fieldsSummary += `• *Status:* ${updates.status}\n`;
         if (cmpUpdates.resolution_notes) fieldsSummary += `• *Resolution Notes:* ${cmpUpdates.resolution_notes}\n`;
-        if (updates.resolution_date) fieldsSummary += `• *Resolution Date:* ${updates.resolution_date}\n`;
+        if (cmpUpdates.resolution_date) fieldsSummary += `• *Resolution Date:* ${updates.resolution_date}\n`;
 
         return `✅ *Customer Complaint Updated Successfully!*\n\n` +
           `• *Customer / Company:* ${matchedCmp.customer_name}\n` +
           (linkedOrderRef ? `• *Linked Order / Ref:* ${linkedOrderRef}\n` : '') +
           fieldsSummary +
+          (cmpNotices.length > 0 ? `\n${cmpNotices.join('\n')}\n` : '') +
           `\nUpdated details saved to Customer Complaints Card! ✅`;
       }
 
@@ -10761,10 +10986,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
   // ── 3a. HANDLE IMPLICIT CUSTOMER CONFIRMATION ASK (catalog_implicit_cust_ask|...) ──
   if (lastIntent.startsWith('catalog_implicit_cust_ask|')) {
+    // Format: catalog_implicit_cust_ask|ACTION|<customer name>|{draft json}
+    // The customer name itself may contain '|', so split on the start of the JSON payload.
     const parts = lastIntent.split('|');
     const originalAction = parts[1];
-    const unrecognizedName = parts[2];
-    const originalDraftJsonStr = parts.slice(3).join('|');
+    const afterAction = parts.slice(2).join('|');
+    const jsonStartIdx = afterAction.indexOf('|{');
+    const unrecognizedName = jsonStartIdx >= 0 ? afterAction.slice(0, jsonStartIdx) : parts[2];
+    const originalDraftJsonStr = jsonStartIdx >= 0 ? afterAction.slice(jsonStartIdx + 1) : parts.slice(3).join('|');
     const originalDraft = safeParseJSON(originalDraftJsonStr, {});
 
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
@@ -11566,7 +11795,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         const pageSize = 10;
         const totalPages = Math.ceil(pool.length / pageSize);
         let nextPage = (Number(existingDraft._visit_candidates_page) || 1) + 1;
-        if (nextPage > totalPages) nextPage = 1;
+        if (nextPage > totalPages) {
+          const noMoreMsg = `ℹ️ *No more records.* All ${pool.length} record${pool.length === 1 ? ' is' : 's are'} already shown.\n\n👉 Reply with the *Option Number* (1–${pool.length}) to pick one.`;
+          await recordSessionMessage(senderPhone, 'assistant', noMoreMsg, { action_type: action });
+          return { handled: true, reply: noMoreMsg };
+        }
         existingDraft._visit_candidates_page = nextPage;
 
         const startIdx = (nextPage - 1) * pageSize;
@@ -11587,13 +11820,16 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
             follow_up_date: details.follow_up_date,
             follow_up_status: details.follow_up_status,
             remarks: details.remarks !== 'Not specified' ? (details.remarks.length > 80 ? details.remarks.slice(0, 77) + '...' : details.remarks) : null,
+            time: formatVisitTimeIST(v.visited_at || v.created_at),
           };
         });
 
+        const pageDateCounts = candidateSummaries.reduce((acc, c) => acc.set(c.date, (acc.get(c.date) || 0) + 1), new Map());
         const choicesText = candidateSummaries
           .map(c => {
+            const timeLabel = pageDateCounts.get(c.date) > 1 && c.time ? `, ${c.time}` : '';
             const lines = [
-              `${c.index}. *Visit on ${c.date}*`,
+              `${c.index}. *Visit on ${c.date}${timeLabel}*`,
               `   • *Person Met:* ${c.person_met}`,
               `   • *Location:* ${c.location}`,
               `   • *Outcome:* ${c.outcome}`,
@@ -11621,7 +11857,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         const pageSize = 10;
         const totalPages = Math.ceil(pool.length / pageSize);
         let nextPage = (Number(existingDraft._inquiry_candidates_page) || 1) + 1;
-        if (nextPage > totalPages) nextPage = 1;
+        if (nextPage > totalPages) {
+          const noMoreMsg = `ℹ️ *No more records.* All ${pool.length} record${pool.length === 1 ? ' is' : 's are'} already shown.\n\n👉 Reply with the *Option Number* (1–${pool.length}) to pick one.`;
+          await recordSessionMessage(senderPhone, 'assistant', noMoreMsg, { action_type: action });
+          return { handled: true, reply: noMoreMsg };
+        }
         existingDraft._inquiry_candidates_page = nextPage;
 
         const startIdx = (nextPage - 1) * pageSize;
@@ -11669,7 +11909,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         const pageSize = 10;
         const totalPages = Math.ceil(pool.length / pageSize);
         let nextPage = (Number(existingDraft._order_candidates_page) || 1) + 1;
-        if (nextPage > totalPages) nextPage = 1;
+        if (nextPage > totalPages) {
+          const noMoreMsg = `ℹ️ *No more records.* All ${pool.length} record${pool.length === 1 ? ' is' : 's are'} already shown.\n\n👉 Reply with the *Option Number* (1–${pool.length}) to pick one.`;
+          await recordSessionMessage(senderPhone, 'assistant', noMoreMsg, { action_type: action });
+          return { handled: true, reply: noMoreMsg };
+        }
         existingDraft._order_candidates_page = nextPage;
 
         const startIdx = (nextPage - 1) * pageSize;
@@ -11702,7 +11946,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         const pageSize = 10;
         const totalPages = Math.ceil(pool.length / pageSize);
         let nextPage = (Number(existingDraft._complaint_candidates_page) || 1) + 1;
-        if (nextPage > totalPages) nextPage = 1;
+        if (nextPage > totalPages) {
+          const noMoreMsg = `ℹ️ *No more records.* All ${pool.length} record${pool.length === 1 ? ' is' : 's are'} already shown.\n\n👉 Reply with the *Option Number* (1–${pool.length}) to pick one.`;
+          await recordSessionMessage(senderPhone, 'assistant', noMoreMsg, { action_type: action });
+          return { handled: true, reply: noMoreMsg };
+        }
         existingDraft._complaint_candidates_page = nextPage;
 
         const startIdx = (nextPage - 1) * pageSize;

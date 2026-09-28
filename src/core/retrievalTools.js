@@ -309,6 +309,22 @@ async function verifyCustomerAccountAccess(customerName, callerContext, supabase
 
 // ─── Date Parsing Utility ───────────────────────────────────────────────────
 
+// Day boundaries are always IST (UTC+5:30), independent of the server timezone.
+const IST_OFFSET_MS = 330 * 60 * 1000;
+
+function getIstDateParts(date = new Date()) {
+  const shifted = new Date(date.getTime() + IST_OFFSET_MS);
+  return { y: shifted.getUTCFullYear(), m: shifted.getUTCMonth(), d: shifted.getUTCDate() };
+}
+
+function istStartOfDay(y, m, d) {
+  return new Date(Date.UTC(y, m, d) - IST_OFFSET_MS);
+}
+
+function istEndOfDay(y, m, d) {
+  return new Date(istStartOfDay(y, m, d + 1).getTime() - 1);
+}
+
 function parseDateFilter(dateFilter) {
   if (!dateFilter) return {};
   const lower = String(dateFilter).toLowerCase().trim().replace(/[-_]+/g, ' ');
@@ -328,30 +344,20 @@ function parseDateFilter(dateFilter) {
   ) return {};
 
   const now = new Date();
+  const { y: nowY, m: nowM, d: nowD } = getIstDateParts(now);
 
   if (lower === 'today' || lower === 'aaj' || lower === 'aj') {
-    const startOfToday = new Date(now);
-    startOfToday.setHours(0, 0, 0, 0);
-    return { from: startOfToday };
+    return { from: istStartOfDay(nowY, nowM, nowD) };
   }
   if (lower === 'yesterday' || lower === 'kal' || lower === 'beeta kal') {
-    const startOfYesterday = new Date(now);
-    startOfYesterday.setDate(startOfYesterday.getDate() - 1);
-    startOfYesterday.setHours(0, 0, 0, 0);
-    const endOfYesterday = new Date(now);
-    endOfYesterday.setDate(endOfYesterday.getDate() - 1);
-    endOfYesterday.setHours(23, 59, 59, 999);
-    return { from: startOfYesterday, to: endOfYesterday };
+    return { from: istStartOfDay(nowY, nowM, nowD - 1), to: istEndOfDay(nowY, nowM, nowD - 1) };
   }
 
   // Relative days regex: e.g. "last 7 days", "past 7 days", "7 days", "7 din", "pichle 7 din", "last 30 days", "30 days", "30 din", "last 14 days"
   const daysMatch = lower.match(/^(?:last|past|pichle)?\s*(\d+)\s*(?:days?|din)$/);
   if (daysMatch) {
     const numDays = parseInt(daysMatch[1], 10);
-    const start = new Date(now);
-    start.setDate(start.getDate() - numDays);
-    start.setHours(0, 0, 0, 0);
-    return { from: start };
+    return { from: istStartOfDay(nowY, nowM, nowD - numDays) };
   }
 
   // Week variations (rolling 7 days for recent activity)
@@ -367,15 +373,22 @@ function parseDateFilter(dateFilter) {
     lower === '7 days' ||
     lower === '7 din' ||
     lower === 'pichle 7 din' ||
-    lower === 'last week' ||
-    lower === 'past week' ||
-    lower === 'previous week' ||
-    lower === 'pichle hafte'
+    lower === 'past week'
   ) {
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(startOfWeek.getDate() - 7);
-    startOfWeek.setHours(0, 0, 0, 0);
-    return { from: startOfWeek };
+    return { from: istStartOfDay(nowY, nowM, nowD - 7) };
+  }
+
+  // Previous week: the 7 days before the rolling "this week" window (same split as week-over-week comparison)
+  if (
+    lower === 'last week' ||
+    lower === 'previous week' ||
+    lower === 'pichle hafte' ||
+    lower === 'pichla hafta'
+  ) {
+    return {
+      from: istStartOfDay(nowY, nowM, nowD - 14),
+      to: new Date(istStartOfDay(nowY, nowM, nowD - 7).getTime() - 1),
+    };
   }
 
   // Month variations (rolling 30 days or start of month)
@@ -393,8 +406,7 @@ function parseDateFilter(dateFilter) {
     lower === '30 din' ||
     lower === 'pichle 30 din'
   ) {
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    return { from: startOfMonth };
+    return { from: istStartOfDay(nowY, nowM, 1) };
   }
   if (
     lower === 'last month' ||
@@ -403,19 +415,21 @@ function parseDateFilter(dateFilter) {
     lower === 'pichle mahine' ||
     lower === 'pichla mahina'
   ) {
-    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0);
-    endOfLastMonth.setHours(23, 59, 59, 999);
-    return { from: startOfLastMonth, to: endOfLastMonth };
+    return { from: istStartOfDay(nowY, nowM - 1, 1), to: istEndOfDay(nowY, nowM, 0) };
+  }
+
+  const isoDateOnly = String(dateFilter).trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoDateOnly) {
+    const y = Number(isoDateOnly[1]);
+    const m = Number(isoDateOnly[2]) - 1;
+    const d = Number(isoDateOnly[3]);
+    return { from: istStartOfDay(y, m, d), to: istEndOfDay(y, m, d) };
   }
 
   const parsed = new Date(dateFilter);
   if (!isNaN(parsed.getTime())) {
-    const start = new Date(parsed);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(parsed);
-    end.setHours(23, 59, 59, 999);
-    return { from: start, to: end };
+    const { y, m, d } = getIstDateParts(parsed);
+    return { from: istStartOfDay(y, m, d), to: istEndOfDay(y, m, d) };
   }
   return {};
 }
@@ -1239,10 +1253,10 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     mode === 'mom' ||
     mode === 'month_over_month'
   ) {
-    const now = new Date();
-    const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+    const istNow = getIstDateParts(new Date());
+    const startOfThisMonth = istStartOfDay(istNow.y, istNow.m, 1);
+    const startOfLastMonth = istStartOfDay(istNow.y, istNow.m - 1, 1);
+    const endOfLastMonth = istEndOfDay(istNow.y, istNow.m, 0);
 
     const thisMonthInqs = materialized.filter((m) => new Date(m.created_at) >= startOfThisMonth);
     const lastMonthInqs = materialized.filter((m) => {
@@ -1278,7 +1292,8 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     mode === 'month_summary'
   ) {
     const now = new Date();
-    const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const istNow = getIstDateParts(now);
+    const startOfThisMonth = istStartOfDay(istNow.y, istNow.m, 1);
     const thisMonthInqs = materialized.filter((m) => new Date(m.created_at) >= startOfThisMonth);
     const thisMonthWon = thisMonthInqs.filter((m) => m.deal_stage === 'won' || Boolean(m.po_number));
     const activePipelineDeals = allDeals.filter((d) => d.stage !== 'won' && d.stage !== 'lost');
@@ -1333,14 +1348,14 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
 
     return {
       data: {
-        period: `${now.toLocaleString('en-IN', { month: 'long' })} ${now.getFullYear()}`,
+        period: `${now.toLocaleString('en-IN', { month: 'long', timeZone: 'Asia/Kolkata' })} ${istNow.y}`,
         total_inquiries_this_month: thisMonthInqs.length,
         won_orders_this_month: thisMonthWon.length,
         total_visits_this_month: totalVisits,
         total_complaints_this_month: totalComplaints,
         active_pipeline_deals: activePipelineDeals.length,
         active_customer_accounts: activeCustCount || 0,
-        summary: `Full monthly summary for ${now.toLocaleString('en-IN', { month: 'long' })} ${now.getFullYear()}: ${thisMonthInqs.length} Inquiries, ${thisMonthWon.length} Confirmed Orders, ${totalVisits} Customer Visits, and ${totalComplaints} Complaints.`,
+        summary: `Full monthly summary for ${now.toLocaleString('en-IN', { month: 'long', timeZone: 'Asia/Kolkata' })} ${istNow.y}: ${thisMonthInqs.length} Inquiries, ${thisMonthWon.length} Confirmed Orders, ${totalVisits} Customer Visits, and ${totalComplaints} Complaints.`,
       },
       rowCount: thisMonthInqs.length,
     };
@@ -1601,10 +1616,8 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     const { from, to } = parseDateFilter(effectiveDateRange);
     let fromDate = from;
     if (!fromDate) {
-      const d = new Date();
-      d.setDate(d.getDate() - 30);
-      d.setHours(0, 0, 0, 0);
-      fromDate = d;
+      const { y, m, d } = getIstDateParts(new Date());
+      fromDate = istStartOfDay(y, m, d - 30);
     }
     const toDate = to || new Date();
 
@@ -1814,8 +1827,8 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     if (e.employee_id) empMap.set(e.employee_id, e.name);
   });
 
-  const now = new Date();
-  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const istToday = getIstDateParts(new Date());
+  const todayStr = `${istToday.y}-${String(istToday.m + 1).padStart(2, '0')}-${String(istToday.d).padStart(2, '0')}`;
 
   const materialized = (rows || []).map((r) => {
     const rawRemarks = r.remarks || r.discussion_remarks || '';

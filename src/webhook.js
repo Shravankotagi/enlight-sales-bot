@@ -90,7 +90,11 @@ function getSenderPhoneFromWebhookBody(body) {
  */
 async function logKRA6Activity(senderPhone, activityType, customerName) {
   try {
-    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    // "Today" is the IST calendar day, independent of the server timezone
+    const istOffsetMs = 330 * 60 * 1000;
+    const istNow = new Date(Date.now() + istOffsetMs);
+    const istDayStart = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate()) - istOffsetMs);
+    const istDayEnd = new Date(istDayStart.getTime() + 24 * 3600 * 1000 - 1);
     // Check if we already logged KRA 6 for this salesperson today with this activity type
     const { data: existing } = await supabase
       .from('kra_logs')
@@ -98,8 +102,8 @@ async function logKRA6Activity(senderPhone, activityType, customerName) {
       .eq('salesperson_phone', senderPhone)
       .eq('kra_number', 6)
       .eq('kra_type', activityType)
-      .gte('created_at', `${today}T00:00:00.000Z`)
-      .lte('created_at', `${today}T23:59:59.999Z`)
+      .gte('created_at', istDayStart.toISOString())
+      .lte('created_at', istDayEnd.toISOString())
       .limit(1);
 
     if (existing && existing.length > 0) return; // Already logged today for this activity
@@ -263,6 +267,26 @@ router.post('/', async (req, res) => {
           default:
             raw_text = `${messageType} message type received`;
             break;
+        }
+
+        // ── UNSUPPORTED MEDIA (video, sticker, location, contact card, ...) ──
+        // Answer clearly instead of passing a placeholder text into the flows; the active session is left untouched.
+        if (!['text', 'interactive', 'image', 'document', 'audio', 'button'].includes(messageType)) {
+          if (messageType === 'reaction') return;
+          const typeLabels = {
+            video: '🎥 *Videos are not supported.*',
+            sticker: '🙂 *Stickers are not supported.*',
+            location: '📍 *Location pins are not supported.*',
+            contacts: '👤 *Contact cards are not supported.*',
+          };
+          const header = typeLabels[messageType] || '⚠️ *This message type is not supported.*';
+          const activeForMedia = await require('./supabase').getFullActiveSession(senderPhone);
+          const hasActiveEntry = String(activeForMedia?.last_intent || '').startsWith('catalog_');
+          const unsupportedReply = `${header}\n\n` +
+            `Please type your message, or send *photos (JPG/PNG)* or a *PDF document* instead.` +
+            (hasActiveEntry ? `\n\n📝 The entry you were filling in is still saved — just continue by typing.` : '');
+          await sendTextMessage(senderPhone, unsupportedReply);
+          return;
         }
 
         // Remove surrounding quotes if typed by the salesperson (e.g. from copy-pasting test prompts)
