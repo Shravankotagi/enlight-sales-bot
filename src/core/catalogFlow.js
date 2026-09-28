@@ -1064,9 +1064,21 @@ function extractFollowUpDate(followupText, baseDate = new Date()) {
     return `${year}-${month}-${day}`;
   }
 
-  const base = new Date(baseDate.getTime());
+  // Parse baseDate properly if it's a string (DD-MM-YYYY or ISO) or Date
+  let base = new Date();
+  if (baseDate instanceof Date && !isNaN(baseDate.getTime())) {
+    base = new Date(baseDate.getTime());
+  } else if (typeof baseDate === 'string' && baseDate.trim()) {
+    const iso = parseDDMMYYYYtoISO(baseDate.trim());
+    const p = new Date(iso);
+    if (!isNaN(p.getTime())) {
+      base = p;
+    }
+  } else if (typeof baseDate === 'number' && !isNaN(baseDate)) {
+    base = new Date(baseDate);
+  }
 
-  // 2. Relative "in X days" / "after X days" / "X days"
+  // 2. Relative "in X days" / "after X days" / "within X days" / "X days"
   const daysMatch = lower.match(/(?:in|after|within)?\s*(\d+)\s*(?:days?|din)/i);
   if (daysMatch) {
     const days = parseInt(daysMatch[1], 10);
@@ -1080,13 +1092,27 @@ function extractFollowUpDate(followupText, baseDate = new Date()) {
     return target.toISOString().split('T')[0];
   }
 
-  // 4. "next week" / "agle hafte"
+  // 4. Relative "in X weeks" / "within X weeks" / "next week" / "agle hafte"
+  const weeksMatch = lower.match(/(?:in|after|within)?\s*(\d+)\s*(?:weeks?|hafte)/i);
+  if (weeksMatch) {
+    const weeks = parseInt(weeksMatch[1], 10);
+    const target = new Date(base.getTime() + weeks * 7 * 24 * 3600 * 1000);
+    return target.toISOString().split('T')[0];
+  }
   if (/\b(?:next\s+week|agle\s+hafte)\b/i.test(lower)) {
     const target = new Date(base.getTime() + 7 * 24 * 3600 * 1000);
     return target.toISOString().split('T')[0];
   }
 
-  // 5. Day of week (e.g. "on monday", "next tuesday")
+  // 5. Relative "in X months" / "within X months"
+  const monthsMatch = lower.match(/(?:in|after|within)?\s*(\d+)\s*(?:months?|mahine)/i);
+  if (monthsMatch) {
+    const months = parseInt(monthsMatch[1], 10);
+    const target = new Date(base.getTime() + months * 30 * 24 * 3600 * 1000);
+    return target.toISOString().split('T')[0];
+  }
+
+  // 6. Day of week (e.g. "on monday", "next tuesday")
   const daysOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
   for (let i = 0; i < daysOfWeek.length; i++) {
     const dayName = daysOfWeek[i];
@@ -4254,6 +4280,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
         visit_id: matchedRecord.id,
         company_name: matchedRecord.customer_name,
         visit_date: matchedRecord.date_formatted,
+        visited_at: matchedRecord.visited_at,
         _visit_verified: true,
       };
     }
@@ -5881,7 +5908,8 @@ function buildConfirmationSummary(action, draft) {
       summary += `• *Visit Outcome:* ${draft.visit_outcome || '-'}\n`;
       if (draft.followup_action) {
         summary += `• *Follow-up Action:* ${draft.followup_action}\n`;
-        const parsedFuDate = extractFollowUpDate(draft.followup_action, new Date());
+        const visitBaseDate = draft.visit_date || draft.visited_at || new Date();
+        const parsedFuDate = extractFollowUpDate(draft.followup_action, visitBaseDate);
         if (parsedFuDate) {
           summary += `• *Follow-up Date:* ${formatDateDDMMYYYY(new Date(parsedFuDate))}\n`;
         }
@@ -5927,7 +5955,8 @@ function buildConfirmationSummary(action, draft) {
         } else if (k === 'followup_action' || k === 'follow_up_action') {
           if (v) {
             summary += `  • *Follow-up Action* → ${v}\n`;
-            const parsedFuDate = extractFollowUpDate(v, new Date());
+            const visitBaseDate = draft.updates?.visit_date || draft.visit_date || draft.visited_at || new Date();
+            const parsedFuDate = extractFollowUpDate(v, visitBaseDate);
             if (parsedFuDate) {
               summary += `  • *Follow-up Date* → ${formatDateDDMMYYYY(new Date(parsedFuDate))}\n`;
             }
@@ -7817,7 +7846,8 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.followup_action !== undefined && updates.followup_action !== null && updates.followup_action !== '') {
           newFollowup = updates.followup_action;
           newFollowupStatus = 'pending';
-          const parsedFuDate = extractFollowUpDate(updates.followup_action, new Date(targetVisit.visited_at || Date.now()));
+          const visitBaseDate = updates.visit_date || targetVisit.visited_at || targetVisit.created_at || Date.now();
+          const parsedFuDate = extractFollowUpDate(updates.followup_action, visitBaseDate);
           if (parsedFuDate) {
             newFollowupDate = parsedFuDate;
           }
