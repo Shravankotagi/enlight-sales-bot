@@ -3976,7 +3976,7 @@ function formatRecordLineForModule(action, record, index) {
     case 'UPDATE_ORDER':
       return `${index}. ${record.displayId} | ${record.customer_name} | ${record.product_summary} | ${record.date_formatted}`;
     case 'UPDATE_COMPLAINT':
-      return `${index}. ${record.displayId} | ${record.customer_name} | ${record.complaint_type} | ${record.status} | ${record.date_formatted}`;
+      return `${index}. ${record.customer_name} | ${record.complaint_type} | ${record.status} | ${record.date_formatted}`;
     case 'UPDATE_VISIT':
       return `${index}. ${record.customer_name} | ${record.location} | ${record.outcome} | ${record.date_formatted}`;
     default:
@@ -4075,7 +4075,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
 
   let footerIdLabel = 'Inquiry ID';
   if (action === 'UPDATE_ORDER') footerIdLabel = 'Order / PO Number';
-  else if (action === 'UPDATE_COMPLAINT') footerIdLabel = 'Complaint / Ticket ID';
+  else if (action === 'UPDATE_COMPLAINT') footerIdLabel = 'Customer Name';
   else if (action === 'UPDATE_VISIT') footerIdLabel = 'Customer Name';
   const footerText = `Reply with the serial number or ${footerIdLabel} to update that record. Type "Next" for the next 7 records, or tell me the customer name to search their records.`;
 
@@ -4333,7 +4333,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
           `What changes would you like to make to the line items?\n` +
           `_(e.g., "Change rate to 48000", "Update quantity to 35 MT", "Change rate to 52000 and quantity to 40 MT")_`;
       } else if (action === 'UPDATE_COMPLAINT') {
-        prompt = `✏️ *Selected Complaint ${matchedRecord.displayId} (${matchedRecord.customer_name}):*\n\n` +
+        prompt = `✏️ *Selected Complaint for ${matchedRecord.customer_name}:*\n\n` +
           `• *Date:* ${matchedRecord.complaint_date || matchedRecord.date_formatted}\n` +
           (matchedRecord.raised_by ? `• *Raised By:* ${matchedRecord.raised_by}\n` : '') +
           (matchedRecord.product_name ? `• *Product:* ${matchedRecord.product_name}\n` : '') +
