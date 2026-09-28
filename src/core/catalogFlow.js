@@ -4795,7 +4795,7 @@ function formatDetailedInquiryItemsList(items) {
       return `${prefix}${name}${spec}${qty ? ` | ${qty}` : ''} | ₹${rate.toLocaleString('en-IN')} /${item.unit || 'MT'}${lineTotalStr}`;
     }
 
-    return `${prefix}*${name}${spec}*${qty ? ` — ${qty}` : ''}`;
+    return `${prefix}${name}${spec}${qty ? ` | ${qty}` : ''}`;
   }).join('\n');
 }
 
@@ -7380,25 +7380,12 @@ function buildConfirmationSummary(action, draft) {
       summary += `• *Customer / Company:* ${draft.company_name || '-'}\n`;
       if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
         if (draft.line_items.length === 1) {
-          const it = draft.line_items[0];
-          const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
-          const qtyStr = it.quantity ? ` — ${it.quantity} ${it.unit || 'MT'}` : '';
-          const rateVal = it.rate || (draft.rate ? (parseIndianAmount(draft.rate) ?? 0) : null);
-          const rateStr = rateVal ? ` @ ₹${Number(rateVal).toLocaleString('en-IN')}/${it.unit || 'MT'}` : '';
-          const amtStr = it.amount ? ` (₹${Number(it.amount).toLocaleString('en-IN')})` : '';
-          summary += `• *Product:* ${it.sku_text || it.description}${specStr}${qtyStr}${rateStr}${amtStr}\n`;
+          summary += `• *Product:* ${formatDetailedInquiryItemsList(draft.line_items)}\n`;
         } else {
-          summary += `• *Products:*\n`;
-          draft.line_items.forEach((it) => {
-            const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
-            const qtyStr = it.quantity ? ` — ${it.quantity} ${it.unit || 'MT'}` : '';
-            const rateStr = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}/${it.unit || 'MT'}` : '';
-            const amtStr = it.amount ? ` (₹${Number(it.amount).toLocaleString('en-IN')})` : '';
-            summary += `  • ${it.sku_text || it.description}${specStr}${qtyStr}${rateStr}${amtStr}\n`;
-          });
+          summary += `• *Line Items:*\n${formatDetailedInquiryItemsList(draft.line_items).split('\n').map(l => `  ${l}`).join('\n')}\n`;
         }
       } else {
-        const rateStr = draft.rate ? ` @ ₹${(parseIndianAmount(draft.rate) ?? 0).toLocaleString('en-IN')}/MT` : '';
+        const rateStr = draft.rate ? ` | ₹${(parseIndianAmount(draft.rate) ?? 0).toLocaleString('en-IN')} /MT` : '';
         summary += `• *Product:* ${draft.product_description || '-'}${rateStr}\n`;
       }
       summary += `• *Preferred Make:* ${draft.preferred_make || '-'}\n`;
@@ -7499,30 +7486,20 @@ function buildConfirmationSummary(action, draft) {
       let subtotal = 0;
       let totalTonnage = 0;
       let primaryUnit = 'MT';
-      if (Array.isArray(draft.line_items) && draft.line_items.length === 1) {
-        const it = draft.line_items[0];
-        const qty = Number(it.quantity) || 0;
-        const rate = Number(it.rate) || 0;
-        const amount = Number(it.amount) || qty * rate;
-        subtotal += amount;
-        totalTonnage += qty;
-        primaryUnit = it.unit || 'MT';
-        const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
-        const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
-        summary += `• *Product:* ${it.sku_text || it.description}${specStr}${hsnStr} — ${qty} ${it.unit || 'MT'} @ ₹${rate.toLocaleString('en-IN')}/${it.unit || 'MT'}\n`;
-      } else if (Array.isArray(draft.line_items) && draft.line_items.length > 1) {
-        summary += `• *Line Items:*\n`;
-        (draft.line_items || []).forEach((it) => {
+      if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
+        draft.line_items.forEach((it) => {
           const qty = Number(it.quantity) || 0;
           const rate = Number(it.rate) || 0;
           const amount = Number(it.amount) || qty * rate;
           subtotal += amount;
           totalTonnage += qty;
           primaryUnit = it.unit || 'MT';
-          const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
-          const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
-          summary += `  • ${it.sku_text || it.description}${specStr}${hsnStr} — ${qty} ${it.unit || 'MT'} @ ₹${rate.toLocaleString('en-IN')}/${it.unit || 'MT'} (₹${amount.toLocaleString('en-IN')})\n`;
         });
+        if (draft.line_items.length === 1) {
+          summary += `• *Product:* ${formatDetailedInquiryItemsList(draft.line_items)}\n`;
+        } else {
+          summary += `• *Line Items:*\n${formatDetailedInquiryItemsList(draft.line_items).split('\n').map(l => `  ${l}`).join('\n')}\n`;
+        }
       }
       if (totalTonnage > 0) {
         summary += `• *Total Tonnage:* ${formatLineItemsTonnage(draft.line_items) || `${totalTonnage.toLocaleString('en-IN')} ${primaryUnit}`}\n`;
@@ -7563,12 +7540,13 @@ function buildConfirmationSummary(action, draft) {
       if (existingItems.length > 0) {
         summary += `• *Updated Line Items:*\n`;
         let subtotal = 0;
-        existingItems.forEach((item, idx) => {
+        const mappedItems = existingItems.map((item, idx) => {
           const matchedUpd = matchLineItemUpdate(item, idx, existingItems.length, lineUpdates);
 
           let itQty = Number(item.quantity) || 0;
           let itRate = Number(item.rate) || 0;
           let itUnit = item.unit || 'MT';
+          let itDim = item.dimensions;
           if (matchedUpd) {
             if (matchedUpd.quantity !== null && matchedUpd.quantity !== undefined && matchedUpd.quantity !== '') {
               itQty = parseNumericValue(matchedUpd.quantity) ?? itQty;
@@ -7577,13 +7555,21 @@ function buildConfirmationSummary(action, draft) {
               itRate = parseIndianAmount(matchedUpd.rate) ?? itRate;
             }
             if (matchedUpd.unit) itUnit = matchedUpd.unit;
+            if (matchedUpd.dimensions) itDim = matchedUpd.dimensions;
           }
           const itAmt = itQty * itRate;
           subtotal += itAmt;
-          const name = item.sku_text || item.description || 'Steel Item';
-          const spec = item.dimensions ? ` (${item.dimensions})` : (item.grade ? ` (${item.grade})` : '');
-          summary += `  ${idx + 1}. *${name}${spec}* — ${itQty} ${itUnit} @ ₹${itRate.toLocaleString('en-IN')}/${itUnit} = ₹${itAmt.toLocaleString('en-IN')}\n`;
+          return {
+            ...item,
+            quantity: itQty,
+            rate: itRate,
+            unit: itUnit,
+            dimensions: itDim,
+            amount: itAmt,
+          };
         });
+
+        summary += `${formatDetailedInquiryItemsList(mappedItems).split('\n').map(l => `  ${l}`).join('\n')}\n`;
 
         if (subtotal > 0) {
           const gst = Math.round(subtotal * 0.18);
@@ -8150,24 +8136,12 @@ async function executeAction(action, draft, senderPhone) {
         let productSummaryLines = '';
         if (structuredLineItems.length > 0) {
           if (structuredLineItems.length === 1) {
-            const it = structuredLineItems[0];
-            const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
-            const qtyStr = it.quantity ? ` — ${it.quantity} ${it.unit || 'MT'}` : '';
-            const rateStr = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}/${it.unit || 'MT'}` : '';
-            const amtStr = it.amount ? ` (₹${Number(it.amount).toLocaleString('en-IN')})` : '';
-            productSummaryLines = `• *Product:* ${it.sku_text || it.description}${specStr}${qtyStr}${rateStr}${amtStr}\n`;
+            productSummaryLines = `• *Product:* ${formatDetailedInquiryItemsList(structuredLineItems)}\n`;
           } else {
-            productSummaryLines = `• *Products:*\n`;
-            structuredLineItems.forEach((it) => {
-              const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
-              const qtyStr = it.quantity ? ` — ${it.quantity} ${it.unit || 'MT'}` : '';
-              const rateStr = it.rate ? ` @ ₹${Number(it.rate).toLocaleString('en-IN')}/${it.unit || 'MT'}` : '';
-              const amtStr = it.amount ? ` (₹${Number(it.amount).toLocaleString('en-IN')})` : '';
-              productSummaryLines += `  • ${it.sku_text || it.description}${specStr}${qtyStr}${rateStr}${amtStr}\n`;
-            });
+            productSummaryLines = `• *Line Items:*\n${formatDetailedInquiryItemsList(structuredLineItems).split('\n').map(l => `  ${l}`).join('\n')}\n`;
           }
         } else {
-          const rateStr = globalRate ? ` @ ₹${Number(globalRate).toLocaleString('en-IN')}/MT` : '';
+          const rateStr = globalRate ? ` | ₹${Number(globalRate).toLocaleString('en-IN')} /MT` : '';
           productSummaryLines = `• *Product:* ${draft.product_description || 'Steel Material'}${rateStr}\n`;
         }
 
@@ -9017,17 +8991,9 @@ async function executeAction(action, draft, senderPhone) {
 
         let itemsSummaryStr = '';
         if (structuredLineItems.length === 1) {
-          const it = structuredLineItems[0];
-          const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
-          const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
-          itemsSummaryStr = `• *Product:* ${it.sku_text || it.description}${specStr}${hsnStr} — ${it.quantity} ${it.unit || 'MT'} @ ₹${Number(it.rate || 0).toLocaleString('en-IN')}/${it.unit || 'MT'}\n`;
+          itemsSummaryStr = `• *Product:* ${formatDetailedInquiryItemsList(structuredLineItems)}\n`;
         } else if (structuredLineItems.length > 1) {
-          itemsSummaryStr = `• *Line Items:*\n`;
-          structuredLineItems.forEach((it) => {
-            const specStr = it.dimensions ? ` (${it.dimensions})` : (it.spec ? ` (${it.spec})` : '');
-            const hsnStr = it.hsn_code ? ` [HSN: ${it.hsn_code}]` : (it.hsn_sac ? ` [HSN: ${it.hsn_sac}]` : '');
-            itemsSummaryStr += `  • ${it.sku_text || it.description}${specStr}${hsnStr} — ${it.quantity} ${it.unit || 'MT'} @ ₹${Number(it.rate || 0).toLocaleString('en-IN')}/${it.unit || 'MT'} (₹${Number(it.amount || 0).toLocaleString('en-IN')})\n`;
-          });
+          itemsSummaryStr = `• *Line Items:*\n${formatDetailedInquiryItemsList(structuredLineItems).split('\n').map(l => `  ${l}`).join('\n')}\n`;
         }
 
         const totalTonnage = structuredLineItems.reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);

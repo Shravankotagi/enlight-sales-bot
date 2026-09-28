@@ -845,9 +845,9 @@ Return ONLY the company name or "NONE":`;
           const lineTotal = Number(it.amount || 0) || (rate > 0 && itQty > 0 ? rate * itQty : 0);
           if (rate > 0) {
             const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
-            return `   • *${name}${dim}*${qty} | ₹${rate.toLocaleString('en-IN')} /${it.unit || 'MT'}${lineTotalStr}`;
+            return `   • ${name}${dim}${qty} | ₹${rate.toLocaleString('en-IN')} /${it.unit || 'MT'}${lineTotalStr}`;
           }
-          return `   • *${name}${dim}*${it.quantity ? ` — ${it.quantity} ${it.unit || 'MT'}` : ''}`;
+          return `   • ${name}${dim}${it.quantity ? ` | ${it.quantity} ${it.unit || 'MT'}` : ''}`;
         });
         itemStr = itemLines.join('\n');
       } else {
@@ -3705,7 +3705,7 @@ async function getInquiryOrDealByCode(scopeOrPhone, text, explicitCode = null) {
           const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
           return `${prefix}${name}${spec}${qty ? ` | ${qty} ${unit}` : ''} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
         }
-        return `${prefix}*${name}${spec}*${qty ? ` — ${qty} ${unit}` : ''}`;
+        return `${prefix}${name}${spec}${qty ? ` | ${qty} ${unit}` : ''}`;
       }).join('\n');
     } else {
       itemsText = `- Steel Requirement: Details in active pipeline`;
