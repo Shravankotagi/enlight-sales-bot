@@ -5,8 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "predev": "chmod +x ./node_modules/.bin/* 2>/dev/null || true",
-    "dev": "nodemon index.js",
+    "predev": "node -e \"if (!require('fs').existsSync('./node_modules/express')) { console.log('Dependencies missing. Installing...'); require('child_process').execSync('npm install', { stdio: 'inherit' }); }\"",
+    "dev": "node --watch index.js",
+    "dev:nodemon": "nodemon index.js",
     "chat": "node scripts/chat_cli.js"
   },
   "dependencies": {
