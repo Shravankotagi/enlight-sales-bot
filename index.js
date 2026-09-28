@@ -15,6 +15,15 @@ const PORT = process.env.PORT || 3001;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Graceful JSON syntax error handler (catches malformed requests from scanners/clients)
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    console.warn(`[Server] Invalid JSON payload received on ${req.method} ${req.originalUrl || req.url}`);
+    return res.status(400).json({ error: 'Invalid JSON format' });
+  }
+  next(err);
+});
+
 // Mount routers
 app.use('/webhook', webhookRouter);
 app.use('/chat/web', webChatRouter);
