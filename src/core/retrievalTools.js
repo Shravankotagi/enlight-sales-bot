@@ -3418,6 +3418,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
     .select('id, inquiry_id, customer_name, customer_phone, total_amount, stage, status, po_number, delivery_location, salesperson_phone, employee_id, created_at, won_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
     .order('created_at', { ascending: false });
 
+  let isDealInCallerScope = () => true;
   if (isSalespersonRole(callerContext.role)) {
     const rawPhone = callerContext.phone || '';
     const cleanPhone = rawPhone.replace(/\D/g, '').slice(-10);
@@ -3427,6 +3428,9 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
     if (empId) orParts.push(`employee_id.eq.${empId}`);
     if (orParts.length === 0) return { data: { summary: { total_deals: 0 }, deals: [] }, rowCount: 0 };
     query = query.or(orParts.join(','));
+    isDealInCallerScope = (d) =>
+      Boolean(cleanPhone && String(d.salesperson_phone || '').includes(cleanPhone)) ||
+      Boolean(empId && d.employee_id && String(d.employee_id) === String(empId));
   } else if (isManagerRole(callerContext.role)) {
     const { phoneSuffixes, employeeIds } = await getSubordinateSalespersons(callerContext, supabaseAdmin);
     const orParts = [];
@@ -3434,6 +3438,10 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
     employeeIds.forEach((id) => orParts.push(`employee_id.eq.${id}`));
     if (orParts.length === 0) return { data: { summary: { total_deals: 0 }, deals: [] }, rowCount: 0 };
     query = query.or(orParts.join(','));
+    const managerEmployeeIds = new Set(employeeIds.map(String));
+    isDealInCallerScope = (d) =>
+      phoneSuffixes.some((p) => p && String(d.salesperson_phone || '').includes(p)) ||
+      Boolean(d.employee_id && managerEmployeeIds.has(String(d.employee_id)));
   }
 
   const { from, to } = parseDateFilter(dateRange);
@@ -3477,11 +3485,12 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
     if (filtered.length === 0) {
       const searchTerms = [poFilter, cleanPo].filter(Boolean);
       const orClauses = searchTerms.map((term) => `po_number.ilike.%${term}%`).join(',');
-      const { data: globalPoDeals } = await supabaseAdmin
+      const { data: rawGlobalPoDeals } = await supabaseAdmin
         .from('deals')
         .select('id, inquiry_id, customer_name, customer_phone, total_amount, stage, status, po_number, delivery_location, salesperson_phone, employee_id, created_at, won_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
         .or(orClauses)
         .limit(5);
+      const globalPoDeals = (rawGlobalPoDeals || []).filter(isDealInCallerScope);
 
       if (globalPoDeals && globalPoDeals.length > 0) {
         filtered = globalPoDeals.map((d) => {

@@ -39,6 +39,35 @@ function isComplaintResolution(text) {
          upper === 'CLOSE';
 }
 
+// Stricter check used while another activity (inquiry / order / visit) is in progress:
+// "fix rate to 48000" or "resolved issue in inquiry" must not jump into complaint resolution.
+function isExplicitComplaintResolution(text) {
+  if (!isComplaintResolution(text)) return false;
+  return /\b(?:complaints?|compliants?|complain(?:ed)?|shikayat|tickets?)\b|\bCMP[-_#]?[A-Z0-9]+/i.test(String(text || ''));
+}
+
+// True when the resolution text does not name any customer (e.g. "Resolved - replacement dispatched")
+function isBareResolutionText(text) {
+  const rest = String(text || '').trim()
+    .replace(/^(?:resolved|resolve|closed|close|fixed|fix)\b\s*/i, '')
+    .replace(/^(?:the\s+|my\s+|last\s+|my\s+last\s+)*(?:complaints?|issues?|problems?|tickets?)?\s*/i, '')
+    .trim();
+  return !/^(?:for|of|regarding|about|on)\s+\S/i.test(rest);
+}
+
+function buildAmbiguousComplaintReply(complaints) {
+  const list = complaints.slice(0, 5).map((c, idx) => {
+    const when = c.reported_at || c.created_at;
+    const dateLabel = when ? new Date(when).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+    const desc = String(c.description || c.affected_product || '').replace(/\s+/g, ' ').trim();
+    const shortDesc = desc.length > 60 ? `${desc.slice(0, 57)}...` : desc;
+    return `${idx + 1}. *${c.customer_name || 'Customer'}*${dateLabel ? ` (${dateLabel})` : ''}${shortDesc ? ` - ${shortDesc}` : ''}`;
+  }).join('\n');
+  return `⚠️ *Multiple Open Complaints Found*\n\n` +
+    `${list}\n\n` +
+    `No complaint was resolved. Please use *Update Complaint* from the menu to pick the exact complaint you want to resolve.`;
+}
+
 /**
  * Validates whether user-provided resolution notes contain real substantive details
  * or are just command filler phrases / generic status words / reference IDs.
@@ -546,37 +575,44 @@ async function handleComplaintResolution(text, senderPhone) {
     let resolution = '';
 
     if (openComplaints && openComplaints.length > 0) {
-      // Find a complaint whose customer name or description matches keywords in the text
-      complaint = openComplaints.find(c => {
-        if (c.customer_name) {
-          const nameLower = c.customer_name.toLowerCase();
-          if (text.toLowerCase().includes(nameLower)) return true;
-          const words = nameLower.split(/\s+/);
-          if (words.some(word => word.length > 3 && text.toLowerCase().includes(word))) return true;
-        }
-        if (c.description) {
-          const descWords = c.description.toLowerCase().split(/[\s,:-]+/);
-          if (descWords.some(w => w.length > 4 && text.toLowerCase().includes(w))) return true;
-        }
-        return false;
+      // Match on customer name only (description words overlap across customers and pick the wrong complaint)
+      const textLower = text.toLowerCase();
+      const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const genericNameWords = new Set(['steel', 'steels', 'metal', 'metals', 'industries', 'industry', 'enterprises', 'enterprise', 'traders', 'trading', 'private', 'limited', 'company', 'corporation', 'group', 'works', 'engineering', 'india', 'infra', 'solutions', 'pvt', 'ltd']);
+      const fullNameMatches = openComplaints.filter(c => {
+        const nameLower = String(c.customer_name || '').toLowerCase().trim();
+        return nameLower && new RegExp(`(?:^|[^a-z0-9])${escapeRe(nameLower)}(?:$|[^a-z0-9])`, 'i').test(textLower);
       });
+      let nameMatches = fullNameMatches;
+      if (nameMatches.length === 0) {
+        nameMatches = openComplaints.filter(c => {
+          const words = String(c.customer_name || '').toLowerCase().split(/\s+/)
+            .filter(w => w.length > 3 && !genericNameWords.has(w));
+          return words.some(w => new RegExp(`(?:^|[^a-z0-9])${escapeRe(w)}(?:$|[^a-z0-9])`, 'i').test(textLower));
+        });
+      }
 
       // Fuzzy match fallback using Gemini if no literal match is found
-      if (!complaint) {
+      if (nameMatches.length === 0) {
         console.log('No literal complaint customer match, trying fuzzy matching...');
         const { fuzzyMatchCustomer } = require('./supabase');
-        const customerList = openComplaints.map(c => c.customer_name).filter(Boolean);
+        const customerList = Array.from(new Set(openComplaints.map(c => c.customer_name).filter(Boolean)));
         if (customerList.length > 0) {
           const matchedName = await fuzzyMatchCustomer(text, customerList);
           if (matchedName) {
             console.log(`Fuzzy matched complaint customer: ${matchedName}`);
-            complaint = openComplaints.find(c => c.customer_name === matchedName);
+            nameMatches = openComplaints.filter(c => c.customer_name === matchedName);
           }
         }
       }
 
-      // If only 1 open complaint exists for this salesperson, match it directly!
-      if (!complaint && openComplaints.length === 1) {
+      if (nameMatches.length > 1) {
+        return buildAmbiguousComplaintReply(nameMatches);
+      }
+      complaint = nameMatches[0] || null;
+
+      // No customer named: only safe to pick directly when the text names no other customer at all
+      if (!complaint && openComplaints.length === 1 && isBareResolutionText(text)) {
         complaint = openComplaints[0];
       }
     }
@@ -603,15 +639,19 @@ async function handleComplaintResolution(text, senderPhone) {
       resolution = cleanText.replace(new RegExp(`^${customerKeyword}`, 'i'), '').replace(/^[\s:,\-]+/, '').replace(/[\s:,\-]+$/, '').trim();
 
       if (customerKeyword && customerKeyword.length > 2) {
-        const { data: complaints } = await supabase
+        const safeKeyword = customerKeyword.replace(/[\\%_,()]/g, '');
+        const { data: complaints } = safeKeyword ? await supabase
           .from('complaints')
           .select('*')
           .in('reported_by', phoneVariants)
           .in('status', ['open', 'pending', 'reported', 'reopened'])
           .is('resolved_at', null)
-          .or(`customer_name.ilike.%${customerKeyword}%,description.ilike.%${customerKeyword}%`)
+          .ilike('customer_name', `%${safeKeyword}%`)
           .order('reported_at', { ascending: false })
-          .limit(1);
+          .limit(10) : { data: [] };
+        if (Array.isArray(complaints) && complaints.length > 1) {
+          return buildAmbiguousComplaintReply(complaints);
+        }
         complaint = complaints?.[0];
       }
     }
@@ -643,22 +683,6 @@ async function handleComplaintResolution(text, senderPhone) {
         resolution_time_hrs: resolutionHrs
       })
       .eq('id', complaint.id);
-
-    // Also resolve any other open duplicates for this customer and salesperson
-    if (resolvedCustomerName && resolvedCustomerName !== 'Customer') {
-      await supabase
-        .from('complaints')
-        .update({
-          customer_name: resolvedCustomerName,
-          status: 'resolved',
-          resolved_at: resolvedAt.toISOString(),
-          resolution_time_hrs: resolutionHrs
-        })
-        .eq('reported_by', senderPhone)
-        .not('status', 'in', '("resolved","closed")')
-        .is('resolved_at', null)
-        .or(`customer_name.ilike.%${resolvedCustomerName}%,description.ilike.%${resolvedCustomerName}%`);
-    }
 
     // Log to KRA 8
     await supabase.from('kra_logs').insert({
@@ -765,6 +789,7 @@ async function getComplaintSummary(scopeOrPhone) {
 module.exports = {
   isComplaintReport,
   isComplaintResolution,
+  isExplicitComplaintResolution,
   isInvalidOrGenericResolutionNotes,
   handleComplaintLog,
   handleComplaintResolution,

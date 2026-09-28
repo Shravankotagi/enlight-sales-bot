@@ -46,6 +46,42 @@ function isDuplicateMessageId(messageId) {
 // In-memory debounce map for batch media uploads per sender phone (e.g. multi-photo complaint attachments)
 const complaintUploadBatches = new Map();
 
+// Per-phone serial queue: messages from the same sender are processed one at a time so
+// rapid double taps / fast follow-ups cannot read and write the same session concurrently.
+// A task holding the queue longer than PHONE_QUEUE_MAX_WAIT_MS stops blocking later messages.
+const PHONE_QUEUE_MAX_WAIT_MS = 60 * 1000;
+const phoneProcessingQueues = new Map();
+function runSerializedForPhone(phone, task) {
+  if (!phone) return task();
+  const key = String(phone).replace(/\D/g, '').slice(-10) || String(phone);
+  const previous = phoneProcessingQueues.get(key) || Promise.resolve();
+  const run = previous.then(() => {
+    let timeoutHandle;
+    const guard = new Promise((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        console.warn(`[Webhook] Processing for ${key} exceeded ${PHONE_QUEUE_MAX_WAIT_MS}ms; releasing queue.`);
+        resolve();
+      }, PHONE_QUEUE_MAX_WAIT_MS);
+    });
+    const work = Promise.resolve().then(task);
+    return Promise.race([work, guard]).finally(() => clearTimeout(timeoutHandle));
+  });
+  const tail = run.catch(() => {});
+  phoneProcessingQueues.set(key, tail);
+  tail.then(() => {
+    if (phoneProcessingQueues.get(key) === tail) phoneProcessingQueues.delete(key);
+  });
+  return run;
+}
+
+function getSenderPhoneFromWebhookBody(body) {
+  try {
+    return body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 /**
  * KRA 6 - CRM Compliance Logger
  * Logs every business activity by a salesperson as a daily CRM touch.
@@ -120,6 +156,7 @@ router.post('/', async (req, res) => {
   // We ACK first, then process asynchronously.
   res.status(200).send('EVENT_RECEIVED');
 
+  await runSerializedForPhone(getSenderPhoneFromWebhookBody(req.body), async () => {
   try {
     const body = req.body;
 
@@ -248,7 +285,8 @@ router.post('/', async (req, res) => {
         // ── GUIDED CATALOG & CONVERSATIONAL FORM FLOW (Greetings, 1-10 Routing, Confirmations) ──
         if ((messageType === 'text' || messageType === 'interactive') && raw_text) {
           const { handleCatalogFlow } = require('./core/catalogFlow');
-          const catalogResult = await handleCatalogFlow(raw_text, senderPhone);
+          const messageTimestampMs = Number(message.timestamp) ? Number(message.timestamp) * 1000 : null;
+          const catalogResult = await handleCatalogFlow(raw_text, senderPhone, { messageTimestampMs });
           if (catalogResult && catalogResult.handled && catalogResult.reply) {
             if (catalogResult.interactiveType === 'buttons' && Array.isArray(catalogResult.interactiveButtons)) {
               await sendInteractiveButtons(
@@ -469,7 +507,7 @@ router.post('/', async (req, res) => {
             }
 
             // Settling debounce timer (1500ms after the LAST incoming photo webhook)
-            batch.timer = setTimeout(async () => {
+            batch.timer = setTimeout(() => runSerializedForPhone(senderPhone, async () => {
               try {
                 const currentBatch = complaintUploadBatches.get(senderPhone);
                 complaintUploadBatches.delete(senderPhone);
@@ -519,7 +557,7 @@ router.post('/', async (req, res) => {
               } catch (batchErr) {
                 console.error('[Webhook] Error processing batched complaint attachments:', batchErr);
               }
-            }, 1500);
+            }), 1500);
 
             return;
           }
@@ -893,6 +931,7 @@ router.post('/', async (req, res) => {
   } catch (error) {
     console.error("Error processing incoming webhook POST:", error);
   }
+  });
 });
 
 // ── Admin: Sync all database records to Zoho Bigin (POST & GET for Browser) ─
