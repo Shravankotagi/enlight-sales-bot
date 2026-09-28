@@ -6,6 +6,7 @@ const {
   mergeDraft,
   buildConfirmationSummary,
   handleCatalogFlow,
+  buildResumePrompt,
 } = require('../src/core/catalogFlow');
 
 async function runTests() {
@@ -90,6 +91,40 @@ async function runTests() {
   const summaryUpdate = buildConfirmationSummary('UPDATE_INQUIRY', mergedUpdateInq);
   assert(summaryUpdate.includes('• *Additional Notes* → we are iquiryng to place the order.'), 'UPDATE_INQUIRY summary must contain exact verbatim additional notes');
   console.log('  -> PASS: Confirmation card summary rendering tests passed.\n');
+
+  // Test 6: buildResumePrompt contextual resume prompts
+  console.log('Test 6: buildResumePrompt');
+  const rPrompt1 = buildResumePrompt('UPDATE_INQUIRY', { inquiry_id: 'INQ-8E15BC', company_name: 'Menon Industries' });
+  assert.strictEqual(rPrompt1, 'You were in the middle of updating *INQ-8E15BC* for *Menon Industries* — do you want to continue?');
+
+  const rPrompt2 = buildResumePrompt('UPDATE_INQUIRY', { inquiry_id: '8e15bc', company_name: 'Menon Industries' });
+  assert.strictEqual(rPrompt2, 'You were in the middle of updating *INQ-8E15BC* for *Menon Industries* — do you want to continue?');
+
+  const rPrompt3 = buildResumePrompt('UPDATE_INQUIRY', { _inquiry_display_id: 'INQ-D013D7' });
+  assert.strictEqual(rPrompt3, 'You were in the middle of updating *INQ-D013D7* — do you want to continue?');
+
+  const rPrompt4 = buildResumePrompt('UPDATE_INQUIRY', { company_name: 'Menon Industries' });
+  assert.strictEqual(rPrompt4, 'You were in the middle of updating inquiry for *Menon Industries* — do you want to continue?');
+
+  const rPrompt5 = buildResumePrompt('LOG_INQUIRY', { company_name: 'Menon Industries' });
+  assert.strictEqual(rPrompt5, 'You were in the middle of logging an Inquiry for *Menon Industries* — do you want to continue?');
+
+  const rPrompt6 = buildResumePrompt('UPDATE_ORDER', { po_number: 'PO-99123', company_name: 'Menon Industries' });
+  assert.strictEqual(rPrompt6, 'You were in the middle of updating order *PO-99123* for *Menon Industries* — do you want to continue?');
+
+  const rPrompt7 = buildResumePrompt('LOG_ORDER', { company_name: 'Menon Industries' });
+  assert.strictEqual(rPrompt7, 'You were in the middle of logging an Order for *Menon Industries* — do you want to continue?');
+
+  const rPrompt8 = buildResumePrompt('LOG_VISIT', { company_name: 'Menon Industries' });
+  assert.strictEqual(rPrompt8, 'You were in the middle of logging a Field Visit for *Menon Industries* — do you want to continue?');
+
+  const rPrompt9 = buildResumePrompt('LOG_COMPLAINT', { company_name: 'Menon Industries' });
+  assert.strictEqual(rPrompt9, 'You were in the middle of logging a Complaint for *Menon Industries* — do you want to continue?');
+
+  const rPrompt10 = buildResumePrompt('LOG_NEW_CUSTOMER', { company_name: 'Menon Industries' });
+  assert.strictEqual(rPrompt10, 'You were in the middle of onboarding *Menon Industries* — do you want to continue?');
+
+  console.log('  -> PASS: buildResumePrompt contextual prompt tests passed.\n');
 
   console.log('🎉 ALL TESTS PASSED SUCCESSFULLY!');
 }

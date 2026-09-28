@@ -5305,7 +5305,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
           `• *Delivery Location:* ${matchedRecord.delivery_location || 'Not specified'}\n\n` +
           `*Current Line Items:*\n${itemsListText}\n\n` +
           `What details would you like to update?\n` +
-          `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
+          `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Additional Notes)_`;
       } else if (action === 'UPDATE_ORDER') {
         let itemsListText = '';
         const items = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
@@ -6151,7 +6151,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         `• *Delivery Location:* ${single.delivery_location}\n\n` +
         `*Current Line Items:*\n${itemsListText}\n\n` +
         `What details would you like to update?\n` +
-        `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
+        `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Additional Notes)_`;
 
       return {
         handled: true,
@@ -9964,6 +9964,81 @@ async function isMidFlowReadQuery(text) {
 }
 
 /**
+ * Builds a contextual resume prompt that explicitly tells the user which record ID and/or company
+ * they were working on, rather than just a generic module name.
+ * e.g.: "You were in the middle of updating *INQ-8E15BC* for *Menon Industries* — do you want to continue?"
+ */
+function buildResumePrompt(action, draft = {}) {
+  let d = draft;
+  if (typeof d === 'string') {
+    try {
+      d = JSON.parse(d);
+    } catch {
+      d = {};
+    }
+  }
+  d = d || {};
+
+  const companyName = (d.company_name || d.customer_name || '').trim();
+  let inqId = d._inquiry_display_id ? String(d._inquiry_display_id).trim() : '';
+  if (!inqId && d.inquiry_id) {
+    const rawInq = String(d.inquiry_id).trim();
+    inqId = rawInq.toUpperCase().startsWith('INQ-') ? rawInq : `INQ-${rawInq.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+  }
+  const rawPo = d.po_number || d.updates?.po_number || (d.order_id ? (String(d.order_id).toUpperCase().startsWith('ORD-') ? d.order_id : `ORD-${String(d.order_id).replace(/-/g, '').slice(0, 6).toUpperCase()}`) : '');
+  const poNum = rawPo ? String(rawPo).trim() : '';
+
+  switch (action) {
+    case 'UPDATE_INQUIRY': {
+      if (inqId && companyName) return `You were in the middle of updating *${inqId}* for *${companyName}* — do you want to continue?`;
+      if (inqId) return `You were in the middle of updating *${inqId}* — do you want to continue?`;
+      if (companyName) return `You were in the middle of updating inquiry for *${companyName}* — do you want to continue?`;
+      return `You were in the middle of updating an Inquiry — do you want to continue?`;
+    }
+    case 'LOG_INQUIRY': {
+      if (companyName) return `You were in the middle of logging an Inquiry for *${companyName}* — do you want to continue?`;
+      return `You were in the middle of logging a New Inquiry — do you want to continue?`;
+    }
+    case 'UPDATE_ORDER': {
+      const orderRef = poNum || inqId;
+      if (orderRef && companyName) return `You were in the middle of updating order *${orderRef}* for *${companyName}* — do you want to continue?`;
+      if (orderRef) return `You were in the middle of updating order *${orderRef}* — do you want to continue?`;
+      if (companyName) return `You were in the middle of updating order for *${companyName}* — do you want to continue?`;
+      return `You were in the middle of updating an Order — do you want to continue?`;
+    }
+    case 'LOG_ORDER': {
+      if (companyName) return `You were in the middle of logging an Order for *${companyName}* — do you want to continue?`;
+      return `You were in the middle of logging a New Order — do you want to continue?`;
+    }
+    case 'UPDATE_VISIT': {
+      if (companyName) return `You were in the middle of updating field visit for *${companyName}* — do you want to continue?`;
+      return `You were in the middle of updating a Field Visit — do you want to continue?`;
+    }
+    case 'LOG_VISIT': {
+      if (companyName) return `You were in the middle of logging a Field Visit for *${companyName}* — do you want to continue?`;
+      return `You were in the middle of logging a Field Visit — do you want to continue?`;
+    }
+    case 'UPDATE_COMPLAINT': {
+      if (companyName) return `You were in the middle of updating complaint for *${companyName}* — do you want to continue?`;
+      return `You were in the middle of updating a Complaint — do you want to continue?`;
+    }
+    case 'LOG_COMPLAINT': {
+      if (companyName) return `You were in the middle of logging a Complaint for *${companyName}* — do you want to continue?`;
+      return `You were in the middle of logging a Customer Complaint — do you want to continue?`;
+    }
+    case 'LOG_NEW_CUSTOMER': {
+      if (companyName) return `You were in the middle of onboarding *${companyName}* — do you want to continue?`;
+      return `You were in the middle of New Customer Acquisition — do you want to continue?`;
+    }
+    default: {
+      const actionDisplayName = getModuleDisplayName(action);
+      if (companyName) return `You were in the middle of *${actionDisplayName}* for *${companyName}* — do you want to continue?`;
+      return `You were in the middle of *${actionDisplayName}* — do you want to continue?`;
+    }
+  }
+}
+
+/**
  * Handles a read/retrieval query mid-flow without dropping or wiping the active catalog state.
  * Returns the answer along with a prompt to resume the active form and Yes/No quick action buttons.
  */
@@ -9971,8 +10046,7 @@ async function handleMidFlowRetrievalQuery(text, senderPhone, activeState, actio
   const { runOrchestrator } = require('./orchestrator');
   const queryAnswer = await runOrchestrator(text, senderPhone);
 
-  const actionDisplayName = getModuleDisplayName(action);
-  const resumeMsg = `You were in the middle of *${actionDisplayName}* — do you want to continue?`;
+  const resumeMsg = buildResumePrompt(action, draft);
   const combinedReply = `${queryAnswer}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
 
   await recordSessionMessage(senderPhone, 'user', text);
@@ -10021,8 +10095,7 @@ async function handleMidFlowComplaintResolution(text, senderPhone, activeState, 
     };
   }
 
-  const companyLabel = draft?.company_name ? ` for *${draft.company_name}*` : '';
-  const resumeMsg = `You were in the middle of ${getActionFriendlyName(action)}${companyLabel} — do you want to continue?`;
+  const resumeMsg = buildResumePrompt(action, draft);
   const combinedReply = `${resolutionReply}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
 
   await recordSessionMessage(senderPhone, 'user', text);
@@ -10262,8 +10335,7 @@ Return ONLY JSON:
   // If no deal or inquiry found
   if (!deal && !inq) {
     const errorMsg = `❌ *Inquiry Not Found*\n\nCould not find an inquiry or deal matching ${targetInqId ? `"${targetInqId}"` : 'the specified reference'}.\n\nPlease check the Inquiry ID (e.g. INQ-D013D7) and try again.`;
-    const actionDisplayName = getModuleDisplayName(action);
-    const resumeMsg = `You were in the middle of *${actionDisplayName}* — do you want to continue?`;
+    const resumeMsg = buildResumePrompt(action, draft);
     const combinedReply = `${errorMsg}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
 
     await recordSessionMessage(senderPhone, 'user', text);
@@ -10295,8 +10367,7 @@ Return ONLY JSON:
   }
 
   if (transitionError) {
-    const actionDisplayName = getModuleDisplayName(action);
-    const resumeMsg = `You were in the middle of *${actionDisplayName}* — do you want to continue?`;
+    const resumeMsg = buildResumePrompt(action, draft);
     const combinedReply = `⚠️ ${transitionError}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
 
     await recordSessionMessage(senderPhone, 'user', text);
@@ -10369,8 +10440,7 @@ Return ONLY JSON:
   }
 
   const confirmationMsg = `Stage for ${formattedDisplayId} has been updated to ${stageDisplayName}.`;
-  const actionDisplayName = getModuleDisplayName(action);
-  const resumeMsg = `You were in the middle of the ${actionDisplayName} flow — do you want to continue?`;
+  const resumeMsg = buildResumePrompt(action, draft);
   const combinedReply = `${confirmationMsg}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
 
   await recordSessionMessage(senderPhone, 'user', text);
@@ -11078,7 +11148,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       console.log(`[CatalogFlow] Active session (${currentAction}) AI classification for "${text.slice(0, 50)}...":`, intentResult);
 
       if (intentResult.classification === 'OUT_OF_SCOPE_GENERIC') {
-        const outOfScopeMsg = `⚠️ *Out of Scope Request*\n\nI am the *Enlight Metals SalesOS Assistant* and cannot answer general knowledge, trivia, or non-sales questions.\n\n━━━━━━━━━━━━━━━━━━━━\nYou were in the middle of ${getActionFriendlyName(currentAction)} — do you want to continue?`;
+        const resumeMsg = buildResumePrompt(currentAction, currentDraft);
+        const outOfScopeMsg = `⚠️ *Out of Scope Request*\n\nI am the *Enlight Metals SalesOS Assistant* and cannot answer general knowledge, trivia, or non-sales questions.\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
         await recordSessionMessage(senderPhone, 'user', text);
         await recordSessionMessage(senderPhone, 'assistant', outOfScopeMsg, { action_type: 'OUT_OF_SCOPE_REDIRECT' });
         await saveActiveSession(senderPhone, currentDraft.company_name || 'Customer', `catalog_resume_ask|${activeState}|${currentAction}|${JSON.stringify(currentDraft)}`);
@@ -12424,7 +12495,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
               `• *Delivery Location:* ${matchedCandidate.delivery_location}\n\n` +
               `*Current Line Items:*\n${itemsListText}\n\n` +
               `What details would you like to update?\n` +
-              `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Stage)_`;
+              `_(e.g., Rate, Quantity, Delivery Location, Payment Terms, or Additional Notes)_`;
 
             await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
             await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
@@ -13349,4 +13420,5 @@ module.exports = {
   formatSelectedVisitPrompt,
   extractVerbatimNotes,
   detectOutOfScopeActionAttempt,
+  buildResumePrompt,
 };
