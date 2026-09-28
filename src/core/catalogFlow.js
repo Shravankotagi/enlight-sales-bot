@@ -4768,8 +4768,8 @@ function formatStageLabel(st) {
 function formatDetailedInquiryItemsList(items) {
   if (!Array.isArray(items) || items.length === 0) return '';
   return items.map((item, idx) => {
-    const name = item.sku_text || item.description || item.product_name || 'Steel Item';
-    const dim = item.dimensions || item.spec;
+    const name = item.sku_text || item.product_requirement || item.product_name || item.description || item.pName || 'Steel Item';
+    const dim = item.dimensions || item.spec || item.thickness || item.size;
     let spec = '';
     if (dim) {
       const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
@@ -4783,16 +4783,22 @@ function formatDetailedInquiryItemsList(items) {
       spec = ` (${item.grade})`;
     }
 
-    const qty = (item.quantity !== undefined && item.quantity !== null && item.quantity !== '') ? `${item.quantity} ${item.unit || 'MT'}` : '';
-    const rate = Number(item.rate || 0);
-    const itQty = Number(item.quantity || 0);
-    const lineTotal = Number(item.amount || 0) || (rate > 0 && itQty > 0 ? rate * itQty : 0);
+    const rawQty = (item.quantity !== undefined && item.quantity !== null && item.quantity !== '')
+      ? item.quantity
+      : ((item.quantity_mt !== undefined && item.quantity_mt !== null && item.quantity_mt !== '')
+          ? item.quantity_mt
+          : ((item.qty !== undefined && item.qty !== null && item.qty !== '') ? item.qty : ''));
+    const unit = item.unit || item.uom || 'MT';
+    const qty = (rawQty !== '' && rawQty !== null && rawQty !== undefined) ? `${rawQty} ${unit}` : '';
+    const rate = Number(item.rate || item.rate_per_mt || item.target_price || item.unit_price || 0);
+    const itQty = Number(rawQty || 0);
+    const lineTotal = Number(item.amount || item.line_total || item.total || 0) || (rate > 0 && itQty > 0 ? Math.round(rate * itQty) : 0);
 
     const prefix = items.length > 1 ? `${idx + 1}. ` : '';
 
     if (rate > 0) {
-      const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
-      return `${prefix}${name}${spec}${qty ? ` | ${qty}` : ''} | ₹${rate.toLocaleString('en-IN')} /${item.unit || 'MT'}${lineTotalStr}`;
+      const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${Math.round(lineTotal).toLocaleString('en-IN')}` : '';
+      return `${prefix}${name}${spec}${qty ? ` | ${qty}` : ''} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
     }
 
     return `${prefix}${name}${spec}${qty ? ` | ${qty}` : ''}`;
@@ -5832,17 +5838,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
         let itemsListText = '';
         const items = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
         if (items.length > 0) {
-          itemsListText = items.map((item, idx) => {
-            const name = item.sku_text || item.description || 'Steel Item';
-            const spec = item.dimensions ? ` (${item.dimensions})` : (item.grade ? ` (${item.grade})` : '');
-            const qty = item.quantity ?? 0;
-            const unit = item.unit || 'MT';
-            const rate = Number(item.rate ?? 0);
-            const rateText = rate > 0 ? ` @ ₹${rate.toLocaleString('en-IN')}/${unit}` : '';
-            const amt = Number(item.amount ?? (qty * rate));
-            const amtText = amt > 0 ? ` (₹${amt.toLocaleString('en-IN')})` : '';
-            return `${idx + 1}. *${name}${spec}* — ${qty} ${unit}${rateText}${amtText}`;
-          }).join('\n');
+          itemsListText = formatDetailedInquiryItemsList(items);
         } else {
           itemsListText = `1. *${matchedRecord.product_summary || 'Steel Material'}*`;
         }

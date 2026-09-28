@@ -3122,7 +3122,7 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
       { data: inqRows },
     ] = await Promise.all([
       supabaseAdmin.from('recurring_customers').select('*').ilike('customer_name', `%${cleanTarget}%`).limit(1),
-      supabaseAdmin.from('deals').select('id, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, quantity, unit, rate, amount)').ilike('customer_name', `%${cleanTarget}%`),
+      supabaseAdmin.from('deals').select('id, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, dimensions, quantity, unit, rate, amount)').ilike('customer_name', `%${cleanTarget}%`),
       supabaseAdmin.from('customer_visits').select('*, salesperson_phone, employee_id').ilike('customer_name', `%${cleanTarget}%`).order('visited_at', { ascending: false }),
       supabaseAdmin.from('complaints').select('*, reported_by, employee_id').ilike('customer_name', `%${cleanTarget}%`).order('created_at', { ascending: false }),
       supabaseAdmin.from('inquiries').select('id, status, created_at, salesperson_phone, sender_phone').ilike('sender_name', `%${cleanTarget}%`),
@@ -3190,7 +3190,7 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
 
   // Directory / Directory Segmentation Mode
   let custQuery = supabaseAdmin.from('recurring_customers').select('*').eq('is_active', true);
-  let dealsQuery = supabaseAdmin.from('deals').select('id, customer_name, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, quantity, unit, rate, amount)');
+  let dealsQuery = supabaseAdmin.from('deals').select('id, customer_name, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, dimensions, quantity, unit, rate, amount)');
   let visitsQuery = supabaseAdmin.from('customer_visits').select('id, customer_name, visited_at, salesperson_phone, employee_id');
   let inqsQuery = supabaseAdmin.from('inquiries').select('id, sender_name, created_at, salesperson_phone, sender_phone');
   let compQuery = supabaseAdmin.from('complaints').select('id, customer_name, status, created_at, reported_by, employee_id');
@@ -4176,7 +4176,7 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
 
   let dealsQuery = supabaseAdmin
     .from('deals')
-    .select('id, inquiry_id, customer_name, stage, status, total_amount, po_number, created_at, salesperson_phone, employee_id, deal_items(sku_text, quantity, unit)')
+    .select('id, inquiry_id, customer_name, stage, status, total_amount, po_number, created_at, salesperson_phone, employee_id, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
     .ilike('customer_name', `%${companyName}%`)
     .order('created_at', { ascending: false })
     .limit(20);

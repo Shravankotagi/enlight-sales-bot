@@ -637,8 +637,18 @@ async function searchDatabaseForOption10(senderPhone, queryText) {
       contextBlock += `### Matched Inquiries & Orders:\n`;
       matchedDeals.forEach(d => {
         const hex = (d.inquiry_id || d.id || '').replace(/-/g, '').slice(0, 6).toUpperCase();
-        const cleanCode = hex ? `INQ-${hex}` : 'INQ';
-        const items = (d.deal_items || []).map(i => `${i.sku_text || 'Product'}${i.dimensions ? ` (${i.dimensions})` : ''} - ${i.quantity || 0} ${i.unit || 'MT'}${i.rate ? ` @ ₹${i.rate}/MT` : ''}`).join('; ');
+        const items = (d.deal_items || []).map(i => {
+          const spec = i.dimensions ? ` (${i.dimensions})` : '';
+          const unit = i.unit || 'MT';
+          const qtyStr = `${i.quantity || 0} ${unit}`;
+          const rate = Number(i.rate || 0);
+          const amt = Number(i.amount || (rate > 0 && i.quantity ? rate * Number(i.quantity) : 0));
+          if (rate > 0) {
+            const lineTotalStr = amt > 0 ? ` | Line Total: ₹${amt.toLocaleString('en-IN')}` : '';
+            return `${i.sku_text || 'Product'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+          }
+          return `${i.sku_text || 'Product'}${spec} | ${qtyStr}`;
+        }).join('; ');
         const dateStr = d.created_at ? d.created_at.slice(0, 10) : 'Recent';
         contextBlock += `- #${cleanCode} | Customer: ${d.customer_name} | Stage: ${d.stage} | Items: [${items || 'No line items'}] | Date: ${dateStr}${d.po_number ? ` | PO: ${d.po_number}` : ''}\n`;
       });

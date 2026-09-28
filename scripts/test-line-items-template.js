@@ -1,66 +1,85 @@
 require('dotenv').config();
 const assert = require('assert');
+const { formatDetailedInquiryItemsList } = require('../src/core/catalogFlow');
 
-// 1. Test retrieval tools line items formatting
-const { get_inquiries, get_deal_ids } = require('../src/core/retrievalTools');
+async function runComprehensiveTests() {
+  console.log('=== Comprehensive Line Items Template Audit Test Suite ===\n');
 
-// 2. Test catalogFlow helper
-const { handleCatalogFlow } = require('../src/core/catalogFlow');
-
-async function testLineItemsFormatting() {
-  console.log('=== Starting Line Items Single-Line Piped Template Verification ===\n');
-
-  // Test retrieval query formatting simulation
-  const dummyItemsWithPricing = [
-    { sku_text: 'HR Coil', dimensions: '7mm', quantity: 45, unit: 'MT', rate: 88, amount: 3960 },
+  // Test 1: Standard Item with Rate & Line Total
+  console.log('--- Test 1: Standard Item with Rate & Line Total ---');
+  const items1 = [
+    { sku_text: 'HR Coil', dimensions: '7mm', quantity: 45, unit: 'MT', rate: 88, amount: 3960 }
   ];
-
-  const dummyMultiItems = [
-    { sku_text: 'HR Coil', dimensions: '7mm', quantity: 45, unit: 'MT', rate: 88, amount: 3960 },
-    { sku_text: 'CR Sheet', dimensions: '2mm', quantity: 20, unit: 'MT', rate: 92, amount: 1840 },
-  ];
-
-  const dummyItemsWithoutPricing = [
-    { sku_text: 'HR Coil', dimensions: '7mm', quantity: 45, unit: 'MT' },
-  ];
-
-  // Helper logic check
-  const formatItem = (it, idx, totalCount) => {
-    const prefix = totalCount > 1 ? `${idx + 1}. ` : '';
-    const spec = it.dimensions ? ` (${it.dimensions})` : '';
-    const qtyStr = it.quantity ? `${it.quantity} ${it.unit || 'MT'}` : '';
-    const rate = Number(it.rate || 0);
-    const amt = Number(it.amount || 0) || (rate > 0 && it.quantity ? rate * Number(it.quantity) : 0);
-    if (rate > 0) {
-      const lineTotalStr = amt > 0 ? ` | Line Total: ₹${amt.toLocaleString('en-IN')}` : '';
-      return `${prefix}${it.sku_text || 'Item'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${it.unit || 'MT'}${lineTotalStr}`;
-    }
-    return `${prefix}${it.sku_text || 'Item'}${spec} | ${qtyStr}`;
-  };
-
-  console.log('--- Test 1: Single item with rate & line total ---');
-  const res1 = formatItem(dummyItemsWithPricing[0], 0, 1);
-  console.log('Output 1:', res1);
-  assert.strictEqual(res1, 'HR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹3,960');
+  const out1 = formatDetailedInquiryItemsList(items1);
+  console.log('Output 1:', out1);
+  assert.strictEqual(out1, 'HR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹3,960');
   console.log('✅ Test 1 Passed\n');
 
-  console.log('--- Test 2: Single item without rate ---');
-  const res2 = formatItem(dummyItemsWithoutPricing[0], 0, 1);
-  console.log('Output 2:', res2);
-  assert.strictEqual(res2, 'HR Coil (7mm) | 45 MT');
+  // Test 2: Standard Item Without Rate
+  console.log('--- Test 2: Standard Item Without Rate ---');
+  const items2 = [
+    { sku_text: 'HR Coil', dimensions: '7mm', quantity: 45, unit: 'MT' }
+  ];
+  const out2 = formatDetailedInquiryItemsList(items2);
+  console.log('Output 2:', out2);
+  assert.strictEqual(out2, 'HR Coil (7mm) | 45 MT');
   console.log('✅ Test 2 Passed\n');
 
-  console.log('--- Test 3: Multiple items with rate & line total ---');
-  const res3 = dummyMultiItems.map((it, idx) => formatItem(it, idx, dummyMultiItems.length)).join('\n');
-  console.log('Output 3:\n' + res3);
-  assert(res3.includes('1. HR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹3,960'));
-  assert(res3.includes('2. CR Sheet (2mm) | 20 MT | ₹92 /MT | Line Total: ₹1,840'));
+  // Test 3: Multiple Items Numbered
+  console.log('--- Test 3: Multiple Items Numbered ---');
+  const items3 = [
+    { sku_text: 'HR Coil', dimensions: '7mm', quantity: 45, unit: 'MT', rate: 88, amount: 3960 },
+    { sku_text: 'CR Sheet', dimensions: '2mm', quantity: 20, unit: 'MT', rate: 92, amount: 1840 }
+  ];
+  const out3 = formatDetailedInquiryItemsList(items3);
+  console.log('Output 3:\n' + out3);
+  assert.strictEqual(out3, '1. HR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹3,960\n2. CR Sheet (2mm) | 20 MT | ₹92 /MT | Line Total: ₹1,840');
   console.log('✅ Test 3 Passed\n');
 
-  console.log('🎉 ALL LINE ITEMS TEMPLATE TESTS PASSED SUCCESSFULLY! 🎉');
+  // Test 4: Property Aliases (product_requirement, quantity_mt, rate_per_mt, thickness)
+  console.log('--- Test 4: Property Aliases Compatibility ---');
+  const items4 = [
+    { product_requirement: 'GP Sheet', thickness: '0.5mm', quantity_mt: 30, rate_per_mt: 75000 }
+  ];
+  const out4 = formatDetailedInquiryItemsList(items4);
+  console.log('Output 4:', out4);
+  assert.strictEqual(out4, 'GP Sheet (0.5mm) | 30 MT | ₹75,000 /MT | Line Total: ₹22,50,000');
+  console.log('✅ Test 4 Passed\n');
+
+  // Test 5: Auto-calculation of Line Total when amount is not explicitly provided
+  console.log('--- Test 5: Auto-calculation of Line Total ---');
+  const items5 = [
+    { sku_text: 'MS Plate', dimensions: '12mm', quantity: 10, unit: 'MT', rate: 60000 }
+  ];
+  const out5 = formatDetailedInquiryItemsList(items5);
+  console.log('Output 5:', out5);
+  assert.strictEqual(out5, 'MS Plate (12mm) | 10 MT | ₹60,000 /MT | Line Total: ₹6,00,000');
+  console.log('✅ Test 5 Passed\n');
+
+  // Test 6: Dimension already in product name
+  console.log('--- Test 6: Dimension already in product name should not duplicate ---');
+  const items6 = [
+    { sku_text: 'HR Coil 8mm', dimensions: '8mm', quantity: 15, unit: 'MT', rate: 52000 }
+  ];
+  const out6 = formatDetailedInquiryItemsList(items6);
+  console.log('Output 6:', out6);
+  assert.strictEqual(out6, 'HR Coil 8mm | 15 MT | ₹52,000 /MT | Line Total: ₹7,80,000');
+  console.log('✅ Test 6 Passed\n');
+
+  // Test 7: Empty or missing fields edge case
+  console.log('--- Test 7: Empty or missing fields ---');
+  const items7 = [
+    { sku_text: 'TMT Rebars' }
+  ];
+  const out7 = formatDetailedInquiryItemsList(items7);
+  console.log('Output 7:', out7);
+  assert.strictEqual(out7, 'TMT Rebars');
+  console.log('✅ Test 7 Passed\n');
+
+  console.log('🎉 ALL COMPREHENSIVE AUDIT TESTS PASSED SUCCESSFULLY! 🎉');
 }
 
-testLineItemsFormatting().catch(err => {
+runComprehensiveTests().catch(err => {
   console.error('Test failed:', err);
   process.exit(1);
 });
