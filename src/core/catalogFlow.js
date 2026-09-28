@@ -449,6 +449,71 @@ const CATALOG_MENU_SECTIONS = [
   },
 ];
 
+async function canUserUpdateVisits(senderPhone) {
+  if (!senderPhone) return true;
+  try {
+    const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
+    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
+    return Boolean(scope.isAdmin || scope.isManager);
+  } catch (err) {
+    console.error('Error checking visit update permissions:', err?.message);
+    return false;
+  }
+}
+
+function getCatalogMenu(isAuthorizedForVisits = true) {
+  if (isAuthorizedForVisits) {
+    return CATALOG_MENU;
+  }
+  return `Welcome to **SalesOS Assistant**!
+
+What would you like to do today?
+
+1. **Log New Inquiry**
+2. **Update Inquiry**
+3. **Log New Order**
+4. **Update Order**
+5. **Log Customer Field Visit**
+6. **New Customer Acquisition**
+7. **Log Customer Complaint**
+8. **Update Customer Complaint**
+9. **Other / General Query**
+
+Reply with a number (1–9) or type what you'd like to do.`;
+}
+
+function getCatalogMenuSections(isAuthorizedForVisits = true) {
+  if (isAuthorizedForVisits) {
+    return CATALOG_MENU_SECTIONS;
+  }
+  return [
+    {
+      title: 'Inquiries & Orders',
+      rows: [
+        { id: 'menu_1', title: '1. Log New Inquiry', description: 'Capture customer requirements' },
+        { id: 'menu_2', title: '2. Update Inquiry', description: 'Update rates, specs or stage' },
+        { id: 'menu_3', title: '3. Log New Order', description: 'Record new confirmed PO' },
+        { id: 'menu_4', title: '4. Update Order', description: 'Attach PO, update items' },
+      ],
+    },
+    {
+      title: 'Visits & Customers',
+      rows: [
+        { id: 'menu_5', title: '5. Log Field Visit', description: 'Record client meeting' },
+        { id: 'menu_7', title: '6. New Acquisition', description: 'Add new customer profile' },
+      ],
+    },
+    {
+      title: 'Complaints & Queries',
+      rows: [
+        { id: 'menu_8', title: '7. Log Complaint', description: 'Report quality or delay' },
+        { id: 'menu_9', title: '8. Update Complaint', description: 'Update resolution status' },
+        { id: 'menu_10', title: '9. General Query', description: 'Ask any data retrieval query' },
+      ],
+    },
+  ];
+}
+
 // ── MODULE COLLECTION PROMPTS ────────────────────────────────────────────────
 
 const MODULE_PROMPTS = {
@@ -693,11 +758,13 @@ function getEditPromptForAction(action) {
   }
 }
 
-function buildOutOfScopeActivityResponse(currentAction, detectedAction) {
+function buildOutOfScopeActivityResponse(currentAction, detectedAction, isAuthorizedForVisits = true) {
   const currentModuleName = getModuleDisplayName(currentAction);
   const targetVerb = getTargetActionVerb(detectedAction);
+  const menuText = getCatalogMenu(isAuthorizedForVisits);
+  const menuSections = getCatalogMenuSections(isAuthorizedForVisits);
 
-  const replyText = `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete the current ongoing activity or select the relevant option from the menu.\n\nHere is the menu to start a new activity:\n\n${CATALOG_MENU}`;
+  const replyText = `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete the current ongoing activity or select the relevant option from the menu.\n\nHere is the menu to start a new activity:\n\n${menuText}`;
 
   return {
     handled: true,
@@ -706,7 +773,7 @@ function buildOutOfScopeActivityResponse(currentAction, detectedAction) {
     interactiveList: {
       bodyText: `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete the current ongoing activity or select the relevant option from the menu.\n\nHere is the menu to start a new activity:`,
       buttonText: 'Choose Action',
-      sections: CATALOG_MENU_SECTIONS,
+      sections: menuSections,
     },
   };
 }
@@ -791,7 +858,7 @@ async function isGreeting(text) {
   return false;
 }
 
-function matchActionFromInput(text, hasActiveSession = false) {
+function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVisits = true) {
   if (!text || typeof text !== 'string') return null;
 
   // Extract first line in case of multi-line interactive list replies (e.g. "3. Log New Order\nRecord new confirmed PO")
@@ -858,8 +925,54 @@ function matchActionFromInput(text, hasActiveSession = false) {
   ) {
     return 'LOG_VISIT';
   }
+
+  // If user is a salesperson, option 6 in their menu is New Customer Acquisition
+  if (!isAuthorizedForVisits) {
+    if (
+      (!hasActiveSession && (clean === '6' || clean === '6.' || clean === 'option 6' || clean === 'choice 6')) ||
+      clean === 'menu_7' ||
+      stripped === 'new acquisition' || stripped === 'new customer' || stripped === 'new customer acquisition' || stripped === 'customer acquisition' || stripped === 'add customer' || stripped === 'onboard customer' || stripped === 'log customer' || stripped === 'start_log_customer' ||
+      clean === '6. new customer acquisition' || clean === '6. new acquisition' || clean === '6 new customer acquisition' ||
+      clean === '7. new customer acquisition' || clean === '7. new acquisition' || clean === '7 new customer acquisition' ||
+      fullClean.includes('onboard new client profile')
+    ) {
+      return 'LOG_NEW_CUSTOMER';
+    }
+    if (
+      (!hasActiveSession && (clean === '7' || clean === '7.' || clean === 'option 7' || clean === 'choice 7')) ||
+      clean === 'menu_8' ||
+      stripped === 'log complaint' || stripped === 'log customer complaint' || stripped === 'new complaint' || stripped === 'record complaint' || stripped === 'raise complaint' || stripped === 'start_log_complaint' ||
+      clean === '7. log customer complaint' || clean === '7. log complaint' || clean === '7 log customer complaint' ||
+      clean === '8. log customer complaint' || clean === '8. log complaint' || clean === '8 log customer complaint' ||
+      fullClean.includes('log quality/service issue')
+    ) {
+      return 'LOG_COMPLAINT';
+    }
+    if (
+      (!hasActiveSession && (clean === '8' || clean === '8.' || clean === 'option 8' || clean === 'choice 8')) ||
+      clean === 'menu_9' ||
+      stripped === 'update complaint' || stripped === 'update customer complaint' || stripped === 'complaint update' || stripped === 'resolve complaint' || stripped === 'close complaint' || stripped === 'edit complaint' || stripped === 'start_update_complaint' ||
+      clean === '8. update customer complaint' || clean === '8. update complaint' || clean === '8 update customer complaint' ||
+      clean === '9. update customer complaint' || clean === '9. update complaint' || clean === '9 update customer complaint' ||
+      fullClean.includes('update resolution or status')
+    ) {
+      return 'UPDATE_COMPLAINT';
+    }
+    if (
+      (!hasActiveSession && (clean === '9' || clean === '9.' || clean === 'option 9' || clean === 'choice 9')) ||
+      clean === 'menu_10' ||
+      stripped === 'other' || stripped === 'general query' || stripped === 'other query' || stripped === 'general_query' || stripped === 'other / general query' || stripped === 'search query' ||
+      clean === '9. other / general query' || clean === '9. other' || clean === '9. general query' || clean === '9 general query' ||
+      clean === '10. other / general query' || clean === '10. other' || clean === '10. general query' || clean === '10 general query' ||
+      fullClean.includes('general search or intelligence') || fullClean.includes('ask any data retrieval query')
+    ) {
+      return 'GENERAL_QUERY';
+    }
+  }
+
+  // Explicit Update Visit keywords (always detected so unauthorized users hit the access denied gate)
   if (
-    (!hasActiveSession && (clean === '6' || clean === '6.' || clean === 'option 6' || clean === 'choice 6')) ||
+    (isAuthorizedForVisits && !hasActiveSession && (clean === '6' || clean === '6.' || clean === 'option 6' || clean === 'choice 6')) ||
     clean === 'menu_6' ||
     stripped === 'update visit' || stripped === 'update field visit' || stripped === 'update customer visit' || stripped === 'visit update' || stripped === 'field visit update' || stripped === 'edit visit' || stripped === 'modify visit' || stripped === 'start_update_visit' ||
     clean === '6. update field visit' || clean === '6. update visit' || clean === '6 update field visit' ||
@@ -867,6 +980,7 @@ function matchActionFromInput(text, hasActiveSession = false) {
   ) {
     return 'UPDATE_VISIT';
   }
+
   if (
     (!hasActiveSession && (clean === '7' || clean === '7.' || clean === 'option 7' || clean === 'choice 7')) ||
     clean === 'menu_7' ||
@@ -897,7 +1011,7 @@ function matchActionFromInput(text, hasActiveSession = false) {
   if (
     (!hasActiveSession && (clean === '10' || clean === '10.' || clean === 'option 10' || clean === 'choice 10')) ||
     clean === 'menu_10' ||
-    stripped === 'other' || stripped === 'general query' || stripped === 'other query' || stripped === 'general_query' || stripped === 'other / general query' || stripped === 'search query' || text.includes('🔟') || text.includes('1️⃣0️⃣') ||
+    stripped === 'other' || stripped === 'general query' || stripped === 'other query' || stripped === 'general_query' || stripped === 'other / general query' || stripped === 'search query' ||
     clean === '10. other / general query' || clean === '10. other' || clean === '10. general query' ||
     fullClean.includes('general search or intelligence')
   ) {
@@ -907,7 +1021,7 @@ function matchActionFromInput(text, hasActiveSession = false) {
   return null;
 }
 
-function isExplicitMenuSelection(text, hasActiveSession = false) {
+function isExplicitMenuSelection(text, hasActiveSession = false, isAuthorizedForVisits = true) {
   if (!text || typeof text !== 'string') return null;
   const firstLine = text.split(/[\r\n]+/)[0].trim();
   const clean = firstLine.toLowerCase().replace(/[🔟*️⃣\uFE0F\u20E3]/g, '').trim();
@@ -915,7 +1029,7 @@ function isExplicitMenuSelection(text, hasActiveSession = false) {
 
   // 1. WhatsApp List Item ID (e.g. menu_1 .. menu_10)
   if (/^menu_(?:[1-9]|10)$/i.test(clean)) {
-    return matchActionFromInput(text, false);
+    return matchActionFromInput(text, false, isAuthorizedForVisits);
   }
 
   // 2. Exact catalog list titles / descriptions
@@ -933,12 +1047,12 @@ function isExplicitMenuSelection(text, hasActiveSession = false) {
     fullClean.includes('ask any data retrieval query') ||
     fullClean.includes('general search or intelligence')
   ) {
-    return matchActionFromInput(text, false);
+    return matchActionFromInput(text, false, isAuthorizedForVisits);
   }
 
   // 3. Action command / start prefix (e.g. "start_log_order", "start_update_inquiry")
   if (/^start_(?:log|update)_(?:inquiry|order|visit|customer|complaint)$/i.test(clean)) {
-    return matchActionFromInput(text, false);
+    return matchActionFromInput(text, false, isAuthorizedForVisits);
   }
 
   // 3b. Repeat action button / command (e.g. "btn_repeat_log_complaint", "log another complaint")
@@ -951,14 +1065,14 @@ function isExplicitMenuSelection(text, hasActiveSession = false) {
   }
 
   // 4. Standalone action verbs / switch commands (e.g. "log order", "new inquiry", "update inquiry", "switch to inquiry")
-  const matchedAction = matchActionFromInput(text, hasActiveSession);
+  const matchedAction = matchActionFromInput(text, hasActiveSession, isAuthorizedForVisits);
   if (matchedAction) {
     return matchedAction;
   }
 
   // 5. If NOT in an active session (idle/general), single digits 1-10 are catalog selections
   if (!hasActiveSession && /^(?:[1-9]|10)\.?$/i.test(clean)) {
-    return matchActionFromInput(text, false);
+    return matchActionFromInput(text, false, isAuthorizedForVisits);
   }
 
   return null;
@@ -1540,7 +1654,7 @@ function getAllowedFieldsListForAction(action) {
     case 'LOG_VISIT':
       return `- *Person Met*\n- *Contact Phone*\n- *City / Location*\n- *Visit Date*\n- *Visit Outcome (Positive / Neutral / Negative)*\n- *Meeting Remarks & Discussion Notes*`;
     case 'UPDATE_VISIT':
-      return `- *Person Met*\n- *Contact Phone*\n- *City / Location*\n- *Visit Date*\n- *Visit Outcome*\n- *Meeting Remarks & Follow-up Notes*\n- *Add Photo / Document (Attach additional site photos)*\n- *Customer Probability (Hot / Warm / Cold)*\n- *Customer Type (OEM / Fabricator / etc.)*\n- *Delivery Location & Payment Terms*\n- *Status*`;
+      return `- *Person Met*\n- *Contact Phone*\n- *Designation & Email*\n- *City / Location*\n- *Customer Type & Visit Type*\n- *Visit Outcome & Probability*\n- *Product Details & Monthly Consumption*\n- *Current Requirement & Next Purchase Expected*\n- *Delivery Location & Preferred Make & Payment Terms*\n- *Follow-up Action & Date*\n- *Meeting Remarks*\n- *Add Photo / Document (Attach additional site photos)*\n- *Status*`;
     case 'LOG_COMPLAINT':
       return `- *Complaint Date*\n- *Complaint Raised By*\n- *Linked Inquiry ID / PO Number*\n- *Affected Product*\n- *Complaint Type*\n- *Invoice / Challan No.*\n- *Complaint Description*\n- *Evidence Attachments (Max 3)*\n- *Corrective Action*\n- *Customer Communication*\n- *Resolution Notes*\n- *Resolution Date*`;
     case 'UPDATE_COMPLAINT':
@@ -3338,6 +3452,24 @@ function extractVisitDetails(v) {
     .replace(/^[\s|•-]+|[\s|•-]+$/g, '')
     .trim();
 
+  const reqTagMatch = rem.match(/\[(?:Requirement|Requirements|Material\s*Requirement):\s*([^\]]+)\]/i);
+  const makeTagMatch = rem.match(/\[(?:Make|Preferred\s*Make):\s*([^\]]+)\]/i);
+  const termsTagMatch = rem.match(/\[(?:Payment\s*Terms|Terms):\s*([^\]]+)\]/i);
+
+  const productDetails = v.product_details || (reqTagMatch ? reqTagMatch[1].trim() : null);
+  const preferredMake = v.preferred_make || (makeTagMatch ? makeTagMatch[1].trim() : null);
+  const paymentTerms = v.payment_terms || (termsTagMatch ? termsTagMatch[1].trim() : null);
+
+  let nextPurchaseExpected = null;
+  if (v.next_purchase_expected) {
+    const parsedNpe = new Date(v.next_purchase_expected);
+    if (!isNaN(parsedNpe.getTime())) {
+      nextPurchaseExpected = formatDateDDMMYYYY(parsedNpe);
+    } else {
+      nextPurchaseExpected = v.next_purchase_expected;
+    }
+  }
+
   return {
     id: v.id,
     customer_name: v.customer_name || 'Customer',
@@ -3345,34 +3477,67 @@ function extractVisitDetails(v) {
     outcome: outcome || 'Positive',
     date_formatted: dateFormatted,
     person_met: v.person_met || 'Not specified',
-    contact_no: v.contact_no || null,
+    contact_no: v.contact_no || v.contact_phone || null,
+    contact_phone: v.contact_phone || v.contact_no || null,
+    email: v.email || null,
+    designation: v.designation || null,
+    customer_type: v.customer_type || null,
+    visit_type: v.visit_type || null,
+    customer_probability: v.customer_probability || null,
+    product_details: productDetails,
+    monthly_consumption: v.monthly_consumption || null,
+    current_requirement: v.current_requirement || null,
+    next_purchase_expected: nextPurchaseExpected,
+    delivery_location: v.delivery_location || null,
+    preferred_make: preferredMake,
+    payment_terms: paymentTerms,
+    gps_photo_url: v.gps_photo_url || null,
+    attachments: Array.isArray(v.attachments) ? v.attachments : [],
+    gps_latitude: v.gps_latitude || null,
+    gps_longitude: v.gps_longitude || null,
+    gps_accuracy: v.gps_accuracy || null,
     follow_up_action: followUpAction,
     follow_up_date: followUpDate,
     follow_up_status: followUpStatus,
     remarks: cleanRemarks || 'Not specified',
     visited_at: v.visited_at,
+    salesperson_phone: v.salesperson_phone || null,
   };
 }
 
 function formatSelectedVisitPrompt(record) {
-  let prompt = `✏️ *Selected Field Visit for ${record.customer_name} (${record.date_formatted}):*\n\n` +
+  let prompt = `*Selected Field Visit for ${record.customer_name} (${record.date_formatted}):*\n\n` +
+    `*Stakeholder & Classification:*\n` +
     `• *Person Met:* ${record.person_met || 'Not specified'}\n` +
-    `• *Location:* ${record.location || 'Not specified'}\n` +
-    `• *Outcome:* ${record.outcome || 'Positive'}\n`;
+    `• *Designation:* ${record.designation || 'Not specified'}\n` +
+    `• *Contact Phone:* ${record.contact_phone || record.contact_no || 'Not specified'}\n` +
+    `• *Email:* ${record.email || 'Not specified'}\n` +
+    `• *City / Location:* ${record.location || 'Not specified'}\n` +
+    `• *Customer Type:* ${record.customer_type || 'Not specified'}\n` +
+    `• *Visit Type:* ${record.visit_type || 'Not specified'}\n` +
+    `• *Outcome:* ${record.outcome || 'Positive'}\n` +
+    `• *Customer Probability:* ${record.customer_probability || 'Not specified'}\n\n` +
+    `*Commercials & Requirements:*\n` +
+    `• *Product Details:* ${record.product_details || 'Not specified'}\n` +
+    `• *Monthly Consumption:* ${record.monthly_consumption || 'Not specified'}\n` +
+    `• *Current Requirement:* ${record.current_requirement || 'Not specified'}\n` +
+    `• *Next Purchase Expected:* ${record.next_purchase_expected || 'Not specified'}\n` +
+    `• *Preferred Make:* ${record.preferred_make || 'Not specified'}\n` +
+    `• *Payment Terms:* ${record.payment_terms || 'Not specified'}\n` +
+    `• *Delivery Location:* ${record.delivery_location || 'Not specified'}\n\n` +
+    `*Follow-up & Meeting Notes:*\n` +
+    `• *Follow-up Action:* ${record.follow_up_action || 'None'}\n` +
+    `• *Follow-up Date:* ${record.follow_up_date || 'None'}\n` +
+    `• *Follow-up Status:* ${record.follow_up_status || 'Pending'}\n` +
+    `• *Remarks:* ${record.remarks || 'Not specified'}\n`;
 
-  if (record.follow_up_action) {
-    prompt += `• *Follow-up Action:* ${record.follow_up_action}\n`;
-  }
-  if (record.follow_up_date) {
-    prompt += `• *Follow-up Date:* ${record.follow_up_date}\n`;
-  }
-  if (record.follow_up_status) {
-    prompt += `• *Follow-up Status:* ${record.follow_up_status}\n`;
+  const attCount = (Array.isArray(record.attachments) ? record.attachments.length : 0) + (record.gps_photo_url ? 1 : 0);
+  if (attCount > 0) {
+    prompt += `• *Attachments:* ${attCount} photo(s) on file\n`;
   }
 
-  prompt += `• *Remarks:* ${record.remarks || 'Not specified'}\n\n` +
-    `What details would you like to update?\n` +
-    `_(e.g., Person Met, Outcome to Positive, Remarks, or Follow-up Action)_`;
+  prompt += `\n*Which fields would you like to update?*\n` +
+    `_(Reply with the field name and new value, or upload a new site photo)_`;
 
   return prompt;
 }
@@ -3454,16 +3619,9 @@ async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
     const details = extractVisitDetails(v);
     return {
       index: startIdx + idx + 1,
-      id: details.id,
+      ...details,
       company_name: details.customer_name || draft.company_name || 'Customer',
       date: details.date_formatted,
-      visited_at: details.visited_at,
-      person_met: details.person_met,
-      location: details.location,
-      outcome: details.outcome,
-      follow_up_action: details.follow_up_action,
-      follow_up_date: details.follow_up_date,
-      follow_up_status: details.follow_up_status,
       remarks: details.remarks !== 'Not specified' ? (details.remarks.length > 80 ? details.remarks.slice(0, 77) + '...' : details.remarks) : null,
     };
   });
@@ -3977,8 +4135,11 @@ function formatRecordLineForModule(action, record, index) {
       return `${index}. ${record.displayId} | ${record.customer_name} | ${record.product_summary} | ${record.date_formatted}`;
     case 'UPDATE_COMPLAINT':
       return `${index}. ${record.customer_name} | ${record.complaint_type} | ${record.status} | ${record.date_formatted}`;
-    case 'UPDATE_VISIT':
-      return `${index}. ${record.customer_name} | ${record.location} | ${record.outcome} | ${record.date_formatted}`;
+    case 'UPDATE_VISIT': {
+      const detailsList = [record.person_met, record.location, record.outcome].filter(Boolean).filter(s => s !== 'Not specified');
+      const detailsStr = detailsList.length > 0 ? ` | ${detailsList.join(' | ')}` : '';
+      return `${index}. ${record.customer_name}${detailsStr} | ${record.date_formatted}`;
+    }
     default:
       return `${index}. ${record.customer_name} | ${record.date_formatted}`;
   }
@@ -4100,10 +4261,26 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
   const clean = text.trim();
   const lower = clean.toLowerCase();
 
+  // 0. Permission check for UPDATE_VISIT
+  if (action === 'UPDATE_VISIT') {
+    const canUpdate = await canUserUpdateVisits(senderPhone);
+    if (!canUpdate) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      const deniedReply = `Access Denied: Field visits can only be updated by Sales Managers and Administrators. Please contact your manager to update a logged visit.`;
+      await recordSessionMessage(senderPhone, 'assistant', deniedReply, { action_type: 'ACCESS_DENIED' });
+      await finalizeCurrentSession(senderPhone, 'Unauthorized visit update attempt');
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return { handled: true, reply: deniedReply };
+    }
+  }
+
   // 1. Cancel / Discard / Menu
   if (isDiscardOrCancelIntent(clean) || (await isGreeting(clean)) || lower === 'menu' || lower === 'exit' || lower === 'quit') {
     await recordSessionMessage(senderPhone, 'user', text);
-    const cancelReply = `Activity cancelled.\n\n` + CATALOG_MENU;
+    const canUpdate = await canUserUpdateVisits(senderPhone);
+    const userMenu = getCatalogMenu(canUpdate);
+    const userSections = getCatalogMenuSections(canUpdate);
+    const cancelReply = `Activity cancelled.\n\n` + userMenu;
     await recordSessionMessage(senderPhone, 'assistant', cancelReply, { action_type: 'CATALOG_MENU' });
     await finalizeCurrentSession(senderPhone, `Cancelled ${getActionFriendlyName(action)} selection`);
     await saveActiveSession(senderPhone, 'Unknown', 'general');
@@ -4114,7 +4291,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
       interactiveList: {
         bodyText: 'Here is the menu to start a new activity:',
         buttonText: 'Choose Action',
-        sections: CATALOG_MENU_SECTIONS,
+        sections: userSections,
       },
     };
   }
@@ -7769,6 +7946,11 @@ async function executeAction(action, draft, senderPhone) {
       }
 
       case 'UPDATE_VISIT': {
+        const canUpdate = await canUserUpdateVisits(senderPhone);
+        if (!canUpdate) {
+          return `Access Denied: Field visits can only be updated by Sales Managers and Administrators.`;
+        }
+
         const companyName = (draft.company_name || '').trim();
         const visitId = (draft.visit_id || '').trim();
         const targetDate = draft.visit_date || draft.updates?.visit_date || null;
@@ -9643,6 +9825,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   if (text.length === 0) return { handled: false };
 
   const { photoDataUrl, gpsData, attachmentObj, incomingAttachments } = extractPhotoAndGps(rawText, options);
+  const canUpdateVisits = await canUserUpdateVisits(senderPhone);
 
   // ── 1. FETCH ACTIVE SESSION STATE ──────────────────────────────────────────
   const activeSession = await getFullActiveSession(senderPhone);
@@ -9658,7 +9841,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   // ── 2a. DIRECT EXPLICIT MENU SELECTION (PREEMPTION) ────────────────────────
   // When user selects any option from catalog list ([Choose Action] or direct action commands),
   // immediately clean up any prior flow and start the newly selected module prompt.
-  const explicitAction = isExplicitMenuSelection(text, hasActiveCatalogSession);
+  const explicitAction = isExplicitMenuSelection(text, hasActiveCatalogSession, canUpdateVisits);
   if (explicitAction) {
     if (hasActiveCatalogSession) {
       await finalizeCurrentSession(senderPhone, `Switched to ${getActionFriendlyName(explicitAction)}`);
@@ -9676,6 +9859,13 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     if (['UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(explicitAction)) {
+      if (explicitAction === 'UPDATE_VISIT' && !canUpdateVisits) {
+        const deniedReply = `Access Denied: Field visits can only be updated by Sales Managers and Administrators. Please contact your manager to update a logged visit.`;
+        await recordSessionMessage(senderPhone, 'assistant', deniedReply, { action_type: 'ACCESS_DENIED' });
+        await saveActiveSession(senderPhone, 'Unknown', 'general');
+        return { handled: true, reply: deniedReply };
+      }
+
       const selectionRes = await fetchAndRenderUpdateSelection(explicitAction, senderPhone, { page: 1, customerFilter: null });
       await startNewCatalogSession(senderPhone, selectionRes.reply);
       await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: explicitAction });
@@ -9704,16 +9894,18 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
   // ── 2b. GREETING CHECK ──────────────────────────────────────────────────────
   if (await isGreeting(text)) {
+    const userMenu = getCatalogMenu(canUpdateVisits);
+    const userSections = getCatalogMenuSections(canUpdateVisits);
     await saveActiveSession(senderPhone, 'Unknown', 'general');
-    await startNewCatalogSession(senderPhone, CATALOG_MENU);
+    await startNewCatalogSession(senderPhone, userMenu);
     return {
       handled: true,
-      reply: CATALOG_MENU,
+      reply: userMenu,
       interactiveType: 'list',
       interactiveList: {
         bodyText: `Welcome to *SalesOS Assistant*!\n\nHere is the menu to start a new activity:`,
         buttonText: 'Choose Action',
-        sections: CATALOG_MENU_SECTIONS,
+        sections: userSections,
       },
     };
   }
@@ -9857,7 +10049,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       await recordSessionMessage(senderPhone, 'user', text);
       await finalizeCurrentSession(senderPhone, `Cancelled ${getActionFriendlyName(action)} draft after query interruption`);
       await saveActiveSession(senderPhone, 'Unknown', 'general');
-      const exitMsg = `Activity cancelled.\n\n` + CATALOG_MENU;
+      const userMenu = getCatalogMenu(canUpdateVisits);
+      const userSections = getCatalogMenuSections(canUpdateVisits);
+      const exitMsg = `Activity cancelled.\n\n` + userMenu;
       await recordSessionMessage(senderPhone, 'assistant', exitMsg, { action_type: 'CATALOG_MENU' });
       return {
         handled: true,
@@ -9866,7 +10060,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         interactiveList: {
           bodyText: 'Here is the menu to start a new activity:',
           buttonText: 'Choose Action',
-          sections: CATALOG_MENU_SECTIONS,
+          sections: userSections,
         },
       };
     }
@@ -10891,17 +11085,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           Boolean(existingDraft.person_met || existingDraft.contact_phone || existingDraft.visit_outcome || existingDraft.meeting_remarks);
 
         if (isPureSelect && !hasUpdates) {
-          const prompt = formatSelectedVisitPrompt({
-            customer_name: matchedCandidate.company_name || 'Customer',
-            date_formatted: matchedCandidate.date,
-            person_met: matchedCandidate.person_met,
-            location: matchedCandidate.location,
-            outcome: matchedCandidate.outcome,
-            follow_up_action: matchedCandidate.follow_up_action,
-            follow_up_date: matchedCandidate.follow_up_date,
-            follow_up_status: matchedCandidate.follow_up_status,
-            remarks: matchedCandidate.remarks,
-          });
+          const prompt = formatSelectedVisitPrompt(matchedCandidate);
 
           await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
           await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
@@ -11564,7 +11748,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   }
 
   // ── 6. DIRECT ACTION ROUTING (Menu Selection 1-10 or Action Keywords) ────────
-  const matchedAction = matchActionFromInput(text);
+  const matchedAction = matchActionFromInput(text, false, canUpdateVisits);
   if (matchedAction) {
     await recordSessionMessage(senderPhone, 'user', text);
     if (matchedAction === 'GENERAL_QUERY') {
@@ -11579,6 +11763,13 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     // 6a. Direct candidate browsing for UPDATE actions
     if (['UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(matchedAction)) {
+      if (matchedAction === 'UPDATE_VISIT' && !canUpdateVisits) {
+        const deniedReply = `Access Denied: Field visits can only be updated by Sales Managers and Administrators. Please contact your manager to update a logged visit.`;
+        await recordSessionMessage(senderPhone, 'assistant', deniedReply, { action_type: 'ACCESS_DENIED' });
+        await saveActiveSession(senderPhone, 'Unknown', 'general');
+        return { handled: true, reply: deniedReply };
+      }
+
       const selectionRes = await fetchAndRenderUpdateSelection(matchedAction, senderPhone, { page: 1, customerFilter: null });
       await startNewCatalogSession(senderPhone, selectionRes.reply);
       await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: matchedAction });
@@ -11601,6 +11792,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
   // ── 6b. DIRECT UPDATE WITH NON-EDITABLE FIELD ATTEMPT (Cold-Start Guard) ──
   const detectedUpdateAction = matchedAction || detectOperationalAction(text);
+  if (detectedUpdateAction === 'UPDATE_VISIT' && !canUpdateVisits) {
+    await recordSessionMessage(senderPhone, 'user', text);
+    const deniedReply = `Access Denied: Field visits can only be updated by Sales Managers and Administrators. Please contact your manager to update a logged visit.`;
+    await recordSessionMessage(senderPhone, 'assistant', deniedReply, { action_type: 'ACCESS_DENIED' });
+    await saveActiveSession(senderPhone, 'Unknown', 'general');
+    return { handled: true, reply: deniedReply };
+  }
+
   if (detectedUpdateAction && ['UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(detectedUpdateAction)) {
     let currentCust = null;
     const match = text.match(/(?:for|of|regarding|on)\s+([A-Za-z0-9\s&.,'-]+?)(?:,|\s+change|\s+edit|\s+update|\s+set|\s+modify|\s+to|$)/i);
@@ -11631,6 +11830,13 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     /\b(?:update|change|modify|edit|amend|revise)\s+(?:the\s+|a\s+)?(?:customer\s*)?(?:field\s*|site\s*)?visit\b/i.test(text);
 
   if (isColdUpdateVisit) {
+    if (!canUpdateVisits) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      const deniedReply = `Access Denied: Field visits can only be updated by Sales Managers and Administrators. Please contact your manager to update a logged visit.`;
+      await recordSessionMessage(senderPhone, 'assistant', deniedReply, { action_type: 'ACCESS_DENIED' });
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return { handled: true, reply: deniedReply };
+    }
     let currentCust = null;
     const match = text.match(/(?:for|of|regarding|on)\s+([A-Za-z0-9\s&.,'-]+?)(?:,|\s+change|\s+edit|\s+update|\s+set|\s+modify|\s+to|$)/i);
     if (match && match[1] && !/^(?:the|a|an|customer|visit|order|inquiry|complaint)$/i.test(match[1].trim())) {
@@ -11806,6 +12012,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   }
 
   // ── 7. FREE DATA RETRIEVAL QUERIES VS OUT-OF-SCOPE PROMPTS ──
+  const userMenu = getCatalogMenu(canUpdateVisits);
+  const userSections = getCatalogMenuSections(canUpdateVisits);
+
   const isGenericOutOfScope = isOutOfScopeGenericPrompt(text);
   if (isGenericOutOfScope) {
     await recordSessionMessage(senderPhone, 'user', text);
@@ -11813,7 +12022,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       `I am the *Enlight Metals SalesOS Assistant* dedicated exclusively to managing and supporting your metal sales operations, inquiries, customer visits, orders, payments, and complaints.\n\n` +
       `I cannot assist with general knowledge, trivia, or non-sales prompts.\n\n` +
       `*Here is the SalesOS menu to assist you with your daily activities:*\n\n` +
-      CATALOG_MENU;
+      userMenu;
 
     await recordSessionMessage(senderPhone, 'assistant', outOfScopeReply, { action_type: 'OUT_OF_SCOPE_PROMPT' });
     await startNewCatalogSession(senderPhone, outOfScopeReply);
@@ -11824,7 +12033,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       interactiveList: {
         bodyText: `I am the *Enlight Metals SalesOS Assistant*. Here is the menu to start a sales activity:`,
         buttonText: 'Choose Action',
-        sections: CATALOG_MENU_SECTIONS,
+        sections: userSections,
       },
     };
   }
@@ -11850,7 +12059,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       `I am the *Enlight Metals SalesOS Assistant* dedicated exclusively to managing and supporting your metal sales operations, inquiries, customer visits, orders, payments, and complaints.\n\n` +
       `I cannot assist with general knowledge, trivia, or non-sales prompts.\n\n` +
       `*Here is the SalesOS menu to assist you with your daily activities:*\n\n` +
-      CATALOG_MENU;
+      userMenu;
 
     await recordSessionMessage(senderPhone, 'assistant', outOfScopeReply, { action_type: 'OUT_OF_SCOPE_PROMPT' });
     await startNewCatalogSession(senderPhone, outOfScopeReply);
@@ -11861,7 +12070,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       interactiveList: {
         bodyText: `I am the *Enlight Metals SalesOS Assistant*. Here is the menu to start a sales activity:`,
         buttonText: 'Choose Action',
-        sections: CATALOG_MENU_SECTIONS,
+        sections: userSections,
       },
     };
   }
@@ -11880,7 +12089,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   // MUST strictly be initiated via Catalog Menu selection (1–10 / buttons).
   // Direct free-text input in idle state is reserved exclusively for read-only data queries.
   await recordSessionMessage(senderPhone, 'user', text);
-  const gatingReply = `To start an activity, please select the relevant option from the menu below:\n\nHere is the menu to start a new activity:\n\n` + CATALOG_MENU;
+  const gatingReply = `To start an activity, please select the relevant option from the menu below:\n\nHere is the menu to start a new activity:\n\n` + userMenu;
   await recordSessionMessage(senderPhone, 'assistant', gatingReply, { action_type: 'CATALOG_GATED_PROMPT' });
   await startNewCatalogSession(senderPhone, gatingReply);
   return {
@@ -11890,7 +12099,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     interactiveList: {
       bodyText: `Here is the menu to start a new activity:`,
       buttonText: 'Choose Action',
-      sections: CATALOG_MENU_SECTIONS,
+      sections: userSections,
     },
   };
 }
@@ -11940,4 +12149,9 @@ module.exports = {
   CATALOG_MENU_SECTIONS,
   CONFIRMATION_BUTTONS,
   extractPhotoAndGps,
+  canUserUpdateVisits,
+  getCatalogMenu,
+  getCatalogMenuSections,
+  extractVisitDetails,
+  formatSelectedVisitPrompt,
 };
