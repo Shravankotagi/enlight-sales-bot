@@ -2126,7 +2126,7 @@ function formatOpenDealsListPrompt(customerName, openDeals) {
     const s = String(st || '').toLowerCase();
     if (s.includes('won') || s.includes('order')) return 'Won';
     if (s.includes('lost')) return 'Lost';
-    if (s.includes('quote') || s.includes('price')) return 'Price Quote';
+    if (s.includes('quote') || s.includes('price') || s.includes('qualif') || s.includes('confirmed') || s.includes('proposal')) return 'Price Quote';
     if (s.includes('negot')) return 'Negotiation';
     if (s.includes('hold')) return 'On Hold';
     return 'New Inquiry';
