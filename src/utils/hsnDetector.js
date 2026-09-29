@@ -481,4 +481,6 @@ module.exports = {
   isConversationalNoise,
   getUnknownProductClarificationMessage,
   MASTER_PRODUCTS_CATALOG,
+  extractThickness,
+  extractHeight,
 };
