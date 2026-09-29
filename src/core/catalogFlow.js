@@ -12360,6 +12360,7 @@ function detectOperationalAction(text) {
 
   // 1. Customer Acquisition
   if (
+    !/\b(?:visit|visited|meeting|met|site\s+visit|field\s+visit|client\s+visit|market\s+visit|office\s+visit|factory\s+visit)\b/i.test(lower) &&
     /\b(?:new\s+customer|customer\s+acquisition|onboard\s+customer|add\s+customer|acquire\s+customer|register\s+customer|nayi\s+party|naya\s+customer|customer\s+onboarding)\b/i.test(lower)
   ) {
     return 'LOG_NEW_CUSTOMER';
@@ -12559,6 +12560,16 @@ async function classifyActiveSessionIntent(activeActivity, text) {
     return { classification: 'SAME_ACTIVITY' };
   }
 
+  // A detailed "new customer visit" report is still data for an active visit form.
+  // Preserve explicit update/change commands for the dedicated visit-update workflow.
+  if (
+    getModuleFamily(activeActivity) === 'VISIT' &&
+    /\b(?:add|log|record|create|visit(?:ed)?|meeting|met)\b/i.test(trimmed) &&
+    !/\b(?:update|change|modify|edit|correct|amend|revise)\b/i.test(trimmed)
+  ) {
+    return { classification: 'SAME_ACTIVITY' };
+  }
+
   const currentFamily = getModuleFamily(activeActivity);
   const activityDisplayName = getModuleDisplayName(activeActivity);
 
@@ -12686,6 +12697,15 @@ function detectOutOfScopeActionAttempt(currentAction, text) {
   // it is data/edit for the current active flow, NEVER a module switch!
   const isExplicitFieldEdit = /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|resolution\s*notes?|comments?|description|rate|price|target\s*price|bhav|quantity|qty|payment\s*terms?|delivery\s*location|location|city|person\s*met|contact\s*person|contact\s*phone|phone|mobile|visit\s*date|po\s*number|po\s*no|po\s*date|status|stage|preferred\s*make|make)\s*(?:to|as|is|:|=|\s+-)\s*/i.test(trimmed);
   if (isExplicitFieldEdit) {
+    return null;
+  }
+
+  // Keep detailed "new customer visit" text inside an active visit workflow.
+  if (
+    currentFamily === 'VISIT' &&
+    /\b(?:add|log|record|create|visit(?:ed)?|meeting|met)\b/i.test(trimmed) &&
+    !/\b(?:update|change|modify|edit|correct|amend|revise)\b/i.test(trimmed)
+  ) {
     return null;
   }
 
