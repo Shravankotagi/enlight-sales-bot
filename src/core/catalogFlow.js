@@ -9949,8 +9949,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         'cancel', 'discard', 'no', 'n', '3', 'stop', 'exit', 'quit', 'nahi', 'wrong', 'galat',
         'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel'
       ].includes(cleanInput);
+    const isComplaintEvidenceUpload =
+      currentAction === 'LOG_COMPLAINT' &&
+      Boolean(photoDataUrl || attachmentObj || incomingAttachments.length > 0);
 
-    if (!isControlReply) {
+    if (!isControlReply && !currentDraft._pending_line_choice && !isComplaintEvidenceUpload) {
       // AI Intent Classifier: Classify every non-control incoming message against active session
       const intentResult = await classifyActiveSessionIntent(currentAction, text);
       console.log(`[CatalogFlow] Active session (${currentAction}) AI classification for "${text.slice(0, 50)}...":`, intentResult);
