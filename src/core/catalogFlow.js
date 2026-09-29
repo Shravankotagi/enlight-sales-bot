@@ -120,6 +120,39 @@ function extractPhotoAndGps(rawText, options = {}) {
   return { photoDataUrl, gpsData, attachmentObj: incomingAttachments[0] || attachmentObj, incomingAttachments };
 }
 
+async function persistComplaintAttachments(attachments, senderPhone) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return [];
+
+  const bucket = 'complaint-evidence';
+  const phonePart = String(senderPhone || 'unknown').replace(/\D/g, '').slice(-10) || 'unknown';
+  return Promise.all(attachments.slice(0, 3).map(async (attachment, index) => {
+    const source = attachment.file_url || attachment.url || '';
+    const dataMatch = String(source).match(/^data:([^;]+);base64,(.+)$/s);
+    if (!dataMatch) return attachment;
+
+    const mimeType = attachment.file_type || attachment.type || dataMatch[1] || 'application/octet-stream';
+    const extension = mimeType.includes('pdf') ? 'pdf' : mimeType.split('/')[1] || 'bin';
+    const storagePath = `complaints/${phonePart}/${Date.now()}-${index}.${extension}`;
+    const { error } = await supabase.storage
+      .from(bucket)
+      .upload(storagePath, Buffer.from(dataMatch[2], 'base64'), {
+        contentType: mimeType,
+        upsert: false,
+      });
+
+    if (error) {
+      throw new Error(`Failed to store complaint evidence: ${error.message}`);
+    }
+
+    return {
+      ...attachment,
+      url: storagePath,
+      file_url: storagePath,
+      storage_path: storagePath,
+    };
+  }));
+}
+
 const CATALOG_MENU = `👋 Welcome to **SalesOS Assistant**!
 
 What would you like to do today?
@@ -165,6 +198,12 @@ const RESUME_QUERY_BUTTONS = [
 const ATTACHMENT_PROMPT_BUTTONS = [
   { id: 'btn_att_no', title: 'No' },
 ];
+
+function isComplaintAttachmentSkip(text, draft) {
+  const clean = String(text || '').trim();
+  return draft?._attachments_asked === true &&
+    /^(?:btn_att_no|no|nah|none|no\s*photos?|no\s*evidence|skip|done|proceed|next|nahi)\b/i.test(clean);
+}
 
 function getPostActivityButtons(action) {
   switch (action) {
@@ -2578,6 +2617,9 @@ function validateMandatoryFields(action, draft) {
       if (!draft.complaint_date) {
         draft.complaint_date = formatDateDDMMYYYY(new Date());
       }
+      if (!draft.status) {
+        draft.status = 'Open';
+      }
       if (!draft.raised_by && (draft.contact_person || draft.person_met)) {
         draft.raised_by = draft.contact_person || draft.person_met;
       }
@@ -2587,6 +2629,18 @@ function validateMandatoryFields(action, draft) {
       }
       if (!draft.complaint_description && !draft.description && !draft.affected_product) {
         missing.push('Complaint Description');
+      }
+      if (!draft.linked_inquiry_or_po && !draft.po_number && !draft.deal_id && !draft.inquiry_id) {
+        missing.push('Linked Inquiry ID / PO Number');
+      }
+      if (!draft.affected_product && !draft.product_name) {
+        missing.push('Product / Material');
+      }
+      if (!draft.complaint_type) {
+        missing.push('Complaint Type');
+      }
+      if (!draft.status) {
+        missing.push('Initial Status');
       }
       break;
 
@@ -8368,8 +8422,18 @@ async function executeAction(action, draft, senderPhone) {
           if (parsedRes) resDateIso = parsedRes;
         }
 
-        const attachmentsPayload = Array.isArray(draft.attachments) && draft.attachments.length > 0
-          ? draft.attachments.map(a => ({
+        let storedAttachments = Array.isArray(draft.attachments) ? draft.attachments : [];
+        if (storedAttachments.length > 0) {
+          try {
+            storedAttachments = await persistComplaintAttachments(storedAttachments, senderPhone);
+          } catch (storageErr) {
+            console.error('[CatalogFlow] Complaint evidence storage error:', storageErr.message);
+            return `❌ *Failed to store complaint evidence for ${companyName}.*\n\nReason: ${storageErr.message}`;
+          }
+        }
+
+        const attachmentsPayload = storedAttachments.length > 0
+          ? storedAttachments.map(a => ({
               file_url: a.file_url || a.url,
               file_name: a.file_name || a.name || `evidence-${Date.now()}`,
               file_type: a.file_type || a.type || 'image/jpeg',
@@ -8414,7 +8478,6 @@ async function executeAction(action, draft, senderPhone) {
           console.error('[CatalogFlow] Complaint insert error, retrying without optional columns:', cmpErr.message);
           const fallbackPayload = { ...complaintPayload };
           delete fallbackPayload.complaint_date;
-          delete fallbackPayload.raised_by;
           delete fallbackPayload.challan_no;
           delete fallbackPayload.customer_communication;
           delete fallbackPayload.resolution_notes;
@@ -8441,7 +8504,10 @@ async function executeAction(action, draft, senderPhone) {
               file_type: a.file_type,
               uploaded_at: a.uploaded_at || nowIso,
             }));
-            await supabase.from('complaint_attachments').insert(attRows);
+            const { error: attInsertErr } = await supabase.from('complaint_attachments').insert(attRows);
+            if (attInsertErr) {
+              console.warn('[CatalogFlow] Non-blocking complaint_attachments insert notice:', attInsertErr.message);
+            }
           } catch (attErr) {
             console.warn('[CatalogFlow] Non-blocking complaint_attachments insert notice:', attErr?.message);
           }
@@ -10503,6 +10569,23 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // CANCEL / DISCARD
+    if (action === 'LOG_COMPLAINT' && isComplaintAttachmentSkip(text, draft)) {
+      draft._attachments_completed = true;
+      await recordSessionMessage(senderPhone, 'user', text);
+      const attachmentSkipSummary = buildConfirmationSummary(action, draft);
+      await recordSessionMessage(senderPhone, 'assistant', attachmentSkipSummary, {
+        action_type: action,
+        customer_name: draft.company_name,
+      });
+      await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(draft)}`);
+      return {
+        handled: true,
+        reply: attachmentSkipSummary,
+        interactiveType: 'buttons',
+        interactiveButtons: CONFIRMATION_BUTTONS,
+      };
+    }
+
     if (
       cleanInput === 'btn_confirm_cancel' ||
       isDiscardOrCancelIntent(cleanInput) ||
@@ -11387,9 +11470,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // Check if user replied "No" to complaint attachment prompt (this is NOT a discard intent)
-    const isAttachmentNo = action === 'LOG_COMPLAINT' &&
-      (existingDraft._attachments_asked || text.trim() === 'btn_att_no' || /^(?:btn_att_no|no|nah|none|no\s*photos?|no\s*evidence|skip|done|proceed|next|nahi)\b/i.test(text.trim())) &&
-      /^(?:btn_att_no|no|nah|none|no\s*photos?|no\s*evidence|skip|done|proceed|next|nahi)\b/i.test(text.trim());
+    const isAttachmentNo = action === 'LOG_COMPLAINT' && isComplaintAttachmentSkip(text, existingDraft);
 
     // Check if user wants to abort / switch (only if not resolving candidate selection or skipping attachments)
     if (!isAttachmentNo && isDiscardOrCancelIntent(text)) {

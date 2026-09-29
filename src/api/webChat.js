@@ -147,13 +147,13 @@ function normalizeIncomingButtonPayload(rawInput) {
     return '7';
   }
   if (text.startsWith('btn_repeat_log_complaint')) {
-    return '8';
+    return 'menu_8';
   }
   if (text.startsWith('btn_repeat_update_complaint')) {
-    return '9';
+    return 'menu_9';
   }
   if (text.startsWith('menu_')) {
-    return text.replace('menu_', '');
+    return text;
   }
   return text;
 }
