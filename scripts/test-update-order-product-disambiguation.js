@@ -53,6 +53,13 @@ async function run() {
     console.log(res4.reply);
   }
 
+  if (res4.reply.includes('Which existing line item')) {
+    console.log('\n--- Step 4c: User selects which item to replace (1) ---');
+    res4 = await handleCatalogFlow('1', senderPhone);
+    console.log('Bot Response 4c:');
+    console.log(res4.reply);
+  }
+
   assert(res4.reply.includes('HR Plate'), 'Summary must show HR Plate');
   assert(res4.reply.includes('4mm') || res4.reply.includes('4MM'), 'Summary must retain 4mm thickness');
   assert(res4.reply.includes('22 MT') || res4.reply.includes('22MT'), 'Summary must retain 22 MT quantity');

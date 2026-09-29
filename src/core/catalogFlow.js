@@ -32,6 +32,8 @@ const {
   isValidCatalogProduct,
   getUnknownProductClarificationMessage,
   MASTER_PRODUCTS_CATALOG,
+  extractThickness,
+  extractHeight,
 } = require('../utils/hsnDetector');
 const { safeParseJSON } = require('../utils/jsonUtils');
 const { calculateQuotationBreakdown, normalizeUnit, convertLineItemToMt } = require('../utils/pricingEngine');
@@ -843,6 +845,18 @@ function isPureOptionSelectorOnly(text) {
   if (/^\s*(?:option|choice|no\.?|#)?\s*[1-9]\d*\.?\s*$/i.test(clean)) return true;
   if (/^\s*(?:the\s+)?(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|last)\s*(?:option|choice|inquiry|order|visit|one)?\.?\s*$/i.test(clean)) return true;
   if (/^(?:PO|Purchase\s*Order|INQ|DEAL)[\s#:-]*[0-9A-Za-z-]+$/i.test(clean)) return true;
+  return false;
+}
+
+/**
+ * Checks if the user message is purely a numeric or ordinal option choice (e.g. "1", "2", "option 3", "#2", "second").
+ * Used to ensure numeric menu choices are NEVER misinterpreted as rates, prices, quantities, or dimensions.
+ */
+function isNumericOptionSelector(text) {
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.trim();
+  if (/^\s*(?:option|choice|no\.?|#)?\s*[1-9]\d*\.?\s*$/i.test(clean)) return true;
+  if (/^\s*(?:the\s+)?(?:first|second|third|fourth|fifth|sixth|1st|2nd|3rd|4th|5th|6th|last)\s*(?:option|choice|inquiry|order|visit|one)?\.?\s*$/i.test(clean)) return true;
   return false;
 }
 
@@ -1765,21 +1779,28 @@ function extractVerbatimNotes(text) {
   const trimmed = text.trim();
   if (!trimmed) return null;
 
-  const noteMatch = trimmed.match(
-    /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|comments?)\s*(?:to|as|is|:|=|\s+-)\s*(.+)$/is
-  );
-  if (noteMatch && noteMatch[1]) {
-    const val = noteMatch[1].trim();
-    if (val.length > 0) {
-      return val;
-    }
+  const prefixPattern = /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|resolution\s*notes?|comments?)\s*(?:to|as|is|:|=|\s+-)\s*/i;
+  const match = trimmed.match(prefixPattern);
+  if (!match) return null;
+
+  let body = trimmed.slice(match[0].length).trim();
+  // If there are subsequent field instructions (e.g. rate, quantity, delivery, payment, stage, status), stop before them
+  const splitPattern = /(?:[\n\r]+|,\s*|\s+and\s+)(?=(?:(?:change|update|set)\s+)?(?:rate|price|qty|quantity|delivery|payment|stage|status)\s*(?:to|is|=|:|\b))/i;
+  const splitMatch = body.search(splitPattern);
+  if (splitMatch !== -1) {
+    body = body.slice(0, splitMatch).trim();
   }
-  return null;
+  return body.length > 0 ? body : null;
 }
 
 // ── LLM FIELD EXTRACTION ENGINE ──────────────────────────────────────────────
 
 async function extractFieldsWithLLM(action, userInput, existingDraft = {}) {
+  // Pure numeric or ordinal option selectors (e.g. "1", "2", "option 2", "#1") are menu choices, not field updates.
+  if (isNumericOptionSelector(userInput)) {
+    return existingDraft;
+  }
+
   const now = new Date();
   const todayStr = formatDateDDMMYYYY(now);
   const yesterdayDate = new Date(now.getTime() - 24 * 3600 * 1000);
@@ -2139,6 +2160,10 @@ If only a single company is mentioned or if filling missing fields for an existi
 15. ZERO SUMMARIZATION OF NOTES / ADDITIONAL NOTES / REMARKS (CRITICAL):
 - When extracting 'additional_notes', 'meeting_remarks', 'remarks', 'discussion_notes', 'notes', or comments, NEVER summarize, rewrite, rephrase, or generalize the user's words (e.g. if the user says 'we will be having follow up', extract 'we will be having follow up' EXACTLY as typed. NEVER convert or summarize it to 'Follow-up planned').
 - PRESERVE the exact verbatim text entered by the user.
+16. NUMERIC OPTION SELECTORS (CRITICAL):
+- If the user message is purely an option number or choice (e.g. '1', '2', '3', 'option 2', 'choice 1', 'second'), it is an option selection from a menu or clarification list.
+- NEVER extract or interpret an option selector number as a rate, price, quantity, or dimension!
+- Leave 'rate' and 'line_items[].rate' as null unless the user explicitly mentioned words like 'rate', 'price', '@', '₹', '/MT', 'per ton', etc.
 `;
 
   const userPrompt = `Existing Active Draft:
@@ -2160,6 +2185,22 @@ User Message:
     else if (raw.startsWith('```')) raw = raw.replace(/^```/, '').replace(/```$/, '').trim();
 
     let parsed = safeParseJSON(raw, null);
+    if (parsed && isNumericOptionSelector(userInput)) {
+      delete parsed.rate;
+      if (parsed.updates) delete parsed.updates.rate;
+      if (Array.isArray(parsed.line_items)) {
+        parsed.line_items.forEach(it => {
+          delete it.rate;
+          delete it.amount;
+        });
+      }
+      if (Array.isArray(parsed.line_item_updates)) {
+        parsed.line_item_updates.forEach(it => {
+          delete it.rate;
+          delete it.amount;
+        });
+      }
+    }
     if (verbatimNotes) {
       if (!parsed) parsed = {};
       if (action === 'LOG_INQUIRY') {
@@ -2574,14 +2615,43 @@ function scoreLineItemAgainstUpdate(item, upd) {
   let score = 0;
   if (cleanItemFull && cleanUpdFull) {
     if (cleanItemFull === cleanUpdFull) {
-      score += 100;
+      score += 150;
     } else if (cleanItemFull.includes(cleanUpdFull)) {
-      score += 50 + cleanUpdFull.length;
+      score += 60 + cleanUpdFull.length;
     } else if (cleanUpdFull.includes(cleanItemFull)) {
-      score += 50 + cleanItemFull.length;
+      score += 60 + cleanItemFull.length;
     }
   }
 
+  // 1. Catalog & HSN Master Alignment
+  const normItem = normalizeProductToCatalog(itemSku, itemDim);
+  const normUpd = normalizeProductToCatalog(updSku, updSpec);
+
+  if (normItem.isValid && normUpd.isValid) {
+    if (normItem.catalogName === normUpd.catalogName) {
+      score += 120;
+      if (normItem.hsnCode && normUpd.hsnCode && normItem.hsnCode === normUpd.hsnCode) {
+        score += 40;
+      }
+    } else if (normItem.category && normUpd.category && normItem.category !== normUpd.category) {
+      score -= 80;
+    } else {
+      score -= 50;
+    }
+  }
+
+  // 2. Thickness / Dimension Alignment
+  const tItem = extractThickness(itemDim) || extractThickness(itemSku);
+  const tUpd = extractThickness(updSpec) || extractThickness(updSku);
+  if (tItem !== null && tUpd !== null) {
+    if (Math.abs(tItem - tUpd) < 0.05) {
+      score += 60;
+    } else {
+      score -= 60;
+    }
+  }
+
+  // 3. Token-based matching
   const stopWords = new Set(['the', 'for', 'and', 'with', 'item', 'update', 'change', 'rate', 'price', 'quantity', 'qty', 'of', 'to', 'in', 'at']);
   const curTokens = [itemSku, itemDim, itemGrade].join(' ').split(/[\s,()/-]+/).map(t => t.trim().toLowerCase()).filter(t => t.length >= 2 && !stopWords.has(t));
   const updTokens = [updSku, updSpec].join(' ').split(/[\s,()/-]+/).map(t => t.trim().toLowerCase()).filter(t => t.length >= 2 && !stopWords.has(t));
@@ -2596,7 +2666,12 @@ function scoreLineItemAgainstUpdate(item, upd) {
     score += matchedTokens * 20;
   }
 
-  const steelKeywords = ['channel', 'plate', 'sheet', 'coil', 'angle', 'pipe', 'tube', 'beam', 'bar', 'chequered', 'gp', 'cr', 'hr', 'ms', 'gi', 'tmt'];
+  // 4. Broad steel keywords covering all 4 master categories
+  const steelKeywords = [
+    'channel', 'plate', 'sheet', 'coil', 'angle', 'pipe', 'tube', 'beam', 'bar',
+    'chequered', 'gp', 'cr', 'hr', 'hrpo', 'galvalume', 'ms', 'gi', 'tmt',
+    'slotted', 'solar', 'purlin', 'tray', 'earthing', 'strip', 'flat', 'round', 'square'
+  ];
   for (const kw of steelKeywords) {
     const inCur = curTokens.some(t => t.includes(kw));
     const inUpd = updTokens.some(t => t.includes(kw));
@@ -3058,6 +3133,51 @@ function resolveLineItemUpdateTargets(draft) {
     delete draft.quantity;
   }
 
+  const headerRate = hasVal(draft.updates?.rate) ? draft.updates.rate : (hasVal(draft.rate) ? draft.rate : null);
+  if (headerRate !== null && !draft._apply_rate_to_all) {
+    const parsedRate = parseIndianAmount(headerRate) ?? (parseNumericValue(headerRate) ?? headerRate);
+    if (items.length === 1) {
+      // Single product in record -> directly assign rate to that product without prompting
+      const existingUpdates = Array.isArray(draft.line_item_updates) ? draft.line_item_updates : [];
+      if (existingUpdates.length > 0) {
+        existingUpdates[0].rate = parsedRate;
+        pinLineUpdateToItems(existingUpdates[0], items, [0]);
+      } else {
+        const singleItem = items[0] || {};
+        draft.line_item_updates = [{
+          operation: 'update',
+          item_reference: singleItem.sku_text || singleItem.description || 'Item 1',
+          rate: parsedRate,
+          _target_indexes: [0],
+          _target_item_ids: singleItem.id ? [String(singleItem.id)] : [],
+        }];
+      }
+    } else if (items.length > 1) {
+      // More than 1 product:
+      const existingUpdates = Array.isArray(draft.line_item_updates) ? draft.line_item_updates : [];
+      const alreadyAssignedToSpecific = existingUpdates.some(u => {
+        return u && Number(u.rate) === Number(parsedRate) && !isGenericLineUpdateRef(getLineUpdateProductRef(u));
+      });
+
+      if (!alreadyAssignedToSpecific) {
+        const genericIdx = existingUpdates.findIndex(u => u && isGenericLineUpdateRef(getLineUpdateProductRef(u)));
+        if (genericIdx >= 0) {
+          existingUpdates[genericIdx].rate = parsedRate;
+          delete existingUpdates[genericIdx]._target_indexes;
+          delete existingUpdates[genericIdx]._target_item_ids;
+        } else {
+          draft.line_item_updates = [...existingUpdates, {
+            operation: 'update',
+            item_reference: 'Line Item',
+            rate: parsedRate,
+          }];
+        }
+      }
+    }
+    if (draft.updates) delete draft.updates.rate;
+    delete draft.rate;
+  }
+
   const updates = Array.isArray(draft?.line_item_updates) ? draft.line_item_updates : [];
   if (updates.length === 0) return null;
 
@@ -3126,13 +3246,21 @@ function buildLineItemChoicePrompt(draft, pending) {
 
   const list = formatDetailedInquiryItemsList(candidates);
   if (pending.reason === 'unnamed') {
+    if (upd.rate !== undefined && upd.rate !== null && upd.rate !== '') {
+      const rateVal = parseIndianAmount(upd.rate) ?? 0;
+      const rateFormatted = `₹${rateVal.toLocaleString('en-IN')}${upd.unit ? ` / ${upd.unit}` : ' / MT'}`;
+      return `📌 *Extracted Rate:* ${rateFormatted}\n\n` +
+        `*For which product is this rate for?*\n\n` +
+        `${list}\n\n` +
+        `👉 Reply with the *product name*, the *number* (1–${candidates.length}), *All* to update all products, or *Skip* to leave rates unchanged.`;
+    }
     return `This record has *${candidates.length} line items*. Which one do you want to update${changeText}?\n\n` +
       `${list}\n\n` +
       `👉 Reply with the *number* (1–${candidates.length}), the *product name*, or *All* to update all of them.`;
   }
   return `There are *${candidates.length} line items* named *${productName}* in this record. Which one do you want to update${changeText}?\n\n` +
     `${list}\n\n` +
-    `👉 Reply with the *number* (1–${candidates.length}), the *thickness / size*, or *All* to update all of them.`;
+    `👉 Reply with the *number* (1–${candidates.length}), the *thickness / size*, *All* to update all, or *Skip* to leave unchanged.`;
 }
 
 async function askLineItemChoiceIfNeeded(action, draft, senderPhone) {
@@ -3218,11 +3346,45 @@ async function handleLineItemChoiceReply(text, senderPhone, action, draft) {
     return null;
   }
 
+  const clean = String(text || '').trim();
+
+  // 1. User wants to skip assigning this rate / update
+  if (/^(?:skip|skip\s*this|skip\s*rate|ignore|leave|leave\s*it|none|rehne\s*do|skip\s*kar\s*do|no\s*rate|keep\s*existing|rehne\s*de)\.?$/i.test(clean)) {
+    if (pending.updateIndex >= 0 && pending.updateIndex < updates.length) {
+      updates.splice(pending.updateIndex, 1);
+      draft.line_item_updates = updates;
+    }
+    delete draft._pending_line_choice;
+
+    const nextChoice = await askLineItemChoiceIfNeeded(action, draft, senderPhone);
+    if (nextChoice) return nextChoice;
+
+    const missing = validateMandatoryFields(action, draft);
+    if (missing.length > 0) {
+      const missingList = missing.map((m) => `- **${m}**`).join('\n');
+      const askMissing = `Please provide the remaining details to update:\n\n${missingList}`;
+      await recordSessionMessage(senderPhone, 'assistant', askMissing, { action_type: action, customer_name: draft.company_name });
+      await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
+      return { handled: true, reply: askMissing };
+    }
+
+    const summary = buildConfirmationSummary(action, draft);
+    await recordSessionMessage(senderPhone, 'assistant', summary, { action_type: action, customer_name: draft.company_name });
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: summary,
+      interactiveType: 'buttons',
+      interactiveButtons: CONFIRMATION_BUTTONS,
+    };
+  }
+
   if (isDiscardOrCancelIntent(text)) {
     delete draft._pending_line_choice;
     return null;
   }
 
+  // 2. User picked an item or All
   const picked = pickLineItemChoice(text, items, pending.candidateIndexes);
   if (!picked) {
     const looksLikeNewUpdate = /\b(?:rate|price|qty|quantity|payment|delivery|stage|status)\b|₹/i.test(text);
@@ -3236,7 +3398,32 @@ async function handleLineItemChoiceReply(text, senderPhone, action, draft) {
     return { handled: true, reply: retry };
   }
 
-  pinLineUpdateToItems(upd, items, picked);
+  // Merge this rate into any existing updates targeting the chosen items
+  const targetIndexes = Array.isArray(picked) ? picked : [picked];
+  const otherUpdates = updates.filter((_, idx) => idx !== pending.updateIndex);
+  for (const pIdx of targetIndexes) {
+    const existingTargetUpd = otherUpdates.find(u => {
+      if (Array.isArray(u._target_indexes) && u._target_indexes.includes(pIdx)) return true;
+      if (items[pIdx]?.id && Array.isArray(u._target_item_ids) && u._target_item_ids.includes(String(items[pIdx].id))) return true;
+      return false;
+    });
+    if (existingTargetUpd) {
+      if (upd.rate !== null && upd.rate !== undefined && upd.rate !== '') existingTargetUpd.rate = upd.rate;
+      if (upd.quantity !== null && upd.quantity !== undefined && upd.quantity !== '') existingTargetUpd.quantity = upd.quantity;
+    }
+  }
+
+  const allMerged = targetIndexes.every(pIdx => otherUpdates.some(u => {
+    return (Array.isArray(u._target_indexes) && u._target_indexes.includes(pIdx)) ||
+           (items[pIdx]?.id && Array.isArray(u._target_item_ids) && u._target_item_ids.includes(String(items[pIdx].id)));
+  }));
+
+  if (allMerged) {
+    updates.splice(pending.updateIndex, 1);
+    draft.line_item_updates = updates;
+  } else {
+    pinLineUpdateToItems(upd, items, picked);
+  }
   delete draft._pending_line_choice;
 
   const nextChoice = await askLineItemChoiceIfNeeded(action, draft, senderPhone);
@@ -3306,7 +3493,9 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             const prevItem = existingList[idx] || (existingList.length === 1 ? existingList[0] : null);
             const qty = parseNumericValue(item.quantity) || (prevItem ? parseNumericValue(prevItem.quantity) || 0 : 0);
             const rawUnit = item.unit || prevItem?.unit || 'MT';
-            const rate = parseIndianAmount(item.rate) || (prevItem ? parseIndianAmount(prevItem.rate) || 0 : 0);
+            const rate = !isNumericOptionSelector(userInput)
+              ? (parseIndianAmount(item.rate) || (prevItem ? parseIndianAmount(prevItem.rate) || 0 : 0))
+              : (prevItem ? parseIndianAmount(prevItem.rate) || 0 : 0);
             const parsedAmt = parseIndianAmount(item.amount);
             const amt = parsedAmt ? parsedAmt : (qty && rate ? qty * rate : (prevItem?.amount ? parseIndianAmount(prevItem.amount) || 0 : 0));
             const rawSku = item.sku_text || item.description || prevItem?.sku_text || prevItem?.description || '';
@@ -3415,8 +3604,10 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             merged[key] = normalizeDateToDDMMYYYY(val);
           }
         } else if (key === 'rate' && (typeof val === 'string' || typeof val === 'number')) {
-          const parsedRate = parseIndianAmount(val);
-          merged.rate = parsedRate !== null ? parsedRate : val;
+          if (!isNumericOptionSelector(userInput)) {
+            const parsedRate = parseIndianAmount(val);
+            merged.rate = parsedRate !== null ? parsedRate : val;
+          }
         } else if (key === 'attachments' && Array.isArray(val)) {
           const prevAtts = Array.isArray(baseDraft.attachments) ? baseDraft.attachments : [];
           const existingUrls = new Set(prevAtts.map(a => a && (a.url || a.file_url)).filter(Boolean));
@@ -3465,7 +3656,7 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   }
 
   // Fallback rate extraction for LOG_ORDER / LOG_INQUIRY / UPDATE_INQUIRY
-  if (!merged.rate && ['LOG_ORDER', 'LOG_INQUIRY', 'UPDATE_INQUIRY'].includes(action)) {
+  if (!merged.rate && ['LOG_ORDER', 'LOG_INQUIRY', 'UPDATE_INQUIRY'].includes(action) && !isNumericOptionSelector(userInput)) {
     const rateMatch = userInput.match(/(?:rate|price|@|bhav)[\s:=-]*(?:to\s+|as\s+|is\s+|be\s+|ko\s+)?(?:₹|rs\.?)?\s*(\d+(?:,\d+)*(?:\.\d+)?(?:\s*(?:lakhs?|lacs?|crores?|k)(?![a-z]))?)/i) ||
       userInput.match(/(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:\/|\s*per\s*)(?:mt|ton|tonne|kg|pcs|sheet)/i) ||
       userInput.match(/(?:₹|rs\.?)\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:rate|bhav)?/i) ||
@@ -3682,9 +3873,25 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     }
   } else if (action === 'UPDATE_INQUIRY') {
     if (!merged.updates) merged.updates = {};
-    if (merged.rate && !merged.updates.rate) merged.updates.rate = merged.rate;
-    if (newExtracted.rate && !merged.updates.rate) merged.updates.rate = newExtracted.rate;
-    if (newExtracted.updates?.rate && !merged.updates.rate) merged.updates.rate = newExtracted.updates.rate;
+    const hasVal = v => v !== null && v !== undefined && v !== '';
+    if (hasVal(newExtracted.updates?.rate)) {
+      merged.updates.rate = newExtracted.updates.rate;
+    } else if (hasVal(newExtracted.rate)) {
+      merged.updates.rate = newExtracted.rate;
+    } else if (hasVal(merged.rate) && !hasVal(merged.updates.rate)) {
+      merged.updates.rate = merged.rate;
+    }
+
+    // Direct regex extraction for explicit rate in user message e.g. "rate 54000/MT", "rate: 54000", "54000/MT"
+    const explicitRateMatch = userInput.match(/\b(?:rate|price|pricing|bhav)\s*[:=-]?\s*(?:rs\.?|inr|₹)?\s*(\d+(?:,\d+)*(?:\.\d+)?(?:\s*(?:lakhs?|lacs?|crores?|k))?)/i) ||
+      userInput.match(/(?:(?:rs\.?|inr|₹)\s*|\b)(\d+(?:,\d+)*(?:\.\d+)?(?:\s*(?:lakhs?|lacs?|crores?|k))?)\s*\/\s*(?:mt|ton|tonne|kg)\b/i);
+    if (explicitRateMatch) {
+      const pExpRate = parseIndianAmount(explicitRateMatch[1]);
+      if (pExpRate && pExpRate > 0) {
+        merged.updates.rate = pExpRate;
+      }
+    }
+
     if (newExtracted.delivery_location && !merged.updates.delivery_location) merged.updates.delivery_location = newExtracted.delivery_location;
     if (newExtracted.payment_terms && !merged.updates.payment_terms) merged.updates.payment_terms = newExtracted.payment_terms;
     if (newExtracted.preferred_make && !merged.updates.preferred_make) merged.updates.preferred_make = newExtracted.preferred_make;
@@ -4301,25 +4508,45 @@ async function findMatchingInquiriesForPo(customerName, lineItems = [], senderPh
     return { status: 'NO_MATCH', candidates: [] };
   }
 
-  // Check product match overlap
-  const poProducts = (lineItems || []).map(it => {
-    const raw = it.sku_text || it.description || it.product_name || '';
-    const norm = normalizeProductToCatalog(raw);
-    return norm.isValid ? norm.catalogName.toLowerCase() : raw.toLowerCase().trim();
-  }).filter(Boolean);
+  // Check product match overlap with Master Catalog, HSN root, and category guards
+  function getProductDetails(it) {
+    const raw = (it.sku_text || it.description || it.product_name || '').trim();
+    const dim = (it.dimensions || it.spec || '').trim();
+    const norm = normalizeProductToCatalog(raw, dim);
+    const hsn = norm.hsnCode || detectHsnCode(raw, dim);
+    const hsnRoot = hsn ? hsn.slice(0, 4) : null;
+    return {
+      raw: raw.toLowerCase(),
+      catalogName: norm.isValid ? norm.catalogName.toLowerCase() : null,
+      category: norm.category || null,
+      hsnRoot,
+      dim: dim.toLowerCase()
+    };
+  }
+
+  function itemsMatch(p, c) {
+    if (p.catalogName && c.catalogName && p.catalogName === c.catalogName) return true;
+    if (p.hsnRoot && c.hsnRoot && p.hsnRoot === c.hsnRoot) {
+      if (p.category && c.category && p.category === c.category) return true;
+    }
+    if (p.category && c.category && p.category !== c.category) {
+      return false;
+    }
+    if (p.raw && c.raw && (p.raw.includes(c.raw) || c.raw.includes(p.raw))) return true;
+    return false;
+  }
+
+  const poProductDetails = (lineItems || []).map(getProductDetails).filter(p => p.raw || p.catalogName);
 
   let matchedCandidates = [];
-  if (poProducts.length > 0) {
-    matchedCandidates = allCustCandidates.filter(c => {
-      const items = Array.isArray(c.deal_items) ? c.deal_items : [];
-      const cProducts = items.map(it => {
-        const raw = it.sku_text || it.description || it.product_name || '';
-        const norm = normalizeProductToCatalog(raw);
-        return norm.isValid ? norm.catalogName.toLowerCase() : raw.toLowerCase().trim();
-      }).filter(Boolean);
+  if (poProductDetails.length > 0) {
+    matchedCandidates = allCustCandidates.filter(cand => {
+      const items = Array.isArray(cand.deal_items) ? cand.deal_items : [];
+      if (items.length === 0) return true;
+      const cProductDetails = items.map(getProductDetails).filter(c => c.raw || c.catalogName);
+      if (cProductDetails.length === 0) return true;
 
-      if (cProducts.length === 0) return true;
-      return poProducts.some(p => cProducts.some(cp => cp.includes(p) || p.includes(cp) || cp === p));
+      return poProductDetails.some(poP => cProductDetails.some(cP => itemsMatch(poP, cP)));
     });
   }
 
@@ -9124,7 +9351,8 @@ async function executeAction(action, draft, senderPhone) {
         const stageInput = updates.stage || updates.status || draft.stage || draft.status || draft.new_stage;
         if (stageInput) {
           const s = String(stageInput).toLowerCase();
-          if (s.includes('won') || s.includes('order')) dealUpdates.stage = 'won';
+          if (/\b(?:new\s*inquiry|new\s*enquiry|new)\b/i.test(s)) dealUpdates.stage = 'new_inquiry';
+          else if (s.includes('won') || s.includes('order')) dealUpdates.stage = 'won';
           else if (s.includes('lost')) dealUpdates.stage = 'lost';
           else if (s.includes('negot')) dealUpdates.stage = 'negotiation';
           else if (s.includes('hold')) dealUpdates.stage = 'on_hold';
@@ -9203,7 +9431,6 @@ async function executeAction(action, draft, senderPhone) {
 
         // 1. Specific line item updates
         if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0 && dItems && dItems.length > 0) {
-          const spillGeneralRate = updates.rate && !isGeneralRateDuplicateOfLineRate(updates.rate, draft.line_item_updates);
           for (let i = 0; i < dItems.length; i++) {
             const currentItem = dItems[i];
             const matchedUpd = matchLineItemUpdate(currentItem, i, dItems.length, draft.line_item_updates);
@@ -9239,9 +9466,6 @@ async function executeAction(action, draft, senderPhone) {
                   }
                 }
               }
-            } else if (spillGeneralRate) {
-              const globalRate = parseIndianAmount(updates.rate) || 0;
-              if (globalRate > 0) itRate = globalRate;
             }
 
             const itAmt = itQty > 0 && itRate > 0 ? itQty * itRate : 0;
@@ -9270,8 +9494,8 @@ async function executeAction(action, draft, senderPhone) {
             totalAmount += addedLines.addedAmount;
             itemsUpdated = true;
           }
-        } else if (updates.rate && dItems && dItems.length > 0) {
-          // 2. Global rate update across all items
+        } else if (updates.rate && dItems && dItems.length > 0 && (dItems.length === 1 || draft._apply_rate_to_all)) {
+          // 2. Global rate update across all items (only for single item or explicit all)
           const newRate = parseIndianAmount(updates.rate) || 0;
           if (newRate > 0) {
             for (const it of dItems) {
@@ -11550,14 +11774,44 @@ function isStageUpdatePrompt(text) {
   if (!text || typeof text !== 'string') return false;
   const lower = text.toLowerCase().trim();
 
-  const stageWord = '(?:stage|satge|stgae|stag)';
+  // If explicitly logging or creating a new record, it is a write operation that must remain menu-gated
+  if (/^\s*(?:log|record|create|add)\s+(?:new\s+)?(?:inquiry|deal|order|visit|field\s*visit|complaint)\b/i.test(lower)) {
+    return false;
+  }
+
+  const stageWord = '(?:stage|satge|stgae|stag|stages|satges)';
+  const stageTarget = '(?:won|lost|closed\\s*won|closed\\s*lost|order\\s*confirmed|order\\s*placed|negotiat\\w*|quoted|quotated|price\\s*quotes?|price\\s*quotations?|on\\s*hold|hold|new\\s*inquiry|new\\s*enquiry|sauda\\s*pakka(?:\\s*ho\\s*gaya)?|deal\\s*pakk[ai]|deal\\s*confirm(?:ed)?|order\\s*mil\\s*gaya|final\\s*ho\\s*gaya|deal\\s*done)';
+
+  // 1. Explicit stage keyword (e.g. "stage update to won", "update stage to quoted", "change stage to new inquiry")
+  if (new RegExp(`\\b(?:${stageWord}\\s*(?:update|change|status|to|is|:)|(?:update|upadte|change|set|move|mark)\\s+(?:the\\s+)?${stageWord})\\b`, 'i').test(lower)) {
+    return true;
+  }
+
+  // 2. Direct Hinglish or English deal closing phrases anywhere in text
+  // e.g. "sauda pakka ho gaya for ABC infra", "deal pakki for XYZ", "order mil gaya from ABC"
+  if (/\b(?:sauda\s*pakka(?:\s*ho\s*gaya)?|deal\s*pakk[ai]|deal\s*confirm(?:ed)?|order\s*mil\s*gaya|final\s*ho\s*gaya|deal\s*done)\b/i.test(lower)) {
+    return true;
+  }
+
+  // 3. Mark/update with customer or target in between, e.g. "mark ABC infra deal won", "mark ABC infra as won", "mark deal won for ABC"
+  if (new RegExp(`\\b(?:mark|move|put|change|set|update|upadte)\\s+.{1,40}?\\b(?:as\\s+|to\\s+)?(?:won|lost|closed\\s*won|closed\\s*lost|quoted|negotiat\\w*|on\\s*hold|hold)\\b`, 'i').test(lower)) {
+    return true;
+  }
+
+  // 4. "deal won", "deal lost", "inquiry quoted", "order won", etc.
+  if (new RegExp(`\\b(?:deal|inquiry|order)\\s+(?:won|lost|closed|quoted|negotiat\\w*|on\\s*hold|hold)\\b`, 'i').test(lower)) {
+    return true;
+  }
+
+  // 5. "${closingTarget} for / of / from <Customer>" e.g. "deal won for ABC infra", "won for ABC infra"
+  if (new RegExp(`\\b(?:won|lost|closed|quoted|negotiat\\w*|on\\s*hold|deal\\s*done|sauda\\s*pakka)\\s+(?:for|of|from)\\b`, 'i').test(lower)) {
+    return true;
+  }
+
+  // 6. Direct command or status phrase
   if (
-    new RegExp(`\\b(?:${stageWord}\\s+update|(?:update|upadte|change|set|move)\\s+(?:the\\s+)?${stageWord})\\b`, 'i').test(lower) ||
-    new RegExp(`\\b(?:mark|move|put|change|set|update|upadte)\\s+(?:the\\s+|a\\s+)?(?:deal|inquiry|status|${stageWord})?\\s*(?:as\\s+|to\\s+)?(won|lost|negotiation|quoted|quotated|price\\s*quote|price\\s*quotation|on\\s+hold|hold|new\\s*inquiry)\\b`, 'i').test(lower) ||
-    /\b(?:deal\s+won|deal\s+lost|inquiry\s+won|inquiry\s+lost|deal\s+quoted|deal\s+negotiation|deal\s+on\s+hold)\b/i.test(lower) ||
-    /^(?:stage\s+(?:is\s+)?(?:to\s+)?(?:won|lost|negotiation|quoted|on\s+hold|price\s*quote)|marked?\s+(?:as\s+)?(?:won|lost|negotiation|quoted|on\s+hold|price\s*quote))\b/i.test(lower) ||
-    /^(?:mark\s+as\s+won|mark\s+as\s+lost|mark\s+as\s+negotiation|mark\s+as\s+quoted|mark\s+as\s+price\s*quote|mark\s+as\s+on\s+hold)$/i.test(lower) ||
-    /^(?:won|lost|negotiation|quoted|on\s+hold)$/i.test(lower)
+    new RegExp(`^(?:${stageWord}\\s+(?:is\\s+)?(?:to\\s+)?${stageTarget}|marked?\\s+(?:as\\s+)?${stageTarget})\\b`, 'i').test(lower) ||
+    new RegExp(`^(?:mark\\s+as\\s+)?${stageTarget}(?:\\s+for\\s+.+)?$`, 'i').test(lower)
   ) {
     return true;
   }
@@ -11587,11 +11841,35 @@ async function saveStageOnlyInquiryUpdateIfNeeded(text, senderPhone, activeState
 
 function isStageOnlyUpdate(text) {
   if (!isStageUpdatePrompt(text)) return false;
-  const stripped = String(text)
+
+  // Remove entity IDs (e.g. INQ-734D48, DEAL-123456, ORD-123, PO-123)
+  let stripped = String(text)
+    .replace(/\b(?:INQ|DEAL|ORD|PO)[-_][A-Z0-9]+\b/gi, ' ')
     .replace(/\b(?:price\s*quotes?|price\s*quotations?)\b/gi, ' ')
-    .replace(/\b(?:quoted|quotated|negotiation|on\s*hold|new\s*inquiry|won|lost|stage|status|update|upadte|change|set|mark|move|put|the|to|as|for|inquiry|deal|this|above|it)\b/gi, ' ');
-  if (/\b(?:rate|qty|quantity|payment|delivery|location|notes|make|line\s*items?|tonnage)\b/i.test(stripped)) return false;
-  if (/\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|mm)\b/i.test(stripped)) return false;
+    .replace(/\b(?:quoted|quotated|negotiation|on\s*hold|new\s*inquiry|new\s*enquiry|won|lost|closed\s*won|closed\s*lost)\b/gi, ' ')
+    .replace(/\b(?:sauda\s*pakka(?:\s*ho\s*gaya)?|deal\s*pakk[ai]|deal\s*confirm(?:ed)?|order\s*mil\s*gaya|final\s*ho\s*gaya|deal\s*done)\b/gi, ' ')
+    .replace(/\b(?:stage|satge|stgae|stages|satges|status)\b/gi, ' ')
+    .replace(/\b(?:update|upadte|updated|change|changed|set|mark|marked|move|moved|put|make|turn)\b/gi, ' ')
+    .replace(/\b(?:the|to|as|for|inquiry|deal|order|this|above|it|ko|kar\s*do|karo|me|in|of|and|an|a|is|ho|gaya|gayi|mil|pakka|pakki)\b/gi, ' ');
+
+  // 1. Any keywords indicating other fields (rates, prices, quantities, delivery, payment, notes, etc.)
+  if (/\b(?:rate|rates|price|prices|pricing|target\s*price|unit\s*price|cost|bhav|daam|amount)\b/i.test(stripped)) return false;
+  if (/\b(?:qty|quantity|quantities|tonnage|tons?|tonne|kg|pieces?|pcs|nos|sheets?|meters?|mtr|dimension|dimensions|spec|specs|specification|specifications|thickness|thk|gauge|size|grade)\b/i.test(stripped)) return false;
+  if (/\b(?:payment|terms?|credit|advance|days?|din|pdc|lc|cad|rtgs|neft|cod)\b/i.test(stripped)) return false;
+  if (/\b(?:delivery|dispatch|dispatched|destination|address|location|site|transport|freight|city)\b/i.test(stripped)) return false;
+  if (/\b(?:notes?|remarks?|comments?|make|brand|preferred\s*make)\b/i.test(stripped)) return false;
+  if (/\b(?:po\s*number|po\s*no|po\s*date|delivery\s*date)\b/i.test(stripped)) return false;
+
+  // 2. Common steel product names or categories
+  if (/\b(?:coil|coils|sheet|sheets|plate|plates|pipe|pipes|tube|tubes|bar|bars|tmt|beam|beams|channel|channels|angle|angles|billet|billets|wire\s*rod|structure|structural|hr|cr|ms|ss|gi|gp)\b/i.test(stripped)) return false;
+
+  // 3. Currency or unit syntax (e.g. 8/MT, ₹500, @ 50, etc.)
+  if (/[₹@]|(?:rs\.?|inr)\b/i.test(stripped)) return false;
+  if (/(?:\/|per|\s*@\s*)\s*(?:mt|tons?|tonne|kg|mm|mtr|nos|pcs|pieces?)/i.test(stripped)) return false;
+
+  // 4. Any numbers remaining (rates, quantities, dimensions)
+  if (/\b\d+(?:\.\d+)?\b/.test(stripped)) return false;
+
   return true;
 }
 
@@ -11792,23 +12070,24 @@ async function handleMidFlowStageUpdate(text, senderPhone, activeState, action, 
   // 1. Identify target stage
   let targetStage = null;
   let stageDisplayName = null;
+  let targetCustomerName = null;
 
-  if (/\b(?:price\s*quote|price\s*quotation|quoted|quote|proposal|prop)\b/i.test(lower)) {
+  if (/\b(?:price\s*quote|price\s*quotation|quoted|quote|proposal|prop|quotation\s*bheja|quote\s*bheja|quote\s*diya|bhav\s*diya|proposal\s*diya)\b/i.test(lower)) {
     targetStage = 'quoted';
     stageDisplayName = 'Price Quote';
-  } else if (/\b(?:negotiat(?:ion|ing|e)?|negot)\b/i.test(lower)) {
+  } else if (/\b(?:negotiat(?:ion|ing|e)?|negot|baatcheet|mol\s*bhav|rate\s*discussion|discussion\s*in\s*progress)\b/i.test(lower)) {
     targetStage = 'negotiation';
     stageDisplayName = 'Negotiation';
-  } else if (/\b(?:on\s*hold|hold)\b/i.test(lower)) {
+  } else if (/\b(?:on\s*hold|hold|hold\s*pe|baad\s*me|pending\s*discussion)\b/i.test(lower)) {
     targetStage = 'on_hold';
     stageDisplayName = 'On Hold';
-  } else if (/\b(?:won|closed\s*won|order\s*confirmed|order\s*placed|deal\s*won)\b/i.test(lower)) {
+  } else if (/\b(?:won|closed\s*won|order\s*confirmed|order\s*placed|deal\s*won|sauda\s*pakka|deal\s*pakki|deal\s*confirm|order\s*mil\s*gaya|final\s*ho\s*gaya|deal\s*done)\b/i.test(lower)) {
     targetStage = 'won';
     stageDisplayName = 'Closed Won';
-  } else if (/\b(?:lost|closed\s*lost|deal\s*lost|cancelled|canceled|drop)\b/i.test(lower)) {
+  } else if (/\b(?:lost|closed\s*lost|deal\s*lost|cancelled|canceled|drop|mana\s*kar\s*diya|mana\s*kiya|deal\s*cancel|party\s*ne\s*mana\s*kiya|deal\s*drop)\b/i.test(lower)) {
     targetStage = 'lost';
     stageDisplayName = 'Closed Lost';
-  } else if (/\b(?:new\s*inquiry|new\s*enquiry|new)\b/i.test(lower)) {
+  } else if (/\b(?:new\s*inquiry|new\s*enquiry|naya\s*inquiry|naya\s*enquiry|initial\s*stage)\b/i.test(lower)) {
     targetStage = 'new_inquiry';
     stageDisplayName = 'New Inquiry';
   }
@@ -11835,16 +12114,38 @@ async function handleMidFlowStageUpdate(text, senderPhone, activeState, action, 
     }
   }
 
+  // Fast regex customer extraction: "for <Customer>", "mark <Customer>", "<Customer> deal won", etc.
+  if (!targetCustomerName) {
+    const forCustMatch = clean.match(/\b(?:for|of|from)\s+([A-Za-z0-9\s.&'-]{2,40}?)(?:\s+(?:deal|inquiry|order|stage|as|to|won|lost|quoted)|\s*$)/i);
+    if (forCustMatch && !/^(?:the|above|this|it|deal|inquiry|order)$/i.test(forCustMatch[1].trim())) {
+      targetCustomerName = forCustMatch[1].trim();
+    }
+    if (!targetCustomerName) {
+      const markCustMatch = clean.match(/\b(?:mark|move|put|change|set|update)\s+([A-Za-z0-9\s.&'-]{2,40}?)\s+(?:as|to|deal|inquiry|stage|won|lost|quoted)\b/i);
+      if (markCustMatch && !/^(?:the|a|an|deal|inquiry|order|status|stage)$/i.test(markCustMatch[1].trim())) {
+        targetCustomerName = markCustMatch[1].trim();
+      }
+    }
+    if (!targetCustomerName) {
+      const beforeDealMatch = clean.match(/^([A-Za-z0-9\s.&'-]{2,40}?)\s+(?:deal\s+won|deal\s+lost|sauda\s+pakka|order\s+won)\b/i);
+      if (beforeDealMatch && !/^(?:the|a|an|deal|inquiry|order|status|stage|mark|update)$/i.test(beforeDealMatch[1].trim())) {
+        targetCustomerName = beforeDealMatch[1].trim();
+      }
+    }
+  }
+
   // If targetStage or targetInqId is still missing, attempt LLM extraction
   if (!targetStage || !targetInqId) {
     try {
-      const extractPrompt = `Extract the target deal/inquiry ID and new pipeline stage from the following message:
+      const extractPrompt = `Extract the target deal/inquiry ID, customer/company name, and new pipeline stage from the following message:
 Message: "${clean}"
 Active draft inquiry ID: "${draft?.inquiry_id || ''}"
+Active draft customer name: "${draft?.company_name || ''}"
 
 Return ONLY JSON:
 {
   "inquiry_id": "<Inquiry ID e.g. INQ-D013D7 or null>",
+  "customer_name": "<Customer / Company Name e.g. ABC Steels or null>",
   "target_stage": "quoted|negotiation|on_hold|won|lost|new_inquiry|null"
 }`;
       const res = await invokeWithFallback([new HumanMessage(extractPrompt)], null);
@@ -11864,14 +12165,65 @@ Return ONLY JSON:
       if (!targetInqId && jsonParsed.inquiry_id) {
         targetInqId = String(jsonParsed.inquiry_id).replace(/^#?(?:INQ|DEAL)[-_:#\s]*/i, '').replace(/^#+/, '').replace(/-/g, '').trim().toUpperCase();
       }
+      if (!targetCustomerName && jsonParsed.customer_name) {
+        targetCustomerName = String(jsonParsed.customer_name).trim();
+      }
     } catch (e) {
       console.warn('[CatalogFlow] handleMidFlowStageUpdate LLM extraction notice:', e.message);
     }
   }
 
   if (!targetStage) {
-    targetStage = 'quoted';
-    stageDisplayName = 'Price Quote';
+    const stageClarificationPrompt = `Which stage would you like to update this inquiry to?\n\n` +
+      `1️⃣ *Price Quote* (Quoted)\n` +
+      `2️⃣ *Negotiation*\n` +
+      `3️⃣ *Closed Won*\n` +
+      `4️⃣ *Closed Lost*\n` +
+      `5️⃣ *On Hold*\n` +
+      `6️⃣ *New Inquiry*\n\n` +
+      `Please reply with the stage name or option number (1–6).`;
+
+    if (activeState === 'general' || !draft) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      await recordSessionMessage(senderPhone, 'assistant', stageClarificationPrompt, { action_type: 'UPDATE_INQUIRY' });
+      await saveActiveSession(senderPhone, 'Customer', 'general');
+      return {
+        handled: true,
+        reply: stageClarificationPrompt,
+        interactiveType: 'buttons',
+        interactiveButtons: [
+          { id: 'stage_quoted', title: 'Price Quote' },
+          { id: 'stage_negotiation', title: 'Negotiation' },
+          { id: 'stage_won', title: 'Closed Won' },
+        ],
+      };
+    }
+
+    const resumeMsg = buildResumePrompt(action, draft);
+    const combinedReply = `${stageClarificationPrompt}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
+
+    await recordSessionMessage(senderPhone, 'user', text);
+    await recordSessionMessage(senderPhone, 'assistant', combinedReply, {
+      action_type: action,
+      customer_name: draft?.company_name || null,
+    });
+
+    await saveActiveSession(
+      senderPhone,
+      draft?.company_name || 'Customer',
+      `catalog_resume_ask|${activeState}|${action}|${JSON.stringify(draft || {})}`
+    );
+
+    return {
+      handled: true,
+      reply: combinedReply,
+      interactiveType: 'buttons',
+      interactiveButtons: [
+        { id: 'stage_quoted', title: 'Price Quote' },
+        { id: 'stage_negotiation', title: 'Negotiation' },
+        { id: 'stage_won', title: 'Closed Won' },
+      ],
+    };
   }
 
   const cleanInqCode = targetInqId ? targetInqId.replace(/-/g, '').toUpperCase() : null;
@@ -11966,11 +12318,12 @@ Return ONLY JSON:
     }
   }
 
-  // 3c. Fallback by draft company_name ONLY if cleanInqCode was not provided or not matched
-  if (!deal && !inq && draft?.company_name) {
+  // 3c. Fallback by customer name (from user message or active draft company_name)
+  const searchCustomerName = targetCustomerName || draft?.company_name;
+  if (!deal && !inq && searchCustomerName) {
     if (deals && deals.length > 0) {
-      deal = deals.find(d => isCustomerMatch(draft.company_name, null, d.customer_name, null)) ||
-             deals.find(d => d.customer_name && d.customer_name.toLowerCase().includes(draft.company_name.toLowerCase())) || null;
+      deal = deals.find(d => isCustomerMatch(searchCustomerName, null, d.customer_name, null)) ||
+             deals.find(d => d.customer_name && d.customer_name.toLowerCase().includes(searchCustomerName.toLowerCase())) || null;
     }
 
     if (!deal) {
@@ -11984,7 +12337,8 @@ Return ONLY JSON:
         const matched = matchInqs.find(i => {
           const ai = i.ai_extraction_json || {};
           const cName = i.sender_name || ai.companyName || ai.customer_name || '';
-          return isCustomerMatch(draft.company_name, null, cName, null);
+          return isCustomerMatch(searchCustomerName, null, cName, null) ||
+                 (cName && cName.toLowerCase().includes(searchCustomerName.toLowerCase()));
         });
         if (matched) {
           inq = matched;
@@ -11996,7 +12350,17 @@ Return ONLY JSON:
 
   // If no deal or inquiry found
   if (!deal && !inq) {
-    const errorMsg = `❌ *Inquiry Not Found*\n\nCould not find an inquiry or deal matching ${targetInqId ? `"${targetInqId}"` : 'the specified reference'}.\n\nPlease check the Inquiry ID (e.g. INQ-D013D7) and try again.`;
+    const missingRef = targetInqId ? `"${targetInqId}"` : (targetCustomerName ? `customer "${targetCustomerName}"` : 'the specified reference');
+    const errorMsg = `❌ *Inquiry Not Found*\n\nCould not find an inquiry or deal matching ${missingRef}.\n\nPlease check the Inquiry ID (e.g. INQ-D013D7) or Customer Name and try again.`;
+    if (activeState === 'general' || !draft) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      await recordSessionMessage(senderPhone, 'assistant', errorMsg, { action_type: action || 'UPDATE_INQUIRY' });
+      await saveActiveSession(senderPhone, 'Customer', 'general');
+      return {
+        handled: true,
+        reply: errorMsg,
+      };
+    }
     const resumeMsg = buildResumePrompt(action, draft);
     const combinedReply = `${errorMsg}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
 
@@ -12065,6 +12429,16 @@ Return ONLY JSON:
   }
 
   if (transitionError) {
+    if (activeState === 'general' || !draft) {
+      const errReply = `⚠️ ${transitionError}`;
+      await recordSessionMessage(senderPhone, 'user', text);
+      await recordSessionMessage(senderPhone, 'assistant', errReply, { action_type: action || 'UPDATE_INQUIRY' });
+      await saveActiveSession(senderPhone, 'Customer', 'general');
+      return {
+        handled: true,
+        reply: errReply,
+      };
+    }
     const resumeMsg = buildResumePrompt(action, draft);
     const combinedReply = `⚠️ ${transitionError}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
 
@@ -12144,6 +12518,23 @@ Return ONLY JSON:
         delete draft.updates.status;
       }
     }
+  }
+
+  const cleanCust = deal?.customer_name || inq?.sender_name || inq?.ai_extraction_json?.companyName || draft?.company_name || '';
+  if (activeState === 'general' || !draft) {
+    const cleanConfirmation = `✅ *Inquiry Stage Updated!*\n\n• *Inquiry:* ${formattedDisplayId}${cleanCust ? ` (${cleanCust})` : ''}\n• *New Stage:* *${stageDisplayName}*`;
+    await recordSessionMessage(senderPhone, 'user', text);
+    await recordSessionMessage(senderPhone, 'assistant', cleanConfirmation, {
+      action_type: 'UPDATE_INQUIRY',
+      customer_name: cleanCust || null,
+    });
+    await saveActiveSession(senderPhone, cleanCust || 'Customer', 'general');
+    return {
+      handled: true,
+      reply: cleanConfirmation,
+      interactiveType: 'buttons',
+      interactiveButtons: getPostActivityButtons('UPDATE_INQUIRY'),
+    };
   }
 
   const confirmationMsg = `Stage for ${formattedDisplayId} has been updated to ${stageDisplayName}.`;
@@ -12578,15 +12969,15 @@ async function classifyActiveSessionIntent(activeActivity, text) {
     return { classification: 'OUT_OF_SCOPE_GENERIC' };
   }
 
-  // In UPDATE_INQUIRY, updating stage/status, rate, quantity, or line items is part of editing the active inquiry
-  if (activeActivity === 'UPDATE_INQUIRY') {
-    const inqMatch = trimmed.match(/\b(?:INQ|DEAL)-([A-Z0-9]+)\b/i);
-    if (!inqMatch) {
+  // In UPDATE_INQUIRY or UPDATE_ORDER, updating stage/status, rate, quantity, or line items is part of editing the active record
+  if (activeActivity === 'UPDATE_INQUIRY' || activeActivity === 'UPDATE_ORDER') {
+    const targetMatch = trimmed.match(/\b(?:INQ|DEAL|ORD|PO)-([A-Z0-9]+)\b/i);
+    if (!targetMatch) {
       if (!isOutOfScopeGenericPrompt(trimmed) && !detectOutOfScopeActionAttempt(activeActivity, trimmed)) {
         if (isStageOnlyUpdate(trimmed)) {
           return { classification: 'STAGE_UPDATE' };
         }
-        if (isStageUpdatePrompt(trimmed) || /\b(?:rate|price|qty|quantity)\b/i.test(trimmed)) {
+        if (isStageUpdatePrompt(trimmed) || /\b(?:rate|price|qty|quantity|po|date|payment|delivery|status|stage|satge)\b/i.test(trimmed)) {
           return { classification: 'SAME_ACTIVITY' };
         }
       }
@@ -12600,14 +12991,14 @@ Incoming message: "${trimmed}"
 
 Classify this incoming message:
 - If this message asks to change, edit, rename, or set a SYSTEM-GENERATED field of the current record (Inquiry ID, Deal ID, Enquiry Number, Inquiry Date / date of the inquiry, Order ID, Complaint Ticket ID, Visit ID, Customer ID, Logged By / Created By, Creation Date, Salesperson), e.g. "edit inquiry id for ABC Steels to IN897", "change inquiry number to 897", "INQ-F2785B ko IN897 kar do", "change created date", "update the date of the inquiry to tomorrow" -> SAME_ACTIVITY (the active workflow will explain that the field can't be edited). NEVER classify these as STAGE_UPDATE, RETRIEVAL_QUERY, or DIFFERENT_ACTIVITY.
-- If the user is in [UPDATE_INQUIRY], updating stage/status (Negotiation, Won, Lost, Quoted, On Hold), rate, quantity, or line items is a core field edit for the active inquiry -> SAME_ACTIVITY. Do NOT classify as STAGE_UPDATE unless a DIFFERENT inquiry ID is explicitly specified.
-- If this message is requesting to update, change, set, move, or mark the stage/status of an inquiry or deal (e.g. "update the stage to price quote for above inquiry", "update stage to quoted", "mark as negotiation", "move to on hold", "set status to price quote", "stage won", "set stage to lost") -> STAGE_UPDATE
+- If the user is in [UPDATE_INQUIRY] or [UPDATE_ORDER], updating stage/status (Negotiation, Won, Lost, Quoted, On Hold, Confirmed, Pending, Processing, Dispatched, Delivered), rate, price, quantity, PO details, delivery, or line items is a core field edit for the active record -> SAME_ACTIVITY. Do NOT classify as STAGE_UPDATE unless a DIFFERENT record ID is explicitly specified or it is strictly a stage-only update without any other fields.
+- If the user provides field details (rates, prices, quantities, products, PO details, delivery location, payment terms, remarks, notes, or compound stage + rate updates) for the active [${activeActivity}] (${activityDisplayName}) form -> SAME_ACTIVITY
+- If this message is STRICTLY requesting to update, change, set, move, or mark ONLY the pipeline stage/status of an inquiry or deal WITHOUT other product or pricing details (e.g. "update the stage to price quote for above inquiry", "update stage to quoted", "mark as negotiation", "move to on hold", "set status to price quote", "stage won", "set stage to lost") -> STAGE_UPDATE
 - If this message is reporting or logging a customer complaint, quality issue, defect, damage, rust, shortage, service problem, or delivery issue -> DIFFERENT_ACTIVITY:LOG_COMPLAINT
 - If this message is recording or logging a purchase order / PO -> DIFFERENT_ACTIVITY:LOG_ORDER
 - If this message is logging a new customer inquiry, requirement, or RFQ -> DIFFERENT_ACTIVITY:LOG_INQUIRY
 - If this message is onboarding a new customer profile -> DIFFERENT_ACTIVITY:LOG_NEW_CUSTOMER
 - If this message is logging a customer field visit / client meeting -> DIFFERENT_ACTIVITY:LOG_VISIT
-- If this message provides field details (payment terms e.g. "45 days" / "advance", delivery location e.g. "Mumbai" / "Kolhapur", person met, contact phone, meeting remarks, visit date, outcome, company name, rate, tonnage, quantity, notes, make) for the active [${activeActivity}] (${activityDisplayName}) form -> SAME_ACTIVITY
 - If this message is asking a read-only data query or search about Enlight Metals sales data or CRM records (asking for rates, checking status, listing inquiries, checking orders) -> RETRIEVAL_QUERY
 - If this message is asking an out-of-scope generic question or prompt (celebrities, sports, cricketers, trivia, science, geography, jokes, coding, recipes) -> OUT_OF_SCOPE_GENERIC
 
@@ -12632,7 +13023,7 @@ Classification:`;
     console.log('[CatalogFlow] AI active session intent classifier raw response:', JSON.stringify(raw));
 
     if (/STAGE_UPDATE/i.test(raw)) {
-      if (activeActivity === 'UPDATE_INQUIRY' && !isStageOnlyUpdate(trimmed) && !trimmed.match(/\b(?:INQ|DEAL)-([A-Z0-9]+)\b/i)) {
+      if (!isStageOnlyUpdate(trimmed) && !trimmed.match(/\b(?:INQ|DEAL|ORD|PO)-([A-Z0-9]+)\b/i)) {
         return { classification: 'SAME_ACTIVITY' };
       }
       return { classification: 'STAGE_UPDATE' };
@@ -12656,7 +13047,7 @@ Classification:`;
     }
 
     if (/SAME_ACTIVITY/i.test(raw)) {
-      if (isStageOnlyUpdate(trimmed) || (activeActivity !== 'UPDATE_INQUIRY' && isStageUpdatePrompt(trimmed))) {
+      if (isStageOnlyUpdate(trimmed)) {
         return { classification: 'STAGE_UPDATE' };
       }
       // Check if deterministic regex detects a clear cross-module action that LLM might have missed
@@ -12672,6 +13063,9 @@ Classification:`;
 
   // Deterministic fallback if model call failed or was ambiguous
   if (isStageUpdatePrompt(trimmed)) {
+    if (!isStageOnlyUpdate(trimmed) && !trimmed.match(/\b(?:INQ|DEAL|ORD|PO)-([A-Z0-9]+)\b/i)) {
+      return { classification: 'SAME_ACTIVITY' };
+    }
     return { classification: 'STAGE_UPDATE' };
   }
 
@@ -14627,7 +15021,13 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const existingProdCheck = validateDraftProducts(action, existingDraft);
     let resolvedProd = null;
     if (!existingProdCheck.isValid && existingProdCheck.invalidProducts.length > 0) {
-      resolvedProd = resolveClarifiedProduct(text, existingProdCheck.invalidProducts[0]);
+      for (const invProd of existingProdCheck.invalidProducts) {
+        const candidate = resolveClarifiedProduct(text, invProd);
+        if (candidate) {
+          resolvedProd = candidate;
+          break;
+        }
+      }
       if (resolvedProd) {
         if (Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0) {
           existingDraft.line_item_updates.forEach((it) => {
@@ -14664,7 +15064,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // Extract fields from user message
-    const isPureCandidateSelection = (candidateResolved || inquiryCandidateResolved || orderCandidateResolved) && isPureOptionSelectorOnly(text);
+    const isPureCandidateSelection = (candidateResolved || inquiryCandidateResolved || orderCandidateResolved || complaintCandidateResolved || resolvedProd) && isPureOptionSelectorOnly(text);
     const isGenericMediaCaption = /^(?:image\s*received|document\s*received|photo\s*uploaded|evidence\s*(?:attachment|photo|photos|document)?\s*uploaded|uploaded\s*photo|attachment\s*uploaded)$/i.test(text.trim());
 
     const updatedDraft = (isPureCandidateSelection || isAttachmentNo || (incomingAttachments.length > 0 && isGenericMediaCaption) || existingDraft._skip_llm_extract)
@@ -14696,8 +15096,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           if (!textHasNewQty && prev.quantity !== null && prev.quantity !== undefined) {
             it.quantity = prev.quantity;
           }
-          if (!textHasNewRate && prev.rate !== null && prev.rate !== undefined) {
-            it.rate = prev.rate;
+          if (!textHasNewRate) {
+            it.rate = (prev.rate !== null && prev.rate !== undefined) ? prev.rate : null;
           }
         });
       }
@@ -14725,10 +15125,18 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           if (!textHasNewQty && prev.quantity !== null && prev.quantity !== undefined) {
             it.quantity = prev.quantity;
           }
-          if (!textHasNewRate && prev.rate !== null && prev.rate !== undefined) {
-            it.rate = prev.rate;
+          if (!textHasNewRate) {
+            it.rate = (prev.rate !== null && prev.rate !== undefined) ? prev.rate : null;
+          }
+          if (!it.rate) {
+            it.amount = null;
+          } else if (it.rate && it.quantity) {
+            it.amount = Number(it.rate) * Number(it.quantity);
           }
         });
+      }
+      if (!textHasNewRate) {
+        updatedDraft.rate = (existingDraft.rate !== null && existingDraft.rate !== undefined) ? existingDraft.rate : null;
       }
     }
 
@@ -15390,6 +15798,13 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
   }
 
+  // ── 7.5 STAGE UPDATES IN IDLE / STALE / EMPTY STATE ──
+  // Per requirement: In stale/empty state, ONLY data retrieval queries and stage updates
+  // are allowed to be processed directly. All other write actions remain strictly gated.
+  if (isStageUpdatePrompt(text)) {
+    return await handleMidFlowStageUpdate(text, senderPhone, 'general', 'UPDATE_INQUIRY', null);
+  }
+
   // ── 8. ALL OTHER MESSAGES OUTSIDE ACTIVE SESSION -> STRICT CATALOG GATING ──
   // Per architecture requirement:
   // Direct write logging outside an active catalog flow is disabled.
@@ -15427,6 +15842,7 @@ module.exports = {
   isSalesOsDomainQuery,
   isOutOfScopeGenericPrompt,
   isStageUpdatePrompt,
+  isStageOnlyUpdate,
   detectOperationalAction,
   extractFieldsWithLLM,
   mergeDraft,
@@ -15483,4 +15899,13 @@ module.exports = {
   handleResumeMenuButton,
   getAllowedFieldsListForAction,
   getEditPromptForAction,
+  scoreLineItemAgainstUpdate,
+  matchLineItemUpdate,
+  resolveLineItemUpdateTargets,
+  pickLineItemChoice,
+  pinLineUpdateToItems,
+  buildLineItemChoicePrompt,
+  handleLineItemChoiceReply,
+  isPureOptionSelectorOnly,
+  isNumericOptionSelector,
 };
