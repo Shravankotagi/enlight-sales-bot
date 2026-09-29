@@ -4886,7 +4886,7 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   draft.inquiry_id = formattedCode;
   draft._inquiry_display_id = formattedCode;
 
-  const sessionRate = draft.rate ? (parseIndianAmount(draft.rate) ?? 0) : (Array.isArray(draft.line_items) && draft.line_items[0]?.rate ? Number(draft.line_items[0].rate) : null);
+  const sessionRate = draft.rate ? (parseIndianAmount(draft.rate) ?? 0) : null;
 
   // 1. Customer Name
   if (!draft.company_name) {
@@ -4938,7 +4938,8 @@ async function validateOrderInquiryStage(draft, senderPhone) {
     if (!Array.isArray(draft.line_items) || draft.line_items.length === 0) {
       draft.line_items = dbItems.map(it => {
         const qty = Number(it.quantity) || 0;
-        const rate = (sessionRate && sessionRate > 0) ? sessionRate : (Number(it.rate) || (matchedInq?.ai_extraction_json?.rate ? Number(matchedInq.ai_extraction_json.rate) : 0));
+        const itemRate = Number(it.rate) || (Number(it.amount) && Number(it.quantity) ? Number(it.amount) / Number(it.quantity) : 0);
+        const rate = itemRate > 0 ? itemRate : ((sessionRate && sessionRate > 0) ? sessionRate : (matchedInq?.ai_extraction_json?.rate ? Number(matchedInq.ai_extraction_json.rate) : 0));
         const amount = qty > 0 && rate > 0 ? qty * rate : (Number(it.amount) || 0);
         const sku = it.sku_text || it.description || 'Metal Product';
         const dim = it.dimensions || it.spec || null;
@@ -4963,7 +4964,8 @@ async function validateOrderInquiryStage(draft, senderPhone) {
       draft.line_items = draft.line_items.map((it, idx) => {
         const fallbackDb = dbItems[idx] || dbItems[0] || {};
         const qty = Number(it.quantity) || Number(fallbackDb.quantity) || 0;
-        const rate = (sessionRate && sessionRate > 0) ? sessionRate : (Number(it.rate) || Number(fallbackDb.rate) || 0);
+        const itemRate = Number(it.rate) || Number(fallbackDb.rate) || (Number(it.amount) && Number(it.quantity) ? Number(it.amount) / Number(it.quantity) : 0);
+        const rate = itemRate > 0 ? itemRate : ((sessionRate && sessionRate > 0) ? sessionRate : 0);
         const amount = qty > 0 && rate > 0 ? qty * rate : (Number(it.amount) || 0);
         const sku = it.sku_text || it.description || fallbackDb.sku_text || fallbackDb.description || 'Metal Product';
         const dim = it.dimensions || it.spec || fallbackDb.dimensions || fallbackDb.spec || null;
@@ -5455,7 +5457,7 @@ function formatStageLabel(st) {
   const s = String(st || '').toLowerCase();
   if (s.includes('won') || s.includes('order')) return 'Won';
   if (s.includes('lost')) return 'Lost';
-  if (s.includes('quote') || s.includes('price')) return 'Quoted';
+  if (s.includes('quote') || s.includes('price') || s.includes('qualif') || s.includes('confirmed') || s.includes('proposal')) return 'Quoted';
   if (s.includes('negot')) return 'Negotiation';
   if (s.includes('hold')) return 'On Hold';
   return 'New Inquiry';
@@ -5981,7 +5983,28 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
     const dealByInqId = new Map();
     const wonOrClosedInqIds = new Set();
     const terminalStages = new Set(['won', 'lost', 'closed', 'completed', 'cancelled']);
-    const ELIGIBLE_ORDER_STAGES = new Set(['quoted', 'negotiation', 'on_hold', 'hold']);
+    const ELIGIBLE_ORDER_STAGES = new Set([
+      'quoted',
+      'price_quote',
+      'price quote',
+      'qualified',
+      'confirmed',
+      'proposal',
+      'saved',
+      'quotation_sent',
+      'negotiation',
+      'on_hold',
+      'hold'
+    ]);
+
+    const isEligibleOrderStage = (st) => {
+      if (!st) return false;
+      const s = String(st).toLowerCase().trim();
+      if (terminalStages.has(s) || s.includes('won') || s.includes('lost') || s.includes('closed') || s.includes('cancel')) return false;
+      if (ELIGIBLE_ORDER_STAGES.has(s)) return true;
+      if (s.includes('quote') || s.includes('price') || s.includes('qualif') || s.includes('proposal') || s.includes('negot') || s.includes('hold')) return true;
+      return false;
+    };
 
     scopedDeals.forEach(d => {
       const stage = (d.stage || '').toLowerCase().trim();
@@ -6013,11 +6036,11 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
       if (rawLower.startsWith('[po document attached:') || rawLower.includes('po number:')) return;
 
       const linkedDeal = dealByInqId.get(inq.id);
-      const stage = (linkedDeal?.stage || inq.status || 'new_inquiry').toLowerCase().trim();
+      const stage = (linkedDeal?.stage || inq.stage || inq.status || 'new_inquiry').toLowerCase().trim();
       if (terminalStages.has(stage)) return;
 
       // STRICT STAGE FILTER FOR LOG_ORDER: Price Quote, Negotiation, On Hold only. Exclude new_inquiry & review.
-      if (action === 'LOG_ORDER' && !ELIGIBLE_ORDER_STAGES.has(stage)) return;
+      if (action === 'LOG_ORDER' && !isEligibleOrderStage(stage)) return;
 
       const cleanCode = (inq.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
       const displayId = `INQ-${cleanCode}`;
@@ -6077,7 +6100,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
       if (terminalStages.has(stage) || Boolean(d.po_number)) return;
 
       // STRICT STAGE FILTER FOR LOG_ORDER: Price Quote, Negotiation, On Hold only. Exclude new_inquiry & review.
-      if (action === 'LOG_ORDER' && !ELIGIBLE_ORDER_STAGES.has(stage)) return;
+      if (action === 'LOG_ORDER' && !isEligibleOrderStage(stage)) return;
 
       const cleanCode = (d.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
       const displayId = `INQ-${cleanCode}`;
@@ -6603,8 +6626,10 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
       candidateIds.push(directCleanId);
     }
 
+    const CANDIDATE_ID_STOPWORDS = new Set(['FOR', 'TO', 'IS', 'OF', 'IN', 'ON', 'AT', 'NEW', 'LOG', 'NOW', 'TODAY', 'DATED', 'WITH', 'FROM', 'THE', 'AND', 'AN', 'A', 'ORDER', 'INQUIRY', 'DEAL', 'PO', 'UPDATE']);
+
     for (const cleanId of candidateIds) {
-      if (!cleanId || cleanId.length < 2) continue;
+      if (!cleanId || cleanId.length < 2 || CANDIDATE_ID_STOPWORDS.has(cleanId)) continue;
       matchedRecord = cached.find(r => {
         const dId = (r.displayId || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
         const rId = (r.id || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
@@ -6620,6 +6645,97 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
           const po = (r.po_number || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
           return dId.includes(cleanId) || rId.startsWith(cleanId) || (po && po.includes(cleanId));
         });
+      }
+
+      if (!matchedRecord && (action === 'LOG_ORDER' || action === 'UPDATE_INQUIRY' || action === 'UPDATE_ORDER')) {
+        try {
+          const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants, isPhoneInScope } = require('../supabase');
+          const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+          const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
+          const { data: dbInqs } = await supabase
+            .from('inquiries')
+            .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, stage, inquiry_type, created_at, salesperson_phone, inquiry_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+            .order('created_at', { ascending: false })
+            .limit(500);
+
+          const accessibleInqs = (dbInqs || []).filter(i => {
+            if (scope.isAdmin || scope.phones === null) return true;
+            return i.salesperson_phone && isPhoneInScope(i.salesperson_phone, targetPhones);
+          });
+
+          const foundInq = accessibleInqs.find(i => {
+            const rawId = (i.id || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
+            return rawId.startsWith(cleanId) || rawId.includes(cleanId);
+          });
+
+          if (foundInq) {
+            let { data: linkedDeals } = await supabase
+              .from('deals')
+              .select('id, inquiry_id, customer_name, customer_phone, po_number, stage, total_amount, payment_terms, delivery_location, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+              .eq('inquiry_id', foundInq.id);
+
+            const linkedDeal = (linkedDeals && linkedDeals.length > 0) ? linkedDeals[0] : null;
+            const rawStage = (linkedDeal?.stage || foundInq.stage || foundInq.status || 'new_inquiry').toLowerCase().trim();
+            const cleanCode = (foundInq.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
+            const displayId = `INQ-${cleanCode}`;
+
+            if (action === 'LOG_ORDER') {
+              const isTerminal = ['won', 'lost', 'closed', 'completed', 'cancelled'].includes(rawStage) || Boolean(linkedDeal?.po_number);
+              if (isTerminal) {
+                const terminalReply = `⚠️ Inquiry *${displayId}* (${foundInq.sender_name || 'Customer'}) has already been converted to an order or closed (Stage: ${formatStageLabel(rawStage)}).\n\nType another Inquiry ID or Customer Name, or reply "All" to view eligible inquiries.`;
+                await recordSessionMessage(senderPhone, 'assistant', terminalReply, { action_type: action });
+                return { handled: true, reply: terminalReply };
+              }
+
+              const isEligible = typeof isEligibleOrderStage === 'function' ? isEligibleOrderStage(rawStage) : ['quoted', 'price_quote', 'qualified', 'confirmed', 'proposal', 'negotiation', 'on_hold', 'hold'].includes(rawStage);
+              if (!isEligible) {
+                const ineligibleReply = `⚠️ Inquiry *${displayId}* (${foundInq.sender_name || 'Customer'}) is currently in *${formatStageLabel(rawStage)}* stage.\n\nOrders can only be logged for inquiries in *Price Quote*, *Negotiation*, or *On Hold* stages.\n\nType another Inquiry ID or Customer Name, or reply "Cancel" to exit.`;
+                await recordSessionMessage(senderPhone, 'assistant', ineligibleReply, { action_type: action });
+                return { handled: true, reply: ineligibleReply };
+              }
+            }
+
+            const ai = foundInq.ai_extraction_json || {};
+            const prodSummary = linkedDeal ? formatProductSummaryCompact(linkedDeal) : formatProductSummaryCompact(foundInq);
+            const inqAttrs = extractInquiryAttributes(foundInq, linkedDeal);
+            const inqDealItems = (linkedDeal?.deal_items && linkedDeal.deal_items.length > 0)
+              ? linkedDeal.deal_items
+              : (foundInq.inquiry_items && foundInq.inquiry_items.length > 0)
+                ? foundInq.inquiry_items
+                : (ai.line_items && ai.line_items.length > 0)
+                  ? ai.line_items
+                  : [];
+
+            let calcTotal = Number(linkedDeal?.total_amount) || Number(ai.totalAmount) || Number(ai.total_amount) || 0;
+            if (!calcTotal && inqDealItems.length > 0) {
+              calcTotal = inqDealItems.reduce((s, it) => s + (Number(it.amount || 0) || (Number(it.quantity || 0) * Number(it.rate || 0))), 0);
+            }
+
+            matchedRecord = {
+              id: foundInq.id,
+              deal_id: linkedDeal?.id || null,
+              inquiry_id: foundInq.id,
+              displayId,
+              clean_code: cleanCode,
+              customer_name: linkedDeal?.customer_name || foundInq.sender_name || ai.companyName || 'Customer',
+              product_summary: prodSummary,
+              stage: formatStageLabel(rawStage),
+              raw_stage: rawStage,
+              date_formatted: formatDateDDMMYYYY(foundInq.created_at),
+              payment_terms: inqAttrs.payment_terms || 'Not specified',
+              delivery_location: inqAttrs.delivery_location || 'Not specified',
+              preferred_make: inqAttrs.preferred_make || null,
+              additional_notes: inqAttrs.additional_notes || null,
+              total_amount: calcTotal,
+              deal_items: inqDealItems,
+              created_at: foundInq.created_at,
+            };
+            break;
+          }
+        } catch (fallbackErr) {
+          console.warn('[CatalogFlow] candidate ID DB fallback error:', fallbackErr.message);
+        }
       }
 
       if (matchedRecord) break;
@@ -7471,7 +7587,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     const s = String(st || '').toLowerCase();
     if (s.includes('won') || s.includes('order')) return 'Won';
     if (s.includes('lost')) return 'Lost';
-    if (s.includes('quote') || s.includes('price')) return 'Price Quote';
+    if (s.includes('quote') || s.includes('price') || s.includes('qualif') || s.includes('confirmed') || s.includes('proposal')) return 'Price Quote';
     if (s.includes('negot')) return 'Negotiation';
     if (s.includes('hold')) return 'On Hold';
     return 'New Inquiry';

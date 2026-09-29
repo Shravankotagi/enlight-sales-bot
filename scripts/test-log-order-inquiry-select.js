@@ -113,7 +113,7 @@ async function testLogOrderInquirySelect() {
       assert.notStrictEqual(st, 'lost', `Record ${r.displayId} has disallowed stage 'lost'`);
       assert.notStrictEqual(st, 'cancelled', `Record ${r.displayId} has disallowed stage 'cancelled'`);
       assert.ok(
-        ['quoted', 'negotiation', 'on_hold', 'hold'].includes(st),
+        ['quoted', 'price_quote', 'price quote', 'qualified', 'confirmed', 'proposal', 'saved', 'negotiation', 'on_hold', 'hold'].includes(st),
         `Record ${r.displayId} stage '${st}' is not in allowed order stages`
       );
     }
