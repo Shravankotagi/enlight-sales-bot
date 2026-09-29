@@ -661,10 +661,13 @@ async function saveCompletedVisit(visitState, senderPhone) {
     if (contact_no) custUpdate.customer_phone = contact_no;
     if (person_met) custUpdate.contact_person = person_met;
     if (email) custUpdate.customer_email = email;
-    await supabase
-      .from('recurring_customers')
-      .update(custUpdate)
-      .ilike('customer_name', `%${finalCustomerName}%`);
+    const exactCustomerName = String(finalCustomerName || '').trim().replace(/[\\%_]/g, (ch) => `\\${ch}`);
+    if (exactCustomerName) {
+      await supabase
+        .from('recurring_customers')
+        .update(custUpdate)
+        .ilike('customer_name', exactCustomerName);
+    }
   }
 
   // Log KRA 9 with full business context
@@ -1362,10 +1365,13 @@ async function applyVisitFieldUpdate(
     if (targetField === 'contact_no') custUpdate.customer_phone = newValue;
     if (targetField === 'customer_address') custUpdate.city = newValue;
 
-    await supabase
-      .from('recurring_customers')
-      .update(custUpdate)
-      .ilike('customer_name', `%${targetVisit.customer_name}%`);
+    const exactCustomerName = String(targetVisit.customer_name || '').trim().replace(/[\\%_]/g, (ch) => `\\${ch}`);
+    if (exactCustomerName) {
+      await supabase
+        .from('recurring_customers')
+        .update(custUpdate)
+        .ilike('customer_name', exactCustomerName);
+    }
   }
 
   // Log to activity_logs

@@ -1500,12 +1500,18 @@ async function syncInquiryFromDeal(inquiryId, dealObj, dealItems) {
       grandTotal: totalAmount > 0 ? Math.round(totalAmount * 1.18) : existingAi.grandTotal || null,
     };
 
+    const inqUpdateFields = {
+      ai_extraction_json: updatedAi,
+      sender_name: dealObj.customer_name || inq.sender_name,
+    };
+    if (dealObj.stage) {
+      inqUpdateFields.stage = dealObj.stage;
+      inqUpdateFields.status = dealObj.stage === 'won' ? 'confirmed' : dealObj.stage;
+    }
+
     const { error: inqUpdErr } = await supabase
       .from('inquiries')
-      .update({
-        ai_extraction_json: updatedAi,
-        sender_name: dealObj.customer_name || inq.sender_name,
-      })
+      .update(inqUpdateFields)
       .eq('id', inq.id);
 
     if (inqUpdErr) {
@@ -1551,15 +1557,21 @@ async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
   if (dealItems.length > 0) {
     itemsSummary = dealItems
       .map((item, idx) => {
+        const prefix = `${idx + 1}. `;
         const spec = item.dimensions ? ` (${item.dimensions})` : '';
         const unit = item.unit || 'MT';
-        const rateVal = Number(item.rate || 0).toLocaleString('en-IN');
-        const amtVal = Number(item.amount || (Number(item.quantity || 0) * Number(item.rate || 0))).toLocaleString('en-IN');
-        return `  ${idx + 1}. ${item.sku_text || 'Material'}${spec} - Qty: ${item.quantity || 0} ${unit} @ ₹ ${rateVal}/${unit} = ₹ ${amtVal}`;
+        const qtyStr = `${Number(item.quantity || 0).toLocaleString('en-IN')} ${unit}`;
+        const rate = Number(item.rate || 0);
+        const amt = Number(item.amount || (Number(item.quantity || 0) * Number(item.rate || 0)));
+        if (rate > 0) {
+          const lineTotalStr = amt > 0 ? ` | Line Total: ₹${amt.toLocaleString('en-IN')}` : '';
+          return `  ${prefix}${item.sku_text || 'Material'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+        }
+        return `  ${prefix}${item.sku_text || 'Material'}${spec} | ${qtyStr}`;
       })
       .join('\n');
   } else {
-    itemsSummary = `  1. Steel Material - Qty: 1 MT @ ₹ ${Number(baseAmt).toLocaleString('en-IN')}/MT = ₹ ${Number(baseAmt).toLocaleString('en-IN')}`;
+    itemsSummary = `  1. Steel Material | 1 MT | ₹${Number(baseAmt).toLocaleString('en-IN')} /MT | Line Total: ₹${Number(baseAmt).toLocaleString('en-IN')}`;
   }
 
   const textContent = `Dear ${customerName},
@@ -1666,7 +1678,7 @@ MIDC Industrial Zone, Mumbai - 400001`;
   if (deal.inquiry_id) {
     await supabase
       .from('inquiries')
-      .update({ status: 'quoted' })
+      .update({ status: 'quoted', stage: 'quoted' })
       .eq('id', deal.inquiry_id);
   }
 
@@ -2252,40 +2264,94 @@ const {
 } = require('../utils/pricingEngine');
 
 /**
- * Evaluates mandatory fields for inquiry completion.
+ * Evaluates mandatory fields for inquiry completion and moving to Price Quote stage.
+ * Mandatory fields (per Enlightenment Metals workflow):
+ * 1. Company Name
+ * 2. Product Description (valid line items)
+ * 3. Specification / Dimensions (for ALL line items)
+ * 4. Quantity & Unit (for ALL line items, qty > 0)
+ * 5. Rate (₹) (must be entered and > 0 for EVERY single product/line item)
+ * 6. Delivery Location / Address
+ * 7. Payment Terms
  */
 function evaluateMandatoryFields({ customerName, lineItems, deliveryLocation, paymentTerms, totalAmount }) {
   const missing = [];
 
-  const hasCompany = !!(customerName && customerName.trim().length >= 2 && customerName !== 'Unknown');
+  const hasCompany = !!(customerName && String(customerName).trim().length >= 2 && !/^(?:unknown|customer|null|undefined)$/i.test(String(customerName).trim()));
   if (!hasCompany) missing.push('Company Name');
 
   const items = Array.isArray(lineItems) ? lineItems : [];
   const validItems = items.filter(i => {
-    const pName = (i.pName || i.sku_text || i.product_requirement || '').trim();
-    return pName.length > 0 && !/^(steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined)$/i.test(pName);
+    const pName = (i.pName || i.sku_text || i.product_requirement || i.productType || i.description || '').trim();
+    return pName.length > 0 && !/^(?:steel requirement|product requirement|steel|material|requirement|inquiry|unknown|item|null|undefined)$/i.test(pName);
   });
   const hasProduct = validItems.length > 0;
-  if (!hasProduct) missing.push('Product Description');
+  if (!hasProduct) {
+    missing.push('Product Description');
+  }
 
-  const hasSpec = validItems.some(i => (i.dimensions && String(i.dimensions).trim().length > 0));
-  if (!hasSpec) missing.push('Specification / Dimensions');
+  let hasSpec = false;
+  let hasQty = false;
+  let hasRate = false;
 
-  const hasQty = validItems.some(i => (Number(i.qty || i.quantity || i.quantity_mt) > 0));
-  if (!hasQty) missing.push('Quantity & Unit');
+  if (validItems.length > 0) {
+    // Check specifications for ALL items
+    const missingSpecItems = validItems.filter(i => {
+      const dim = String(i.dimensions || i.spec || i.specifications || '').trim();
+      return dim.length === 0;
+    });
+    hasSpec = missingSpecItems.length === 0;
+    if (!hasSpec) {
+      const names = missingSpecItems.map(i => (i.pName || i.sku_text || i.product_requirement || i.productType || i.description || 'Product').trim()).join(', ');
+      missing.push(`Specification / Dimensions for: ${names}`);
+    }
 
-  const hasRate = validItems.some(i => (Number(i.rate || i.rate_per_mt) > 0)) || (Number(totalAmount) > 0);
-  if (!hasRate) missing.push('Rate (₹)');
+    // Check quantities for ALL items
+    const missingQtyItems = validItems.filter(i => {
+      const q = Number(
+        i.qty !== undefined && i.qty !== null ? i.qty :
+        (i.quantity !== undefined && i.quantity !== null ? i.quantity :
+        (i.quantity_mt !== undefined && i.quantity_mt !== null ? i.quantity_mt :
+        (i.quantityTons !== undefined && i.quantityTons !== null ? i.quantityTons : 0)))
+      );
+      return q <= 0;
+    });
+    hasQty = missingQtyItems.length === 0;
+    if (!hasQty) {
+      const names = missingQtyItems.map(i => (i.pName || i.sku_text || i.product_requirement || i.productType || i.description || 'Product').trim()).join(', ');
+      missing.push(`Quantity & Unit for: ${names}`);
+    }
 
-  const hasDelivery = !!(deliveryLocation && String(deliveryLocation).trim().length >= 2);
+    // Check rates for ALL items (Must be entered and > 0 for EVERY product!)
+    const missingRateItems = validItems.filter(i => {
+      const r = Number(
+        i.rate !== undefined && i.rate !== null ? i.rate :
+        (i.rate_per_mt !== undefined && i.rate_per_mt !== null ? i.rate_per_mt :
+        (i.unitPrice !== undefined && i.unitPrice !== null ? i.unitPrice : 0))
+      );
+      return r <= 0;
+    });
+    hasRate = missingRateItems.length === 0;
+    if (!hasRate) {
+      const names = missingRateItems.map(i => (i.pName || i.sku_text || i.product_requirement || i.productType || i.description || 'Product').trim()).join(', ');
+      missing.push(`Rate (₹) for: ${names} (must be > 0)`);
+    }
+  } else {
+    missing.push('Specification / Dimensions');
+    missing.push('Quantity & Unit');
+    missing.push('Rate (₹)');
+  }
+
+  const hasDelivery = !!(deliveryLocation && String(deliveryLocation).trim().length >= 2 && !/^(?:null|undefined|none|na|n\/a)$/i.test(String(deliveryLocation).trim()));
   if (!hasDelivery) missing.push('Delivery Location');
 
-  const hasPayment = !!(paymentTerms && String(paymentTerms).trim().length >= 2);
+  const hasPayment = !!(paymentTerms && String(paymentTerms).trim().length >= 2 && !/^(?:null|undefined|none|na|n\/a)$/i.test(String(paymentTerms).trim()));
   if (!hasPayment) missing.push('Payment Terms');
 
   return {
     isComplete: missing.length === 0,
     missingFields: missing,
+    validItems,
     hasProduct,
     hasSpec,
     hasCompany,
@@ -3233,6 +3299,83 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
         return `Inquiry ${dealCode} for ${dealToUpdate.customer_name} is already in ${dbStage.toUpperCase().replace('_', ' ')} stage.`;
       }
 
+      // Stage Gate 1.5: PRICE QUOTE (quoted) stage validation
+      // All mandatory fields must be filled: Company, Product Specs, Quantities, Rates for ALL products, Delivery Address, Payment Terms
+      if (dbStage === 'quoted') {
+        let itemsToCheck = Array.isArray(dealToUpdate.deal_items) ? [...dealToUpdate.deal_items] : [];
+        if (itemsToCheck.length === 0 && dealToUpdate.id) {
+          const { data: dbItems } = await supabase.from('deal_items').select('*').eq('deal_id', dealToUpdate.id);
+          if (dbItems && dbItems.length > 0) {
+            itemsToCheck = dbItems;
+            dealToUpdate.deal_items = dbItems;
+          }
+        }
+        if (itemsToCheck.length === 0 && dealToUpdate.inquiry_id) {
+          const { data: inqItems } = await supabase.from('inquiry_items').select('*').eq('inquiry_id', dealToUpdate.inquiry_id);
+          if (inqItems && inqItems.length > 0) {
+            itemsToCheck = inqItems;
+            dealToUpdate.deal_items = inqItems;
+          }
+        }
+        if (itemsToCheck.length === 0 && dealToUpdate.raw_inquiry?.ai_extraction_json) {
+          const aiJson = typeof dealToUpdate.raw_inquiry.ai_extraction_json === 'string'
+            ? JSON.parse(dealToUpdate.raw_inquiry.ai_extraction_json)
+            : dealToUpdate.raw_inquiry.ai_extraction_json;
+          if (Array.isArray(aiJson?.line_items) && aiJson.line_items.length > 0) {
+            itemsToCheck = aiJson.line_items;
+          }
+        }
+        if (itemsToCheck.length === 0 && dealToUpdate.inquiry_id) {
+          const { data: inqRow } = await supabase.from('inquiries').select('ai_extraction_json').eq('id', dealToUpdate.inquiry_id).single();
+          if (inqRow?.ai_extraction_json) {
+            const aiJson = typeof inqRow.ai_extraction_json === 'string'
+              ? JSON.parse(inqRow.ai_extraction_json)
+              : inqRow.ai_extraction_json;
+            if (Array.isArray(aiJson?.line_items) && aiJson.line_items.length > 0) {
+              itemsToCheck = aiJson.line_items;
+            }
+          }
+        }
+
+        // Overlay any rates, quantities or specs extracted from current message
+        if (processedItems.length > 0) {
+          itemsToCheck = itemsToCheck.map(it => {
+            const matchingProc = processedItems.find(p => {
+              const n1 = (it.sku_text || it.product_requirement || '').toLowerCase();
+              const n2 = (p.pName || p.sku_text || '').toLowerCase();
+              return n1 && n2 && (n1 === n2 || n1.includes(n2) || n2.includes(n1));
+            });
+            if (matchingProc) {
+              return {
+                ...it,
+                rate: matchingProc.rate > 0 ? matchingProc.rate : it.rate,
+                quantity: matchingProc.qty > 0 ? matchingProc.qty : it.quantity,
+                dimensions: matchingProc.dimensions || it.dimensions,
+              };
+            }
+            return it;
+          });
+        }
+
+        const effectiveDelivery = extractedDeliveryLoc || data.delivery_location || dealToUpdate.delivery_location || null;
+        const effectivePayment = extractedPaymentTermsVal || data.payment_terms || dealToUpdate.payment_terms || null;
+
+        const completeness = evaluateMandatoryFields({
+          customerName: dealToUpdate.customer_name,
+          lineItems: itemsToCheck,
+          deliveryLocation: effectiveDelivery,
+          paymentTerms: effectivePayment,
+          totalAmount: dealAmount,
+        });
+
+        if (!completeness.isComplete) {
+          return `❌ Cannot update stage to Price Quote.\n\n` +
+            `Inquiry ${dealCode} for ${dealToUpdate.customer_name} has missing mandatory field(s):\n` +
+            completeness.missingFields.map(f => `• ${f}`).join('\n') +
+            `\n\nPlease fill the mandatory fields to update the stage to Price Quote.`;
+        }
+      }
+
       // Stage Gate 2: On Hold is ONLY allowed from Price Quote (quoted/qualified) stage
       if (dbStage === 'on_hold') {
         if (isNewInquiryStage) {
@@ -3330,9 +3473,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
 
         dealToUpdate = insertedDeals[0];
 
-        // Update inquiries table status
+        // Update inquiries table status and stage
         const inqStatus = dbStage === 'won' ? 'confirmed' : dbStage;
-        await supabase.from('inquiries').update({ status: inqStatus }).eq('id', dealToUpdate.inquiry_id);
+        await supabase.from('inquiries').update({ status: inqStatus, stage: dbStage }).eq('id', dealToUpdate.inquiry_id);
       } else {
         // Update existing deals record
         const updatePayload = {
@@ -3364,7 +3507,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
 
         if (dealToUpdate.inquiry_id) {
           const inqStatus = dbStage === 'won' ? 'confirmed' : dbStage;
-          await supabase.from('inquiries').update({ status: inqStatus }).eq('id', dealToUpdate.inquiry_id);
+          await supabase.from('inquiries').update({ status: inqStatus, stage: dbStage }).eq('id', dealToUpdate.inquiry_id);
         }
       }
 
@@ -3658,7 +3801,18 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
           // If user gave an explicit "from X to Y" quantity, but NO existing item matches that fromVal:
           if (fromToTargetIdx === -1) {
             const itemListStr = existingItems
-              .map(it => `• ${it.sku_text || 'Item'}${it.dimensions ? ` (${it.dimensions})` : ''}: ${Number(it.quantity).toLocaleString('en-IN')} ${it.unit || 'MT'}`)
+              .map((it, idx) => {
+                const prefix = existingItems.length > 1 ? `${idx + 1}. ` : '';
+                const spec = it.dimensions ? ` (${it.dimensions})` : '';
+                const qtyStr = `${Number(it.quantity).toLocaleString('en-IN')} ${it.unit || 'MT'}`;
+                const rate = Number(it.rate || it.rate_per_mt || 0);
+                const amt = Number(it.amount || 0) || (rate > 0 ? rate * Number(it.quantity || 0) : 0);
+                if (rate > 0) {
+                  const lineTotalStr = amt > 0 ? ` | Line Total: ₹${amt.toLocaleString('en-IN')}` : '';
+                  return `${prefix}${it.sku_text || 'Item'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${it.unit || 'MT'}${lineTotalStr}`;
+                }
+                return `${prefix}${it.sku_text || 'Item'}${spec} | ${qtyStr}`;
+              })
               .join('\n');
             return `⚠️ Could not find any line item with quantity ${fromVal}${fromUnit ? ` ${fromUnit}` : ''} in Inquiry ${dealCode}.\n\nCurrent Line Items:\n${itemListStr}\n\nPlease specify which product you would like to update (e.g. "Change ${existingItems[0]?.sku_text || 'GP Sheet'} quantity to ${fromToNewQty} ${fromToNewUnit || 'MT'}").`;
           }
@@ -3719,7 +3873,18 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
           !data.delivery_date
         ) {
           const itemListStr = existingItems
-            .map((it, i) => `• Item ${i + 1}: ${it.sku_text || 'Item'}${it.dimensions ? ` (${it.dimensions})` : ''} - ${Number(it.quantity).toLocaleString('en-IN')} ${it.unit || 'MT'}${it.rate ? ` @ ₹${it.rate}` : ''}`)
+            .map((it, i) => {
+              const prefix = `${i + 1}. `;
+              const spec = it.dimensions ? ` (${it.dimensions})` : '';
+              const qtyStr = `${Number(it.quantity).toLocaleString('en-IN')} ${it.unit || 'MT'}`;
+              const rate = Number(it.rate || it.rate_per_mt || 0);
+              const amt = Number(it.amount || 0) || (rate > 0 ? rate * Number(it.quantity || 0) : 0);
+              if (rate > 0) {
+                const lineTotalStr = amt > 0 ? ` | Line Total: ₹${amt.toLocaleString('en-IN')}` : '';
+                return `${prefix}${it.sku_text || 'Item'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${it.unit || 'MT'}${lineTotalStr}`;
+              }
+              return `${prefix}${it.sku_text || 'Item'}${spec} | ${qtyStr}`;
+            })
             .join('\n');
           return `⚠️ Inquiry ${dealCode} contains ${existingItems.length} line items. Please specify which product you would like to update:\n\n${itemListStr}\n\nExample: "Change ${existingItems[0]?.sku_text || 'Item 1'} quantity to ${explicitTargetQty || 45} MT"`;
         }
@@ -3818,8 +3983,25 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
         updateFields.total_amount = computedTotal;
       }
 
-      // Keep stage unchanged (never auto-escalate to quoted on field updates)
-      updateFields.stage = targetExplicitDeal.stage || 'new_inquiry';
+      // Stage resolution: If deal is in new_inquiry, promote to quoted ONLY if ALL mandatory fields are complete!
+      const currentTargetStage = (targetExplicitDeal.stage || 'new_inquiry').toLowerCase().trim();
+      if (['new_inquiry', 'review', 'auto_created', 'pending', 'draft', 'needs_review'].includes(currentTargetStage)) {
+        const preCheckCompleteness = evaluateMandatoryFields({
+          customerName: company,
+          lineItems: updatedDealItems,
+          deliveryLocation: updateFields.delivery_location || targetExplicitDeal.delivery_location,
+          paymentTerms: updateFields.payment_terms || targetExplicitDeal.payment_terms,
+          totalAmount: computedTotal,
+        });
+        if (preCheckCompleteness.isComplete) {
+          updateFields.stage = 'quoted';
+          updateFields.status = 'quoted';
+        } else {
+          updateFields.stage = targetExplicitDeal.stage || 'new_inquiry';
+        }
+      } else {
+        updateFields.stage = targetExplicitDeal.stage;
+      }
 
       const { data: existingDealRows } = await supabase
         .from('deals')
@@ -3890,11 +4072,18 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
       }
 
       // Build verified itemized breakdown for manager response
-      const itemBreakdownLines = (updatedDealItems || []).map(item => {
-        const rateDisplay = item.rate > 0 ? ` @ ₹${Number(item.rate).toLocaleString('en-IN')}/${item.unit || 'MT'}` : ' (Rate pending)';
-        const amountDisplay = item.amount > 0 ? ` = ₹${Number(item.amount).toLocaleString('en-IN')}` : '';
-        const hsnDisplay = item.hsn_code ? ` [HSN: ${item.hsn_code}]` : '';
-        return `- ${item.sku_text || 'Item'}${item.dimensions ? ` (${item.dimensions})` : ''}${hsnDisplay}: ${item.quantity || 0} ${item.unit || 'MT'}${rateDisplay}${amountDisplay}`;
+      const itemBreakdownLines = (updatedDealItems || []).map((item, idx) => {
+        const prefix = (updatedDealItems || []).length > 1 ? `${idx + 1}. ` : '';
+        const spec = item.dimensions ? ` (${item.dimensions})` : '';
+        const unit = item.unit || 'MT';
+        const qtyStr = `${Number(item.quantity || 0).toLocaleString('en-IN')} ${unit}`;
+        const rate = Number(item.rate || 0);
+        const amt = Number(item.amount || 0) || (rate > 0 ? rate * Number(item.quantity || 0) : 0);
+        if (rate > 0) {
+          const lineTotalStr = amt > 0 ? ` | Line Total: ₹${amt.toLocaleString('en-IN')}` : '';
+          return `${prefix}${item.sku_text || 'Item'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+        }
+        return `${prefix}${item.sku_text || 'Item'}${spec} | ${qtyStr}`;
       });
 
       const subtotalVal = (updatedDealItems || []).reduce((s, i) => s + (Number(i.amount) || 0), 0);
@@ -3917,9 +4106,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
       const updatedStr = updatedLabels.length > 0 ? `Updated: ${updatedLabels.join(', ')}\n\n` : '';
 
       if (completeness.isComplete) {
+        const displayStage = (refreshedDeal.stage || 'PRICE QUOTE').toUpperCase().replace('_', ' ');
         return `Inquiry Updated & Complete - ${dealCode}\n\n` +
           `Customer: ${company}\n` +
-          `Stage: ${(refreshedDeal.stage || 'NEW INQUIRY').toUpperCase()}\n\n` +
+          `Stage: ${displayStage}\n\n` +
           updatedStr +
           `Current Line Items:\n` +
           itemBreakdownLines.join('\n') +
@@ -3927,8 +4117,9 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
           financialSummary +
           termsSection +
           unmatchedWarning +
-          `\nAll mandatory fields complete. Logged to Sales Pipeline & Inquiries!`;
+          `\nAll mandatory fields complete. Inquiry moved to Price Quote stage! 📈`;
       } else {
+        const displayStage = (refreshedDeal.stage || 'NEW INQUIRY').toUpperCase().replace('_', ' ');
         return `Inquiry Updated - ${dealCode}\n\n` +
           `Customer: ${company}\n\n` +
           updatedStr +
@@ -3938,7 +4129,8 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
           financialSummary +
           termsSection +
           unmatchedWarning +
-          `\nStill needed to complete:\n` +
+          `\n⚠️ Inquiry remains in ${displayStage} stage.\n` +
+          `Please fill the mandatory field(s) to update the stage to Price Quote:\n` +
           completeness.missingFields.map(f => `• ${f}`).join('\n') +
           `\n\nLogged to Sales Pipeline & Inquiries!`;
       }
@@ -4149,7 +4341,14 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
     };
 
     let inqId = existingDeal?.inquiry_id || null;
-    const initialInqStatus = dbStage === 'won' ? 'confirmed' : ((dealAmount > 0 || processedItems.some(i => i.rate > 0)) ? 'quoted' : 'review');
+    const preCheckCompleteness = evaluateMandatoryFields({
+      customerName: finalCustomerName,
+      lineItems: processedItems,
+      deliveryLocation: finalDeliveryLoc,
+      paymentTerms: finalPaymentTerms,
+      totalAmount: dealAmount,
+    });
+    const initialInqStatus = dbStage === 'won' ? 'confirmed' : (preCheckCompleteness.isComplete ? 'quoted' : 'review');
 
     // CRM Account Owner Binding: If customer is registered in recurring_customers, bind to assigned owner
     let effectiveSalespersonPhone = senderPhone;
@@ -4308,14 +4507,14 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
       // Sync inquiries table ai_extraction_json & status
       if (inqId) {
         if (effectiveStage === 'won') {
-          await supabase.from('inquiries').update({ status: 'confirmed' }).eq('id', inqId);
+          await supabase.from('inquiries').update({ status: 'confirmed', stage: 'won' }).eq('id', inqId);
         }
         await syncInquiryFromDeal(inqId, { ...existingDeal, ...updatePayload }, finalPersistedItems);
       }
 
       activeDealObj = { id: dealId, ...updatePayload };
     } else {
-      const effectiveStage = (dbStage === 'won' || dbStage === 'lost') ? dbStage : ((dealAmount > 0 || processedItems.some(i => i.rate > 0)) ? 'quoted' : 'new_inquiry');
+      const effectiveStage = (dbStage === 'won' || dbStage === 'lost') ? dbStage : (preCheckCompleteness.isComplete ? 'quoted' : 'new_inquiry');
       const { data: newDeal, error: dealInsertErr } = await supabase
         .from('deals')
         .insert({
@@ -4359,7 +4558,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
         }
         if (inqId) {
           if (effectiveStage === 'won') {
-            await supabase.from('inquiries').update({ status: 'confirmed' }).eq('id', inqId);
+            await supabase.from('inquiries').update({ status: 'confirmed', stage: 'won' }).eq('id', inqId);
           }
           await syncInquiryFromDeal(inqId, newDeal, finalPersistedItems);
         }

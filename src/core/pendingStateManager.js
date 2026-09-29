@@ -60,7 +60,7 @@ async function handlePendingSessionState(rawText, senderPhone) {
     let dealAmount = 0;
     const { data: dealRow } = await supabase
       .from('deals')
-      .select('total_amount, deal_items(amount, quantity, rate)')
+      .select('total_amount, inquiry_id, deal_items(amount, quantity, rate)')
       .eq('id', dealId)
       .limit(1);
 
@@ -83,6 +83,10 @@ async function handlePendingSessionState(rawText, senderPhone) {
     if (lostErr) {
       console.error('[PendingState] Mark lost error:', lostErr);
       return `❌ Failed to mark deal as lost for ${customerName}: ${lostErr.message}. Please try again.`;
+    }
+
+    if (dealRow && dealRow[0]?.inquiry_id) {
+      await supabase.from('inquiries').update({ stage: 'lost', status: 'lost', lost_reason: selectedReason }).eq('id', dealRow[0].inquiry_id);
     }
 
     await supabase.from('kra_logs').insert({

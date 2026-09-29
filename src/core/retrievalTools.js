@@ -309,6 +309,22 @@ async function verifyCustomerAccountAccess(customerName, callerContext, supabase
 
 // ─── Date Parsing Utility ───────────────────────────────────────────────────
 
+// Day boundaries are always IST (UTC+5:30), independent of the server timezone.
+const IST_OFFSET_MS = 330 * 60 * 1000;
+
+function getIstDateParts(date = new Date()) {
+  const shifted = new Date(date.getTime() + IST_OFFSET_MS);
+  return { y: shifted.getUTCFullYear(), m: shifted.getUTCMonth(), d: shifted.getUTCDate() };
+}
+
+function istStartOfDay(y, m, d) {
+  return new Date(Date.UTC(y, m, d) - IST_OFFSET_MS);
+}
+
+function istEndOfDay(y, m, d) {
+  return new Date(istStartOfDay(y, m, d + 1).getTime() - 1);
+}
+
 function parseDateFilter(dateFilter) {
   if (!dateFilter) return {};
   const lower = String(dateFilter).toLowerCase().trim().replace(/[-_]+/g, ' ');
@@ -328,30 +344,20 @@ function parseDateFilter(dateFilter) {
   ) return {};
 
   const now = new Date();
+  const { y: nowY, m: nowM, d: nowD } = getIstDateParts(now);
 
   if (lower === 'today' || lower === 'aaj' || lower === 'aj') {
-    const startOfToday = new Date(now);
-    startOfToday.setHours(0, 0, 0, 0);
-    return { from: startOfToday };
+    return { from: istStartOfDay(nowY, nowM, nowD) };
   }
   if (lower === 'yesterday' || lower === 'kal' || lower === 'beeta kal') {
-    const startOfYesterday = new Date(now);
-    startOfYesterday.setDate(startOfYesterday.getDate() - 1);
-    startOfYesterday.setHours(0, 0, 0, 0);
-    const endOfYesterday = new Date(now);
-    endOfYesterday.setDate(endOfYesterday.getDate() - 1);
-    endOfYesterday.setHours(23, 59, 59, 999);
-    return { from: startOfYesterday, to: endOfYesterday };
+    return { from: istStartOfDay(nowY, nowM, nowD - 1), to: istEndOfDay(nowY, nowM, nowD - 1) };
   }
 
   // Relative days regex: e.g. "last 7 days", "past 7 days", "7 days", "7 din", "pichle 7 din", "last 30 days", "30 days", "30 din", "last 14 days"
   const daysMatch = lower.match(/^(?:last|past|pichle)?\s*(\d+)\s*(?:days?|din)$/);
   if (daysMatch) {
     const numDays = parseInt(daysMatch[1], 10);
-    const start = new Date(now);
-    start.setDate(start.getDate() - numDays);
-    start.setHours(0, 0, 0, 0);
-    return { from: start };
+    return { from: istStartOfDay(nowY, nowM, nowD - numDays) };
   }
 
   // Week variations (rolling 7 days for recent activity)
@@ -367,15 +373,22 @@ function parseDateFilter(dateFilter) {
     lower === '7 days' ||
     lower === '7 din' ||
     lower === 'pichle 7 din' ||
-    lower === 'last week' ||
-    lower === 'past week' ||
-    lower === 'previous week' ||
-    lower === 'pichle hafte'
+    lower === 'past week'
   ) {
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(startOfWeek.getDate() - 7);
-    startOfWeek.setHours(0, 0, 0, 0);
-    return { from: startOfWeek };
+    return { from: istStartOfDay(nowY, nowM, nowD - 7) };
+  }
+
+  // Previous week: the 7 days before the rolling "this week" window (same split as week-over-week comparison)
+  if (
+    lower === 'last week' ||
+    lower === 'previous week' ||
+    lower === 'pichle hafte' ||
+    lower === 'pichla hafta'
+  ) {
+    return {
+      from: istStartOfDay(nowY, nowM, nowD - 14),
+      to: new Date(istStartOfDay(nowY, nowM, nowD - 7).getTime() - 1),
+    };
   }
 
   // Month variations (rolling 30 days or start of month)
@@ -393,8 +406,7 @@ function parseDateFilter(dateFilter) {
     lower === '30 din' ||
     lower === 'pichle 30 din'
   ) {
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    return { from: startOfMonth };
+    return { from: istStartOfDay(nowY, nowM, 1) };
   }
   if (
     lower === 'last month' ||
@@ -403,19 +415,21 @@ function parseDateFilter(dateFilter) {
     lower === 'pichle mahine' ||
     lower === 'pichla mahina'
   ) {
-    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0);
-    endOfLastMonth.setHours(23, 59, 59, 999);
-    return { from: startOfLastMonth, to: endOfLastMonth };
+    return { from: istStartOfDay(nowY, nowM - 1, 1), to: istEndOfDay(nowY, nowM, 0) };
+  }
+
+  const isoDateOnly = String(dateFilter).trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoDateOnly) {
+    const y = Number(isoDateOnly[1]);
+    const m = Number(isoDateOnly[2]) - 1;
+    const d = Number(isoDateOnly[3]);
+    return { from: istStartOfDay(y, m, d), to: istEndOfDay(y, m, d) };
   }
 
   const parsed = new Date(dateFilter);
   if (!isNaN(parsed.getTime())) {
-    const start = new Date(parsed);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(parsed);
-    end.setHours(23, 59, 59, 999);
-    return { from: start, to: end };
+    const { y, m, d } = getIstDateParts(parsed);
+    return { from: istStartOfDay(y, m, d), to: istEndOfDay(y, m, d) };
   }
   return {};
 }
@@ -1006,11 +1020,51 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     });
 
     if (matched) {
+      const itemsFormatted = (matched.line_items || []).map((it, idx) => {
+        const name = it.sku_text || it.product_name || it.description || it.product_requirement || 'Steel Item';
+        const dim = it.dimensions || it.spec;
+        let spec = '';
+        if (dim) {
+          const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+          const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
+          if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
+            spec = ` (${shortSpec})`;
+          } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
+            spec = ` (${dim})`;
+          }
+        }
+        const qtyVal = (it.quantity !== undefined && it.quantity !== null && it.quantity !== '')
+          ? it.quantity
+          : (it.quantity_mt !== undefined && it.quantity_mt !== null ? it.quantity_mt : '');
+        const unit = it.unit || 'MT';
+        const qtyStr = qtyVal ? `${qtyVal} ${unit}` : '';
+        const rate = Number(it.rate || it.rate_per_mt || 0);
+        const itQty = Number(qtyVal || 0);
+        const lineTotal = Number(it.amount || 0) || (rate > 0 && itQty > 0 ? rate * itQty : 0);
+        const prefix = (matched.line_items || []).length > 1 ? `${idx + 1}. ` : '';
+        if (rate > 0) {
+          const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
+          return `${prefix}${name}${spec}${qtyStr ? ` | ${qtyStr}` : ''} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+        }
+        return `${prefix}${name}${spec}${qtyStr ? ` | ${qtyStr}` : ''}`;
+      }).join('\n');
+
+      let statusSummary = `Inquiry ${matched.inquiry_id} (${matched.customer_name}):\n\nStage: ${matched.status}\nPayment Terms: ${matched.payment_terms || '-'}\nDelivery Location: ${matched.delivery_location || '-'}`;
+      if (itemsFormatted) {
+        statusSummary += `\n\nCurrent Line Items:\n\n${itemsFormatted}`;
+      }
+      if (matched.total_amount_inr > 0) {
+        statusSummary += `\n\nQuotation Total: ₹${matched.total_amount_inr.toLocaleString('en-IN')}`;
+      }
+
       return {
         data: {
           found: true,
-          inquiry: matched,
-          status_summary: `Inquiry ${matched.inquiry_id} for ${matched.customer_name} is currently in '${matched.status}' status (Deal Stage: '${matched.deal_stage}')${matched.po_number ? `, PO Number: ${matched.po_number}` : ''}.`,
+          inquiry: {
+            ...matched,
+            formatted_line_items: itemsFormatted,
+          },
+          status_summary: statusSummary,
         },
         rowCount: 1,
       };
@@ -1239,10 +1293,10 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     mode === 'mom' ||
     mode === 'month_over_month'
   ) {
-    const now = new Date();
-    const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+    const istNow = getIstDateParts(new Date());
+    const startOfThisMonth = istStartOfDay(istNow.y, istNow.m, 1);
+    const startOfLastMonth = istStartOfDay(istNow.y, istNow.m - 1, 1);
+    const endOfLastMonth = istEndOfDay(istNow.y, istNow.m, 0);
 
     const thisMonthInqs = materialized.filter((m) => new Date(m.created_at) >= startOfThisMonth);
     const lastMonthInqs = materialized.filter((m) => {
@@ -1278,7 +1332,8 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     mode === 'month_summary'
   ) {
     const now = new Date();
-    const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const istNow = getIstDateParts(now);
+    const startOfThisMonth = istStartOfDay(istNow.y, istNow.m, 1);
     const thisMonthInqs = materialized.filter((m) => new Date(m.created_at) >= startOfThisMonth);
     const thisMonthWon = thisMonthInqs.filter((m) => m.deal_stage === 'won' || Boolean(m.po_number));
     const activePipelineDeals = allDeals.filter((d) => d.stage !== 'won' && d.stage !== 'lost');
@@ -1333,14 +1388,14 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
 
     return {
       data: {
-        period: `${now.toLocaleString('en-IN', { month: 'long' })} ${now.getFullYear()}`,
+        period: `${now.toLocaleString('en-IN', { month: 'long', timeZone: 'Asia/Kolkata' })} ${istNow.y}`,
         total_inquiries_this_month: thisMonthInqs.length,
         won_orders_this_month: thisMonthWon.length,
         total_visits_this_month: totalVisits,
         total_complaints_this_month: totalComplaints,
         active_pipeline_deals: activePipelineDeals.length,
         active_customer_accounts: activeCustCount || 0,
-        summary: `Full monthly summary for ${now.toLocaleString('en-IN', { month: 'long' })} ${now.getFullYear()}: ${thisMonthInqs.length} Inquiries, ${thisMonthWon.length} Confirmed Orders, ${totalVisits} Customer Visits, and ${totalComplaints} Complaints.`,
+        summary: `Full monthly summary for ${now.toLocaleString('en-IN', { month: 'long', timeZone: 'Asia/Kolkata' })} ${istNow.y}: ${thisMonthInqs.length} Inquiries, ${thisMonthWon.length} Confirmed Orders, ${totalVisits} Customer Visits, and ${totalComplaints} Complaints.`,
       },
       rowCount: thisMonthInqs.length,
     };
@@ -1601,10 +1656,8 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     const { from, to } = parseDateFilter(effectiveDateRange);
     let fromDate = from;
     if (!fromDate) {
-      const d = new Date();
-      d.setDate(d.getDate() - 30);
-      d.setHours(0, 0, 0, 0);
-      fromDate = d;
+      const { y, m, d } = getIstDateParts(new Date());
+      fromDate = istStartOfDay(y, m, d - 30);
     }
     const toDate = to || new Date();
 
@@ -1814,8 +1867,8 @@ async function executeGetVisits(args, callerContext, supabaseAdmin = supabase) {
     if (e.employee_id) empMap.set(e.employee_id, e.name);
   });
 
-  const now = new Date();
-  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const istToday = getIstDateParts(new Date());
+  const todayStr = `${istToday.y}-${String(istToday.m + 1).padStart(2, '0')}-${String(istToday.d).padStart(2, '0')}`;
 
   const materialized = (rows || []).map((r) => {
     const rawRemarks = r.remarks || r.discussion_remarks || '';
@@ -3069,7 +3122,7 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
       { data: inqRows },
     ] = await Promise.all([
       supabaseAdmin.from('recurring_customers').select('*').ilike('customer_name', `%${cleanTarget}%`).limit(1),
-      supabaseAdmin.from('deals').select('id, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, quantity, unit, rate, amount)').ilike('customer_name', `%${cleanTarget}%`),
+      supabaseAdmin.from('deals').select('id, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, dimensions, quantity, unit, rate, amount)').ilike('customer_name', `%${cleanTarget}%`),
       supabaseAdmin.from('customer_visits').select('*, salesperson_phone, employee_id').ilike('customer_name', `%${cleanTarget}%`).order('visited_at', { ascending: false }),
       supabaseAdmin.from('complaints').select('*, reported_by, employee_id').ilike('customer_name', `%${cleanTarget}%`).order('created_at', { ascending: false }),
       supabaseAdmin.from('inquiries').select('id, status, created_at, salesperson_phone, sender_phone').ilike('sender_name', `%${cleanTarget}%`),
@@ -3137,7 +3190,7 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
 
   // Directory / Directory Segmentation Mode
   let custQuery = supabaseAdmin.from('recurring_customers').select('*').eq('is_active', true);
-  let dealsQuery = supabaseAdmin.from('deals').select('id, customer_name, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, quantity, unit, rate, amount)');
+  let dealsQuery = supabaseAdmin.from('deals').select('id, customer_name, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, dimensions, quantity, unit, rate, amount)');
   let visitsQuery = supabaseAdmin.from('customer_visits').select('id, customer_name, visited_at, salesperson_phone, employee_id');
   let inqsQuery = supabaseAdmin.from('inquiries').select('id, sender_name, created_at, salesperson_phone, sender_phone');
   let compQuery = supabaseAdmin.from('complaints').select('id, customer_name, status, created_at, reported_by, employee_id');
@@ -3418,6 +3471,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
     .select('id, inquiry_id, customer_name, customer_phone, total_amount, stage, status, po_number, delivery_location, salesperson_phone, employee_id, created_at, won_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
     .order('created_at', { ascending: false });
 
+  let isDealInCallerScope = () => true;
   if (isSalespersonRole(callerContext.role)) {
     const rawPhone = callerContext.phone || '';
     const cleanPhone = rawPhone.replace(/\D/g, '').slice(-10);
@@ -3427,6 +3481,9 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
     if (empId) orParts.push(`employee_id.eq.${empId}`);
     if (orParts.length === 0) return { data: { summary: { total_deals: 0 }, deals: [] }, rowCount: 0 };
     query = query.or(orParts.join(','));
+    isDealInCallerScope = (d) =>
+      Boolean(cleanPhone && String(d.salesperson_phone || '').includes(cleanPhone)) ||
+      Boolean(empId && d.employee_id && String(d.employee_id) === String(empId));
   } else if (isManagerRole(callerContext.role)) {
     const { phoneSuffixes, employeeIds } = await getSubordinateSalespersons(callerContext, supabaseAdmin);
     const orParts = [];
@@ -3434,6 +3491,10 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
     employeeIds.forEach((id) => orParts.push(`employee_id.eq.${id}`));
     if (orParts.length === 0) return { data: { summary: { total_deals: 0 }, deals: [] }, rowCount: 0 };
     query = query.or(orParts.join(','));
+    const managerEmployeeIds = new Set(employeeIds.map(String));
+    isDealInCallerScope = (d) =>
+      phoneSuffixes.some((p) => p && String(d.salesperson_phone || '').includes(p)) ||
+      Boolean(d.employee_id && managerEmployeeIds.has(String(d.employee_id)));
   }
 
   const { from, to } = parseDateFilter(dateRange);
@@ -3446,6 +3507,31 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   const materialized = (rows || []).map((d) => {
     const shortId = `INQ-${(d.inquiry_id || d.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     const normStage = normalizeDealStage(d.stage);
+    const formattedItems = (d.deal_items || []).map((it, idx) => {
+      const name = it.sku_text || it.description || 'Steel Item';
+      const dim = it.dimensions || it.spec;
+      let spec = '';
+      if (dim) {
+        const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+        const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
+        if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
+          spec = ` (${shortSpec})`;
+        } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
+          spec = ` (${dim})`;
+        }
+      }
+      const qty = Number(it.quantity || 0);
+      const unit = it.unit || 'MT';
+      const rate = Number(it.rate || 0);
+      const lineTotal = Number(it.amount || (rate > 0 && qty > 0 ? rate * qty : 0));
+      const prefix = (d.deal_items || []).length > 1 ? `${idx + 1}. ` : '';
+      if (rate > 0) {
+        const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
+        return `${prefix}${name}${spec} | ${qty} ${unit} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+      }
+      return `${prefix}${name}${spec} | ${qty} ${unit}`;
+    }).join('\n');
+
     return {
       inquiry_id: shortId,
       deal_id: shortId,
@@ -3462,6 +3548,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
       created_at: d.created_at,
       won_at: d.won_at,
       items: d.deal_items || [],
+      formatted_line_items: formattedItems,
     };
   });
 
@@ -3477,16 +3564,42 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
     if (filtered.length === 0) {
       const searchTerms = [poFilter, cleanPo].filter(Boolean);
       const orClauses = searchTerms.map((term) => `po_number.ilike.%${term}%`).join(',');
-      const { data: globalPoDeals } = await supabaseAdmin
+      const { data: rawGlobalPoDeals } = await supabaseAdmin
         .from('deals')
         .select('id, inquiry_id, customer_name, customer_phone, total_amount, stage, status, po_number, delivery_location, salesperson_phone, employee_id, created_at, won_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
         .or(orClauses)
         .limit(5);
+      const globalPoDeals = (rawGlobalPoDeals || []).filter(isDealInCallerScope);
 
       if (globalPoDeals && globalPoDeals.length > 0) {
         filtered = globalPoDeals.map((d) => {
           const shortId = `INQ-${(d.inquiry_id || d.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
           const normStage = normalizeDealStage(d.stage);
+          const formattedItems = (d.deal_items || []).map((it, idx) => {
+            const name = it.sku_text || it.description || 'Steel Item';
+            const dim = it.dimensions || it.spec;
+            let spec = '';
+            if (dim) {
+              const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+              const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
+              if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
+                spec = ` (${shortSpec})`;
+              } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
+                spec = ` (${dim})`;
+              }
+            }
+            const qty = Number(it.quantity || 0);
+            const unit = it.unit || 'MT';
+            const rate = Number(it.rate || 0);
+            const lineTotal = Number(it.amount || (rate > 0 && qty > 0 ? rate * qty : 0));
+            const prefix = (d.deal_items || []).length > 1 ? `${idx + 1}. ` : '';
+            if (rate > 0) {
+              const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
+              return `${prefix}${name}${spec} | ${qty} ${unit} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+            }
+            return `${prefix}${name}${spec} | ${qty} ${unit}`;
+          }).join('\n');
+
           return {
             inquiry_id: shortId,
             deal_id: shortId,
@@ -3503,6 +3616,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
             created_at: d.created_at,
             won_at: d.won_at,
             items: d.deal_items || [],
+            formatted_line_items: formattedItems,
           };
         });
       }
@@ -4062,7 +4176,7 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
 
   let dealsQuery = supabaseAdmin
     .from('deals')
-    .select('id, inquiry_id, customer_name, stage, status, total_amount, po_number, created_at, salesperson_phone, employee_id, deal_items(sku_text, quantity, unit)')
+    .select('id, inquiry_id, customer_name, stage, status, total_amount, po_number, created_at, salesperson_phone, employee_id, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
     .ilike('customer_name', `%${companyName}%`)
     .order('created_at', { ascending: false })
     .limit(20);
@@ -4092,6 +4206,31 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
     .map((d) => {
     const rawId = d.inquiry_id || d.id || '';
     const formattedCode = `INQ-${rawId.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    const formattedItems = (d.deal_items || []).map((it, idx) => {
+      const name = it.sku_text || it.description || 'Steel Item';
+      const dim = it.dimensions || it.spec;
+      let spec = '';
+      if (dim) {
+        const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+        const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
+        if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
+          spec = ` (${shortSpec})`;
+        } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
+          spec = ` (${dim})`;
+        }
+      }
+      const qty = Number(it.quantity || 0);
+      const unit = it.unit || 'MT';
+      const rate = Number(it.rate || 0);
+      const lineTotal = Number(it.amount || (rate > 0 && qty > 0 ? rate * qty : 0));
+      const prefix = (d.deal_items || []).length > 1 ? `${idx + 1}. ` : '';
+      if (rate > 0) {
+        const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
+        return `${prefix}${name}${spec} | ${qty} ${unit} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+      }
+      return `${prefix}${name}${spec} | ${qty} ${unit}`;
+    }).join('\n');
+
     return {
       inquiry_id: formattedCode,
       full_id: rawId,
@@ -4100,6 +4239,7 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
       po_number: d.po_number || null,
       total_amount_inr: Number(d.total_amount || 0),
       items: d.deal_items || [],
+      formatted_line_items: formattedItems,
       created_at: d.created_at,
     };
   });
