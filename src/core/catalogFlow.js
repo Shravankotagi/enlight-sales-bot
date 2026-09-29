@@ -726,6 +726,11 @@ function extractCandidateIndex(text, candidateCount = 10) {
   }
 
   // Pattern 4: Standalone / start-of-line number ("1", "1.", "1)", "1 -", "#1", "1️⃣")
+  // Do NOT treat explicit menu commands/titles (e.g. "2. Update Inquiry", "menu_2") as candidate indexes!
+  if (isExplicitMenuSelection(clean, true)) {
+    return null;
+  }
+
   const cleanKeycap = clean.replace(/([1-9]|10)️⃣/g, '$1');
   const startNumMatch = cleanKeycap.match(/^\s*(?:option\s*|no\.?\s*|#\s*)?([1-9]\d*)\s*(?:[.)\-:\s]|$)/i);
   if (startNumMatch) {
@@ -946,11 +951,10 @@ Please provide the **Inquiry ID** (e.g. INQ-F4D982) linked to this order:
   UPDATE_ORDER: `✏️ **Update Order**
 
 To identify the order, please provide ONE of the following:
-- **Inquiry ID:** * (e.g. INQ-936C7B or INQ-3C86DE)
-- **PO Number:** * (e.g. PO-2026-0042)
+- **Inquiry ID:** (e.g. INQ-936C7B or INQ-3C86DE)
+- **PO Number:** (e.g. PO-2026-0042)
 
-What would you like to update?
-- **Line Item Updates:** Quantity, Rate, Add/Remove Items
+Which field would you like to update? (Rate, Quantity, PO Number, PO Date, Delivery Location, Payment Terms, Stage, Attach PO)
 
 **Examples:**
 - "For Inquiry INQ-936C7B, attach PO number PO-2026-8899"
@@ -1118,7 +1122,7 @@ function getEditPromptForAction(action) {
     case 'LOG_ORDER':
       return `Which field would you like to change? (e.g. "Rate: 54000", "Delivery location: Pune", or "PO Number: PO-2026-001")`;
     case 'UPDATE_ORDER':
-      return `Which field would you like to change? (e.g. "Rate: 52000", "Quantity: 35 MT", or "Rate: 50000 and Quantity: 40 MT")`;
+      return `Which field would you like to update? (Rate, Quantity, PO Number, PO Date, Delivery Location, Payment Terms, Stage, Attach PO)`;
     case 'LOG_VISIT':
       return `Which field would you like to change? (e.g. "Person met: Jenny Shah", "Contact phone: 9820123456", "Visit date: 20-09-2026", "Remarks: Discussed HR coil", or upload another photo)`;
     case 'UPDATE_VISIT':
@@ -1471,7 +1475,12 @@ async function isCatalogMenuAwaitingSelection(senderPhone) {
     if (!last || last.role !== 'assistant') return false;
     const content = String(last.content || '');
     return last.agent === 'catalog_menu' ||
+      last.action_type === 'CATALOG_MENU' ||
+      last.metadata?.action_type === 'CATALOG_MENU' ||
       /Reply with a number \(1\s*[–-]/i.test(content) ||
+      /\bChoose Action\b/i.test(content) ||
+      /\bWhat would you like to do today\b/i.test(content) ||
+      /\bActivity cancelled\b/i.test(content) ||
       /\breply with \*(?:[1-9]|10)\*/i.test(content);
   } catch (err) {
     console.warn('[CatalogFlow] Menu-awaiting check failed, allowing selection:', err.message);
@@ -3102,7 +3111,20 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
           merged.linked_inquiry_or_po = merged.po_number;
         }
       }
+    } else if (action === 'LOG_ORDER' && /\b(?:auto|generate|auto[-_ ]?generate)\b/i.test(userInput)) {
+      const d = new Date();
+      const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+      const rand4 = Math.floor(1000 + Math.random() * 9000);
+      merged.po_number = `PO-${ymd}-${rand4}`;
     }
+  }
+
+  // If LLM extracted literal "Auto" or "auto" as po_number in LOG_ORDER, replace with generated PO number
+  if (action === 'LOG_ORDER' && merged.po_number && /^(?:auto|generate|autogenerate|auto\s*generate)$/i.test(String(merged.po_number).trim())) {
+    const d = new Date();
+    const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    const rand4 = Math.floor(1000 + Math.random() * 9000);
+    merged.po_number = `PO-${ymd}-${rand4}`;
   }
 
   // Fallback payment_terms extraction for LOG_INQUIRY / LOG_ORDER / UPDATE_INQUIRY / UPDATE_ORDER
@@ -4778,7 +4800,7 @@ function formatStageLabel(st) {
   return 'New Inquiry';
 }
 
-function formatDetailedInquiryItemsList(items) {
+function formatDetailedInquiryItemsList(items, { includeHsn = false } = {}) {
   if (!Array.isArray(items) || items.length === 0) return '';
   return items.map((item, idx) => {
     const name = item.sku_text || item.product_requirement || item.product_name || item.description || item.pName || 'Steel Item';
@@ -4796,6 +4818,15 @@ function formatDetailedInquiryItemsList(items) {
       spec = ` (${item.grade})`;
     }
 
+    let hsnBlock = '';
+    if (includeHsn) {
+      const detected = (typeof detectHsnCode === 'function') ? detectHsnCode(name, dim || '') : null;
+      const hsn = item.hsn_code || item.hsn_sac || item.hsn || detected;
+      if (hsn) {
+        hsnBlock = ` [HSN: ${hsn}]`;
+      }
+    }
+
     const rawQty = (item.quantity !== undefined && item.quantity !== null && item.quantity !== '')
       ? item.quantity
       : ((item.quantity_mt !== undefined && item.quantity_mt !== null && item.quantity_mt !== '')
@@ -4805,21 +4836,36 @@ function formatDetailedInquiryItemsList(items) {
     const qty = (rawQty !== '' && rawQty !== null && rawQty !== undefined) ? `${rawQty} ${unit}` : '';
     const rate = Number(item.rate || item.rate_per_mt || item.target_price || item.unit_price || 0);
     const itQty = Number(rawQty || 0);
-    const lineTotal = Number(item.amount || item.line_total || item.total || 0) || (rate > 0 && itQty > 0 ? Math.round(rate * itQty) : 0);
+    const lineTotal = Number(item.amount || item.line_total || item.total || 0) || (rate > 0 && itQty > 0 ? (rate * itQty) : 0);
 
     const prefix = items.length > 1 ? `${idx + 1}. ` : '';
 
     if (rate > 0) {
-      const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${Math.round(lineTotal).toLocaleString('en-IN')}` : '';
-      return `${prefix}${name}${spec}${qty ? ` | ${qty}` : ''} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+      const formattedLineTotal = formatMoneyValue(lineTotal);
+      const formattedRate = formatMoneyValue(rate);
+      const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${formattedLineTotal}` : '';
+      return `${prefix}${name}${spec}${hsnBlock}${qty ? ` | ${qty}` : ''} | ₹${formattedRate} /${unit}${lineTotalStr}`;
     }
 
-    return `${prefix}${name}${spec}${qty ? ` | ${qty}` : ''}`;
+    return `${prefix}${name}${spec}${hsnBlock}${qty ? ` | ${qty}` : ''}`;
   }).join('\n');
 }
 
 /**
- * Normalizes attribute values for display in inquiry update prompts.
+ * Helper to format Indian currency values with or without decimals cleanly.
+ */
+function formatMoneyValue(num) {
+  if (num === null || num === undefined || isNaN(Number(num))) return '0';
+  const n = Number(num);
+  const hasDec = (n % 1 !== 0);
+  return n.toLocaleString('en-IN', {
+    minimumFractionDigits: hasDec ? 2 : 0,
+    maximumFractionDigits: 2,
+  });
+}
+
+/**
+ * Normalizes attribute values for display in inquiry/order update prompts.
  * If empty, null, undefined, 'Not specified', 'none', or 'null', returns '-'.
  */
 function formatAttributeValue(val) {
@@ -4914,7 +4960,7 @@ function formatSelectedInquiryPrompt(matchedRecord, itemsListText) {
     }, 0);
   }
 
-  const quoteTotalBlock = totalAmt > 0 ? `\n\nQuotation Total: ₹${totalAmt.toLocaleString('en-IN')}` : '';
+  const quoteTotalBlock = totalAmt > 0 ? `\n\nQuotation Total: ₹${formatMoneyValue(totalAmt)}` : '';
 
   return `✏️ *Selected Inquiry ${displayId} (${custName}):*\n\n` +
     `• *Date:* ${formatAttributeValue(dateStr)}\n` +
@@ -4926,6 +4972,131 @@ function formatSelectedInquiryPrompt(matchedRecord, itemsListText) {
     `*Current Line Items:*\n\n${itemsListText}` +
     quoteTotalBlock + `\n\n` +
     `Want to update Stage (Negotiation, Won, Lost, On Hold), Rate, Quantity or other details?`;
+}
+
+/**
+ * Formats the selected order card when chosen for update.
+ * Guarantees that Linked Inquiry, PO Number, PO Date, Stage, Delivery Location,
+ * and Payment Terms are displayed in compulsory order, using '-' for any missing value.
+ * Displays Current Line Items with HSN code, Total Tonnage, Sub Total, GST (18%),
+ * Total Order Value, and the multi-field update prompt.
+ */
+function formatSelectedOrderPrompt(matchedRecord, itemsListText) {
+  const displayId = matchedRecord.displayId || matchedRecord.po_number || `INQ-${(matchedRecord.inquiry_id || matchedRecord.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase()}`;
+  const custName = matchedRecord.customer_name || matchedRecord.company_name || 'Customer';
+
+  // Clean Linked Inquiry display
+  const rawInqId = matchedRecord.inquiry_id || matchedRecord.id || '';
+  const cleanInqCode = rawInqId.replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
+  const linkedInquiry = cleanInqCode ? `INQ-${cleanInqCode}` : (matchedRecord.deal_code || '-');
+
+  const poNumberStr = matchedRecord.po_number || '-';
+  const poDateStr = matchedRecord.po_date
+    ? formatDateDDMMYYYY(matchedRecord.po_date)
+    : (matchedRecord.date_formatted || matchedRecord.dateFormatted || (matchedRecord.won_at ? formatDateDDMMYYYY(matchedRecord.won_at) : (matchedRecord.created_at ? formatDateDDMMYYYY(matchedRecord.created_at) : '-')));
+  const stageStr = formatStageLabel(matchedRecord.stage || 'Won');
+  const delLocStr = matchedRecord.delivery_location || '-';
+  const payTermsStr = matchedRecord.payment_terms || '-';
+
+  // Line items & financial calculations
+  const items = (Array.isArray(matchedRecord.deal_items) && matchedRecord.deal_items.length > 0)
+    ? matchedRecord.deal_items
+    : (Array.isArray(matchedRecord.existing_items) && matchedRecord.existing_items.length > 0)
+      ? matchedRecord.existing_items
+      : (Array.isArray(matchedRecord.items) && matchedRecord.items.length > 0)
+        ? matchedRecord.items
+        : [];
+
+  let subtotal = 0;
+  let totalTonnage = 0;
+  let primaryUnit = 'MT';
+
+  if (items.length > 0) {
+    items.forEach(it => {
+      const rawQty = (it.quantity !== undefined && it.quantity !== null && it.quantity !== '')
+        ? it.quantity
+        : ((it.quantity_mt !== undefined && it.quantity_mt !== null && it.quantity_mt !== '') ? it.quantity_mt : (it.qty || 0));
+      const qty = Number(rawQty) || 0;
+      const rate = Number(it.rate || it.rate_per_mt || it.target_price || it.unit_price || 0);
+      const amount = Number(it.amount || it.line_total || it.total || 0) || (rate > 0 && qty > 0 ? (rate * qty) : 0);
+      subtotal += amount;
+      totalTonnage += qty;
+      if (it.unit) primaryUnit = it.unit;
+    });
+  }
+
+  if (subtotal === 0 && Number(matchedRecord.total_amount) > 0) {
+    subtotal = Number(matchedRecord.total_amount);
+  }
+
+  const gstRate = 0.18;
+  const gstAmount = Math.round(subtotal * gstRate * 100) / 100;
+  const grandTotal = Math.round((subtotal + gstAmount) * 100) / 100;
+
+  const tonnageStr = totalTonnage > 0
+    ? (formatLineItemsTonnage(items) || `${formatMoneyValue(totalTonnage)} ${primaryUnit}`)
+    : '';
+
+  let lineItemsSection = '';
+  if (itemsListText && itemsListText.trim()) {
+    lineItemsSection = `*Current Line Items:*\n\n${itemsListText}\n`;
+  }
+
+  let totalsSection = '';
+  if (totalTonnage > 0) {
+    totalsSection += `• *Total Tonnage:* ${tonnageStr}\n`;
+  }
+  totalsSection += `• *Sub Total:* ₹${formatMoneyValue(subtotal)}\n`;
+  totalsSection += `• *GST (18%):* ₹${formatMoneyValue(gstAmount)}\n`;
+  totalsSection += `• *Total Order Value:* ₹${formatMoneyValue(grandTotal)}`;
+
+  return `✏️ *Selected Order ${displayId} (${custName}):*\n\n` +
+    `• *Linked Inquiry:* ${formatAttributeValue(linkedInquiry)}\n` +
+    `• *PO Number:* ${formatAttributeValue(poNumberStr)}\n` +
+    `• *PO Date:* ${formatAttributeValue(poDateStr)}\n` +
+    `• *Stage:* ${formatAttributeValue(stageStr)}\n` +
+    `• *Delivery Location:* ${formatAttributeValue(delLocStr)}\n` +
+    `• *Payment Terms:* ${formatAttributeValue(payTermsStr)}\n\n` +
+    lineItemsSection +
+    totalsSection + `\n\n` +
+    `Which field would you like to update? (Rate, Quantity, PO Number, PO Date, Delivery Location, Payment Terms, Stage, Attach PO)`;
+}
+
+function formatSelectedInquiryForOrderPrompt(matchedRecord) {
+  const inqDisplay = matchedRecord.displayId || `INQ-${matchedRecord.clean_code || matchedRecord.id}`;
+  const cust = matchedRecord.customer_name || 'Customer';
+  const prodSummary = matchedRecord.product_summary || 'Steel Material';
+  const loc = matchedRecord.delivery_location && matchedRecord.delivery_location !== 'Not specified' ? matchedRecord.delivery_location : null;
+  const pay = matchedRecord.payment_terms && matchedRecord.payment_terms !== 'Not specified' ? matchedRecord.payment_terms : null;
+  const rateText = matchedRecord.total_amount > 0 ? `₹${Number(matchedRecord.total_amount).toLocaleString('en-IN')}` : 'Rate not set';
+
+  let itemsText = '';
+  const items = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
+  if (items.length > 0) {
+    itemsText = items.map(it => {
+      const name = it.sku_text || it.product_name || 'Steel Material';
+      const spec = [it.grade, it.dimensions].filter(Boolean).join(' ');
+      const specStr = spec ? ` (${spec})` : '';
+      const qtyStr = it.quantity ? `${it.quantity} ${it.unit || 'MT'}` : '';
+      const rateStr = it.rate ? `₹${Number(it.rate).toLocaleString('en-IN')} /${it.unit || 'MT'}` : '';
+      const totStr = it.amount ? `Total: ₹${Number(it.amount).toLocaleString('en-IN')}` : (it.quantity && it.rate ? `Total: ₹${Number(it.quantity * it.rate).toLocaleString('en-IN')}` : '');
+      const parts = [qtyStr, rateStr, totStr].filter(Boolean).join(' | ');
+      return `• *Product:* ${name}${specStr} | ${parts}`;
+    }).join('\n');
+  } else {
+    itemsText = `• *Product:* ${prodSummary} | ${rateText}`;
+  }
+
+  let prompt = `🛒 *Creating order for ${inqDisplay} (${cust})*\n\n` +
+    `${itemsText}\n` +
+    (loc ? `• *Delivery Location:* ${loc}\n` : '') +
+    (pay ? `• *Payment Terms:* ${pay}\n` : '') +
+    `\nPlease provide:\n` +
+    `• *PO Number* (or type "Auto" to generate)\n` +
+    `• *PO Date* (or "Today")\n\n` +
+    `_(e.g. "Auto Today" or "PO-9988 28-09-2026")_`;
+
+  return prompt;
 }
 
 function formatProductSummaryCompact(item) {
@@ -5108,7 +5279,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
 
   const cleanCustFilter = customerFilter ? customerFilter.trim() : null;
 
-  if (action === 'UPDATE_INQUIRY') {
+  if (action === 'UPDATE_INQUIRY' || action === 'LOG_ORDER') {
     let dealsQuery = supabase
       .from('deals')
       .select('id, inquiry_id, customer_name, customer_phone, po_number, stage, total_amount, payment_terms, delivery_location, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
@@ -5149,6 +5320,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
     const dealByInqId = new Map();
     const wonOrClosedInqIds = new Set();
     const terminalStages = new Set(['won', 'lost', 'closed', 'completed', 'cancelled']);
+    const ELIGIBLE_ORDER_STAGES = new Set(['quoted', 'negotiation', 'on_hold', 'hold']);
 
     scopedDeals.forEach(d => {
       const stage = (d.stage || '').toLowerCase().trim();
@@ -5182,6 +5354,9 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
       const linkedDeal = dealByInqId.get(inq.id);
       const stage = (linkedDeal?.stage || inq.status || 'new_inquiry').toLowerCase().trim();
       if (terminalStages.has(stage)) return;
+
+      // STRICT STAGE FILTER FOR LOG_ORDER: Price Quote, Negotiation, On Hold only. Exclude new_inquiry & review.
+      if (action === 'LOG_ORDER' && !ELIGIBLE_ORDER_STAGES.has(stage)) return;
 
       const cleanCode = (inq.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
       const displayId = `INQ-${cleanCode}`;
@@ -5239,6 +5414,9 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
       if (d.inquiry_id) return; // If it has an inquiry_id but wasn't in inqs, it was filtered out (e.g. PO)
       const stage = (d.stage || 'new_inquiry').toLowerCase().trim();
       if (terminalStages.has(stage) || Boolean(d.po_number)) return;
+
+      // STRICT STAGE FILTER FOR LOG_ORDER: Price Quote, Negotiation, On Hold only. Exclude new_inquiry & review.
+      if (action === 'LOG_ORDER' && !ELIGIBLE_ORDER_STAGES.has(stage)) return;
 
       const cleanCode = (d.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
       const displayId = `INQ-${cleanCode}`;
@@ -5342,6 +5520,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         inquiry_id: d.inquiry_id || d.id,
         displayId,
         po_number: d.po_number || null,
+        po_date: d.po_date || null,
         deal_code: displayInq,
         clean_code: cleanCode,
         customer_name: d.customer_name || 'Customer',
@@ -5479,6 +5658,11 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
 
 function formatRecordLineForModule(action, record, index) {
   switch (action) {
+    case 'LOG_ORDER': {
+      const priceStr = record.total_amount > 0 ? `₹${Number(record.total_amount).toLocaleString('en-IN')}` : 'Rate not set';
+      const stageStr = record.raw_stage === 'quoted' ? 'Price Quote' : (record.stage || 'Price Quote');
+      return `${index}. ${record.displayId} | ${record.customer_name} | ${record.product_summary} | ${priceStr} | ${stageStr} | ${record.date_formatted}`;
+    }
     case 'UPDATE_INQUIRY':
       return `${index}. ${record.displayId} | ${record.customer_name} | ${record.product_summary} | ${record.stage} | ${record.date_formatted}`;
     case 'UPDATE_ORDER':
@@ -5506,6 +5690,9 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
       emptyReply = `ℹ️ *No records found for "${customerFilter}".*\n\nType another customer name to search specifically, or reply "All" to view all recent records.`;
     } else {
       switch (action) {
+        case 'LOG_ORDER':
+          emptyReply = `ℹ️ *No Eligible Inquiries Found for Order Creation*\n\nThere are no inquiries currently in Price Quote, Negotiation, or On Hold stage ready for an order.\n\nTo create a new inquiry, reply with *1* or send the inquiry details.`;
+          break;
         case 'UPDATE_INQUIRY':
           emptyReply = `ℹ️ *No Editable Inquiries Found*\n\nThere are no active or editable inquiries recorded in your portfolio.\n\nIf you would like to log a new inquiry, reply with *1* or send the inquiry details.`;
           break;
@@ -5553,6 +5740,9 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
   let headerText = '';
   if (customerFilter) {
     switch (action) {
+      case 'LOG_ORDER':
+        headerText = `📋 *Inquiries ready for an order for ${customerFilter} (${totalCount} Records):*`;
+        break;
       case 'UPDATE_INQUIRY':
         headerText = `📋 *Editable Inquiries for ${customerFilter} (${totalCount} Records):*`;
         break;
@@ -5569,6 +5759,9 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
   } else {
     const countDisplay = totalCount <= pageSize ? totalCount : `${startIdx + 1}–${startIdx + cachedRecords.length} of ${totalCount}`;
     switch (action) {
+      case 'LOG_ORDER':
+        headerText = `📋 *Log New Order*\n\nHere are your ${totalCount <= pageSize ? `${totalCount} ` : ''}inquiries ready for an order${totalCount > pageSize ? ` (${countDisplay})` : ''}:`;
+        break;
       case 'UPDATE_INQUIRY':
         headerText = `📋 *Update Inquiry*\n\nHere are your ${totalCount <= pageSize ? `${totalCount} ` : ''}recent editable inquiries${totalCount > pageSize ? ` (${countDisplay})` : ''}:`;
         break;
@@ -5584,11 +5777,16 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
     }
   }
 
-  let footerIdLabel = 'Inquiry ID';
-  if (action === 'UPDATE_ORDER') footerIdLabel = 'Order / PO Number';
-  else if (action === 'UPDATE_COMPLAINT') footerIdLabel = 'Customer Name';
-  else if (action === 'UPDATE_VISIT') footerIdLabel = 'Customer Name';
-  const footerText = `Reply with the serial number or ${footerIdLabel} to update that record. Type "Next" for the next 7 records, or tell me the customer name to search their records.`;
+  let footerText = '';
+  if (action === 'LOG_ORDER') {
+    footerText = `Reply with the serial number or Inquiry ID to create an order. Type "Next" for more, or send a customer name to search.`;
+  } else {
+    let footerIdLabel = 'Inquiry ID';
+    if (action === 'UPDATE_ORDER') footerIdLabel = 'Order / PO Number';
+    else if (action === 'UPDATE_COMPLAINT') footerIdLabel = 'Customer Name';
+    else if (action === 'UPDATE_VISIT') footerIdLabel = 'Customer Name';
+    footerText = `Reply with the serial number or ${footerIdLabel} to update that record. Type "Next" for the next 7 records, or tell me the customer name to search their records.`;
+  }
 
   const fullReply = `${headerText}\n\n${listText}\n\n${footerText}`;
 
@@ -5649,10 +5847,18 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
 
   // 1b. Direct cross-module action / menu selection preemption
   const explicitAction = isExplicitMenuSelection(clean, true);
-  if (explicitAction && explicitAction !== action) {
-    recordInactiveDraft(senderPhone, action, null, 'discarded');
-    await finalizeCurrentSession(senderPhone, `Switched from ${getActionFriendlyName(action)} to ${getActionFriendlyName(explicitAction)}`);
-    return await handleCatalogFlow(text, senderPhone);
+  if (explicitAction) {
+    if (explicitAction !== action) {
+      recordInactiveDraft(senderPhone, action, null, 'discarded');
+      await finalizeCurrentSession(senderPhone, `Switched from ${getActionFriendlyName(action)} to ${getActionFriendlyName(explicitAction)}`);
+      return await handleCatalogFlow(text, senderPhone);
+    } else {
+      await recordSessionMessage(senderPhone, 'user', text);
+      const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, { page: 1, customerFilter: null });
+      await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
+      await saveActiveSession(senderPhone, 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
+      return { handled: true, reply: selectionRes.reply };
+    }
   }
 
   // 1c. Mid-flow retrieval query interception
@@ -5790,7 +5996,32 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     await recordSessionMessage(senderPhone, 'user', text);
 
     let draft = {};
-    if (action === 'UPDATE_INQUIRY') {
+    if (action === 'LOG_ORDER') {
+      const inqItems = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
+      draft = {
+        action: 'LOG_ORDER',
+        inquiry_id: matchedRecord.inquiry_id || matchedRecord.id,
+        deal_id: matchedRecord.deal_id || null,
+        company_name: matchedRecord.customer_name,
+        line_items: inqItems.map(it => ({
+          sku_text: it.sku_text || it.product_name || 'Steel Material',
+          description: it.description || it.sku_text || it.product_name || 'Steel Material',
+          spec: it.dimensions || it.specifications || it.grade || '',
+          dimensions: it.dimensions || '',
+          grade: it.grade || '',
+          quantity: Number(it.quantity || 0),
+          unit: it.unit || 'MT',
+          rate: Number(it.rate || 0),
+          amount: Number(it.amount || 0) || (Number(it.quantity || 0) * Number(it.rate || 0)),
+        })),
+        product_description: matchedRecord.product_summary || null,
+        _inquiry_display_id: matchedRecord.displayId,
+        _inquiry_verified: true,
+        delivery_location: matchedRecord.delivery_location && matchedRecord.delivery_location !== 'Not specified' ? matchedRecord.delivery_location : null,
+        payment_terms: matchedRecord.payment_terms && matchedRecord.payment_terms !== 'Not specified' ? matchedRecord.payment_terms : null,
+        total_amount: Number(matchedRecord.total_amount || 0),
+      };
+    } else if (action === 'UPDATE_INQUIRY') {
       const inqItems = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
       draft = {
         inquiry_id: matchedRecord.inquiry_id || matchedRecord.id,
@@ -5810,6 +6041,10 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
         inquiry_id: matchedRecord.inquiry_id || matchedRecord.id,
         deal_id: matchedRecord.deal_id || matchedRecord.id,
         po_number: matchedRecord.po_number || null,
+        po_date: matchedRecord.po_date || null,
+        stage: matchedRecord.stage || 'Won',
+        delivery_location: matchedRecord.delivery_location || null,
+        payment_terms: matchedRecord.payment_terms || null,
         linked_inquiry_or_po: matchedRecord.po_number ? `PO: ${matchedRecord.po_number} (${matchedRecord.deal_code})` : matchedRecord.deal_code,
         company_name: matchedRecord.customer_name,
         existing_items: orderItems,
@@ -5837,7 +6072,9 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
 
     if (isPureSelect) {
       let prompt = '';
-      if (action === 'UPDATE_INQUIRY') {
+      if (action === 'LOG_ORDER') {
+        prompt = formatSelectedInquiryForOrderPrompt(matchedRecord);
+      } else if (action === 'UPDATE_INQUIRY') {
         let itemsListText = '';
         const items = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
         if (items.length > 0) {
@@ -5849,20 +6086,14 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
         prompt = formatSelectedInquiryPrompt(matchedRecord, itemsListText);
       } else if (action === 'UPDATE_ORDER') {
         let itemsListText = '';
-        const items = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
+        const items = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : (Array.isArray(matchedRecord.existing_items) ? matchedRecord.existing_items : []);
         if (items.length > 0) {
-          itemsListText = formatDetailedInquiryItemsList(items);
+          itemsListText = formatDetailedInquiryItemsList(items, { includeHsn: true });
         } else {
-          itemsListText = `1. *${matchedRecord.product_summary || 'Steel Material'}*`;
+          itemsListText = `*${matchedRecord.product_summary || 'Steel Material'}*`;
         }
 
-        prompt = `✏️ *Selected Order ${matchedRecord.displayId} (${matchedRecord.customer_name}):*\n\n` +
-          `• *Date:* ${matchedRecord.date_formatted}\n` +
-          `• *Stage:* ${matchedRecord.stage}\n` +
-          `• *Total Value:* ₹${Number(matchedRecord.total_amount || 0).toLocaleString('en-IN')}\n\n` +
-          `*Current Line Items:*\n${itemsListText}\n\n` +
-          `What changes would you like to make to the line items?\n` +
-          `_(e.g., "Change rate to 48000", "Update quantity to 35 MT", "Change rate to 52000 and quantity to 40 MT")_`;
+        prompt = formatSelectedOrderPrompt(matchedRecord, itemsListText);
       } else if (action === 'UPDATE_COMPLAINT') {
         prompt = `✏️ *Selected Complaint for ${matchedRecord.customer_name}:*\n\n` +
           `• *Date:* ${matchedRecord.complaint_date || matchedRecord.date_formatted}\n` +
@@ -6850,7 +7081,7 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
   // 1. Fetch recent deals strictly scoped by role
   let dealsQuery = supabase
     .from('deals')
-    .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone')
+    .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
     .order('created_at', { ascending: false });
 
   if (scope.phones !== null) {
@@ -7027,7 +7258,7 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
   if (!deal && (cleanInqId || rawPo)) {
     const { data: rawAllDeals } = await supabase
       .from('deals')
-      .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone')
+      .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
       .order('created_at', { ascending: false })
       .limit(500);
     const allDeals = await filterRecordsToCallerScope(rawAllDeals, scope, { customerField: 'customer_name' });
@@ -7122,20 +7353,18 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
                      (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0);
 
   if (!hasUpdates) {
-    const displayInq = deal.inquiry_id ? `INQ-${deal.inquiry_id.replace(/-/g, '').slice(0, 6).toUpperCase()}` : `INQ-${deal.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    let itemsListText = '';
+    const items = Array.isArray(deal.deal_items) ? deal.deal_items : [];
+    if (items.length > 0) {
+      itemsListText = formatDetailedInquiryItemsList(items, { includeHsn: true });
+    } else {
+      itemsListText = `*${deal.product_summary || 'Steel Material'}*`;
+    }
     let prompt = '';
     if (draft._permissionNotice) {
       prompt += `${draft._permissionNotice}\n\n`;
     }
-    prompt += `✏️ *Order / Inquiry Found for ${deal.customer_name}:*\n\n` +
-      `• *Inquiry ID:* ${displayInq}\n` +
-      `• *PO Number:* ${deal.po_number || 'Not Attached Yet'}\n` +
-      `• *Stage:* ${deal.stage || 'Won'}\n` +
-      `• *Total Value:* ₹${Number(deal.total_amount || 0).toLocaleString('en-IN')}\n` +
-      `• *Payment Terms:* ${deal.payment_terms || 'Not specified'}\n` +
-      `• *Delivery Location:* ${deal.delivery_location || 'Not specified'}\n\n` +
-      `What would you like to update?\n` +
-      `_(e.g. "Attach PO-2026-8899", "Update delivery location to Bhosari", or "Change payment terms to 45 days credit")_`;
+    prompt += formatSelectedOrderPrompt(deal, itemsListText);
 
     return {
       handled: true,
@@ -11671,7 +11900,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       };
     }
 
-    if (['UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(explicitAction)) {
+    if (['LOG_ORDER', 'UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(explicitAction)) {
       if (explicitAction === 'UPDATE_VISIT' && !canUpdateVisits) {
         const deniedReply = `Access Denied: Field visits can only be updated by Sales Managers and Administrators. Please contact your manager to update a logged visit.`;
         await recordSessionMessage(senderPhone, 'assistant', deniedReply, { action_type: 'ACCESS_DENIED' });
@@ -13316,12 +13545,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
             (Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0);
 
           if (isPureSelect && !hasUpdates) {
-            const prompt = `✏️ **Selected Order ${matchedCandidate.po_number ? `PO: ${matchedCandidate.po_number}` : matchedCandidate.deal_code} (${matchedCandidate.customer_name || 'Customer'}):**\n\n` +
-              `- **Date:** ${matchedCandidate.po_date || matchedCandidate.dateFormatted || 'Not specified'}\n` +
-              `- **Stage:** ${matchedCandidate.stage || 'Won'}\n` +
-              `- **Total Value:** ₹${Number(matchedCandidate.total_amount || 0).toLocaleString('en-IN')}\n\n` +
-              `What details would you like to update?\n` +
-              `_(e.g., Attach PO Number, Delivery Location, Payment Terms, Rate, or Quantity)_`;
+            let itemsListText = '';
+            const items = Array.isArray(matchedCandidate.deal_items) ? matchedCandidate.deal_items : (Array.isArray(matchedCandidate.items) ? matchedCandidate.items : []);
+            if (items.length > 0) {
+              itemsListText = formatDetailedInquiryItemsList(items, { includeHsn: true });
+            } else {
+              itemsListText = `*${matchedCandidate.product_summary || 'Steel Material'}*`;
+            }
+            const prompt = formatSelectedOrderPrompt(matchedCandidate, itemsListText);
 
             await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
             await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
@@ -13797,8 +14028,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       };
     }
 
-    // 6a. Direct candidate browsing for UPDATE actions
-    if (['UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(matchedAction)) {
+    // 6a. Direct candidate browsing for UPDATE & ORDER actions
+    if (['LOG_ORDER', 'UPDATE_INQUIRY', 'UPDATE_ORDER', 'UPDATE_VISIT', 'UPDATE_COMPLAINT'].includes(matchedAction)) {
       if (matchedAction === 'UPDATE_VISIT' && !canUpdateVisits) {
         const deniedReply = `Access Denied: Field visits can only be updated by Sales Managers and Administrators. Please contact your manager to update a logged visit.`;
         await recordSessionMessage(senderPhone, 'assistant', deniedReply, { action_type: 'ACCESS_DENIED' });
@@ -14197,6 +14428,8 @@ module.exports = {
   extractInquiryAttributes,
   formatDetailedInquiryItemsList,
   formatSelectedInquiryPrompt,
+  formatSelectedOrderPrompt,
+  formatSelectedInquiryForOrderPrompt,
   recordInactiveDraft,
   getLastInactiveDraft,
   getModuleCatalogName,

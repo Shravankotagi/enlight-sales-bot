@@ -126,34 +126,34 @@ function normalizeIncomingButtonPayload(rawInput) {
     return 'menu';
   }
   if (text.startsWith('btn_repeat_log_inquiry')) {
-    return '1';
+    return 'menu_1';
   }
   if (text.startsWith('btn_repeat_update_inquiry')) {
-    return '2';
+    return 'menu_2';
   }
   if (text.startsWith('btn_repeat_log_order')) {
-    return '3';
+    return 'menu_3';
   }
   if (text.startsWith('btn_repeat_update_order')) {
-    return '4';
+    return 'menu_4';
   }
   if (text.startsWith('btn_repeat_log_visit')) {
-    return '5';
+    return 'menu_5';
   }
   if (text.startsWith('btn_repeat_update_visit')) {
-    return '6';
+    return 'menu_6';
   }
   if (text.startsWith('btn_repeat_log_new_customer')) {
-    return '7';
+    return 'menu_7';
   }
   if (text.startsWith('btn_repeat_log_complaint')) {
-    return '8';
+    return 'menu_8';
   }
   if (text.startsWith('btn_repeat_update_complaint')) {
-    return '9';
+    return 'menu_9';
   }
   if (text.startsWith('menu_')) {
-    return text.replace('menu_', '');
+    return text;
   }
   return text;
 }
