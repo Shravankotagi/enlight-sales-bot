@@ -9070,7 +9070,8 @@ async function executeAction(action, draft, senderPhone) {
         const stageInput = updates.stage || updates.status || draft.stage || draft.status || draft.new_stage;
         if (stageInput) {
           const s = String(stageInput).toLowerCase();
-          if (s.includes('won') || s.includes('order')) dealUpdates.stage = 'won';
+          if (/\b(?:new\s*inquiry|new\s*enquiry|new)\b/i.test(s)) dealUpdates.stage = 'new_inquiry';
+          else if (s.includes('won') || s.includes('order')) dealUpdates.stage = 'won';
           else if (s.includes('lost')) dealUpdates.stage = 'lost';
           else if (s.includes('negot')) dealUpdates.stage = 'negotiation';
           else if (s.includes('hold')) dealUpdates.stage = 'on_hold';
@@ -11484,14 +11485,15 @@ function isStageUpdatePrompt(text) {
   if (!text || typeof text !== 'string') return false;
   const lower = text.toLowerCase().trim();
 
-  const stageWord = '(?:stage|satge|stgae|stag)';
+  const stageWord = '(?:stage|satge|stgae|stag|stages|satges)';
+  const stageTarget = '(?:won|lost|closed\\s*won|closed\\s*lost|order\\s*confirmed|negotiat\\w*|quoted|quotated|price\\s*quotes?|price\\s*quotations?|on\\s*hold|hold|new\\s*inquiry|new\\s*enquiry)';
+
   if (
-    new RegExp(`\\b(?:${stageWord}\\s+update|(?:update|upadte|change|set|move)\\s+(?:the\\s+)?${stageWord})\\b`, 'i').test(lower) ||
-    new RegExp(`\\b(?:mark|move|put|change|set|update|upadte)\\s+(?:the\\s+|a\\s+)?(?:deal|inquiry|status|${stageWord})?\\s*(?:as\\s+|to\\s+)?(won|lost|negotiation|quoted|quotated|price\\s*quote|price\\s*quotation|on\\s+hold|hold|new\\s*inquiry)\\b`, 'i').test(lower) ||
-    /\b(?:deal\s+won|deal\s+lost|inquiry\s+won|inquiry\s+lost|deal\s+quoted|deal\s+negotiation|deal\s+on\s+hold)\b/i.test(lower) ||
-    /^(?:stage\s+(?:is\s+)?(?:to\s+)?(?:won|lost|negotiation|quoted|on\s+hold|price\s*quote)|marked?\s+(?:as\s+)?(?:won|lost|negotiation|quoted|on\s+hold|price\s*quote))\b/i.test(lower) ||
-    /^(?:mark\s+as\s+won|mark\s+as\s+lost|mark\s+as\s+negotiation|mark\s+as\s+quoted|mark\s+as\s+price\s*quote|mark\s+as\s+on\s+hold)$/i.test(lower) ||
-    /^(?:won|lost|negotiation|quoted|on\s+hold)$/i.test(lower)
+    new RegExp(`\\b(?:${stageWord}\\s*(?:update|change|status)|(?:update|upadte|change|set|move|mark)\\s+(?:the\\s+)?${stageWord})\\b`, 'i').test(lower) ||
+    new RegExp(`\\b(?:mark|move|put|change|set|update|upadte)\\s+(?:the\\s+|a\\s+)?(?:deal|inquiry|order|status|${stageWord})?\\s*(?:as\\s+|to\\s+)?${stageTarget}\\b`, 'i').test(lower) ||
+    new RegExp(`\\b(?:deal|inquiry|order)\\s+${stageTarget}\\b`, 'i').test(lower) ||
+    new RegExp(`^(?:${stageWord}\\s+(?:is\\s+)?(?:to\\s+)?${stageTarget}|marked?\\s+(?:as\\s+)?${stageTarget})\\b`, 'i').test(lower) ||
+    new RegExp(`^(?:mark\\s+as\\s+)?${stageTarget}$`, 'i').test(lower)
   ) {
     return true;
   }
@@ -11521,11 +11523,34 @@ async function saveStageOnlyInquiryUpdateIfNeeded(text, senderPhone, activeState
 
 function isStageOnlyUpdate(text) {
   if (!isStageUpdatePrompt(text)) return false;
-  const stripped = String(text)
+
+  // Remove entity IDs (e.g. INQ-734D48, DEAL-123456, ORD-123, PO-123)
+  let stripped = String(text)
+    .replace(/\b(?:INQ|DEAL|ORD|PO)[-_][A-Z0-9]+\b/gi, ' ')
     .replace(/\b(?:price\s*quotes?|price\s*quotations?)\b/gi, ' ')
-    .replace(/\b(?:quoted|quotated|negotiation|on\s*hold|new\s*inquiry|won|lost|stage|status|update|upadte|change|set|mark|move|put|the|to|as|for|inquiry|deal|this|above|it)\b/gi, ' ');
-  if (/\b(?:rate|qty|quantity|payment|delivery|location|notes|make|line\s*items?|tonnage)\b/i.test(stripped)) return false;
-  if (/\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|mm)\b/i.test(stripped)) return false;
+    .replace(/\b(?:quoted|quotated|negotiation|on\s*hold|new\s*inquiry|new\s*enquiry|won|lost|closed\s*won|closed\s*lost)\b/gi, ' ')
+    .replace(/\b(?:stage|satge|stgae|stages|satges|status)\b/gi, ' ')
+    .replace(/\b(?:update|upadte|updated|change|changed|set|mark|marked|move|moved|put|make|turn)\b/gi, ' ')
+    .replace(/\b(?:the|to|as|for|inquiry|deal|order|this|above|it|ko|kar\s*do|karo|me|in|of|and|an|a|is)\b/gi, ' ');
+
+  // 1. Any keywords indicating other fields (rates, prices, quantities, delivery, payment, notes, etc.)
+  if (/\b(?:rate|rates|price|prices|pricing|target\s*price|unit\s*price|cost|bhav|daam|amount)\b/i.test(stripped)) return false;
+  if (/\b(?:qty|quantity|quantities|tonnage|tons?|tonne|kg|pieces?|pcs|nos|sheets?|meters?|mtr|dimension|dimensions|spec|specs|specification|specifications|thickness|thk|gauge|size|grade)\b/i.test(stripped)) return false;
+  if (/\b(?:payment|terms?|credit|advance|days?|din|pdc|lc|cad|rtgs|neft|cod)\b/i.test(stripped)) return false;
+  if (/\b(?:delivery|dispatch|dispatched|destination|address|location|site|transport|freight|city)\b/i.test(stripped)) return false;
+  if (/\b(?:notes?|remarks?|comments?|make|brand|preferred\s*make)\b/i.test(stripped)) return false;
+  if (/\b(?:po\s*number|po\s*no|po\s*date|delivery\s*date)\b/i.test(stripped)) return false;
+
+  // 2. Common steel product names or categories
+  if (/\b(?:coil|coils|sheet|sheets|plate|plates|pipe|pipes|tube|tubes|bar|bars|tmt|beam|beams|channel|channels|angle|angles|billet|billets|wire\s*rod|structure|structural|hr|cr|ms|ss|gi|gp)\b/i.test(stripped)) return false;
+
+  // 3. Currency or unit syntax (e.g. 8/MT, ₹500, @ 50, etc.)
+  if (/[₹@]|(?:rs\.?|inr)\b/i.test(stripped)) return false;
+  if (/(?:\/|per|\s*@\s*)\s*(?:mt|tons?|tonne|kg|mm|mtr|nos|pcs|pieces?)/i.test(stripped)) return false;
+
+  // 4. Any numbers remaining (rates, quantities, dimensions)
+  if (/\b\d+(?:\.\d+)?\b/.test(stripped)) return false;
+
   return true;
 }
 
@@ -12501,15 +12526,15 @@ async function classifyActiveSessionIntent(activeActivity, text) {
     return { classification: 'OUT_OF_SCOPE_GENERIC' };
   }
 
-  // In UPDATE_INQUIRY, updating stage/status, rate, quantity, or line items is part of editing the active inquiry
-  if (activeActivity === 'UPDATE_INQUIRY') {
-    const inqMatch = trimmed.match(/\b(?:INQ|DEAL)-([A-Z0-9]+)\b/i);
-    if (!inqMatch) {
+  // In UPDATE_INQUIRY or UPDATE_ORDER, updating stage/status, rate, quantity, or line items is part of editing the active record
+  if (activeActivity === 'UPDATE_INQUIRY' || activeActivity === 'UPDATE_ORDER') {
+    const targetMatch = trimmed.match(/\b(?:INQ|DEAL|ORD|PO)-([A-Z0-9]+)\b/i);
+    if (!targetMatch) {
       if (!isOutOfScopeGenericPrompt(trimmed) && !detectOutOfScopeActionAttempt(activeActivity, trimmed)) {
         if (isStageOnlyUpdate(trimmed)) {
           return { classification: 'STAGE_UPDATE' };
         }
-        if (isStageUpdatePrompt(trimmed) || /\b(?:rate|price|qty|quantity)\b/i.test(trimmed)) {
+        if (isStageUpdatePrompt(trimmed) || /\b(?:rate|price|qty|quantity|po|date|payment|delivery|status|stage|satge)\b/i.test(trimmed)) {
           return { classification: 'SAME_ACTIVITY' };
         }
       }
@@ -12523,7 +12548,7 @@ Incoming message: "${trimmed}"
 
 Classify this incoming message:
 - If this message asks to change, edit, rename, or set a SYSTEM-GENERATED field of the current record (Inquiry ID, Deal ID, Enquiry Number, Inquiry Date / date of the inquiry, Order ID, Complaint Ticket ID, Visit ID, Customer ID, Logged By / Created By, Creation Date, Salesperson), e.g. "edit inquiry id for ABC Steels to IN897", "change inquiry number to 897", "INQ-F2785B ko IN897 kar do", "change created date", "update the date of the inquiry to tomorrow" -> SAME_ACTIVITY (the active workflow will explain that the field can't be edited). NEVER classify these as STAGE_UPDATE, RETRIEVAL_QUERY, or DIFFERENT_ACTIVITY.
-- If the user is in [UPDATE_INQUIRY], updating stage/status (Negotiation, Won, Lost, Quoted, On Hold), rate, quantity, or line items is a core field edit for the active inquiry -> SAME_ACTIVITY. Do NOT classify as STAGE_UPDATE unless a DIFFERENT inquiry ID is explicitly specified.
+- If the user is in [UPDATE_INQUIRY] or [UPDATE_ORDER], updating stage/status (Negotiation, Won, Lost, Quoted, On Hold, Confirmed, Pending, Processing, Dispatched, Delivered), rate, price, quantity, PO details, delivery, or line items is a core field edit for the active record -> SAME_ACTIVITY. Do NOT classify as STAGE_UPDATE unless a DIFFERENT record ID is explicitly specified or it is strictly a stage-only update without any other fields.
 - If this message is requesting to update, change, set, move, or mark the stage/status of an inquiry or deal (e.g. "update the stage to price quote for above inquiry", "update stage to quoted", "mark as negotiation", "move to on hold", "set status to price quote", "stage won", "set stage to lost") -> STAGE_UPDATE
 - If this message is reporting or logging a customer complaint, quality issue, defect, damage, rust, shortage, service problem, or delivery issue -> DIFFERENT_ACTIVITY:LOG_COMPLAINT
 - If this message is recording or logging a purchase order / PO -> DIFFERENT_ACTIVITY:LOG_ORDER
@@ -12555,7 +12580,7 @@ Classification:`;
     console.log('[CatalogFlow] AI active session intent classifier raw response:', JSON.stringify(raw));
 
     if (/STAGE_UPDATE/i.test(raw)) {
-      if (activeActivity === 'UPDATE_INQUIRY' && !isStageOnlyUpdate(trimmed) && !trimmed.match(/\b(?:INQ|DEAL)-([A-Z0-9]+)\b/i)) {
+      if ((activeActivity === 'UPDATE_INQUIRY' || activeActivity === 'UPDATE_ORDER') && !isStageOnlyUpdate(trimmed) && !trimmed.match(/\b(?:INQ|DEAL|ORD|PO)-([A-Z0-9]+)\b/i)) {
         return { classification: 'SAME_ACTIVITY' };
       }
       return { classification: 'STAGE_UPDATE' };
@@ -12579,7 +12604,7 @@ Classification:`;
     }
 
     if (/SAME_ACTIVITY/i.test(raw)) {
-      if (isStageOnlyUpdate(trimmed) || (activeActivity !== 'UPDATE_INQUIRY' && isStageUpdatePrompt(trimmed))) {
+      if (isStageOnlyUpdate(trimmed)) {
         return { classification: 'STAGE_UPDATE' };
       }
       // Check if deterministic regex detects a clear cross-module action that LLM might have missed
@@ -12595,6 +12620,9 @@ Classification:`;
 
   // Deterministic fallback if model call failed or was ambiguous
   if (isStageUpdatePrompt(trimmed)) {
+    if ((activeActivity === 'UPDATE_INQUIRY' || activeActivity === 'UPDATE_ORDER') && !isStageOnlyUpdate(trimmed)) {
+      return { classification: 'SAME_ACTIVITY' };
+    }
     return { classification: 'STAGE_UPDATE' };
   }
 
@@ -15323,6 +15351,7 @@ module.exports = {
   isSalesOsDomainQuery,
   isOutOfScopeGenericPrompt,
   isStageUpdatePrompt,
+  isStageOnlyUpdate,
   detectOperationalAction,
   extractFieldsWithLLM,
   mergeDraft,
