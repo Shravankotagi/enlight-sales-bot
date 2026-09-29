@@ -97,6 +97,10 @@ async function runTest() {
     console.error('FAILED: Confirmation card does not show 3 file(s) attached');
     process.exit(1);
   }
+  if (step2Result.reply.includes('Discarded') || step2Result.interactiveType !== 'buttons') {
+    console.error('FAILED: Complaint evidence upload left the catalog flow or skipped confirmation');
+    process.exit(1);
+  }
 
   console.log('\n=== TEST 4: Cancel and Test "No" path ===');
   // Cancel draft
@@ -116,6 +120,12 @@ async function runTest() {
 
   if (stepNoResult.reply.includes('• *Evidence:*')) {
     console.error('FAILED: Evidence line should not appear when user chooses "No"');
+    process.exit(1);
+  }
+  if (stepNoResult.reply.includes('Discarded') ||
+      !stepNoResult.reply.includes("Here's what I've captured:") ||
+      stepNoResult.interactiveType !== 'buttons') {
+    console.error('FAILED: "No" discarded the complaint instead of continuing to confirmation');
     process.exit(1);
   }
 
