@@ -867,7 +867,12 @@ function isPreviousPaginationRequest(text) {
 function isPureOptionSelectorOnly(text) {
   if (!text || typeof text !== 'string') return true;
   const clean = text.trim();
-  if (/^\s*(?:option|choice|no\.?|#)?\s*[1-9]\d*\.?\s*$/i.test(clean)) return true;
+  // Phone numbers (7-15 digits, optionally with +, -, spaces) or PIN codes are NOT option selectors
+  const digitsOnly = clean.replace(/[\s+-]/g, '');
+  if (/^\d{7,15}$/.test(digitsOnly)) return false;
+
+  if (/^\s*(?:option|choice|no\.?|#)\s*[1-9]\d*\.?\s*$/i.test(clean)) return true;
+  if (/^\s*[1-9]\d{0,1}\.?\s*$/i.test(clean)) return true;
   if (/^\s*(?:the\s+)?(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|last)\s*(?:option|choice|inquiry|order|visit|one)?\.?\s*$/i.test(clean)) return true;
   if (/^(?:PO|Purchase\s*Order|INQ|DEAL)[\s#:-]*[0-9A-Za-z-]+$/i.test(clean)) return true;
   return false;
@@ -880,7 +885,12 @@ function isPureOptionSelectorOnly(text) {
 function isNumericOptionSelector(text) {
   if (!text || typeof text !== 'string') return false;
   const clean = text.trim();
-  if (/^\s*(?:option|choice|no\.?|#)?\s*[1-9]\d*\.?\s*$/i.test(clean)) return true;
+  // Phone numbers (7-15 digits, optionally with +, -, spaces) or PIN codes are NOT option selectors
+  const digitsOnly = clean.replace(/[\s+-]/g, '');
+  if (/^\d{7,15}$/.test(digitsOnly)) return false;
+
+  if (/^\s*(?:option|choice|no\.?|#)\s*[1-9]\d*\.?\s*$/i.test(clean)) return true;
+  if (/^\s*[1-9]\d{0,1}\.?\s*$/i.test(clean)) return true;
   if (/^\s*(?:the\s+)?(?:first|second|third|fourth|fifth|sixth|1st|2nd|3rd|4th|5th|6th|last)\s*(?:option|choice|inquiry|order|visit|one)?\.?\s*$/i.test(clean)) return true;
   return false;
 }
@@ -3889,10 +3899,11 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   // Fallback contact_person and mobile_number for LOG_NEW_CUSTOMER / LOG_VISIT / UPDATE_VISIT / LOG_INQUIRY / LOG_ORDER
   if (['LOG_NEW_CUSTOMER', 'LOG_VISIT', 'UPDATE_VISIT', 'LOG_INQUIRY', 'LOG_ORDER'].includes(action)) {
     if (!merged.mobile_number && !merged.contact_phone) {
-      const phoneMatch = userInput.match(/\b([6-9]\d{9})\b/);
+      const phoneMatch = userInput.match(/\b(?:\+?91[\s-]?)?([6-9]\d{9})\b/) || userInput.match(/\b(\d{10})\b/);
       if (phoneMatch) {
-        merged.mobile_number = phoneMatch[1];
-        if (action.includes('VISIT') || action === 'LOG_INQUIRY') merged.contact_phone = phoneMatch[1];
+        const extractedPhone = phoneMatch[1] || phoneMatch[0].replace(/\D/g, '').slice(-10);
+        merged.mobile_number = extractedPhone;
+        if (action.includes('VISIT') || action === 'LOG_INQUIRY') merged.contact_phone = extractedPhone;
       }
     }
     if (!merged.contact_person && !merged.person_met) {
@@ -14249,7 +14260,35 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       return outOfScopeRes;
     }
 
-    const updatedCustDraft = await extractFieldsWithLLM('LOG_NEW_CUSTOMER', text, custDraft);
+    let updatedCustDraft = await extractFieldsWithLLM('LOG_NEW_CUSTOMER', text, custDraft);
+    if (!updatedCustDraft || typeof updatedCustDraft !== 'object') {
+      updatedCustDraft = { ...custDraft };
+    }
+    if (!updatedCustDraft._parentDraft && custDraft._parentDraft) {
+      updatedCustDraft._parentDraft = custDraft._parentDraft;
+    }
+
+    // Deterministic fallback for mobile_number if not yet extracted
+    if (!updatedCustDraft.mobile_number) {
+      const cleanDigits = text.replace(/\D/g, '');
+      if (cleanDigits.length === 10) {
+        updatedCustDraft.mobile_number = cleanDigits;
+      } else if (cleanDigits.length === 12 && cleanDigits.startsWith('91')) {
+        updatedCustDraft.mobile_number = cleanDigits.slice(-10);
+      } else if (cleanDigits.length === 11 && cleanDigits.startsWith('0')) {
+        updatedCustDraft.mobile_number = cleanDigits.slice(-10);
+      }
+    }
+
+    // Deterministic fallback for delivery_location if phone is already set and text has no phone digits
+    if (!updatedCustDraft.delivery_location && updatedCustDraft.mobile_number) {
+      const cleanLoc = text.replace(/^(?:delivery\s*location|location|city|address)\s*[:=-]?\s*/i, '').trim();
+      const hasPhoneDigits = /\b\d{10}\b/.test(text) || text.replace(/\D/g, '').length >= 10;
+      if (!hasPhoneDigits && cleanLoc && cleanLoc.length >= 2 && cleanLoc.length <= 60 && !isDiscardOrCancelIntent(cleanLoc)) {
+        updatedCustDraft.delivery_location = cleanLoc;
+      }
+    }
+
     const custMissing = validateMandatoryFields('LOG_NEW_CUSTOMER', updatedCustDraft);
 
     if (custMissing.length === 0) {
@@ -14314,11 +14353,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       if (updatedCustDraft.contact_person) {
         alreadyProvided.push(`• *Contact Person:* ${updatedCustDraft.contact_person}`);
       }
-      if (updatedCustDraft.delivery_location) {
-        alreadyProvided.push(`• *Delivery Location:* ${updatedCustDraft.delivery_location}`);
-      }
       if (updatedCustDraft.mobile_number) {
         alreadyProvided.push(`• *Mobile Number:* ${updatedCustDraft.mobile_number}`);
+      }
+      if (updatedCustDraft.delivery_location) {
+        alreadyProvided.push(`• *Delivery Location:* ${updatedCustDraft.delivery_location}`);
       }
 
       const missingList = custMissing.map(m => `• *${m}*`).join('\n');
