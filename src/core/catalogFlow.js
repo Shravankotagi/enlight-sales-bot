@@ -2561,6 +2561,45 @@ function buildInquirySystemFieldReply(label, displayId = null) {
     `Reply with the inquiry serial number or customer name to continue.`;
 }
 
+function extractThicknessTransition(text) {
+  if (!text || typeof text !== 'string') return null;
+
+  // Pattern 1: X -> Y (e.g. 2.5mm -> 3.5mm, 2.5 -> 3.5mm, 2.5mm to 3.5mm)
+  const arrowMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:mm)?\s*(?:->|-->|=>|→)\s*(\d+(?:\.\d+)?)\s*mm/i);
+  if (arrowMatch) {
+    return {
+      sourceThickness: Number(arrowMatch[1]),
+      targetThickness: Number(arrowMatch[2]),
+      sourceSpec: `${arrowMatch[1]}mm`,
+      targetSpec: `${arrowMatch[2]}mm`,
+    };
+  }
+
+  // Pattern 2: from X to Y / change X to Y / thickness of X to Y / X to Y
+  const toMatch = text.match(/(?:(?:from|change|thickness(?:\s*of)?|thk(?:\s*of)?)\s+)?(\d+(?:\.\d+)?)\s*(?:mm)?\s*(?:to|into|se)\s*(\d+(?:\.\d+)?)\s*mm/i);
+  if (toMatch) {
+    return {
+      sourceThickness: Number(toMatch[1]),
+      targetThickness: Number(toMatch[2]),
+      sourceSpec: `${toMatch[1]}mm`,
+      targetSpec: `${toMatch[2]}mm`,
+    };
+  }
+
+  // Pattern 3: X thickness Y (e.g. "HR Coil 2.5mm thickness 3.5mm")
+  const thkWordMatch = text.match(/(\d+(?:\.\d+)?)\s*mm\s+(?:thickness|spec|thk)\s+(?:to\s+|is\s+|as\s+)?(\d+(?:\.\d+)?)\s*mm/i);
+  if (thkWordMatch) {
+    return {
+      sourceThickness: Number(thkWordMatch[1]),
+      targetThickness: Number(thkWordMatch[2]),
+      sourceSpec: `${thkWordMatch[1]}mm`,
+      targetSpec: `${thkWordMatch[2]}mm`,
+    };
+  }
+
+  return null;
+}
+
 function scoreLineItemAgainstUpdate(item, upd) {
   if (!item || !upd) return 0;
   const itemSku = (item.sku_text || item.description || '').trim().toLowerCase();
@@ -2584,6 +2623,30 @@ function scoreLineItemAgainstUpdate(item, upd) {
     }
   }
 
+  // Extract source thickness if this update specifies a transition (e.g. 2.5mm -> 3.5mm)
+  // or specifies an item reference / source with a different thickness from target spec
+  let sourceThk = null;
+  if (upd.source_spec || upd.source_dimensions) {
+    sourceThk = extractThickness(upd.source_spec || upd.source_dimensions);
+  }
+  if (sourceThk === null) {
+    const trRef = extractThicknessTransition(upd.item_reference) ||
+                  extractThicknessTransition(upd.replace_source) ||
+                  extractThicknessTransition(upd.sku_text) ||
+                  extractThicknessTransition(upd.description);
+    if (trRef) sourceThk = trRef.sourceThickness;
+  }
+  if (sourceThk === null) {
+    const thkSku = extractThickness(upd.sku_text);
+    const thkSpec = extractThickness(updSpec);
+    if (thkSku !== null && thkSpec !== null && Math.abs(thkSku - thkSpec) >= 0.05) {
+      sourceThk = thkSku;
+    }
+  }
+
+  const tItem = extractThickness(itemDim) || extractThickness(itemSku);
+  const tUpd = extractThickness(updSpec) || extractThickness(updSku);
+
   // 1. Catalog & HSN Master Alignment
   const normItem = normalizeProductToCatalog(itemSku, itemDim);
   const normUpd = normalizeProductToCatalog(updSku, updSpec);
@@ -2591,7 +2654,10 @@ function scoreLineItemAgainstUpdate(item, upd) {
   if (normItem.isValid && normUpd.isValid) {
     if (normItem.catalogName === normUpd.catalogName) {
       score += 120;
-      if (normItem.hsnCode && normUpd.hsnCode && normItem.hsnCode === normUpd.hsnCode) {
+      // Do not award HSN bonus if this update is changing the thickness to a different value,
+      // because target thickness HSN would falsely bias towards existing items in the destination tariff band.
+      const isChangingThickness = (sourceThk !== null) || (tItem !== null && tUpd !== null && Math.abs(tItem - tUpd) >= 0.05 && (upd.spec || upd.dimensions));
+      if (!isChangingThickness && normItem.hsnCode && normUpd.hsnCode && normItem.hsnCode === normUpd.hsnCode) {
         score += 40;
       }
     } else if (normItem.category && normUpd.category && normItem.category !== normUpd.category) {
@@ -2602,9 +2668,13 @@ function scoreLineItemAgainstUpdate(item, upd) {
   }
 
   // 2. Thickness / Dimension Alignment
-  const tItem = extractThickness(itemDim) || extractThickness(itemSku);
-  const tUpd = extractThickness(updSpec) || extractThickness(updSku);
-  if (tItem !== null && tUpd !== null) {
+  if (sourceThk !== null && tItem !== null) {
+    if (Math.abs(tItem - sourceThk) < 0.05) {
+      score += 250; // Decisive match: matches the source thickness specified by user!
+    } else {
+      score -= 150; // Penalize other thicknesses
+    }
+  } else if (tItem !== null && tUpd !== null) {
     if (Math.abs(tItem - tUpd) < 0.05) {
       score += 60;
     } else {
@@ -3717,13 +3787,29 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
       if (qtyMatch) extractedQty = Number(qtyMatch[1]);
     }
 
-    const thkMatch = userInput.match(/(?:line\s*item[\s:=-]*)?.*?(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i) ||
-      userInput.match(/\b(\d+X\d+X\d+|\d+\s*x\s*\d+(?:\s*x\s*\d+)?)\b/i);
-    const extractedSpec = thkMatch ? thkMatch[1].trim() : null;
+    const transition = extractThicknessTransition(userInput);
+    const thkMatch = transition
+      ? null
+      : (userInput.match(/(?:line\s*item[\s:=-]*)?.*?(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i) ||
+         userInput.match(/\b(\d+X\d+X\d+|\d+\s*x\s*\d+(?:\s*x\s*\d+)?)\b/i));
+    const extractedSpec = transition ? transition.targetSpec : (thkMatch ? thkMatch[1].trim() : null);
+    const sourceSpec = transition ? transition.sourceSpec : null;
 
     let lineUpdates = Array.isArray(newExtracted.line_item_updates) ? newExtracted.line_item_updates : [];
     if (lineUpdates.length === 0 && Array.isArray(merged.line_item_updates)) {
       lineUpdates = merged.line_item_updates;
+    }
+    if (transition && lineUpdates.length > 0) {
+      lineUpdates.forEach(upd => {
+        if (!upd.source_spec && transition.sourceSpec) {
+          upd.source_spec = transition.sourceSpec;
+          upd.source_dimensions = transition.sourceSpec;
+        }
+        if (transition.targetSpec) {
+          upd.spec = transition.targetSpec;
+          upd.dimensions = transition.targetSpec;
+        }
+      });
     }
 
     if (lineUpdates.length > 0) {
@@ -3746,12 +3832,16 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
               mergedUpd.sku_text = newUpd.sku_text;
               mergedUpd.description = newUpd.sku_text;
             }
+            if (sourceSpec) {
+              mergedUpd.source_spec = sourceSpec;
+              mergedUpd.source_dimensions = sourceSpec;
+            }
             const updatedDim = (newUpd.spec && String(newUpd.spec).trim()) ||
                                (newUpd.dimensions && String(newUpd.dimensions).trim()) ||
                                extractedSpec ||
                                prevUpd.dimensions ||
                                prevUpd.spec;
-            if (updatedDim) {
+            if (updatedDim || sourceSpec) {
               mergedUpd.spec = updatedDim;
               mergedUpd.dimensions = updatedDim;
               delete mergedUpd._target_indexes;
@@ -3759,6 +3849,10 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             }
             mergedList[matchedPrevIdx] = mergedUpd;
           } else {
+            if (sourceSpec) {
+              newUpd.source_spec = sourceSpec;
+              newUpd.source_dimensions = sourceSpec;
+            }
             if (extractedSpec && !newUpd.dimensions && !newUpd.spec) {
               newUpd.dimensions = extractedSpec;
               newUpd.spec = extractedSpec;
@@ -3773,6 +3867,10 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             if (!u.dimensions && !u.spec) {
               u.dimensions = extractedSpec;
               u.spec = extractedSpec;
+            }
+            if (sourceSpec && !u.source_spec) {
+              u.source_spec = sourceSpec;
+              u.source_dimensions = sourceSpec;
             }
           });
         }
@@ -3889,9 +3987,22 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
       if (pRate !== null) merged.updates.rate = pRate;
     }
 
+    const transition = extractThicknessTransition(userInput);
     let lineUpdates = Array.isArray(newExtracted.line_item_updates) ? newExtracted.line_item_updates : [];
     if (lineUpdates.length === 0 && Array.isArray(merged.line_item_updates)) {
       lineUpdates = merged.line_item_updates;
+    }
+    if (transition && lineUpdates.length > 0) {
+      lineUpdates.forEach(upd => {
+        if (!upd.source_spec && transition.sourceSpec) {
+          upd.source_spec = transition.sourceSpec;
+          upd.source_dimensions = transition.sourceSpec;
+        }
+        if (transition.targetSpec) {
+          upd.spec = transition.targetSpec;
+          upd.dimensions = transition.targetSpec;
+        }
+      });
     }
     if (lineUpdates.length > 0) {
       if (Array.isArray(baseDraft.line_item_updates) && baseDraft.line_item_updates.length > 0) {
@@ -3903,7 +4014,11 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
           });
           if (matchedPrevIdx >= 0) {
             const mergedUpd = { ...mergedList[matchedPrevIdx], ...newUpd };
-            if (newUpd.spec || newUpd.dimensions) {
+            if (transition && transition.sourceSpec) {
+              mergedUpd.source_spec = transition.sourceSpec;
+              mergedUpd.source_dimensions = transition.sourceSpec;
+            }
+            if (newUpd.spec || newUpd.dimensions || newUpd.source_spec) {
               delete mergedUpd._target_indexes;
               delete mergedUpd._target_item_ids;
             }
@@ -3917,16 +4032,20 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
         merged.line_item_updates = lineUpdates;
       }
     } else {
-      const thkMatch = userInput.match(/(?:line\s*item[\s:=-]*)?.*?(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i) || userInput.match(/\b(\d+X\d+X\d+|\d+\s*x\s*\d+(?:\s*x\s*\d+)?)\b/i);
+      const thkMatch = transition
+        ? null
+        : (userInput.match(/(?:line\s*item[\s:=-]*)?.*?(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i) || userInput.match(/\b(\d+X\d+X\d+|\d+\s*x\s*\d+(?:\s*x\s*\d+)?)\b/i));
       const qtyMatch = userInput.match(/(\d+(?:\.\d+)?)\s*(?:mt|ton|tonne|kg|pcs|nos|sheets?|plates?|coils?)\b/i) || userInput.match(/(?:qty|quantity)[\s:=-]*(\d+(?:\.\d+)?)/i);
-      if (thkMatch || qtyMatch) {
-        const extractedSpec = thkMatch ? thkMatch[1].trim() : null;
+      if (transition || thkMatch || qtyMatch) {
+        const extractedSpec = transition ? transition.targetSpec : (thkMatch ? thkMatch[1].trim() : null);
+        const sourceSpec = transition ? transition.sourceSpec : null;
         const extractedQty = qtyMatch ? Number(qtyMatch[1]) : null;
         const extractedUnit = userInput.match(/\b(mt|ton|tonne|kg|pcs|nos|sheets?|plates?|coils?)\b/i)?.[1]?.toUpperCase() || 'MT';
         if (extractedSpec || extractedQty) {
           merged.line_item_updates = [{
             operation: 'update',
             item_reference: 'Line Item',
+            ...(sourceSpec ? { source_spec: sourceSpec, source_dimensions: sourceSpec } : {}),
             ...(extractedQty !== null ? { quantity: extractedQty, unit: extractedUnit } : {}),
             ...(extractedSpec ? { spec: extractedSpec, dimensions: extractedSpec } : {}),
           }];
@@ -15920,4 +16039,5 @@ module.exports = {
   handleLineItemChoiceReply,
   isPureOptionSelectorOnly,
   isNumericOptionSelector,
+  extractThicknessTransition,
 };
