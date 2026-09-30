@@ -2093,6 +2093,7 @@ CRITICAL RULES:
 4. If a field was NOT mentioned by the user, leave it as null or empty string. NEVER fabricate or guess.
 5. In LOG_INQUIRY and LOG_ORDER: if multiple products are listed, extract EACH individual item into the line_items array with its own product name, dimensions/spec, quantity, and unit.
 6. If an existing draft is provided, you are completing or updating fields for THAT ACTIVE DRAFT (${cleanDraftForLLM.company_name || 'the current draft'}). PRESERVE existing draft fields unless explicitly changed by the user message.
+6a. VISIT OUTCOME AUTHORITY (CRITICAL): In LOG_VISIT and UPDATE_VISIT, \`visit_outcome\` is an explicit field, not sentiment analysis. If the active draft already has an outcome, return null for \`visit_outcome\` unless the user explicitly supplies or changes the outcome (for example, "Visit Outcome: Negative" or "change outcome to Neutral"). Never infer or change it from meeting remarks, requirements, or general discussion text.
 7. MULTIPLE ENTITIES / COMPANIES (CRITICAL): If and only if the user message itself introduces multiple distinct companies/records (e.g. 'Visited two customers today: ABC Steel in Mumbai (positive) and Sharma Construction in Pune (neutral)' or 'Inquiry from ABC for 10 MT and XYZ for 20 MT'):
 Output an 'entries' array containing a separate object for EACH individual customer/visit/inquiry/complaint!
 If only a single company is mentioned or if filling missing fields for an existing draft, return the top-level fields (e.g. company_name, person_met, contact_phone, etc.) and do NOT output an entries array.
@@ -3264,6 +3265,20 @@ async function handleLineItemChoiceReply(text, senderPhone, action, draft) {
 
 // ── MERGE DRAFT HELPER ───────────────────────────────────────────────────────
 
+function hasExplicitVisitOutcomeInput(userInput = '') {
+  const input = String(userInput).trim();
+  if (!input) return false;
+
+  // A controlled value by itself is a valid response to the outcome prompt.
+  if (/^(?:positive|negative|neutral|follow[-\s]*up(?:\s+required)?)\.?$/i.test(input)) {
+    return true;
+  }
+
+  // Otherwise require that the outcome field is explicitly named or updated.
+  return /\b(?:visit\s+)?outcome\b\s*(?:(?:is|to|as|=|:)\s*)?(?:positive|negative|neutral|follow[-\s]*up(?:\s+required)?)\b/i.test(input) ||
+    /\b(?:change|update|set|mark)\b[\s\S]{0,40}\b(?:visit\s+)?outcome\b[\s\S]{0,40}\b(?:positive|negative|neutral|follow[-\s]*up(?:\s+required)?)\b/i.test(input);
+}
+
 function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   const merged = { ...baseDraft, action };
   delete merged._permissionNotice; // Always clear stale notice from prior turns
@@ -3279,6 +3294,9 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
         merged.updates = merged.updates || {};
         for (const [uKey, uVal] of Object.entries(val)) {
           if (uVal !== null && uVal !== undefined && uVal !== '') {
+            if (action === 'UPDATE_VISIT' && uKey === 'visit_outcome' && !hasExplicitVisitOutcomeInput(userInput)) {
+              continue;
+            }
             if (action === 'UPDATE_ORDER' && (uKey === 'total_amount' || uKey === 'total_value' || uKey === 'grand_total' || uKey === 'amount')) {
               continue;
             }
@@ -3425,6 +3443,15 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
         } else if (key === 'gps_photo_url' && typeof val === 'string') {
           // Keep baseDraft photo if already set (never replace previously added photo)
           merged.gps_photo_url = baseDraft.gps_photo_url || val;
+        } else if (
+          key === 'visit_outcome' &&
+          (
+            (action === 'LOG_VISIT' && baseDraft.visit_outcome && !hasExplicitVisitOutcomeInput(userInput)) ||
+            (action === 'UPDATE_VISIT' && !hasExplicitVisitOutcomeInput(userInput))
+          )
+        ) {
+          // A prior explicit outcome is authoritative. Remarks and general discussion
+          // must not silently mutate it through LLM sentiment extraction.
         } else {
           merged[key] = val;
         }
@@ -3931,12 +3958,21 @@ function forwardCustomerDetailsToParentDraft(originalAction, originalDraft, cust
   }
 
   // 3. Location / City / Delivery Address
-  const locVal = custDraft.delivery_location || custDraft.city_location || custDraft.location || custDraft.address;
-  if (locVal) {
-    if (!originalDraft.city_location) originalDraft.city_location = locVal;
-    if (!originalDraft.delivery_location) originalDraft.delivery_location = locVal;
-    if (!originalDraft.location) originalDraft.location = locVal;
-    if (!originalDraft.address) originalDraft.address = locVal;
+  // A visit city and a customer's delivery location are separate fields. Do not
+  // turn one into the other while resuming a visit after customer onboarding.
+  if (originalAction === 'LOG_VISIT') {
+    const explicitDelivery = custDraft.delivery_location || null;
+    if (explicitDelivery && !originalDraft.delivery_location) {
+      originalDraft.delivery_location = explicitDelivery;
+    }
+  } else {
+    const locVal = custDraft.delivery_location || custDraft.city_location || custDraft.location || custDraft.address;
+    if (locVal) {
+      if (!originalDraft.city_location) originalDraft.city_location = locVal;
+      if (!originalDraft.delivery_location) originalDraft.delivery_location = locVal;
+      if (!originalDraft.location) originalDraft.location = locVal;
+      if (!originalDraft.address) originalDraft.address = locVal;
+    }
   }
 
   // 4. Contact Person / Person Met
@@ -10641,7 +10677,7 @@ async function executeAction(action, draft, senderPhone) {
           .trim();
 
         // 2. Compute updated values
-        const newOutcome = updates.visit_outcome || existingOutcome || 'Positive';
+        const newOutcome = updates.visit_outcome || existingOutcome || null;
         const newLocation = updates.city_location || existingLoc || null;
 
         let newFollowup = existingFollowup;
@@ -13153,7 +13189,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         company_name: unrecognizedName,
         contact_person: originalDraft.person_met || originalDraft.contact_person || null,
         mobile_number: originalDraft.contact_phone || originalDraft.mobile_number || originalDraft.phone || null,
-        delivery_location: originalDraft.delivery_location || originalDraft.city_location || originalDraft.location || originalDraft.address || null,
+        // City / visit location does not imply a customer's delivery location.
+        delivery_location: originalDraft.delivery_location || null,
         email: originalDraft.email || null,
         gst_number: originalDraft.gst_number || null,
         _parentAction: originalAction,
@@ -15430,6 +15467,7 @@ module.exports = {
   detectOperationalAction,
   extractFieldsWithLLM,
   mergeDraft,
+  forwardCustomerDetailsToParentDraft,
   validateOrderInquiryStage,
   checkInquiriesForUpdate,
   checkOrdersForUpdate,
