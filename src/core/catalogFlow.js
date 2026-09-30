@@ -2072,16 +2072,10 @@ UPDATE_COMPLAINT:
   "company_name": "<Customer / Company Name if mentioned, else null>",
   "linked_inquiry_or_po": "<Linked PO Number or Inquiry ID e.g. INQ-8971B1, PO-2026-TI-101 if mentioned, else null>",
   "updates": {
-    "complaint_date": "<DD-MM-YYYY format if updated, else null>",
     "raised_by": "<Contact person name at customer if updated, else null>",
-    "affected_product": "<Product name from official catalog if updated, else null>",
     "complaint_type": "<Quality Defect | Physical Damage | Quantity Shortage | Delivery Delay | Billing Mismatch | Specification Mismatch | Other if updated, else null>",
-    "challan_no": "<Invoice or Delivery Challan number if updated, else null>",
     "complaint_description": "<if updated, else null>",
-    "corrective_action": "<if updated, else null>",
-    "customer_communication": "<Communication or update shared with customer if updated, else null>",
     "status": "<Pending | In Progress | Resolved | Closed if updated, else null>",
-    "resolution_date": "<DD-MM-YYYY format if updated, else null>",
     "resolution_notes": "<if updated, else null>"
   }
 }
@@ -2140,6 +2134,9 @@ If only a single company is mentioned or if filling missing fields for an existi
 15. ZERO SUMMARIZATION OF NOTES / ADDITIONAL NOTES / REMARKS (CRITICAL):
 - When extracting 'additional_notes', 'meeting_remarks', 'remarks', 'discussion_notes', 'notes', or comments, NEVER summarize, rewrite, rephrase, or generalize the user's words (e.g. if the user says 'we will be having follow up', extract 'we will be having follow up' EXACTLY as typed. NEVER convert or summarize it to 'Follow-up planned').
 - PRESERVE the exact verbatim text entered by the user.
+16. UPDATE_COMPLAINT FIELD RESTRICTION (CRITICAL):
+- After a complaint is logged, ONLY these fields may be updated: Complaint Raised By, Complaint Type, Complaint Description, Status, and Resolution Notes.
+- Complaint Date, customer/company, linked Inquiry/PO, product/material, challan number, attachments/evidence, corrective action, customer communication, and resolution date are locked. Do not return them in \`updates\`.
 `;
 
   const userPrompt = `Existing Active Draft:
@@ -2212,6 +2209,67 @@ User Message:
 }
 
 const TOTAL_VALUE_PERMISSION_NOTICE = '⚠️ *Permission Notice:* You do not have permission to directly change the Total Order Value. Total value is calculated automatically from individual line item quantities and rates. To adjust the total value, please update individual line item rates or quantities.';
+const COMPLAINT_EDITABLE_UPDATE_FIELDS = new Set([
+  'raised_by',
+  'complaint_type',
+  'complaint_description',
+  'description',
+  'status',
+  'resolution_notes',
+]);
+
+const COMPLAINT_UPDATE_FIELD_LABELS = {
+  complaint_date: 'Complaint Date',
+  customer_name: 'Customer / Company Name',
+  linked_inquiry_or_po: 'Linked Inquiry / PO',
+  deal_id: 'Linked Inquiry / PO',
+  po_number: 'Linked Inquiry / PO',
+  affected_product: 'Product / Material',
+  product_name: 'Product / Material',
+  product: 'Product / Material',
+  challan_no: 'Invoice / Challan No.',
+  attachments: 'Evidence / Attachments',
+  corrective_action: 'Corrective Action',
+  customer_communication: 'Customer Communication',
+  resolution_date: 'Resolution Date',
+};
+
+function restrictComplaintUpdateFields(updates = {}) {
+  const allowed = {};
+  const locked = [];
+  for (const [field, value] of Object.entries(updates || {})) {
+    if (COMPLAINT_EDITABLE_UPDATE_FIELDS.has(field)) {
+      allowed[field] = value;
+    } else if (value !== null && value !== undefined && value !== '') {
+      locked.push(COMPLAINT_UPDATE_FIELD_LABELS[field] || field.replace(/_/g, ' '));
+    }
+  }
+  return { allowed, locked: [...new Set(locked)] };
+}
+
+function detectLockedComplaintUpdateFields(userInput = '') {
+  const text = String(userInput || '');
+  const editVerb = '(?:change|edit|update|modify|set|replace|correct|revise|amend|alter)';
+  const locked = [];
+  const hasEdit = new RegExp(`\\b${editVerb}\\b`, 'i').test(text);
+  if (!hasEdit) return locked;
+
+  const addIf = (pattern, label) => {
+    if (pattern.test(text)) locked.push(label);
+  };
+
+  addIf(new RegExp(`\\b${editVerb}\\b[\\s\\S]{0,50}\\b(?:customer|company|client|party)\\s*name\\b`, 'i'), 'Customer / Company Name');
+  addIf(new RegExp(`\\b${editVerb}\\b[\\s\\S]{0,50}\\b(?:linked\\s*)?(?:po|purchase\\s*order|inquiry|deal)\\s*(?:number|no\\.?|id)?\\b`, 'i'), 'Linked Inquiry / PO');
+  addIf(new RegExp(`\\b${editVerb}\\b[\\s\\S]{0,50}\\bcomplaint\\s*date\\b`, 'i'), 'Complaint Date');
+  addIf(new RegExp(`\\b${editVerb}\\b[\\s\\S]{0,50}\\b(?:product|material|affected\\s*product)\\b`, 'i'), 'Product / Material');
+  addIf(new RegExp(`\\b${editVerb}\\b[\\s\\S]{0,50}\\b(?:invoice|challan)\\b`, 'i'), 'Invoice / Challan No.');
+  addIf(new RegExp(`\\b${editVerb}\\b[\\s\\S]{0,50}\\b(?:attachment|evidence|photo|document)\\b`, 'i'), 'Evidence / Attachments');
+  addIf(new RegExp(`\\b${editVerb}\\b[\\s\\S]{0,50}\\bcorrective\\s*action\\b`, 'i'), 'Corrective Action');
+  addIf(new RegExp(`\\b${editVerb}\\b[\\s\\S]{0,50}\\bcustomer\\s*communication\\b`, 'i'), 'Customer Communication');
+  addIf(new RegExp(`\\b${editVerb}\\b[\\s\\S]{0,50}\\bresolution\\s*date\\b`, 'i'), 'Resolution Date');
+
+  return [...new Set(locked)];
+}
 
 function detectTotalValueUpdateAttempt(text, extractedData) {
   if (!text || typeof text !== 'string') return false;
@@ -2255,7 +2313,7 @@ function getAllowedFieldsListForAction(action) {
     case 'LOG_COMPLAINT':
       return `- *Complaint Date*\n- *Complaint Raised By*\n- *Linked Inquiry ID / PO Number*\n- *Affected Product*\n- *Complaint Type*\n- *Invoice / Challan No.*\n- *Complaint Description*\n- *Evidence Attachments (Max 3)*\n- *Corrective Action*\n- *Customer Communication*\n- *Resolution Notes*\n- *Resolution Date*`;
     case 'UPDATE_COMPLAINT':
-      return `- *Complaint Date*\n- *Complaint Raised By*\n- *Product / Material*\n- *Complaint Type*\n- *Invoice / Challan No.*\n- *Complaint Description*\n- *Corrective Action*\n- *Customer Communication*\n- *Resolution Notes*\n- *Resolution Date*\n- *Status (Pending, In Progress, Resolved, Closed)*`;
+      return `- *Complaint Raised By*\n- *Complaint Type*\n- *Complaint Description*\n- *Status (Pending, In Progress, Resolved, Closed)*\n- *Resolution Notes*`;
     case 'LOG_NEW_CUSTOMER':
       return `- *Company Name*\n- *Contact Person*\n- *Mobile Number*\n- *Delivery Location / City*\n- *Email Address*\n- *GST Number*`;
     default:
@@ -3281,7 +3339,11 @@ function hasExplicitVisitOutcomeInput(userInput = '') {
 
 function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   const merged = { ...baseDraft, action };
+  if (baseDraft.updates && typeof baseDraft.updates === 'object' && !Array.isArray(baseDraft.updates)) {
+    merged.updates = { ...baseDraft.updates };
+  }
   delete merged._permissionNotice; // Always clear stale notice from prior turns
+  delete merged._locked_complaint_update_fields;
   if (baseDraft._queue) merged._queue = baseDraft._queue;
   if (baseDraft._totalCount) merged._totalCount = baseDraft._totalCount;
   if (baseDraft._currentIndex) merged._currentIndex = baseDraft._currentIndex;
@@ -3864,6 +3926,19 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (merged.updates.resolution_notes && isInvalidOrGenericResolutionNotes(merged.updates.resolution_notes, merged.company_name)) {
       delete merged.updates.resolution_notes;
     }
+
+    const restricted = restrictComplaintUpdateFields(merged.updates);
+    merged.updates = restricted.allowed;
+    const requestedLockedFields = detectLockedComplaintUpdateFields(userInput);
+    const lockedFields = [...new Set([...restricted.locked, ...requestedLockedFields])];
+    if (lockedFields.length > 0) {
+      merged._locked_complaint_update_fields = [
+        ...new Set([
+          ...(baseDraft._locked_complaint_update_fields || []),
+          ...lockedFields,
+        ]),
+      ];
+    }
   }
 
   // Preserve attachments and GPS metadata from baseDraft
@@ -4161,6 +4236,9 @@ function validateMandatoryFields(action, draft) {
       const cmpUpdates = draft.updates || {};
       const hasCmpUpdate = Object.values(cmpUpdates).some(v => v !== null && v !== undefined && v !== '');
       if (!hasCmpUpdate) {
+        if (Array.isArray(draft._locked_complaint_update_fields) && draft._locked_complaint_update_fields.length > 0) {
+          missing.push(`Locked fields cannot be updated after logging: ${draft._locked_complaint_update_fields.join(', ')}`);
+        }
         missing.push('At least one field to update (e.g. Complaint Type, Status, Description, Resolution Notes)');
       }
       if (cmpUpdates.status && ['resolved', 'closed'].includes(String(cmpUpdates.status).toLowerCase())) {
@@ -8535,6 +8613,10 @@ function buildConfirmationSummary(action, draft) {
           summary += `  • *${label}* → ${v}\n`;
         }
       }
+      if (Array.isArray(draft._locked_complaint_update_fields) && draft._locked_complaint_update_fields.length > 0) {
+        summary += `\n⚠️ *Permission Notice:* You are not allowed to edit these fields after a complaint is logged: *${draft._locked_complaint_update_fields.join(', ')}*.\n` +
+          `Only Complaint Raised By, Complaint Type, Complaint Description, Status, and Resolution Notes can be updated.\n`;
+      }
       break;
     }
   }
@@ -11207,38 +11289,12 @@ async function executeAction(action, draft, senderPhone) {
         const cmpUpdates = {};
         const cmpNotices = [];
 
-        if (updates.complaint_date) {
-          const parsed = parseUserDateToISOStrict(updates.complaint_date);
-          if (parsed) {
-            cmpUpdates.complaint_date = parsed;
-          } else {
-            cmpNotices.push(`⚠️ Complaint date "${updates.complaint_date}" was not understood, so the existing date was kept. Please send it as DD-MM-YYYY.`);
-          }
-        }
         if (updates.raised_by || updates.contact_person) {
           cmpUpdates.raised_by = (updates.raised_by || updates.contact_person).trim();
         }
-        if (updates.challan_no) cmpUpdates.challan_no = updates.challan_no.trim();
-        if (updates.customer_communication) cmpUpdates.customer_communication = updates.customer_communication.trim();
-        if (updates.resolution_date) {
-          const parsedRes = parseUserDateToISOStrict(updates.resolution_date);
-          if (parsedRes) {
-            cmpUpdates.resolution_date = parsedRes;
-          } else {
-            cmpNotices.push(`⚠️ Resolution date "${updates.resolution_date}" was not understood, so the existing date was kept. Please send it as DD-MM-YYYY.`);
-          }
-        }
         if (updates.complaint_type) cmpUpdates.complaint_type = normalizeComplaintType(updates.complaint_type);
         if (updates.complaint_description || updates.description) cmpUpdates.description = updates.complaint_description || updates.description;
-        if (updates.corrective_action) cmpUpdates.corrective_action = updates.corrective_action;
         if (updates.resolution_notes) cmpUpdates.resolution_notes = updates.resolution_notes;
-        if (updates.product_name || updates.affected_product || updates.product) {
-          const p = updates.product_name || updates.affected_product || updates.product;
-          cmpUpdates.product_name = p;
-          cmpUpdates.affected_product = p;
-        }
-        if (updates.po_number) cmpUpdates.po_number = updates.po_number;
-        if (updates.deal_id) cmpUpdates.deal_id = updates.deal_id;
         const isResolved = updates.status && ['resolved', 'closed'].includes(String(updates.status).toLowerCase());
         if (updates.status) {
           let st = String(updates.status).toLowerCase().trim();
@@ -11300,12 +11356,8 @@ async function executeAction(action, draft, senderPhone) {
         if (updateErr) {
           console.error('[CatalogFlow] Supabase complaint update error, retrying without optional columns:', updateErr.message);
           const fallbackUpdates = { ...cmpUpdates };
-          delete fallbackUpdates.complaint_date;
           delete fallbackUpdates.raised_by;
-          delete fallbackUpdates.challan_no;
-          delete fallbackUpdates.customer_communication;
           delete fallbackUpdates.resolution_notes;
-          delete fallbackUpdates.resolution_date;
 
           if (Object.keys(fallbackUpdates).length > 0) {
             const { error: fbErr } = await supabase
@@ -11346,17 +11398,12 @@ async function executeAction(action, draft, senderPhone) {
           const isSlaCompliant = resolutionHrs <= 48;
           return `✅ *Customer Complaint Resolved Successfully!*\n\n` +
             `• *Customer / Company:* ${matchedCmp.customer_name}\n` +
-            (cmpUpdates.complaint_date ? `• *Complaint Date:* ${updates.complaint_date}\n` : '') +
             (cmpUpdates.raised_by ? `• *Complaint Raised By:* ${cmpUpdates.raised_by}\n` : '') +
             (linkedOrderRef ? `• *Linked Order / Ref:* ${linkedOrderRef}\n` : '') +
-            `• *Product / Material:* ${cmpUpdates.product_name || matchedCmp.product_name || matchedCmp.affected_product || 'Steel Material'}\n` +
+            `• *Product / Material:* ${matchedCmp.product_name || matchedCmp.affected_product || 'Steel Material'}\n` +
             `• *Complaint Type:* ${cmpUpdates.complaint_type || matchedCmp.complaint_type || 'Quality Defect'}\n` +
-            (cmpUpdates.challan_no ? `• *Invoice / Challan No.:* ${cmpUpdates.challan_no}\n` : '') +
-            (cmpUpdates.corrective_action ? `• *Corrective Action:* ${cmpUpdates.corrective_action}\n` : '') +
-            (cmpUpdates.customer_communication ? `• *Customer Communication:* ${cmpUpdates.customer_communication}\n` : '') +
             `• *Status:* ${updates.status || 'Resolved'}\n` +
             `• *Resolution Notes:* ${cmpUpdates.resolution_notes || 'Resolved'}\n` +
-            (cmpUpdates.resolution_date ? `• *Resolution Date:* ${updates.resolution_date}\n` : '') +
             `• *Resolution Time:* ${resolutionHrs} Hours\n` +
             `• *SLA Target (48h):* ${isSlaCompliant ? '✅ Achieved - Within SLA Target!' : '⚠️ Breached - Escalated!'}\n\n` +
             (cmpNotices.length > 0 ? `${cmpNotices.join('\n')}\n\n` : '') +
@@ -11364,17 +11411,11 @@ async function executeAction(action, draft, senderPhone) {
         }
 
         let fieldsSummary = '';
-        if (cmpUpdates.complaint_date) fieldsSummary += `• *Complaint Date:* ${updates.complaint_date}\n`;
         if (cmpUpdates.raised_by) fieldsSummary += `• *Complaint Raised By:* ${cmpUpdates.raised_by}\n`;
-        if (cmpUpdates.product_name) fieldsSummary += `• *Product:* ${cmpUpdates.product_name}\n`;
         if (cmpUpdates.complaint_type) fieldsSummary += `• *Complaint Type:* ${cmpUpdates.complaint_type}\n`;
-        if (cmpUpdates.challan_no) fieldsSummary += `• *Invoice / Challan No.:* ${cmpUpdates.challan_no}\n`;
         if (cmpUpdates.description) fieldsSummary += `• *Description:* ${cmpUpdates.description}\n`;
-        if (cmpUpdates.corrective_action) fieldsSummary += `• *Corrective Action:* ${cmpUpdates.corrective_action}\n`;
-        if (cmpUpdates.customer_communication) fieldsSummary += `• *Customer Communication:* ${cmpUpdates.customer_communication}\n`;
         if (updates.status) fieldsSummary += `• *Status:* ${updates.status}\n`;
         if (cmpUpdates.resolution_notes) fieldsSummary += `• *Resolution Notes:* ${cmpUpdates.resolution_notes}\n`;
-        if (cmpUpdates.resolution_date) fieldsSummary += `• *Resolution Date:* ${updates.resolution_date}\n`;
 
         return `✅ *Customer Complaint Updated Successfully!*\n\n` +
           `• *Customer / Company:* ${matchedCmp.customer_name}\n` +

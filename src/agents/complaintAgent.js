@@ -538,20 +538,9 @@ async function processSingleComplaint(data, originalText, senderPhone) {
       const isSlaBreached = resolutionTimeHrs > 48;
       const isSlaCompliant = !isSlaBreached;
 
-      // If openComplaint has 'General Material' or null for product, update it with real product!
       const existingProd = openComplaint.product_name || openComplaint.affected_product;
-      const isGeneric = !existingProd || ['general material', 'general steel material', 'steel material', 'material', 'steel', 'null'].includes(existingProd.toLowerCase().trim());
-      let updatedProduct = existingProd;
-      if (isGeneric) {
-        updatedProduct = await resolveProductFromContext(
-          openComplaint.deal_id || data.deal_id,
-          openComplaint.po_number || data.po_number,
-          finalCustomerName,
-          affectedProduct,
-          openComplaint.description || cleanDescription || resolutionNotes,
-          senderPhone
-        );
-      }
+      // Product and linked order data are immutable after complaint logging.
+      const updatedProduct = existingProd || affectedProduct;
 
       const updatePayload = {
         status: 'resolved',
@@ -560,10 +549,6 @@ async function processSingleComplaint(data, originalText, senderPhone) {
         resolution_time_hrs: resolutionTimeHrs,
         escalated: isSlaBreached,
       };
-      if (isGeneric && updatedProduct && updatedProduct !== 'General Material') {
-        updatePayload.product_name = updatedProduct;
-        updatePayload.affected_product = updatedProduct;
-      }
 
       const { error: cmpUpdErr } = await supabase
         .from('complaints')
