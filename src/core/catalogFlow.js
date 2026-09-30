@@ -5569,6 +5569,55 @@ function formatSelectedVisitPrompt(record) {
   return prompt;
 }
 
+function formatSelectedComplaintPrompt(record) {
+  const customer = record.customer_name || 'Customer';
+  const date = record.complaint_date || record.date_formatted || 'Not specified';
+  const resolutionNotes = record.resolution_notes || 'Not specified';
+  const fields = [
+    'Complaint Raised By',
+    'Complaint Type',
+    'Complaint Description',
+    'Status',
+    'Resolution Notes',
+  ];
+
+  return `*Selected Customer Complaint: ${customer}*\n` +
+    `*Complaint Details:*\n` +
+    `• *Complaint Date:* ${date}\n` +
+    `• *Complaint Raised By:* ${record.raised_by || 'Not specified'}\n` +
+    `• *Linked Order / Ref:* ${record.po_number ? `PO: ${record.po_number}` : (record.linked_inquiry_or_po || 'Not specified')}\n` +
+    `• *Product / Material:* ${record.product_name || record.affected_product || 'Not specified'}\n` +
+    `• *Complaint Type:* ${record.complaint_type || 'Quality Defect'}\n` +
+    `• *Invoice / Challan No.:* ${record.challan_no || 'Not specified'}\n` +
+    `• *Description:* ${record.description || 'Not specified'}\n` +
+    `• *Status:* ${record.status || 'Open'}\n` +
+    `• *Resolution Notes:* ${resolutionNotes}\n\n` +
+    `*Fields to Update:*\n` +
+    fields.map(field => `• *${field}*`).join('\n') +
+    `\n\nPlease reply with the field name and new value.`;
+}
+
+function isFullRecordSelection(text = '') {
+  const value = String(text).trim();
+  if (!value.includes('|')) return false;
+  if (/\b(?:update|change|edit|modify|set|resolve|close|reopen|mark)\b/i.test(value)) return false;
+  return /\b(?:date|status|type|outcome|location|customer)\b/i.test(value);
+}
+
+function formatSelectedRecordPrompt(action, record) {
+  if (action === 'UPDATE_COMPLAINT') return formatSelectedComplaintPrompt(record);
+  if (action === 'UPDATE_VISIT') return formatSelectedVisitPrompt(record);
+  return '';
+}
+
+function formatVisitSelectionLine(record, index) {
+  return `${index}. *${record.customer_name}* | Date: ${record.date_formatted || 'Not specified'} | Person: ${record.person_met || 'Not specified'} | Location: ${record.location || 'Not specified'} | Outcome: ${record.outcome || 'Not specified'}`;
+}
+
+function formatComplaintSelectionLine(record, index) {
+  return `${index}. *${record.customer_name}* | Date: ${record.complaint_date || record.date_formatted || 'Not specified'} | Type: ${record.complaint_type || 'Not specified'} | Status: ${record.status || 'Not specified'}`;
+}
+
 // ── MULTI-VISIT DATE DISAMBIGUATION CHECK ────────────────────────────────────
 
 async function checkMultipleVisitsForUpdate(action, draft, senderPhone) {
@@ -6639,11 +6688,9 @@ function formatRecordLineForModule(action, record, index) {
     case 'UPDATE_ORDER':
       return `${index}. ${record.displayId} | ${record.customer_name} | ${record.product_summary} | ${record.date_formatted}`;
     case 'UPDATE_COMPLAINT':
-      return `${index}. ${record.customer_name} | ${record.complaint_type} | ${record.status} | ${record.date_formatted}`;
+      return formatComplaintSelectionLine(record, index);
     case 'UPDATE_VISIT': {
-      const detailsList = [record.person_met, record.location, record.outcome].filter(Boolean).filter(s => s !== 'Not specified');
-      const detailsStr = detailsList.length > 0 ? ` | ${detailsList.join(' | ')}` : '';
-      return `${index}. ${record.customer_name}${detailsStr} | ${record.date_formatted}`;
+      return formatVisitSelectionLine(record, index);
     }
     default:
       return `${index}. ${record.customer_name} | ${record.date_formatted}`;
@@ -6833,7 +6880,8 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
   }
 
   // 1c. Mid-flow retrieval query interception
-  if (await isMidFlowReadQuery(clean)) {
+  const isMidFlowRead = await isMidFlowReadQuery(clean);
+  if (isMidFlowRead && !isFullRecordSelection(clean)) {
     return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_update_select', action, selectionState);
   }
 
@@ -7029,6 +7077,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     }
   }
 
+
   // 4c. Visit matching by Date / Person Met for UPDATE_VISIT
   if (!matchedRecord && action === 'UPDATE_VISIT') {
     const normInputDate = normalizeDateToDDMMYYYY(clean);
@@ -7135,7 +7184,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
       };
     }
 
-    const isPureSelect = isPureOptionSelectorOnly(clean);
+    const isPureSelect = isPureOptionSelectorOnly(clean) || isFullRecordSelection(clean);
 
     if (isPureSelect) {
       let prompt = '';
@@ -7162,23 +7211,9 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
 
         prompt = formatSelectedOrderPrompt(matchedRecord, itemsListText);
       } else if (action === 'UPDATE_COMPLAINT') {
-        prompt = `✏️ *Selected Complaint for ${matchedRecord.customer_name}:*\n\n` +
-          `• *Date:* ${matchedRecord.complaint_date || matchedRecord.date_formatted}\n` +
-          (matchedRecord.raised_by ? `• *Raised By:* ${matchedRecord.raised_by}\n` : '') +
-          (matchedRecord.product_name ? `• *Product:* ${matchedRecord.product_name}\n` : '') +
-          (matchedRecord.challan_no ? `• *Invoice / Challan No:* ${matchedRecord.challan_no}\n` : '') +
-          (matchedRecord.po_number ? `• *Linked Ref:* PO: ${matchedRecord.po_number}\n` : '') +
-          `• *Type:* ${matchedRecord.complaint_type || 'Quality Defect'}\n` +
-          `• *Status:* ${matchedRecord.status || 'Open'}\n` +
-          (matchedRecord.description ? `• *Description:* ${matchedRecord.description}\n` : '') +
-          (matchedRecord.corrective_action ? `• *Corrective Action:* ${matchedRecord.corrective_action}\n` : '') +
-          (matchedRecord.customer_communication ? `• *Customer Communication:* ${matchedRecord.customer_communication}\n` : '') +
-          (matchedRecord.resolution_notes ? `• *Resolution Notes:* ${matchedRecord.resolution_notes}\n` : '') +
-          (matchedRecord.resolution_date ? `• *Resolution Date:* ${matchedRecord.resolution_date}\n` : '') +
-          `\nWhat details would you like to update?\n` +
-          `_(e.g., "Mark as Resolved", "Update type to Specification Mismatch", "Resolution notes: Replaced material", "Change date to 25-09-2026", "Update raised by to Ramesh", "Corrective action: Reworked on site")_`;
+        prompt = formatSelectedRecordPrompt(action, matchedRecord);
       } else if (action === 'UPDATE_VISIT') {
-        prompt = formatSelectedVisitPrompt(matchedRecord);
+        prompt = formatSelectedRecordPrompt(action, matchedRecord);
       }
 
       await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
@@ -8498,13 +8533,10 @@ async function checkComplaintsForUpdate(action, draft, senderPhone, originalText
       if (matchedCmp.po_number && !draft.linked_inquiry_or_po) {
         draft.linked_inquiry_or_po = matchedCmp.po_number;
       }
-      const prompt = `✏️ *Active Complaint Found for ${matchedCmp.customer_name}:*\n\n` +
-        (matchedCmp.po_number ? `• *Linked Order / Ref:* PO: ${matchedCmp.po_number}\n` : '') +
-        `• *Complaint Type:* ${matchedCmp.complaint_type || 'Quality Defect'}\n` +
-        `• *Status:* ${matchedCmp.status || 'Open'}\n` +
-        `• *Description:* ${matchedCmp.description || 'N/A'}\n\n` +
-        `What details would you like to update?\n` +
-        `_(e.g. "Mark as Resolved", "Update type to Specification Mismatch", "Add resolution notes: Replaced 2 MT coils")_`;
+      const prompt = formatSelectedComplaintPrompt({
+        ...matchedCmp,
+        date_formatted: matchedCmp.complaint_date || formatDateDDMMYYYY(new Date(matchedCmp.created_at || Date.now())),
+      });
       return {
         handled: true,
         reply: prompt,
@@ -14987,7 +15019,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         delete existingDraft._visit_candidates_page;
         candidateResolved = true;
 
-        const isPureSelect = isPureOptionSelectorOnly(text);
+        const isPureSelect = isPureOptionSelectorOnly(text) || isFullRecordSelection(text);
         const hasUpdates = (existingDraft.updates && Object.values(existingDraft.updates).some(v => v !== null && v !== undefined && v !== '')) ||
           Boolean(existingDraft.person_met || existingDraft.contact_phone || existingDraft.visit_outcome || existingDraft.meeting_remarks);
 
@@ -15275,17 +15307,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         delete existingDraft._complaint_candidates_page;
         complaintCandidateResolved = true;
 
-        const isPureSelect = isPureOptionSelectorOnly(text);
+        const isPureSelect = isPureOptionSelectorOnly(text) || isFullRecordSelection(text);
         const hasUpdates = (existingDraft.updates && Object.values(existingDraft.updates).some(v => v !== null && v !== undefined && v !== ''));
 
         if (isPureSelect && !hasUpdates) {
-          const prompt = `✏️ **Selected Complaint for ${matchedCandidate.customer_name || 'Customer'}:**\n\n` +
-            (matchedCandidate.po_number ? `- **Linked PO:** ${matchedCandidate.po_number}\n` : '') +
-            `- **Type:** ${matchedCandidate.complaint_type || 'Quality Defect'}\n` +
-            `- **Status:** ${matchedCandidate.status || 'Open'}\n` +
-            `- **Description:** ${matchedCandidate.description || 'N/A'}\n\n` +
-            `What details would you like to update?\n` +
-            `_(e.g., "Mark as Resolved", "Update type to Specification Mismatch", "Resolution notes: Replaced 2 MT coils")_`;
+          const prompt = formatSelectedRecordPrompt(action, matchedCandidate);
 
           await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: action });
           await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
@@ -16194,6 +16220,10 @@ module.exports = {
   getCatalogMenuSections,
   extractVisitDetails,
   formatSelectedVisitPrompt,
+  formatSelectedComplaintPrompt,
+  formatSelectedRecordPrompt,
+  formatVisitSelectionLine,
+  formatComplaintSelectionLine,
   extractVerbatimNotes,
   detectOutOfScopeActionAttempt,
   buildResumePrompt,
