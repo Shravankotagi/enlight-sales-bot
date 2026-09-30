@@ -234,6 +234,8 @@ router.post('/message', requireWebApiKey, async (req, res) => {
       imageMimeType,
       photoDataUrl,
       gps,
+      channel: 'ai_assistant',
+      source_channel: 'ai_assistant',
     });
     if (catalogResult && catalogResult.handled && catalogResult.reply) {
       let replyToSend = catalogResult.reply;
@@ -274,6 +276,8 @@ router.post('/message', requireWebApiKey, async (req, res) => {
       imageBuffer,
       imageMimeType,
       gps,
+      channel: 'ai_assistant',
+      source_channel: 'ai_assistant',
     });
 
     const formattedReply = formatForWeb(reply);

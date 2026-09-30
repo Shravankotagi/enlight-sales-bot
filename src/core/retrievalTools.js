@@ -802,7 +802,7 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
             inquiries_today: 0,
             by_inquiry_status: {},
             by_deal_stage: {},
-            by_source_channel: { whatsapp: 0, dashboard: 0 },
+            by_source_channel: { whatsapp: 0, dashboard: 0, ai_assistant: 0 },
             top_customers: [],
             message: 'Access denied. Caller identity could not be verified.',
           },
@@ -838,7 +838,7 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
           inquiries_today: 0,
           by_inquiry_status: {},
           by_deal_stage: {},
-          by_source_channel: { whatsapp: 0, dashboard: 0 },
+          by_source_channel: { whatsapp: 0, dashboard: 0, ai_assistant: 0 },
           top_customers: [],
         },
         data: [],
@@ -958,7 +958,15 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     const shortId = `INQ-${(row.id || linkedDeal?.inquiry_id || linkedDeal?.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     const rawSrc = (row.source_channel || '').toLowerCase();
     const isDoc = rawSrc.includes('image') || rawSrc.includes('po') || rawSrc.includes('ocr') || (row.media_urls && row.media_urls.length > 0);
-    const channelDisplay = isDoc ? 'ocr_document' : (rawSrc.includes('whatsapp') ? 'whatsapp_text' : (rawSrc.includes('dashboard') ? 'web_dashboard' : 'whatsapp_text'));
+    const channelDisplay = isDoc
+      ? 'ocr_document'
+      : (rawSrc.includes('assistant')
+        ? 'ai_assistant'
+        : (rawSrc.includes('dashboard')
+          ? 'web_dashboard'
+          : (rawSrc.includes('whatsapp')
+            ? 'whatsapp_text'
+            : (rawSrc || 'whatsapp_text'))));
 
     return {
       inquiry_id: shortId,
@@ -1112,10 +1120,12 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   ) {
     let waCount = 0;
     let dashCount = 0;
+    let aiCount = 0;
     let ocrCount = 0;
 
     materialized.forEach((m) => {
       if (m.channel === 'web_dashboard') dashCount++;
+      else if (m.channel === 'ai_assistant') aiCount++;
       else waCount++;
       if (m.is_ocr_document) ocrCount++;
     });
@@ -1125,9 +1135,11 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
         total_inquiries: materialized.length,
         whatsapp_inquiries: waCount,
         dashboard_inquiries: dashCount,
+        ai_assistant_inquiries: aiCount,
         ocr_document_inquiries: ocrCount,
         whatsapp_percentage: materialized.length > 0 ? `${Math.round((waCount / materialized.length) * 100)}%` : '0%',
         dashboard_percentage: materialized.length > 0 ? `${Math.round((dashCount / materialized.length) * 100)}%` : '0%',
+        ai_assistant_percentage: materialized.length > 0 ? `${Math.round((aiCount / materialized.length) * 100)}%` : '0%',
       },
       rowCount: materialized.length,
     };

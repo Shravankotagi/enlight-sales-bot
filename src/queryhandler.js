@@ -946,7 +946,9 @@ function isProductInquiry(inquiry) {
     inquiry.inquiry_type === 'inquiry' ||
     inquiry.source_channel === 'whatsapp_text' ||
     inquiry.source_channel === 'whatsapp_image' ||
-    inquiry.source_channel === 'web_dashboard'
+    inquiry.source_channel === 'web_dashboard' ||
+    inquiry.source_channel === 'ai_assistant' ||
+    inquiry.source_channel === 'WhatsApp'
   ) {
     return true;
   }
@@ -996,6 +998,9 @@ function classifyInquirySource(inquiry) {
   const channel = (inquiry.source_channel || '').toLowerCase().trim();
   if (channel.includes('dashboard') || channel === 'web_dashboard') {
     return 'Dashboard Entry';
+  }
+  if (channel.includes('assistant') || channel === 'ai_assistant') {
+    return 'AI Assistant Entry';
   }
   return 'WhatsApp Entry';
 }
@@ -4197,4 +4202,6 @@ module.exports = {
   getCustomer360,
   getDealIdsForCompany,
   getInquiryOrDealByCode,
+  isProductInquiry,
+  classifyInquirySource,
 };
