@@ -38,9 +38,9 @@ async function runTest() {
   }
   console.log('✅ Step 2 Passed: Successfully switched to Update Inquiry selection screen');
 
-  // Step 3: User enters an inquiry query / reference "inquiry id to 898978"
-  console.log('\n[Step 3] User sends "inquiry id to 898978"...');
-  const queryRes = await handleCatalogFlow('inquiry id to 898978', testPhone);
+  // Step 3: User enters an inquiry query / reference "what are pending complaints?"
+  console.log('\n[Step 3] User sends "what are pending complaints?"...');
+  const queryRes = await handleCatalogFlow('what are pending complaints?', testPhone);
   console.log('Query Response:\n', queryRes.reply);
 
   if (!queryRes.handled) {
@@ -49,10 +49,10 @@ async function runTest() {
   if (queryRes.reply.includes('Field Visit')) {
     throw new Error('BUG REPRODUCED: Bot said "Field Visit" instead of "Inquiry"!');
   }
-  if (!queryRes.reply.includes('You were in the middle of *Inquiry* — do you want to continue?')) {
-    throw new Error(`Expected resume prompt with *Inquiry*, got: ${queryRes.reply}`);
+  if (!queryRes.reply.includes('You were in the middle of updating an Inquiry — do you want to continue?')) {
+    throw new Error(`Expected resume prompt with updating an Inquiry, got: ${queryRes.reply}`);
   }
-  console.log('✅ Step 3 Passed: Query answered and resume prompt correctly says *Inquiry* (NOT Field Visit)!');
+  console.log('✅ Step 3 Passed: Query answered and resume prompt correctly says updating an Inquiry (NOT Field Visit)!');
 
   // Step 4: User clicks "Yes, Continue"
   console.log('\n[Step 4] User clicks "Yes, Continue" (btn_resume_yes)...');

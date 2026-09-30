@@ -12,8 +12,19 @@ const { syncAllDatabaseToBigin, pullBiginToDatabase } = require('./src/agents/bi
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Image attachments are accepted up to 15 MB each; base64 and JSON overhead
+// require a larger request envelope at the HTTP boundary.
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+
+// Graceful JSON syntax error handler (catches malformed requests from scanners/clients)
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    console.warn(`[Server] Invalid JSON payload received on ${req.method} ${req.originalUrl || req.url}`);
+    return res.status(400).json({ error: 'Invalid JSON format' });
+  }
+  next(err);
+});
 
 // Mount routers
 app.use('/webhook', webhookRouter);

@@ -1020,11 +1020,51 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     });
 
     if (matched) {
+      const itemsFormatted = (matched.line_items || []).map((it, idx) => {
+        const name = it.sku_text || it.product_name || it.description || it.product_requirement || 'Steel Item';
+        const dim = it.dimensions || it.spec;
+        let spec = '';
+        if (dim) {
+          const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+          const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
+          if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
+            spec = ` (${shortSpec})`;
+          } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
+            spec = ` (${dim})`;
+          }
+        }
+        const qtyVal = (it.quantity !== undefined && it.quantity !== null && it.quantity !== '')
+          ? it.quantity
+          : (it.quantity_mt !== undefined && it.quantity_mt !== null ? it.quantity_mt : '');
+        const unit = it.unit || 'MT';
+        const qtyStr = qtyVal ? `${qtyVal} ${unit}` : '';
+        const rate = Number(it.rate || it.rate_per_mt || 0);
+        const itQty = Number(qtyVal || 0);
+        const lineTotal = Number(it.amount || 0) || (rate > 0 && itQty > 0 ? rate * itQty : 0);
+        const prefix = (matched.line_items || []).length > 1 ? `${idx + 1}. ` : '';
+        if (rate > 0) {
+          const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
+          return `${prefix}${name}${spec}${qtyStr ? ` | ${qtyStr}` : ''} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+        }
+        return `${prefix}${name}${spec}${qtyStr ? ` | ${qtyStr}` : ''}`;
+      }).join('\n');
+
+      let statusSummary = `Inquiry ${matched.inquiry_id} (${matched.customer_name}):\n\nStage: ${matched.status}\nPayment Terms: ${matched.payment_terms || '-'}\nDelivery Location: ${matched.delivery_location || '-'}`;
+      if (itemsFormatted) {
+        statusSummary += `\n\nCurrent Line Items:\n\n${itemsFormatted}`;
+      }
+      if (matched.total_amount_inr > 0) {
+        statusSummary += `\n\nQuotation Total: ₹${matched.total_amount_inr.toLocaleString('en-IN')}`;
+      }
+
       return {
         data: {
           found: true,
-          inquiry: matched,
-          status_summary: `Inquiry ${matched.inquiry_id} for ${matched.customer_name} is currently in '${matched.status}' status (Deal Stage: '${matched.deal_stage}')${matched.po_number ? `, PO Number: ${matched.po_number}` : ''}.`,
+          inquiry: {
+            ...matched,
+            formatted_line_items: itemsFormatted,
+          },
+          status_summary: statusSummary,
         },
         rowCount: 1,
       };
@@ -3082,7 +3122,7 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
       { data: inqRows },
     ] = await Promise.all([
       supabaseAdmin.from('recurring_customers').select('*').ilike('customer_name', `%${cleanTarget}%`).limit(1),
-      supabaseAdmin.from('deals').select('id, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, quantity, unit, rate, amount)').ilike('customer_name', `%${cleanTarget}%`),
+      supabaseAdmin.from('deals').select('id, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, dimensions, quantity, unit, rate, amount)').ilike('customer_name', `%${cleanTarget}%`),
       supabaseAdmin.from('customer_visits').select('*, salesperson_phone, employee_id').ilike('customer_name', `%${cleanTarget}%`).order('visited_at', { ascending: false }),
       supabaseAdmin.from('complaints').select('*, reported_by, employee_id').ilike('customer_name', `%${cleanTarget}%`).order('created_at', { ascending: false }),
       supabaseAdmin.from('inquiries').select('id, status, created_at, salesperson_phone, sender_phone').ilike('sender_name', `%${cleanTarget}%`),
@@ -3150,7 +3190,7 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
 
   // Directory / Directory Segmentation Mode
   let custQuery = supabaseAdmin.from('recurring_customers').select('*').eq('is_active', true);
-  let dealsQuery = supabaseAdmin.from('deals').select('id, customer_name, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, quantity, unit, rate, amount)');
+  let dealsQuery = supabaseAdmin.from('deals').select('id, customer_name, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, dimensions, quantity, unit, rate, amount)');
   let visitsQuery = supabaseAdmin.from('customer_visits').select('id, customer_name, visited_at, salesperson_phone, employee_id');
   let inqsQuery = supabaseAdmin.from('inquiries').select('id, sender_name, created_at, salesperson_phone, sender_phone');
   let compQuery = supabaseAdmin.from('complaints').select('id, customer_name, status, created_at, reported_by, employee_id');
@@ -3467,6 +3507,31 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   const materialized = (rows || []).map((d) => {
     const shortId = `INQ-${(d.inquiry_id || d.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
     const normStage = normalizeDealStage(d.stage);
+    const formattedItems = (d.deal_items || []).map((it, idx) => {
+      const name = it.sku_text || it.description || 'Steel Item';
+      const dim = it.dimensions || it.spec;
+      let spec = '';
+      if (dim) {
+        const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+        const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
+        if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
+          spec = ` (${shortSpec})`;
+        } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
+          spec = ` (${dim})`;
+        }
+      }
+      const qty = Number(it.quantity || 0);
+      const unit = it.unit || 'MT';
+      const rate = Number(it.rate || 0);
+      const lineTotal = Number(it.amount || (rate > 0 && qty > 0 ? rate * qty : 0));
+      const prefix = (d.deal_items || []).length > 1 ? `${idx + 1}. ` : '';
+      if (rate > 0) {
+        const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
+        return `${prefix}${name}${spec} | ${qty} ${unit} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+      }
+      return `${prefix}${name}${spec} | ${qty} ${unit}`;
+    }).join('\n');
+
     return {
       inquiry_id: shortId,
       deal_id: shortId,
@@ -3483,6 +3548,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
       created_at: d.created_at,
       won_at: d.won_at,
       items: d.deal_items || [],
+      formatted_line_items: formattedItems,
     };
   });
 
@@ -3509,6 +3575,31 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
         filtered = globalPoDeals.map((d) => {
           const shortId = `INQ-${(d.inquiry_id || d.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`;
           const normStage = normalizeDealStage(d.stage);
+          const formattedItems = (d.deal_items || []).map((it, idx) => {
+            const name = it.sku_text || it.description || 'Steel Item';
+            const dim = it.dimensions || it.spec;
+            let spec = '';
+            if (dim) {
+              const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+              const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
+              if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
+                spec = ` (${shortSpec})`;
+              } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
+                spec = ` (${dim})`;
+              }
+            }
+            const qty = Number(it.quantity || 0);
+            const unit = it.unit || 'MT';
+            const rate = Number(it.rate || 0);
+            const lineTotal = Number(it.amount || (rate > 0 && qty > 0 ? rate * qty : 0));
+            const prefix = (d.deal_items || []).length > 1 ? `${idx + 1}. ` : '';
+            if (rate > 0) {
+              const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
+              return `${prefix}${name}${spec} | ${qty} ${unit} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+            }
+            return `${prefix}${name}${spec} | ${qty} ${unit}`;
+          }).join('\n');
+
           return {
             inquiry_id: shortId,
             deal_id: shortId,
@@ -3525,6 +3616,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
             created_at: d.created_at,
             won_at: d.won_at,
             items: d.deal_items || [],
+            formatted_line_items: formattedItems,
           };
         });
       }
@@ -4084,7 +4176,7 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
 
   let dealsQuery = supabaseAdmin
     .from('deals')
-    .select('id, inquiry_id, customer_name, stage, status, total_amount, po_number, created_at, salesperson_phone, employee_id, deal_items(sku_text, quantity, unit)')
+    .select('id, inquiry_id, customer_name, stage, status, total_amount, po_number, created_at, salesperson_phone, employee_id, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
     .ilike('customer_name', `%${companyName}%`)
     .order('created_at', { ascending: false })
     .limit(20);
@@ -4114,6 +4206,31 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
     .map((d) => {
     const rawId = d.inquiry_id || d.id || '';
     const formattedCode = `INQ-${rawId.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    const formattedItems = (d.deal_items || []).map((it, idx) => {
+      const name = it.sku_text || it.description || 'Steel Item';
+      const dim = it.dimensions || it.spec;
+      let spec = '';
+      if (dim) {
+        const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+        const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
+        if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
+          spec = ` (${shortSpec})`;
+        } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
+          spec = ` (${dim})`;
+        }
+      }
+      const qty = Number(it.quantity || 0);
+      const unit = it.unit || 'MT';
+      const rate = Number(it.rate || 0);
+      const lineTotal = Number(it.amount || (rate > 0 && qty > 0 ? rate * qty : 0));
+      const prefix = (d.deal_items || []).length > 1 ? `${idx + 1}. ` : '';
+      if (rate > 0) {
+        const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
+        return `${prefix}${name}${spec} | ${qty} ${unit} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+      }
+      return `${prefix}${name}${spec} | ${qty} ${unit}`;
+    }).join('\n');
+
     return {
       inquiry_id: formattedCode,
       full_id: rawId,
@@ -4122,6 +4239,7 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
       po_number: d.po_number || null,
       total_amount_inr: Number(d.total_amount || 0),
       items: d.deal_items || [],
+      formatted_line_items: formattedItems,
       created_at: d.created_at,
     };
   });

@@ -43,7 +43,7 @@ function isComplaintResolution(text) {
 // "fix rate to 48000" or "resolved issue in inquiry" must not jump into complaint resolution.
 function isExplicitComplaintResolution(text) {
   if (!isComplaintResolution(text)) return false;
-  return /\b(?:complaints?|compliants?|complain(?:ed)?|shikayat|tickets?)\b|\bCMP[-_#]?[A-Z0-9]+/i.test(String(text || ''));
+  return /\b(?:complaints?|compliants?|complain(?:ed)?|shikayat|tickets?|defect|defective|damage|damaged|replaced|replacement|quality|repaired|reworked|settled|refunded|credit\s*note)\b|\bCMP[-_#]?[A-Z0-9]+/i.test(String(text || ''));
 }
 
 // True when the resolution text does not name any customer (e.g. "Resolved - replacement dispatched")

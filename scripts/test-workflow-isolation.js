@@ -538,6 +538,19 @@ async function runTests() {
   const pass17 = pass17a && pass17b && pass17c;
   console.log('Test 17 Passed:', pass17, `(17a:${pass17a}, 17b:${pass17b}, 17c:${pass17c})`);
 
+  // TEST 17d: Textual PO selection must remain inside LOG_COMPLAINT flow
+  await saveActiveSession(testMultiOrderPhone, 'Unknown', 'catalog_flow|LOG_COMPLAINT|{}');
+  const textualPromptRes = await handleCatalogFlow('log a complaint for Apex Precision Ltd, HR Sheet 3.00 mm, rust on the upper surface', testMultiOrderPhone);
+  const textualSelectRes = await handleCatalogFlow('PO-APEX-8802', testMultiOrderPhone);
+  const pass17d = textualPromptRes.handled === true &&
+                  textualPromptRes.reply.includes('Multiple Confirmed Orders Found for Apex Precision Ltd') &&
+                  textualSelectRes.handled === true &&
+                  !textualSelectRes.reply.includes('To start an activity') &&
+                  !textualSelectRes.reply.includes('Welcome to') &&
+                  (textualSelectRes.reply.includes("Here's what I've captured:") ||
+                   textualSelectRes.reply.includes('Do you want to attach'));
+  console.log('Test 17d Passed:', pass17d, `(prompt:${textualPromptRes.reply.slice(0, 80)}, selection:${textualSelectRes.reply.slice(0, 80)})`);
+
   // Clean up test deals, items, complaints, and session
   if (wonDeal1?.id) {
     await supabase.from('deal_items').delete().eq('deal_id', wonDeal1.id);

@@ -897,7 +897,15 @@ async function handlePendingVisitContinuation(text, senderPhone, storedState) {
     extracted.contact_no = phoneMatch[1];
   }
 
-  if (!extracted.visit_outcome) {
+  const hasExplicitOutcomeInput = (value) => {
+    const input = String(value || '').trim();
+    return /^(?:positive|negative|neutral)\.?$/i.test(input) ||
+      /\b(?:visit\s+)?outcome\b\s*(?:(?:is|to|as|=|:)\s*)?(?:positive|negative|neutral)\b/i.test(input) ||
+      /\b(?:change|update|set|mark)\b[\s\S]{0,40}\b(?:visit\s+)?outcome\b[\s\S]{0,40}\b(?:positive|negative|neutral)\b/i.test(input);
+  };
+  const canSetOutcome = !storedState.visit_outcome || hasExplicitOutcomeInput(text);
+
+  if (!extracted.visit_outcome && canSetOutcome) {
     if (
       /\b(?:negative|bad|rejected|rejection|unsuccessful|declined|not\s+(?:at\s+all\s+)?inter(?:e)?sted|uninterested|no\s+interest|not\s+buying|not\s+interested|no\s+(?:immediate\s+)?need|no\s+requirement|refused|unfavorable|dissatisfied|cancelled|lost)\b/i.test(
         text,
@@ -942,7 +950,7 @@ async function handlePendingVisitContinuation(text, senderPhone, storedState) {
   if (extracted.person_met) storedState.person_met = extracted.person_met;
   if (extracted.contact_no) storedState.contact_no = extracted.contact_no;
   if (extracted.city) storedState.city = extracted.city;
-  if (extracted.visit_outcome)
+  if (extracted.visit_outcome && canSetOutcome)
     storedState.visit_outcome = extracted.visit_outcome.toLowerCase();
   if (extracted.remarks) {
     storedState.remarks = storedState.remarks

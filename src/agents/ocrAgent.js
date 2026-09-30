@@ -421,12 +421,18 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
     let itemsBreakdown = '';
     if (extraction.line_items && extraction.line_items.length > 0) {
       itemsBreakdown = extraction.line_items
-        .map(i => {
+        .map((i, idx) => {
+          const prefix = extraction.line_items.length > 1 ? `${idx + 1}. ` : '';
           const dimStr = i.dimensions ? ` (${i.dimensions})` : '';
           const unit = i.unit || 'MT';
-          const qtyStr = Number(i.quantity || 0).toLocaleString('en-IN');
-          const rateStr = i.rate ? ` @ ₹${Number(i.rate).toLocaleString('en-IN')}/${unit}` : '';
-          return `  • *${i.sku_text || 'Material'}*${dimStr}: ${qtyStr} ${unit}${rateStr}`;
+          const qtyStr = `${Number(i.quantity || 0).toLocaleString('en-IN')} ${unit}`;
+          const rate = Number(i.rate || 0);
+          const lineTotal = Number(i.amount || 0) || (rate > 0 ? rate * Number(i.quantity || 0) : 0);
+          if (rate > 0) {
+            const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
+            return `${prefix}${i.sku_text || 'Material'}${dimStr} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+          }
+          return `${prefix}${i.sku_text || 'Material'}${dimStr} | ${qtyStr}`;
         })
         .join('\n');
     }

@@ -776,22 +776,36 @@ Return ONLY the company name or "NONE":`;
     if (!deals || deals.length === 0) {
       let inqQuery = supabase
         .from('inquiries')
-        .select('*')
+        .select('*, inquiry_items(*)')
         .ilike('sender_name', `%${customerName.replace(/[.,'"]/g, '').trim()}%`)
         .order('created_at', { ascending: false })
         .limit(10);
       inqQuery = applySalespersonFilter(inqQuery, scope.phones, 'salesperson_phone');
       const { data: inqs } = await inqQuery;
       if (inqs && inqs.length > 0) {
-        deals = inqs.map(inq => ({
-          id: inq.id,
-          inquiry_id: inq.id,
-          customer_name: inq.sender_name || customerName,
-          stage: inq.status || 'new_inquiry',
-          total_amount: inq.ai_extraction_json?.total_amount || 0,
-          inquiry_type: inq.inquiry_type || inq.ai_extraction_json?.product_requirement || 'Requirement',
-          deal_items: inq.ai_extraction_json?.line_items || [],
-        }));
+        deals = inqs.map(inq => {
+          const inqDealItems = (inq.inquiry_items && inq.inquiry_items.length > 0)
+            ? inq.inquiry_items
+            : (inq.ai_extraction_json?.line_items || inq.ai_extraction_json?.lineItems || []);
+          let inqTot = Number(inq.total_amount || inq.ai_extraction_json?.total_amount || inq.ai_extraction_json?.totalAmount || 0);
+          if (!inqTot && inqDealItems.length > 0) {
+            inqTot = inqDealItems.reduce((s, it) => {
+              const q = Number(it.quantity || 0);
+              const r = Number(it.rate || 0);
+              const a = Number(it.amount || 0);
+              return s + (a || (q * r));
+            }, 0);
+          }
+          return {
+            id: inq.id,
+            inquiry_id: inq.id,
+            customer_name: inq.sender_name || customerName,
+            stage: inq.status || 'new_inquiry',
+            total_amount: inqTot,
+            inquiry_type: inq.inquiry_type || inq.ai_extraction_json?.product_requirement || 'Requirement',
+            deal_items: inqDealItems,
+          };
+        });
       }
     }
 
@@ -810,14 +824,30 @@ Return ONLY the company name or "NONE":`;
       const dealCode = `INQ-${cleanNum}`;
       const stageStr = (d.stage || 'new_inquiry').toUpperCase();
       const items = d.deal_items || [];
+      let calculatedTotal = Number(d.total_amount || 0);
+      if (!calculatedTotal && items.length > 0) {
+        calculatedTotal = items.reduce((s, it) => {
+          const q = Number(it.quantity || 0);
+          const r = Number(it.rate || 0);
+          const a = Number(it.amount || 0);
+          return s + (a || (q * r));
+        }, 0);
+      }
+
       let itemStr = '';
       if (items.length > 0) {
         const itemLines = items.map(it => {
-          const name = it.sku_text || 'Steel Item';
-          const dim = it.dimensions ? ` (${it.dimensions})` : '';
-          const qty = it.quantity ? ` - ${it.quantity} ${it.unit || 'MT'}` : '';
-          const rate = it.rate ? ` @ Rs. ${Number(it.rate).toLocaleString('en-IN')}` : '';
-          return `   • *${name}*${dim}${qty}${rate}`;
+          const name = it.sku_text || it.product_name || 'Steel Item';
+          const dim = it.dimensions || it.spec ? ` (${it.dimensions || it.spec})` : '';
+          const qty = it.quantity ? ` | ${it.quantity} ${it.unit || 'MT'}` : '';
+          const rate = Number(it.rate || 0);
+          const itQty = Number(it.quantity || 0);
+          const lineTotal = Number(it.amount || 0) || (rate > 0 && itQty > 0 ? rate * itQty : 0);
+          if (rate > 0) {
+            const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
+            return `   • ${name}${dim}${qty} | ₹${rate.toLocaleString('en-IN')} /${it.unit || 'MT'}${lineTotalStr}`;
+          }
+          return `   • ${name}${dim}${it.quantity ? ` | ${it.quantity} ${it.unit || 'MT'}` : ''}`;
         });
         itemStr = itemLines.join('\n');
       } else {
@@ -825,10 +855,10 @@ Return ONLY the company name or "NONE":`;
       }
 
       const poStr = d.po_number ? `\n   • PO: *${d.po_number}*` : '';
-      const amountStr = d.total_amount && Number(d.total_amount) > 0 ? `\n   • Total Value: *Rs. ${Number(d.total_amount).toLocaleString('en-IN')}*` : '';
+      const quoteTotalStr = calculatedTotal > 0 ? `\n   • Quotation Total: *₹${calculatedTotal.toLocaleString('en-IN')}*` : '';
 
       return `${i + 1}. *${dealCode}*\n` +
-             `   Stage: *${stageStr}*${amountStr}${poStr}\n` +
+             `   Stage: *${stageStr}*${quoteTotalStr}${poStr}\n` +
              itemStr;
     });
 
@@ -3605,7 +3635,7 @@ async function getInquiryOrDealByCode(scopeOrPhone, text, explicitCode = null) {
         .limit(200),
       supabase
         .from('inquiries')
-        .select('*')
+        .select('*, inquiry_items(*)')
         .order('created_at', { ascending: false })
         .limit(200),
     ]);
@@ -3640,36 +3670,56 @@ async function getInquiryOrDealByCode(scopeOrPhone, text, explicitCode = null) {
       ? new Date(matchedDeal?.created_at || matchedInq?.created_at).toLocaleDateString('en-IN')
       : 'Recent';
 
-    const dealItems = matchedDeal?.deal_items || [];
+    const dealItems = (matchedDeal?.deal_items && matchedDeal.deal_items.length > 0) ? matchedDeal.deal_items : [];
+    const inqItems = (matchedInq?.inquiry_items && matchedInq.inquiry_items.length > 0) ? matchedInq.inquiry_items : [];
     const inqAi = matchedInq?.ai_extraction_json || {};
     const aiLineItems = inqAi.line_items || inqAi.lineItems || [];
+    const items = dealItems.length > 0 ? dealItems : (inqItems.length > 0 ? inqItems : aiLineItems);
 
     let itemsText = '';
-    if (dealItems.length > 0) {
-      itemsText = dealItems.map((item) => {
-        const spec = item.dimensions ? ` (${item.dimensions})` : '';
+    if (items.length > 0) {
+      itemsText = items.map((item, idx) => {
+        const name = item.sku_text || item.description || item.product_name || 'Item';
+        const dim = item.dimensions || item.spec;
+        let spec = '';
+        if (dim) {
+          const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+          const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
+          if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
+            spec = ` (${shortSpec})`;
+          } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
+            spec = ` (${dim})`;
+          }
+        } else if (item.grade && !name.toLowerCase().includes(String(item.grade).toLowerCase())) {
+          spec = ` (${item.grade})`;
+        }
+
         const unit = item.unit || 'MT';
         const qty = item.quantity || item.quantity_mt || 0;
         const rate = Number(item.rate || 0);
-        const rateStr = rate > 0 ? ` @ ₹${rate.toLocaleString('en-IN')}/${unit}` : ' (Rate pending)';
-        const amtStr = rate > 0 && qty > 0 ? ` = ₹${Math.round(rate * qty).toLocaleString('en-IN')}` : '';
-        return `- ${item.sku_text || 'Item'}${spec}: ${qty} ${unit}${rateStr}${amtStr}`;
-      }).join('\n');
-    } else if (aiLineItems.length > 0) {
-      itemsText = aiLineItems.map((item) => {
-        const spec = item.dimensions ? ` (${item.dimensions})` : '';
-        const unit = item.unit || 'MT';
-        const qty = item.quantity || item.quantity_mt || 0;
-        const rate = Number(item.rate || 0);
-        const rateStr = rate > 0 ? ` @ ₹${rate.toLocaleString('en-IN')}/${unit}` : ' (Rate pending)';
-        const amtStr = rate > 0 && qty > 0 ? ` = ₹${Math.round(rate * qty).toLocaleString('en-IN')}` : '';
-        return `- ${item.sku_text || item.product_name || 'Item'}${spec}: ${qty} ${unit}${rateStr}${amtStr}`;
+        const lineTotal = Number(item.amount || 0) || (rate > 0 && qty > 0 ? Math.round(rate * qty) : 0);
+
+        const prefix = items.length > 1 ? `${idx + 1}. ` : '';
+
+        if (rate > 0) {
+          const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
+          return `${prefix}${name}${spec}${qty ? ` | ${qty} ${unit}` : ''} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+        }
+        return `${prefix}${name}${spec}${qty ? ` | ${qty} ${unit}` : ''}`;
       }).join('\n');
     } else {
       itemsText = `- Steel Requirement: Details in active pipeline`;
     }
 
-    const baseAmt = Number(matchedDeal?.total_amount) || inqAi.total_amount || inqAi.totalAmount || 0;
+    let baseAmt = Number(matchedDeal?.total_amount) || inqAi.total_amount || inqAi.totalAmount || Number(matchedInq?.total_amount) || 0;
+    if (!baseAmt && items.length > 0) {
+      baseAmt = items.reduce((s, it) => {
+        const q = Number(it.quantity || it.quantity_mt || 0);
+        const r = Number(it.rate || 0);
+        const a = Number(it.amount || 0);
+        return s + (a || (q * r));
+      }, 0);
+    }
     const gstAmt = Math.round(baseAmt * 0.18);
     const grandTotal = baseAmt + gstAmt;
 
@@ -3683,7 +3733,8 @@ async function getInquiryOrDealByCode(scopeOrPhone, text, explicitCode = null) {
       `Line Items:\n${itemsText}\n`;
 
     if (baseAmt > 0) {
-      out += `\nFinancial Breakdown:\n` +
+      out += `\nQuotation Total: ₹${Number(baseAmt).toLocaleString('en-IN')}\n` +
+        `\nFinancial Breakdown:\n` +
         `- Subtotal: ₹${Number(baseAmt).toLocaleString('en-IN')}\n` +
         `- GST (18%): ₹${Number(gstAmt).toLocaleString('en-IN')}\n` +
         `- Grand Total: ₹${Number(grandTotal).toLocaleString('en-IN')}\n`;
