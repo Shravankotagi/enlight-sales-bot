@@ -389,7 +389,7 @@ function isGeneralRateDuplicateOfLineRate(generalRate, lineUpdates) {
 
 function isExecutionFailureReply(reply) {
   if (typeof reply !== 'string') return false;
-  return /^\s*(?:[❌⚠️]\s*)?\*?(?:Failed to\b|An error occurred while saving\b|Order Cannot Be Created\b|Order Already Recorded\b|Inquiry Not Found or Inaccessible\b)/i.test(reply);
+  return /^\s*(?:[❌⚠️]\s*)?\*?(?:Failed to\b|An error occurred while saving\b|Order Cannot Be Created\b|Order Already Recorded\b|Inquiry Not Found or Inaccessible\b|Customer Already\b)/i.test(reply);
 }
 
 const RECENT_SAVE_WINDOW_MS = 15 * 1000;
@@ -832,7 +832,32 @@ function isPaginationRequest(text) {
     clean === 'load more' ||
     clean === 'see more' ||
     clean === 'aur dikhao' ||
-    clean === 'agla page'
+    clean === 'agla page' ||
+    clean === 'btn_next_customers' ||
+    clean === 'next 10 customers' ||
+    clean === 'next 10' ||
+    clean === 'next customers' ||
+    clean === 'next customer' ||
+    clean === 'aage' ||
+    clean === 'agla'
+  );
+}
+
+/**
+ * Detects if the user requested previous page navigation ("prev", "previous", "back", etc.)
+ */
+function isPreviousPaginationRequest(text) {
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.toLowerCase().trim();
+  return (
+    clean === 'prev' ||
+    clean === 'previous' ||
+    clean === 'back' ||
+    clean === 'btn_prev_customers' ||
+    clean === 'previous 10' ||
+    clean === 'previous customers' ||
+    clean === 'pehle wala' ||
+    clean === 'piche'
   );
 }
 
@@ -4577,6 +4602,75 @@ function validateMandatoryFields(action, draft) {
   }
 
   return missing;
+}
+
+/**
+ * Checks whether a company name is already registered company-wide in recurring_customers.
+ * If registered, returns conflict details with the assigned representative's name, phone, etc.
+ */
+async function checkCompanyWideCustomerRegistration(companyName, senderPhone) {
+  if (!companyName) return null;
+  const cleanName = String(companyName).trim();
+  if (!cleanName || cleanName.toLowerCase() === 'unknown' || cleanName.toLowerCase() === 'null') return null;
+
+  try {
+    const coreName = normalizeCoreCompanyName(cleanName);
+    let query = supabase.from('recurring_customers').select('*');
+    if (coreName && coreName.length >= 3) {
+      query = query.or(`customer_name.ilike.%${cleanName}%,customer_name.ilike.%${coreName}%`);
+    } else {
+      query = query.ilike('customer_name', `%${cleanName}%`);
+    }
+
+    const { data: existingCusts, error } = await query.limit(20);
+    if (error) {
+      console.error('[CatalogFlow] checkCompanyWideCustomerRegistration query error:', error.message);
+      return null;
+    }
+
+    const exactMatch = (existingCusts || []).find((c) => {
+      const dbName = (c.customer_name || '').trim().toLowerCase();
+      const targetName = cleanName.toLowerCase();
+      if (dbName === targetName) return true;
+      const dbCore = normalizeCoreCompanyName(c.customer_name);
+      const targetCore = normalizeCoreCompanyName(cleanName);
+      if (dbCore && targetCore && dbCore === targetCore) return true;
+      return false;
+    });
+
+    if (exactMatch) {
+      const normSender = String(senderPhone || '').replace(/\D/g, '').slice(-10);
+      const normAssigned = String(exactMatch.assigned_salesperson_phone || '').replace(/\D/g, '').slice(-10);
+      let repInfo = '';
+      if (normAssigned && normAssigned !== normSender) {
+        const { getEmployeeByPhone } = require('../supabase');
+        const repEmp = await getEmployeeByPhone(normAssigned);
+        const repName = repEmp?.name || 'Another Representative';
+        repInfo = `• *Assigned Representative:* ${repName} (${normAssigned})\n`;
+      } else if (normAssigned && normAssigned === normSender) {
+        repInfo = `• *Assigned Representative:* You (already registered in your accounts)\n`;
+      }
+
+      const conflictMsg = `⚠️ *Customer Already Registered!*\n\n` +
+        `• *Company Name:* ${exactMatch.customer_name}\n` +
+        repInfo +
+        (exactMatch.contact_person ? `• *Contact Person:* ${exactMatch.contact_person}\n` : '') +
+        (exactMatch.customer_phone ? `• *Mobile Number:* ${exactMatch.customer_phone}\n` : '') +
+        (exactMatch.customer_address ? `• *Location:* ${exactMatch.customer_address}\n` : '') +
+        (exactMatch.customer_gst ? `• *GST:* ${exactMatch.customer_gst}\n` : '') +
+        `\n_This customer is already registered in the system under another representative's portfolio. Duplicate account creation is not permitted. Please contact your Sales Manager or Administrator to reassign this account._`;
+
+      return {
+        isRegistered: true,
+        match: exactMatch,
+        isOtherRep: Boolean(normAssigned && normAssigned !== normSender),
+        conflictMessage: conflictMsg,
+      };
+    }
+  } catch (err) {
+    console.error('[CatalogFlow] checkCompanyWideCustomerRegistration error:', err.message);
+  }
+  return null;
 }
 
 // ── VERIFY DRAFT CUSTOMER (ROLE & ACCOUNT SCOPED) ───────────────────────────
@@ -9382,7 +9476,7 @@ async function executeAction(action, draft, senderPhone) {
         const { data: inqRow, error: inqErr } = await supabase
           .from('inquiries')
           .insert({
-            source_channel: 'WhatsApp',
+            source_channel: draft.source_channel || 'WhatsApp',
             sender_name: companyName,
             customer_name: companyName,
             raw_text: humanRawText.trim(),
@@ -10311,7 +10405,7 @@ async function executeAction(action, draft, senderPhone) {
             const { data: inqRow, error: inqErr } = await supabase
               .from('inquiries')
               .insert({
-                source_channel: 'WhatsApp',
+                source_channel: draft.source_channel || 'WhatsApp',
                 customer_name: companyName,
                 sender_name: companyName,
                 raw_text: humanRawText.trim(),
@@ -11468,25 +11562,9 @@ async function executeAction(action, draft, senderPhone) {
         const email = draft.email ? String(draft.email).trim() : null;
 
         // 1. Exact duplicate check across recurring_customers
-        const { data: existingCusts } = await supabase
-          .from('recurring_customers')
-          .select('*')
-          .ilike('customer_name', companyName)
-          .limit(10);
-
-        const exactMatch = (existingCusts || []).find(c =>
-          c.customer_name.trim().toLowerCase() === companyName.toLowerCase() ||
-          (normalizeCoreCompanyName(c.customer_name) && normalizeCoreCompanyName(c.customer_name) === normalizeCoreCompanyName(companyName))
-        );
-
-        if (exactMatch) {
-          return `⚠️ *Customer Already Exists!*\n\n` +
-            `• *Company Name:* ${exactMatch.customer_name}\n` +
-            (exactMatch.contact_person ? `• *Contact Person:* ${exactMatch.contact_person}\n` : '') +
-            (exactMatch.customer_phone ? `• *Mobile Number:* ${exactMatch.customer_phone}\n` : '') +
-            (exactMatch.customer_address ? `• *Location:* ${exactMatch.customer_address}\n` : '') +
-            (exactMatch.customer_gst ? `• *GST:* ${exactMatch.customer_gst}\n` : '') +
-            `\n_This customer is already registered in the system. Duplicate record creation was prevented._`;
+        const regCheck = await checkCompanyWideCustomerRegistration(companyName, senderPhone);
+        if (regCheck && regCheck.isRegistered) {
+          return regCheck.conflictMessage;
         }
 
         // 2. Insert new record into recurring_customers
@@ -13275,8 +13353,13 @@ async function classifyActiveSessionIntent(activeActivity, text) {
     return { classification: 'SAME_ACTIVITY' };
   }
 
-  // 2. Candidate disambiguation selections (1, 2, option 1, date strings) are field inputs
-  if (/^(?:option\s*|choice\s*|#\s*)?(?:[1-9]|10)\s*[.)]?$/i.test(trimmed)) {
+  // 1b. Fast guard for candidate list pagination and navigation commands ("next 10 customers", "more", "prev", etc.)
+  if (isPaginationRequest(trimmed) || isPreviousPaginationRequest(trimmed)) {
+    return { classification: 'SAME_ACTIVITY' };
+  }
+
+  // 2. Candidate disambiguation selections (1, 2, option 1, 16, etc.) are field inputs
+  if (/^(?:option\s*|choice\s*|#\s*)?(?:[1-9]\d?)\s*[.)]?$/i.test(trimmed)) {
     return { classification: 'SAME_ACTIVITY' };
   }
 
@@ -13493,6 +13576,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
   const { photoDataUrl, gpsData, attachmentObj, incomingAttachments } = extractPhotoAndGps(rawText, options);
   const canUpdateVisits = await canUserUpdateVisits(senderPhone);
+  const callerSourceChannel = options.source_channel || options.channel || null;
 
   // ── 1. FETCH ACTIVE SESSION STATE ──────────────────────────────────────────
   const activeSession = await getFullActiveSession(senderPhone);
@@ -13574,7 +13658,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (initialPrompt) {
       await startNewCatalogSession(senderPhone, initialPrompt);
       await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: explicitAction });
-      await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${explicitAction}|{}`);
+      const initialDraft = callerSourceChannel ? { source_channel: callerSourceChannel } : {};
+      await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${explicitAction}|${JSON.stringify(initialDraft)}`);
       return {
         handled: true,
         reply: initialPrompt,
@@ -13853,6 +13938,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const unrecognizedName = jsonStartIdx >= 0 ? afterAction.slice(0, jsonStartIdx) : parts[2];
     const originalDraftJsonStr = jsonStartIdx >= 0 ? afterAction.slice(jsonStartIdx + 1) : parts.slice(3).join('|');
     const originalDraft = safeParseJSON(originalDraftJsonStr, {});
+    if (callerSourceChannel && !originalDraft.source_channel) {
+      originalDraft.source_channel = callerSourceChannel;
+    }
 
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
 
@@ -13903,11 +13991,47 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         custDraft = await extractFieldsWithLLM('LOG_NEW_CUSTOMER', text, custDraft);
       }
 
+      // Immediate duplicate registration check across recurring_customers
+      const regCheck = await checkCompanyWideCustomerRegistration(custDraft.company_name || unrecognizedName, senderPhone);
+      if (regCheck && regCheck.isRegistered) {
+        const conflictReply = `${regCheck.conflictMessage}\n\n` +
+          `What would you like to do?\n` +
+          `• Reply with a different customer name to continue your ${getActionFriendlyName(originalAction)}.\n` +
+          `• Or reply *cancel* to discard this entry.`;
+        await recordSessionMessage(senderPhone, 'assistant', conflictReply, {
+          action_type: originalAction,
+          customer_name: custDraft.company_name || unrecognizedName,
+        });
+        originalDraft.company_name = null;
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return {
+          handled: true,
+          reply: conflictReply,
+          interactiveType: 'buttons',
+          interactiveButtons: [
+            { id: 'btn_confirm_cancel', title: 'Discard Draft' },
+          ],
+        };
+      }
+
       const custMissing = validateMandatoryFields('LOG_NEW_CUSTOMER', custDraft);
 
       if (custMissing.length === 0) {
         // All customer mandatory fields already supplied (e.g. from field visit or direct input)
-        await executeAction('LOG_NEW_CUSTOMER', custDraft, senderPhone);
+        const custActionRes = await executeAction('LOG_NEW_CUSTOMER', custDraft, senderPhone);
+        if (isExecutionFailureReply(custActionRes) || (typeof custActionRes === 'string' && (custActionRes.includes('Customer Already') || custActionRes.includes('Failed to add customer')))) {
+          const conflictReply = `${custActionRes}\n\n` +
+            `What would you like to do?\n` +
+            `• Reply with a different customer name to continue your ${getActionFriendlyName(originalAction)}.\n` +
+            `• Or reply *cancel* to discard this entry.`;
+          await recordSessionMessage(senderPhone, 'assistant', conflictReply, {
+            action_type: originalAction,
+            customer_name: custDraft.company_name,
+          });
+          originalDraft.company_name = null;
+          await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+          return { handled: true, reply: conflictReply };
+        }
 
         forwardCustomerDetailsToParentDraft(originalAction, originalDraft, custDraft);
         const custProdCheck = validateDraftProducts(originalAction, originalDraft);
@@ -13997,18 +14121,44 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     ) {
       originalDraft.company_name = null;
       const assignedList = await getAssignedCustomersList(senderPhone);
-      const listDisplay = assignedList && assignedList.length > 0
-        ? `\n\n*Your Assigned Accounts:*\n` + assignedList.slice(0, 10).map((c, i) => `  ${i + 1}. *${c.customer_name}*`).join('\n')
-        : '';
+      const customerNames = (assignedList || []).map(c => c.customer_name).filter(Boolean);
+      const pageSize = 10;
+      const totalPages = Math.ceil(customerNames.length / pageSize);
+      originalDraft._all_customer_candidates = customerNames;
+      originalDraft._customer_candidates = customerNames.slice(0, pageSize);
+      originalDraft._customer_candidates_page = 1;
 
-      const reEnterPrompt = `Understood! 👍 Please reply with the correct *Company Name* so we can proceed with your ${getActionFriendlyName(originalAction)}.${listDisplay}\n\n` +
+      let listDisplay = '';
+      if (customerNames.length > 0) {
+        const pageItems = customerNames.slice(0, pageSize);
+        listDisplay = `\n\n*Your Assigned Accounts (1–${pageItems.length} of ${customerNames.length}):*\n` +
+          pageItems.map((name, i) => `  ${i + 1}. *${name}*`).join('\n');
+      }
+
+      const paginationHint = totalPages > 1
+        ? `\n\n👉 Reply with the *Company Name* (or option number 1–${customerNames.length}), or tap *Next 10 Customers* to view more.`
+        : (customerNames.length > 0 ? `\n\n👉 Reply with the *Company Name* or option number (1–${customerNames.length}).` : '');
+
+      const reEnterPrompt = `Understood! 👍 Please reply with the correct *Company Name* so we can proceed with your ${getActionFriendlyName(originalAction)}.${listDisplay}${paginationHint}\n\n` +
         `_(Your other entered details have been preserved)_`;
 
       await recordSessionMessage(senderPhone, 'assistant', reEnterPrompt, {
         action_type: originalAction,
       });
       await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
-      return { handled: true, reply: reEnterPrompt };
+
+      const buttons = [];
+      if (totalPages > 1) {
+        buttons.push({ id: 'btn_next_customers', title: 'Next 10 Customers' });
+      }
+      buttons.push({ id: 'btn_confirm_cancel', title: 'Discard Draft' });
+
+      return {
+        handled: true,
+        reply: reEnterPrompt,
+        interactiveType: 'buttons',
+        interactiveButtons: buttons,
+      };
     }
 
     // If user directly typed the correct company name
@@ -14103,7 +14253,21 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const custMissing = validateMandatoryFields('LOG_NEW_CUSTOMER', updatedCustDraft);
 
     if (custMissing.length === 0) {
-      await executeAction('LOG_NEW_CUSTOMER', updatedCustDraft, senderPhone);
+      const custActionRes = await executeAction('LOG_NEW_CUSTOMER', updatedCustDraft, senderPhone);
+      if (isExecutionFailureReply(custActionRes) || (typeof custActionRes === 'string' && (custActionRes.includes('Customer Already') || custActionRes.includes('Failed to add customer')))) {
+        const conflictReply = `${custActionRes}\n\n` +
+          `What would you like to do?\n` +
+          `• Reply with a different customer name to continue your ${getActionFriendlyName(originalAction)}.\n` +
+          `• Or reply *cancel* to discard this entry.`;
+        await recordSessionMessage(senderPhone, 'assistant', conflictReply, {
+          action_type: originalAction,
+          customer_name: updatedCustDraft.company_name,
+        });
+        const originalDraft = updatedCustDraft._parentDraft || {};
+        originalDraft.company_name = null;
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return { handled: true, reply: conflictReply };
+      }
 
       const originalDraft = updatedCustDraft._parentDraft || {};
       forwardCustomerDetailsToParentDraft(originalAction, originalDraft, updatedCustDraft);
@@ -14178,6 +14342,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const action = parts[1];
     const draftJsonStr = parts.slice(2).join('|');
     const draft = safeParseJSON(draftJsonStr, {});
+    if (callerSourceChannel && !draft.source_channel) {
+      draft.source_channel = callerSourceChannel;
+    }
 
     if (await isMidFlowReadQuery(text)) {
       return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_confirm', action, draft);
@@ -14518,6 +14685,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const action = parts[1];
     const draftJsonStr = parts.slice(2).join('|');
     const draft = safeParseJSON(draftJsonStr, {});
+    if (callerSourceChannel && !draft.source_channel) {
+      draft.source_channel = callerSourceChannel;
+    }
 
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
 
@@ -14721,6 +14891,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     let action = parts[1];
     const draftJsonStr = parts.slice(2).join('|');
     let existingDraft = safeParseJSON(draftJsonStr, {});
+    if (callerSourceChannel && !existingDraft.source_channel) {
+      existingDraft.source_channel = callerSourceChannel;
+    }
 
     await recordSessionMessage(senderPhone, 'user', text);
 
@@ -14730,7 +14903,59 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // ── Pagination Handler for Candidate Lists (View More / Next) ────────────
-    if (isPaginationRequest(text)) {
+    if (isPaginationRequest(text) || isPreviousPaginationRequest(text)) {
+      if (existingDraft._all_customer_candidates && Array.isArray(existingDraft._all_customer_candidates)) {
+        const pool = existingDraft._all_customer_candidates;
+        const pageSize = 10;
+        const totalPages = Math.ceil(pool.length / pageSize);
+        const currentPage = Number(existingDraft._customer_candidates_page) || 1;
+        const isPrev = isPreviousPaginationRequest(text);
+        let targetPage = isPrev ? currentPage - 1 : currentPage + 1;
+
+        if (isPrev && targetPage < 1) {
+          targetPage = 1;
+        }
+
+        if (!isPrev && targetPage > totalPages) {
+          const noMoreMsg = `ℹ️ *All ${pool.length} assigned accounts have already been displayed.*\n\n👉 Reply with the *Company Name* or *Option Number* (1–${pool.length}) to proceed with your ${getActionFriendlyName(action)}.`;
+          await recordSessionMessage(senderPhone, 'assistant', noMoreMsg, { action_type: action });
+          return {
+            handled: true,
+            reply: noMoreMsg,
+            interactiveType: 'buttons',
+            interactiveButtons: [
+              { id: 'btn_confirm_cancel', title: 'Discard Draft' },
+            ],
+          };
+        }
+
+        existingDraft._customer_candidates_page = targetPage;
+        const startIdx = (targetPage - 1) * pageSize;
+        const pageItems = pool.slice(startIdx, startIdx + pageSize);
+        existingDraft._customer_candidates = pageItems;
+
+        const listDisplay = pageItems.map((name, i) => `  ${startIdx + i + 1}. *${name}*`).join('\n');
+        const headerText = `*Your Assigned Accounts (${startIdx + 1}–${startIdx + pageItems.length} of ${pool.length}):*`;
+        const promptText = `Understood! 👍 Please reply with the correct *Company Name* so we can proceed with your ${getActionFriendlyName(action)}.\n\n${headerText}\n${listDisplay}\n\n` +
+          `👉 Reply with the *Company Name* (or option number 1–${pool.length})${targetPage < totalPages ? ', or tap *Next 10 Customers* to view more.' : '.'}\n\n` +
+          `_(Your other entered details have been preserved)_`;
+
+        const buttons = [];
+        if (targetPage < totalPages) {
+          buttons.push({ id: 'btn_next_customers', title: 'Next 10 Customers' });
+        }
+        buttons.push({ id: 'btn_confirm_cancel', title: 'Discard Draft' });
+
+        await recordSessionMessage(senderPhone, 'assistant', promptText, { action_type: action });
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+        return {
+          handled: true,
+          reply: promptText,
+          interactiveType: 'buttons',
+          interactiveButtons: buttons,
+        };
+      }
+
       if (existingDraft._all_visit_candidates && Array.isArray(existingDraft._all_visit_candidates)) {
         const pool = existingDraft._all_visit_candidates;
         const pageSize = 10;
@@ -14925,13 +15150,15 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       (existingDraft._visit_candidates && existingDraft._visit_candidates.length) ||
       (existingDraft._inquiry_candidates && existingDraft._inquiry_candidates.length) ||
       (existingDraft._order_candidates && existingDraft._order_candidates.length) ||
-      (existingDraft._complaint_candidates && existingDraft._complaint_candidates.length) || 0;
+      (existingDraft._complaint_candidates && existingDraft._complaint_candidates.length) ||
+      (existingDraft._customer_candidates && existingDraft._customer_candidates.length) || 0;
 
     const totalAllCandidates =
       (existingDraft._all_visit_candidates && existingDraft._all_visit_candidates.length) ||
       (existingDraft._all_inquiry_candidates && existingDraft._all_inquiry_candidates.length) ||
       (existingDraft._all_order_candidates && existingDraft._all_order_candidates.length) ||
-      (existingDraft._all_complaint_candidates && existingDraft._all_complaint_candidates.length) || totalVisibleCandidates;
+      (existingDraft._all_complaint_candidates && existingDraft._all_complaint_candidates.length) ||
+      (existingDraft._all_customer_candidates && existingDraft._all_customer_candidates.length) || totalVisibleCandidates;
 
     const maxAllowedCandidates = (action === 'LOG_ORDER' && (existingDraft._all_inquiry_candidates || existingDraft._inquiry_candidates))
       ? (totalAllCandidates + 1)
@@ -15320,6 +15547,69 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       }
     }
 
+    // ── 5. Check Assigned Customer Candidate Selection ───────────────────────
+    if (existingDraft._all_customer_candidates && Array.isArray(existingDraft._all_customer_candidates)) {
+      const numIdx = extractCandidateIndex(text, totalAllCandidates || existingDraft._all_customer_candidates.length);
+      let matchedCust = null;
+      if (numIdx !== null && numIdx >= 1 && numIdx <= existingDraft._all_customer_candidates.length) {
+        matchedCust = existingDraft._all_customer_candidates[numIdx - 1];
+      } else {
+        const lowerInput = text.toLowerCase().trim();
+        if (lowerInput.length >= 2 && !isPaginationRequest(text) && !isPreviousPaginationRequest(text) && !isDiscardOrCancelIntent(text)) {
+          matchedCust = existingDraft._all_customer_candidates.find(name => {
+            const lowerName = name.toLowerCase();
+            return lowerName === lowerInput || lowerName.includes(lowerInput) || lowerInput.includes(lowerName);
+          });
+        }
+      }
+
+      if (matchedCust) {
+        existingDraft.company_name = matchedCust;
+        existingDraft._customer_verified = true;
+        delete existingDraft._all_customer_candidates;
+        delete existingDraft._customer_candidates;
+        delete existingDraft._customer_candidates_page;
+
+        const custProdCheck = validateDraftProducts(action, existingDraft);
+        if (!custProdCheck.isValid) {
+          await recordSessionMessage(senderPhone, 'assistant', custProdCheck.clarificationMessage, {
+            action_type: action,
+            customer_name: existingDraft.company_name,
+          });
+          await saveActiveSession(senderPhone, existingDraft.company_name, `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+          return { handled: true, reply: custProdCheck.clarificationMessage };
+        }
+
+        const missing = validateMandatoryFields(action, existingDraft);
+        if (missing.length === 0) {
+          const lineChoice = await askLineItemChoiceIfNeeded(action, existingDraft, senderPhone);
+          if (lineChoice) return lineChoice;
+
+          const summary = buildConfirmationSummary(action, existingDraft);
+          await recordSessionMessage(senderPhone, 'assistant', summary, {
+            action_type: action,
+            customer_name: existingDraft.company_name,
+          });
+          await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(existingDraft)}`);
+          return {
+            handled: true,
+            reply: summary,
+            interactiveType: 'buttons',
+            interactiveButtons: CONFIRMATION_BUTTONS,
+          };
+        } else {
+          const missingList = missing.map(m => `• *${m}*`).join('\n');
+          const askMissing = `✅ *Company:* ${existingDraft.company_name}\n\nPlease provide the remaining mandatory details for this ${getActionFriendlyName(action)}:\n\n${missingList}`;
+          await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+            action_type: action,
+            customer_name: existingDraft.company_name,
+          });
+          await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+          return { handled: true, reply: askMissing };
+        }
+      }
+    }
+
     // Check if user replied "No" to complaint attachment prompt (this is NOT a discard intent)
     const isAttachmentNo = action === 'LOG_COMPLAINT' && isComplaintAttachmentSkip(text, existingDraft);
 
@@ -15480,6 +15770,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     const preserveKeys = [
+      'source_channel',
       'visit_id', 'visit_date', 'inquiry_id', '_inquiry_display_id', '_inquiry_verified',
       'deal_id', 'po_number', 'linked_inquiry_or_po', 'affected_product', '_order_verified',
       'complaint_type', 'complaint_description', 'company_name', 'complaint_id', '_complaint_verified',
@@ -15495,6 +15786,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
     if (existingDraft._inquiry_display_id && !updatedDraft._inquiry_display_id) {
       updatedDraft._inquiry_display_id = existingDraft._inquiry_display_id;
+    }
+    if (callerSourceChannel && !updatedDraft.source_channel) {
+      updatedDraft.source_channel = callerSourceChannel;
     }
 
     if (action === 'LOG_VISIT') {
@@ -15601,6 +15895,36 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
         await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
         return { handled: true, reply: custCheck.rejectionMessage };
+      }
+    }
+
+    if (custCheck.isValid && updatedDraft._all_customer_candidates) {
+      delete updatedDraft._all_customer_candidates;
+      delete updatedDraft._customer_candidates;
+      delete updatedDraft._customer_candidates_page;
+    }
+
+    if (action === 'LOG_NEW_CUSTOMER' && updatedDraft.company_name) {
+      const regCheck = await checkCompanyWideCustomerRegistration(updatedDraft.company_name, senderPhone);
+      if (regCheck && regCheck.isRegistered) {
+        const conflictReply = `${regCheck.conflictMessage}\n\n` +
+          `What would you like to do?\n` +
+          `• Reply with a different customer name to continue adding a customer.\n` +
+          `• Or reply *cancel* to discard this entry.`;
+        await recordSessionMessage(senderPhone, 'assistant', conflictReply, {
+          action_type: action,
+          customer_name: updatedDraft.company_name,
+        });
+        updatedDraft.company_name = null;
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|LOG_NEW_CUSTOMER|${JSON.stringify(updatedDraft)}`);
+        return {
+          handled: true,
+          reply: conflictReply,
+          interactiveType: 'buttons',
+          interactiveButtons: [
+            { id: 'btn_confirm_cancel', title: 'Discard Draft' },
+          ],
+        };
       }
     }
 
@@ -15840,7 +16164,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (initialPrompt) {
       await startNewCatalogSession(senderPhone, initialPrompt);
       await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: matchedAction });
-      await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${matchedAction}|{}`);
+      const initialDraft = callerSourceChannel ? { source_channel: callerSourceChannel } : {};
+      await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${matchedAction}|${JSON.stringify(initialDraft)}`);
       return { handled: true, reply: initialPrompt };
     }
   }
