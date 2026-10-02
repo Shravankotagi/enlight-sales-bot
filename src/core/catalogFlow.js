@@ -207,6 +207,55 @@ const ATTACHMENT_PROMPT_BUTTONS = [
   { id: 'btn_att_no', title: 'No' },
 ];
 
+const DIRECT_ORDER_BUTTONS = [
+  { id: 'log_order_direct', title: 'Create directly' },
+];
+
+const DIRECT_ORDER_PROMPT = `🛒 *Record New Order*
+
+No Inquiry available - Create Order Directly
+
+Send the order in your own words, or send the PO document (photo or PDF).
+
+*Required:*
+• *Company Name*
+• *PO Number*
+• *PO Date*
+• *Delivery Location*
+• *Payment Terms*
+• *Line Items* (Product, Quantity, Rate)
+
+You can send some of these now. I will ask only for what is still missing.`;
+
+function isDirectOrderRequest(text) {
+  const clean = String(text || '').toLowerCase().replace(/[!.,?*]/g, '').replace(/\s+/g, ' ').trim();
+  return (
+    clean === 'log_order_direct' ||
+    clean === 'create directly' ||
+    clean === 'no inquiry available - create order directly' ||
+    clean === 'no inquiry available create order directly'
+  );
+}
+
+function catalogSelectionResult(selectionRes) {
+  const result = { handled: true, reply: selectionRes.reply };
+  if (selectionRes && selectionRes.interactiveButtons) {
+    result.interactiveType = 'buttons';
+    result.interactiveButtons = selectionRes.interactiveButtons;
+  }
+  return result;
+}
+
+async function beginDirectOrder(senderPhone, sourceChannel) {
+  const draft = { _direct_order: true };
+  if (sourceChannel) draft.source_channel = sourceChannel;
+  await recordSessionMessage(senderPhone, 'user', 'Create directly');
+  await startNewCatalogSession(senderPhone, DIRECT_ORDER_PROMPT);
+  await recordSessionMessage(senderPhone, 'assistant', DIRECT_ORDER_PROMPT, { action_type: 'LOG_ORDER' });
+  await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|LOG_ORDER|${JSON.stringify(draft)}`);
+  return { handled: true, reply: DIRECT_ORDER_PROMPT };
+}
+
 function isComplaintAttachmentSkip(text, draft) {
   const clean = String(text || '').trim();
   return draft?._attachments_asked === true &&
@@ -4466,7 +4515,6 @@ function validateMandatoryFields(action, draft) {
       if (!draft.delivery_location && (draft.city_location || draft.location || draft.address)) {
         draft.delivery_location = draft.city_location || draft.location || draft.address;
       }
-      if (!draft.inquiry_id) missing.push('Inquiry ID (e.g. INQ-F4D982)');
       if (!draft.company_name) missing.push('Company Name');
       if (!draft.po_number) missing.push('PO Number (e.g. PO-2026-0042)');
       if (!draft.po_date) missing.push('PO Date (e.g. 10-09-2026)');
@@ -4962,8 +5010,18 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
     attachments: [attachmentObj],
     _customer_verified: Boolean(officialCustomerName),
   };
+  try {
+    const session = await getFullActiveSession(senderPhone);
+    const intent = session?.last_intent || '';
+    if (intent.includes('|LOG_INQUIRY|')) {
+      const existing = safeParseJSON(intent.split('|').slice(2).join('|'), {});
+      if (existing && existing.source_channel && !draft.source_channel) {
+        draft.source_channel = existing.source_channel;
+      }
+    }
+  } catch (e) {}
 
-  if (caption && caption.length > 3) {
+  if (caption && caption.length > 3 && !/^(?:attached image|photo uploaded)$/i.test(String(caption).trim())) {
     try {
       const captionExtracted = await extractFieldsWithLLM('LOG_INQUIRY', caption, draft);
       mergeDraft('LOG_INQUIRY', draft, captionExtracted, caption);
@@ -5013,6 +5071,27 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
   }
 }
 
+async function finishUnlinkedOrderDraft(draft, senderPhone, notice) {
+  const missing = validateMandatoryFields('LOG_ORDER', draft);
+  if (missing.length > 0) {
+    const missingList = missing.map((m) => `• *${m}*`).join('\n');
+    const askMissing = `${notice || ''}Please provide the remaining mandatory details for this order:\n\n${missingList}`;
+    await recordSessionMessage(senderPhone, 'assistant', askMissing, { action_type: 'LOG_ORDER' });
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_ORDER|${JSON.stringify(draft)}`);
+    return { handled: true, reply: askMissing };
+  }
+  const summary = buildConfirmationSummary('LOG_ORDER', draft);
+  const fullReply = `${notice || ''}${summary}`;
+  await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'LOG_ORDER' });
+  await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|LOG_ORDER|${JSON.stringify(draft)}`);
+  return {
+    handled: true,
+    reply: fullReply,
+    interactiveType: 'buttons',
+    interactiveButtons: CONFIRMATION_BUTTONS,
+  };
+}
+
 /**
  * Processes an incoming Purchase Order (PO) document inside an active LOG_ORDER flow session.
  * Auto-matches against open inquiries belonging to the salesperson.
@@ -5058,22 +5137,39 @@ async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, captio
 
   const poDate = extraction.po_date ? normalizeDateToDDMMYYYY(extraction.po_date) : formatDateDDMMYYYY(new Date());
 
-  const draft = {
-    company_name: finalCustomerName,
-    po_number: extraction.po_number && String(extraction.po_number).trim().length > 2 ? String(extraction.po_number).trim() : null,
-    po_date: poDate,
-    delivery_location: extraction.delivery_location || null,
-    payment_terms: extraction.payment_terms || null,
-    line_items: lineItems,
-    attachments: [attachmentObj],
-    _customer_verified: Boolean(officialCustomerName),
-  };
+  let existingDraft = {};
+  try {
+    const session = await getFullActiveSession(senderPhone);
+    const intent = session?.last_intent || '';
+    if (intent.startsWith('catalog_flow|LOG_ORDER|') || intent.startsWith('catalog_editing|LOG_ORDER|')) {
+      existingDraft = safeParseJSON(intent.split('|').slice(2).join('|'), {}) || {};
+    }
+  } catch (e) {}
+
+  const draft = { ...existingDraft };
+  if (!draft.company_name && finalCustomerName) draft.company_name = finalCustomerName;
+  if (!draft.po_number && extraction.po_number && String(extraction.po_number).trim().length > 2) {
+    draft.po_number = String(extraction.po_number).trim();
+  }
+  if (!draft.po_date && extraction.po_date) draft.po_date = normalizeDateToDDMMYYYY(extraction.po_date);
+  if (!draft.po_date && !draft._direct_order) draft.po_date = poDate;
+  if (!draft.delivery_location && extraction.delivery_location) draft.delivery_location = extraction.delivery_location;
+  if (!draft.payment_terms && extraction.payment_terms) draft.payment_terms = extraction.payment_terms;
+  if ((!Array.isArray(draft.line_items) || draft.line_items.length === 0) && lineItems.length > 0) {
+    draft.line_items = lineItems;
+  }
+  draft.attachments = [...(Array.isArray(existingDraft.attachments) ? existingDraft.attachments : []), attachmentObj];
+  if (officialCustomerName) draft._customer_verified = true;
 
   if (caption && caption.length > 3) {
     try {
       const captionExtracted = await extractFieldsWithLLM('LOG_ORDER', caption, draft);
       mergeDraft('LOG_ORDER', draft, captionExtracted, caption);
     } catch (e) {}
+  }
+
+  if (draft._direct_order) {
+    return await finishUnlinkedOrderDraft(draft, senderPhone, '');
   }
 
   // 1. Auto-match to existing inquiries by Customer + Product
@@ -5126,19 +5222,11 @@ async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, captio
     };
   }
 
-  // NO_MATCH case
-  const notice = `ℹ️ *No matching inquiry found for this customer and product. Order will be recorded without an inquiry link.*\n\n`;
-  const summary = buildConfirmationSummary('LOG_ORDER', draft);
-  const fullReply = notice + summary;
-
-  await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'LOG_ORDER' });
-  await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|LOG_ORDER|${JSON.stringify(draft)}`);
-  return {
-    handled: true,
-    reply: fullReply,
-    interactiveType: 'buttons',
-    interactiveButtons: CONFIRMATION_BUTTONS,
-  };
+  return await finishUnlinkedOrderDraft(
+    draft,
+    senderPhone,
+    `ℹ️ *No matching inquiry found for this customer and product. Order will be recorded without an inquiry link.*\n\n`,
+  );
 }
 
 // ── VALIDATE ORDER INQUIRY STAGE GATE ───────────────────────────────────────
@@ -6814,7 +6902,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
     } else {
       switch (action) {
         case 'LOG_ORDER':
-          emptyReply = `ℹ️ *No Eligible Inquiries Found for Order Creation*\n\nThere are no inquiries currently in Price Quote, Negotiation, or On Hold stage ready for an order.\n\nTo create a new inquiry, reply with *1* or send the inquiry details.`;
+          emptyReply = `ℹ️ *No Eligible Inquiries Found for Order Creation*\n\nThere are no inquiries currently in Price Quote, Negotiation, or On Hold stage.\n\n*No Inquiry available - Create Order Directly*`;
           break;
         case 'UPDATE_INQUIRY':
           emptyReply = `ℹ️ *No Editable Inquiries Found*\n\nThere are no active or editable inquiries recorded in your portfolio.\n\nIf you would like to log a new inquiry, reply with *1* or send the inquiry details.`;
@@ -6836,6 +6924,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
     return {
       hasRecords: false,
       reply: emptyReply,
+      interactiveButtons: action === 'LOG_ORDER' ? DIRECT_ORDER_BUTTONS : null,
       state: {
         action,
         page: 1,
@@ -6902,7 +6991,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
 
   let footerText = '';
   if (action === 'LOG_ORDER') {
-    footerText = `Reply with the serial number or Inquiry ID to create an order. Type "Next" for more, or send a customer name to search.`;
+    footerText = `Reply with the serial number or Inquiry ID to create an order. Type "Next" for more, or send a customer name to search.\n\n*No Inquiry available - Create Order Directly*`;
   } else {
     let footerIdLabel = 'Inquiry ID';
     if (action === 'UPDATE_ORDER') footerIdLabel = 'Order / PO Number';
@@ -6916,6 +7005,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
   return {
     hasRecords: true,
     reply: fullReply,
+    interactiveButtons: action === 'LOG_ORDER' ? DIRECT_ORDER_BUTTONS : null,
     state: {
       action,
       page: curPage,
@@ -6943,6 +7033,11 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return { handled: true, reply: deniedReply };
     }
+  }
+
+  // Direct order, with no inquiry linked
+  if (action === 'LOG_ORDER' && isDirectOrderRequest(clean)) {
+    return await beginDirectOrder(senderPhone, null);
   }
 
   // 1. Cancel / Discard / Menu
@@ -6980,7 +7075,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
       const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, { page: 1, customerFilter: null });
       await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
       await saveActiveSession(senderPhone, 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-      return { handled: true, reply: selectionRes.reply };
+      return catalogSelectionResult(selectionRes);
     }
   }
 
@@ -6996,7 +7091,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, { page: 1, customerFilter: null });
     await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
     await saveActiveSession(senderPhone, 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-    return { handled: true, reply: selectionRes.reply };
+    return catalogSelectionResult(selectionRes);
   }
 
   // 3. Pagination ("Next", "more", "view more", "page 2", etc.)
@@ -7015,7 +7110,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     });
     await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
     await saveActiveSession(senderPhone, selectionState.customerFilter || 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-    return { handled: true, reply: selectionRes.reply };
+    return catalogSelectionResult(selectionRes);
   }
 
   // 4. Candidate Match Resolution (by Serial Number, Record ID, Date, or Name)
@@ -7366,7 +7461,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, { page: 1, customerFilter: clean });
     await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
     await saveActiveSession(senderPhone, clean, `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-    return { handled: true, reply: selectionRes.reply };
+    return catalogSelectionResult(selectionRes);
   }
 
   // 7. Check if user typed an out-of-bounds number
@@ -13088,10 +13183,7 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
       customerFilter: draft.customerFilter || null,
     });
     await saveActiveSession(senderPhone, draft.customerFilter || 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-    return {
-      handled: true,
-      reply: selectionRes.reply,
-    };
+    return catalogSelectionResult(selectionRes);
   }
 
   if (interruptedState === 'catalog_confirm') {
@@ -13581,9 +13673,8 @@ function detectOutOfScopeActionAttempt(currentAction, text) {
  * { handled: false } if message should proceed to general LangGraph Orchestrator
  */
 async function handleCatalogFlow(rawText, senderPhone, options = {}) {
-  if (!rawText || typeof rawText !== 'string') return { handled: false };
-  const text = rawText.trim();
-  if (text.length === 0) return { handled: false };
+  const text = typeof rawText === 'string' ? rawText.trim() : '';
+  if (!text && !options.imageBuffer) return { handled: false };
 
   const { photoDataUrl, gpsData, attachmentObj, incomingAttachments } = extractPhotoAndGps(rawText, options);
   const canUpdateVisits = await canUserUpdateVisits(senderPhone);
@@ -13599,6 +13690,39 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   }
 
   const hasActiveCatalogSession = lastIntent.startsWith('catalog_');
+
+  if (options.imageBuffer && (
+    lastIntent.startsWith('catalog_flow|LOG_INQUIRY') ||
+    lastIntent.startsWith('catalog_editing|LOG_INQUIRY') ||
+    lastIntent.startsWith('catalog_confirm|LOG_INQUIRY') ||
+    lastIntent.startsWith('catalog_selection|LOG_INQUIRY')
+  )) {
+    const caption = /^(?:attached image|photo uploaded)$/i.test(text) ? '' : text;
+    return await handleInquiryDocumentOcr(
+      options.imageBuffer,
+      options.imageMimeType || 'image/jpeg',
+      senderPhone,
+      caption,
+    );
+  }
+
+  if (options.imageBuffer && (
+    lastIntent.startsWith('catalog_flow|LOG_ORDER') ||
+    lastIntent.startsWith('catalog_editing|LOG_ORDER') ||
+    lastIntent.startsWith('catalog_confirm|LOG_ORDER')
+  )) {
+    const caption = /^(?:attached image|photo uploaded)$/i.test(text) ? '' : text;
+    return await handleOrderDocumentOcr(
+      options.imageBuffer,
+      options.imageMimeType || 'image/jpeg',
+      senderPhone,
+      caption,
+    );
+  }
+
+  if (isDirectOrderRequest(text)) {
+    return await beginDirectOrder(senderPhone, callerSourceChannel);
+  }
 
   // ── 2-0. BARE NUMBER WITH NO OPEN SESSION ──
   // Only a displayed catalog menu (or a "reply with N" prompt) makes "1".."10" a catalog selection.
@@ -13654,15 +13778,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       const selectionRes = await fetchAndRenderUpdateSelection(explicitAction, senderPhone, { page: 1, customerFilter: null });
       await startNewCatalogSession(senderPhone, selectionRes.reply);
       await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: explicitAction });
-      if (selectionRes.hasRecords) {
+      if (selectionRes.hasRecords || explicitAction === 'LOG_ORDER') {
         await saveActiveSession(senderPhone, 'Unknown', `catalog_update_select|${explicitAction}|${JSON.stringify(selectionRes.state)}`);
       } else {
         await saveActiveSession(senderPhone, 'Unknown', 'general');
       }
-      return {
-        handled: true,
-        reply: selectionRes.reply,
-      };
+      return catalogSelectionResult(selectionRes);
     }
 
     const initialPrompt = MODULE_PROMPTS[explicitAction];
@@ -14427,7 +14548,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         if (custCheck.isUnrecognizedCustomer) {
           await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
           await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(draft)}`);
-          return { handled: true, reply: custCheck.prompt };
+          return {
+            handled: true,
+            reply: custCheck.prompt,
+            interactiveType: 'buttons',
+            interactiveButtons: NEW_CUSTOMER_BUTTONS,
+          };
         } else {
           draft.company_name = null;
           await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
@@ -14856,7 +14982,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
-        return { handled: true, reply: custCheck.prompt };
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: NEW_CUSTOMER_BUTTONS,
+        };
       } else {
         updatedDraft.company_name = null;
         await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
@@ -15909,7 +16040,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // 0. LOG_ORDER Inquiry Quoted Stage Gate check
-    if (action === 'LOG_ORDER') {
+    if (action === 'LOG_ORDER' && (updatedDraft.inquiry_id || updatedDraft.deal_id || updatedDraft._inquiry_display_id)) {
       const stageCheck = await validateOrderInquiryStage(updatedDraft, senderPhone);
       if (!stageCheck.isValid) {
         await recordSessionMessage(senderPhone, 'assistant', stageCheck.reply, { action_type: action });
@@ -16191,12 +16322,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       const selectionRes = await fetchAndRenderUpdateSelection(matchedAction, senderPhone, { page: 1, customerFilter: null });
       await startNewCatalogSession(senderPhone, selectionRes.reply);
       await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: matchedAction });
-      if (selectionRes.hasRecords) {
+      if (selectionRes.hasRecords || matchedAction === 'LOG_ORDER') {
         await saveActiveSession(senderPhone, 'Unknown', `catalog_update_select|${matchedAction}|${JSON.stringify(selectionRes.state)}`);
       } else {
         await saveActiveSession(senderPhone, 'Unknown', 'general');
       }
-      return { handled: true, reply: selectionRes.reply };
+      return catalogSelectionResult(selectionRes);
     }
 
     const initialPrompt = MODULE_PROMPTS[matchedAction];
