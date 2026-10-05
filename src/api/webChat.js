@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const { handleCatalogFlow } = require('../core/catalogFlow');
 const { runOrchestrator } = require('../core/orchestrator');
@@ -20,6 +21,31 @@ function requireWebApiKey(req, res, next) {
     return res.status(401).json({ success: false, error: 'Unauthorized: Invalid or missing API key' });
   }
   next();
+}
+
+function verifyUserToken(token) {
+  const raw = String(token || '').replace(/^Bearer\s+/i, '').trim();
+  const parts = raw.split('.');
+  if (parts.length !== 3) return null;
+  const secret = process.env.JWT_SECRET || 'enlight-sales-jwt-secret-2026';
+  const data = `${parts[0]}.${parts[1]}`;
+  const expected = crypto.createHmac('sha256', secret).update(data).digest();
+  let actual;
+  try {
+    actual = Buffer.from(parts[2], 'base64url');
+  } catch (e) {
+    return null;
+  }
+  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    if (payload.exp && Date.now() / 1000 >= Number(payload.exp)) return null;
+    return payload;
+  } catch (e) {
+    return null;
+  }
 }
 
 /**
@@ -164,9 +190,16 @@ function normalizeIncomingButtonPayload(rawInput) {
  */
 router.post('/reset', requireWebApiKey, async (req, res) => {
   try {
-    const { employeePhone } = req.body;
-    let cleanPhone = String(employeePhone || '').replace(/\D/g, '');
-    if (cleanPhone.length < 10) cleanPhone = '9619226169';
+    const userPayload = verifyUserToken(req.headers['x-user-token']);
+    const rawPhone = userPayload?.phone || req.body?.employeePhone;
+    let cleanPhone = String(rawPhone || '').replace(/\D/g, '');
+    if (cleanPhone.length < 10) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized: valid user token or phone required to reset the assistant',
+      });
+    }
+    cleanPhone = cleanPhone.slice(-10);
 
     await saveActiveSession(cleanPhone, 'Unknown', 'general');
     await clearActiveSession(cleanPhone);
@@ -185,17 +218,24 @@ router.post('/reset', requireWebApiKey, async (req, res) => {
  */
 router.post('/message', requireWebApiKey, async (req, res) => {
   try {
-    const { message, employeePhone, userId, employeeName, role, resetSession, image, gps } = req.body;
+    const { message, employeePhone, employeeName, resetSession, image, gps } = req.body;
 
     if (!message && !image) {
       return res.status(400).json({ success: false, error: 'message string or image is required' });
     }
 
-    let cleanPhone = String(employeePhone || '').replace(/\D/g, '');
+    const userToken = req.headers['x-user-token'];
+    const userPayload = verifyUserToken(userToken);
+    const rawPhone = userPayload?.phone || employeePhone;
+    let cleanPhone = String(rawPhone || '').replace(/\D/g, '');
     if (cleanPhone.length >= 10) {
       cleanPhone = cleanPhone.slice(-10);
     } else {
-      cleanPhone = '9619226169'; // Default fallback phone for sales ops
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized: valid user token or account phone required',
+        reply: 'Please sign in again to use the assistant.',
+      });
     }
 
     // Optional reset if starting fresh conversation
@@ -205,7 +245,7 @@ router.post('/message', requireWebApiKey, async (req, res) => {
     }
 
     const rawText = normalizeIncomingButtonPayload(message || '');
-    const empName = employeeName || 'Sales Staff';
+    const empName = userPayload.name || employeeName || 'Sales Staff';
 
     let augmentedText = rawText;
     if (gps && typeof gps.latitude === 'number' && typeof gps.longitude === 'number') {
