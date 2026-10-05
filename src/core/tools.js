@@ -246,7 +246,7 @@ function createTools(senderPhone, rawUserText = '') {
       schema: z.object({
         inquiry_id: z.string().optional().nullable().describe('Optional specific Inquiry ID or Deal ID (e.g. "INQ-2C788F" or UUID) to fetch status and details for that exact inquiry.'),
         status_filter: z.string().optional().nullable().describe('Optional filter by inquiry status or deal outcome: "all", "won" / "orders", "lost", "review", "pending", "quoted" (includes price quote, proposal, qualified), "negotiation", "on_hold".'),
-        source_channel: z.string().optional().nullable().describe('Optional filter by incoming channel: "all", "whatsapp", "dashboard", "whatsapp_text", "web_dashboard".'),
+        source_channel: z.string().optional().nullable().describe('Optional filter by incoming channel: "all", "whatsapp", "dashboard", "ai_assistant", "whatsapp_text", "web_dashboard".'),
         source_type: z.string().optional().nullable().describe('Optional filter by inquiry format: "all", "ocr_document" (documents/PDFs/images), "text".'),
         date_range: z.string().optional().nullable().describe('Optional date filter: "today", "yesterday", "last_7_days", "this_week", "last_week", "last_30_days", "this_month", "last_month", "all".'),
         customer_name_search: z.string().optional().nullable().describe('Optional search term for customer or company name.'),

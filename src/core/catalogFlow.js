@@ -32,6 +32,8 @@ const {
   isValidCatalogProduct,
   getUnknownProductClarificationMessage,
   MASTER_PRODUCTS_CATALOG,
+  extractThickness,
+  extractHeight,
 } = require('../utils/hsnDetector');
 const { safeParseJSON } = require('../utils/jsonUtils');
 const { calculateQuotationBreakdown, normalizeUnit, convertLineItemToMt } = require('../utils/pricingEngine');
@@ -204,6 +206,55 @@ const STAGE_UPDATE_RESUME_BUTTONS = [
 const ATTACHMENT_PROMPT_BUTTONS = [
   { id: 'btn_att_no', title: 'No' },
 ];
+
+const DIRECT_ORDER_BUTTONS = [
+  { id: 'log_order_direct', title: 'Create directly' },
+];
+
+const DIRECT_ORDER_PROMPT = `🛒 *Record New Order*
+
+No Inquiry available - Create Order Directly
+
+Send the order in your own words, or send the PO document (photo or PDF).
+
+*Required:*
+• *Company Name*
+• *PO Number*
+• *PO Date*
+• *Delivery Location*
+• *Payment Terms*
+• *Line Items* (Product, Quantity, Rate)
+
+You can send some of these now. I will ask only for what is still missing.`;
+
+function isDirectOrderRequest(text) {
+  const clean = String(text || '').toLowerCase().replace(/[!.,?*]/g, '').replace(/\s+/g, ' ').trim();
+  return (
+    clean === 'log_order_direct' ||
+    clean === 'create directly' ||
+    clean === 'no inquiry available - create order directly' ||
+    clean === 'no inquiry available create order directly'
+  );
+}
+
+function catalogSelectionResult(selectionRes) {
+  const result = { handled: true, reply: selectionRes.reply };
+  if (selectionRes && selectionRes.interactiveButtons) {
+    result.interactiveType = 'buttons';
+    result.interactiveButtons = selectionRes.interactiveButtons;
+  }
+  return result;
+}
+
+async function beginDirectOrder(senderPhone, sourceChannel) {
+  const draft = { _direct_order: true };
+  if (sourceChannel) draft.source_channel = sourceChannel;
+  await recordSessionMessage(senderPhone, 'user', 'Create directly');
+  await startNewCatalogSession(senderPhone, DIRECT_ORDER_PROMPT);
+  await recordSessionMessage(senderPhone, 'assistant', DIRECT_ORDER_PROMPT, { action_type: 'LOG_ORDER' });
+  await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|LOG_ORDER|${JSON.stringify(draft)}`);
+  return { handled: true, reply: DIRECT_ORDER_PROMPT };
+}
 
 function isComplaintAttachmentSkip(text, draft) {
   const clean = String(text || '').trim();
@@ -387,7 +438,7 @@ function isGeneralRateDuplicateOfLineRate(generalRate, lineUpdates) {
 
 function isExecutionFailureReply(reply) {
   if (typeof reply !== 'string') return false;
-  return /^\s*(?:[❌⚠️]\s*)?\*?(?:Failed to\b|An error occurred while saving\b|Order Cannot Be Created\b|Order Already Recorded\b|Inquiry Not Found or Inaccessible\b)/i.test(reply);
+  return /^\s*(?:[❌⚠️]\s*)?\*?(?:Failed to\b|An error occurred while saving\b|Order Cannot Be Created\b|Order Already Recorded\b|Inquiry Not Found or Inaccessible\b|Customer Already\b)/i.test(reply);
 }
 
 const RECENT_SAVE_WINDOW_MS = 15 * 1000;
@@ -830,7 +881,32 @@ function isPaginationRequest(text) {
     clean === 'load more' ||
     clean === 'see more' ||
     clean === 'aur dikhao' ||
-    clean === 'agla page'
+    clean === 'agla page' ||
+    clean === 'btn_next_customers' ||
+    clean === 'next 10 customers' ||
+    clean === 'next 10' ||
+    clean === 'next customers' ||
+    clean === 'next customer' ||
+    clean === 'aage' ||
+    clean === 'agla'
+  );
+}
+
+/**
+ * Detects if the user requested previous page navigation ("prev", "previous", "back", etc.)
+ */
+function isPreviousPaginationRequest(text) {
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.toLowerCase().trim();
+  return (
+    clean === 'prev' ||
+    clean === 'previous' ||
+    clean === 'back' ||
+    clean === 'btn_prev_customers' ||
+    clean === 'previous 10' ||
+    clean === 'previous customers' ||
+    clean === 'pehle wala' ||
+    clean === 'piche'
   );
 }
 
@@ -840,9 +916,31 @@ function isPaginationRequest(text) {
 function isPureOptionSelectorOnly(text) {
   if (!text || typeof text !== 'string') return true;
   const clean = text.trim();
-  if (/^\s*(?:option|choice|no\.?|#)?\s*[1-9]\d*\.?\s*$/i.test(clean)) return true;
+  // Phone numbers (7-15 digits, optionally with +, -, spaces) or PIN codes are NOT option selectors
+  const digitsOnly = clean.replace(/[\s+-]/g, '');
+  if (/^\d{7,15}$/.test(digitsOnly)) return false;
+
+  if (/^\s*(?:option|choice|no\.?|#)\s*[1-9]\d*\.?\s*$/i.test(clean)) return true;
+  if (/^\s*[1-9]\d{0,1}\.?\s*$/i.test(clean)) return true;
   if (/^\s*(?:the\s+)?(?:first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th|last)\s*(?:option|choice|inquiry|order|visit|one)?\.?\s*$/i.test(clean)) return true;
   if (/^(?:PO|Purchase\s*Order|INQ|DEAL)[\s#:-]*[0-9A-Za-z-]+$/i.test(clean)) return true;
+  return false;
+}
+
+/**
+ * Checks if the user message is purely a numeric or ordinal option choice (e.g. "1", "2", "option 3", "#2", "second").
+ * Used to ensure numeric menu choices are NEVER misinterpreted as rates, prices, quantities, or dimensions.
+ */
+function isNumericOptionSelector(text) {
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.trim();
+  // Phone numbers (7-15 digits, optionally with +, -, spaces) or PIN codes are NOT option selectors
+  const digitsOnly = clean.replace(/[\s+-]/g, '');
+  if (/^\d{7,15}$/.test(digitsOnly)) return false;
+
+  if (/^\s*(?:option|choice|no\.?|#)\s*[1-9]\d*\.?\s*$/i.test(clean)) return true;
+  if (/^\s*[1-9]\d{0,1}\.?\s*$/i.test(clean)) return true;
+  if (/^\s*(?:the\s+)?(?:first|second|third|fourth|fifth|sixth|1st|2nd|3rd|4th|5th|6th|last)\s*(?:option|choice|inquiry|order|visit|one)?\.?\s*$/i.test(clean)) return true;
   return false;
 }
 
@@ -1765,21 +1863,28 @@ function extractVerbatimNotes(text) {
   const trimmed = text.trim();
   if (!trimmed) return null;
 
-  const noteMatch = trimmed.match(
-    /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|comments?)\s*(?:to|as|is|:|=|\s+-)\s*(.+)$/is
-  );
-  if (noteMatch && noteMatch[1]) {
-    const val = noteMatch[1].trim();
-    if (val.length > 0) {
-      return val;
-    }
+  const prefixPattern = /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|resolution\s*notes?|comments?)\s*(?:to|as|is|:|=|\s+-)\s*/i;
+  const match = trimmed.match(prefixPattern);
+  if (!match) return null;
+
+  let body = trimmed.slice(match[0].length).trim();
+  // If there are subsequent field instructions (e.g. rate, quantity, delivery, payment, stage, status), stop before them
+  const splitPattern = /(?:[\n\r]+|,\s*|\s+and\s+)(?=(?:(?:change|update|set)\s+)?(?:rate|price|qty|quantity|delivery|payment|stage|status)\s*(?:to|is|=|:|\b))/i;
+  const splitMatch = body.search(splitPattern);
+  if (splitMatch !== -1) {
+    body = body.slice(0, splitMatch).trim();
   }
-  return null;
+  return body.length > 0 ? body : null;
 }
 
 // ── LLM FIELD EXTRACTION ENGINE ──────────────────────────────────────────────
 
 async function extractFieldsWithLLM(action, userInput, existingDraft = {}) {
+  // Pure numeric or ordinal option selectors (e.g. "1", "2", "option 2", "#1") are menu choices, not field updates.
+  if (isNumericOptionSelector(userInput)) {
+    return existingDraft;
+  }
+
   const now = new Date();
   const todayStr = formatDateDDMMYYYY(now);
   const yesterdayDate = new Date(now.getTime() - 24 * 3600 * 1000);
@@ -2134,7 +2239,11 @@ If only a single company is mentioned or if filling missing fields for an existi
 15. ZERO SUMMARIZATION OF NOTES / ADDITIONAL NOTES / REMARKS (CRITICAL):
 - When extracting 'additional_notes', 'meeting_remarks', 'remarks', 'discussion_notes', 'notes', or comments, NEVER summarize, rewrite, rephrase, or generalize the user's words (e.g. if the user says 'we will be having follow up', extract 'we will be having follow up' EXACTLY as typed. NEVER convert or summarize it to 'Follow-up planned').
 - PRESERVE the exact verbatim text entered by the user.
-16. UPDATE_COMPLAINT FIELD RESTRICTION (CRITICAL):
+16. NUMERIC OPTION SELECTORS (CRITICAL):
+- If the user message is purely an option number or choice (e.g. '1', '2', '3', 'option 2', 'choice 1', 'second'), it is an option selection from a menu or clarification list.
+- NEVER extract or interpret an option selector number as a rate, price, quantity, or dimension!
+- Leave 'rate' and 'line_items[].rate' as null unless the user explicitly mentioned words like 'rate', 'price', '@', '₹', '/MT', 'per ton', etc.
+17. UPDATE_COMPLAINT FIELD RESTRICTION (CRITICAL):
 - After a complaint is logged, ONLY these fields may be updated: Complaint Raised By, Complaint Type, Complaint Description, Status, and Resolution Notes.
 - Complaint Date, customer/company, linked Inquiry/PO, product/material, challan number, attachments/evidence, corrective action, customer communication, and resolution date are locked. Do not return them in \`updates\`.
 `;
@@ -2158,6 +2267,22 @@ User Message:
     else if (raw.startsWith('```')) raw = raw.replace(/^```/, '').replace(/```$/, '').trim();
 
     let parsed = safeParseJSON(raw, null);
+    if (parsed && isNumericOptionSelector(userInput)) {
+      delete parsed.rate;
+      if (parsed.updates) delete parsed.updates.rate;
+      if (Array.isArray(parsed.line_items)) {
+        parsed.line_items.forEach(it => {
+          delete it.rate;
+          delete it.amount;
+        });
+      }
+      if (Array.isArray(parsed.line_item_updates)) {
+        parsed.line_item_updates.forEach(it => {
+          delete it.rate;
+          delete it.amount;
+        });
+      }
+    }
     if (verbatimNotes) {
       if (!parsed) parsed = {};
       if (action === 'LOG_INQUIRY') {
@@ -2618,6 +2743,45 @@ function buildInquirySystemFieldReply(label, displayId = null) {
     `Reply with the inquiry serial number or customer name to continue.`;
 }
 
+function extractThicknessTransition(text) {
+  if (!text || typeof text !== 'string') return null;
+
+  // Pattern 1: X -> Y (e.g. 2.5mm -> 3.5mm, 2.5 -> 3.5mm, 2.5mm to 3.5mm)
+  const arrowMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:mm)?\s*(?:->|-->|=>|→)\s*(\d+(?:\.\d+)?)\s*mm/i);
+  if (arrowMatch) {
+    return {
+      sourceThickness: Number(arrowMatch[1]),
+      targetThickness: Number(arrowMatch[2]),
+      sourceSpec: `${arrowMatch[1]}mm`,
+      targetSpec: `${arrowMatch[2]}mm`,
+    };
+  }
+
+  // Pattern 2: from X to Y / change X to Y / thickness of X to Y / X to Y
+  const toMatch = text.match(/(?:(?:from|change|thickness(?:\s*of)?|thk(?:\s*of)?)\s+)?(\d+(?:\.\d+)?)\s*(?:mm)?\s*(?:to|into|se)\s*(\d+(?:\.\d+)?)\s*mm/i);
+  if (toMatch) {
+    return {
+      sourceThickness: Number(toMatch[1]),
+      targetThickness: Number(toMatch[2]),
+      sourceSpec: `${toMatch[1]}mm`,
+      targetSpec: `${toMatch[2]}mm`,
+    };
+  }
+
+  // Pattern 3: X thickness Y (e.g. "HR Coil 2.5mm thickness 3.5mm")
+  const thkWordMatch = text.match(/(\d+(?:\.\d+)?)\s*mm\s+(?:thickness|spec|thk)\s+(?:to\s+|is\s+|as\s+)?(\d+(?:\.\d+)?)\s*mm/i);
+  if (thkWordMatch) {
+    return {
+      sourceThickness: Number(thkWordMatch[1]),
+      targetThickness: Number(thkWordMatch[2]),
+      sourceSpec: `${thkWordMatch[1]}mm`,
+      targetSpec: `${thkWordMatch[2]}mm`,
+    };
+  }
+
+  return null;
+}
+
 function scoreLineItemAgainstUpdate(item, upd) {
   if (!item || !upd) return 0;
   const itemSku = (item.sku_text || item.description || '').trim().toLowerCase();
@@ -2633,14 +2797,74 @@ function scoreLineItemAgainstUpdate(item, upd) {
   let score = 0;
   if (cleanItemFull && cleanUpdFull) {
     if (cleanItemFull === cleanUpdFull) {
-      score += 100;
+      score += 150;
     } else if (cleanItemFull.includes(cleanUpdFull)) {
-      score += 50 + cleanUpdFull.length;
+      score += 60 + cleanUpdFull.length;
     } else if (cleanUpdFull.includes(cleanItemFull)) {
-      score += 50 + cleanItemFull.length;
+      score += 60 + cleanItemFull.length;
     }
   }
 
+  // Extract source thickness if this update specifies a transition (e.g. 2.5mm -> 3.5mm)
+  // or specifies an item reference / source with a different thickness from target spec
+  let sourceThk = null;
+  if (upd.source_spec || upd.source_dimensions) {
+    sourceThk = extractThickness(upd.source_spec || upd.source_dimensions);
+  }
+  if (sourceThk === null) {
+    const trRef = extractThicknessTransition(upd.item_reference) ||
+                  extractThicknessTransition(upd.replace_source) ||
+                  extractThicknessTransition(upd.sku_text) ||
+                  extractThicknessTransition(upd.description);
+    if (trRef) sourceThk = trRef.sourceThickness;
+  }
+  if (sourceThk === null) {
+    const thkSku = extractThickness(upd.sku_text);
+    const thkSpec = extractThickness(updSpec);
+    if (thkSku !== null && thkSpec !== null && Math.abs(thkSku - thkSpec) >= 0.05) {
+      sourceThk = thkSku;
+    }
+  }
+
+  const tItem = extractThickness(itemDim) || extractThickness(itemSku);
+  const tUpd = extractThickness(updSpec) || extractThickness(updSku);
+
+  // 1. Catalog & HSN Master Alignment
+  const normItem = normalizeProductToCatalog(itemSku, itemDim);
+  const normUpd = normalizeProductToCatalog(updSku, updSpec);
+
+  if (normItem.isValid && normUpd.isValid) {
+    if (normItem.catalogName === normUpd.catalogName) {
+      score += 120;
+      // Do not award HSN bonus if this update is changing the thickness to a different value,
+      // because target thickness HSN would falsely bias towards existing items in the destination tariff band.
+      const isChangingThickness = (sourceThk !== null) || (tItem !== null && tUpd !== null && Math.abs(tItem - tUpd) >= 0.05 && (upd.spec || upd.dimensions));
+      if (!isChangingThickness && normItem.hsnCode && normUpd.hsnCode && normItem.hsnCode === normUpd.hsnCode) {
+        score += 40;
+      }
+    } else if (normItem.category && normUpd.category && normItem.category !== normUpd.category) {
+      score -= 80;
+    } else {
+      score -= 50;
+    }
+  }
+
+  // 2. Thickness / Dimension Alignment
+  if (sourceThk !== null && tItem !== null) {
+    if (Math.abs(tItem - sourceThk) < 0.05) {
+      score += 250; // Decisive match: matches the source thickness specified by user!
+    } else {
+      score -= 150; // Penalize other thicknesses
+    }
+  } else if (tItem !== null && tUpd !== null) {
+    if (Math.abs(tItem - tUpd) < 0.05) {
+      score += 60;
+    } else {
+      score -= 60;
+    }
+  }
+
+  // 3. Token-based matching
   const stopWords = new Set(['the', 'for', 'and', 'with', 'item', 'update', 'change', 'rate', 'price', 'quantity', 'qty', 'of', 'to', 'in', 'at']);
   const curTokens = [itemSku, itemDim, itemGrade].join(' ').split(/[\s,()/-]+/).map(t => t.trim().toLowerCase()).filter(t => t.length >= 2 && !stopWords.has(t));
   const updTokens = [updSku, updSpec].join(' ').split(/[\s,()/-]+/).map(t => t.trim().toLowerCase()).filter(t => t.length >= 2 && !stopWords.has(t));
@@ -2655,7 +2879,12 @@ function scoreLineItemAgainstUpdate(item, upd) {
     score += matchedTokens * 20;
   }
 
-  const steelKeywords = ['channel', 'plate', 'sheet', 'coil', 'angle', 'pipe', 'tube', 'beam', 'bar', 'chequered', 'gp', 'cr', 'hr', 'ms', 'gi', 'tmt'];
+  // 4. Broad steel keywords covering all 4 master categories
+  const steelKeywords = [
+    'channel', 'plate', 'sheet', 'coil', 'angle', 'pipe', 'tube', 'beam', 'bar',
+    'chequered', 'gp', 'cr', 'hr', 'hrpo', 'galvalume', 'ms', 'gi', 'tmt',
+    'slotted', 'solar', 'purlin', 'tray', 'earthing', 'strip', 'flat', 'round', 'square'
+  ];
   for (const kw of steelKeywords) {
     const inCur = curTokens.some(t => t.includes(kw));
     const inUpd = updTokens.some(t => t.includes(kw));
@@ -3117,6 +3346,51 @@ function resolveLineItemUpdateTargets(draft) {
     delete draft.quantity;
   }
 
+  const headerRate = hasVal(draft.updates?.rate) ? draft.updates.rate : (hasVal(draft.rate) ? draft.rate : null);
+  if (headerRate !== null && !draft._apply_rate_to_all) {
+    const parsedRate = parseIndianAmount(headerRate) ?? (parseNumericValue(headerRate) ?? headerRate);
+    if (items.length === 1) {
+      // Single product in record -> directly assign rate to that product without prompting
+      const existingUpdates = Array.isArray(draft.line_item_updates) ? draft.line_item_updates : [];
+      if (existingUpdates.length > 0) {
+        existingUpdates[0].rate = parsedRate;
+        pinLineUpdateToItems(existingUpdates[0], items, [0]);
+      } else {
+        const singleItem = items[0] || {};
+        draft.line_item_updates = [{
+          operation: 'update',
+          item_reference: singleItem.sku_text || singleItem.description || 'Item 1',
+          rate: parsedRate,
+          _target_indexes: [0],
+          _target_item_ids: singleItem.id ? [String(singleItem.id)] : [],
+        }];
+      }
+    } else if (items.length > 1) {
+      // More than 1 product:
+      const existingUpdates = Array.isArray(draft.line_item_updates) ? draft.line_item_updates : [];
+      const alreadyAssignedToSpecific = existingUpdates.some(u => {
+        return u && Number(u.rate) === Number(parsedRate) && !isGenericLineUpdateRef(getLineUpdateProductRef(u));
+      });
+
+      if (!alreadyAssignedToSpecific) {
+        const genericIdx = existingUpdates.findIndex(u => u && isGenericLineUpdateRef(getLineUpdateProductRef(u)));
+        if (genericIdx >= 0) {
+          existingUpdates[genericIdx].rate = parsedRate;
+          delete existingUpdates[genericIdx]._target_indexes;
+          delete existingUpdates[genericIdx]._target_item_ids;
+        } else {
+          draft.line_item_updates = [...existingUpdates, {
+            operation: 'update',
+            item_reference: 'Line Item',
+            rate: parsedRate,
+          }];
+        }
+      }
+    }
+    if (draft.updates) delete draft.updates.rate;
+    delete draft.rate;
+  }
+
   const updates = Array.isArray(draft?.line_item_updates) ? draft.line_item_updates : [];
   if (updates.length === 0) return null;
 
@@ -3185,13 +3459,21 @@ function buildLineItemChoicePrompt(draft, pending) {
 
   const list = formatDetailedInquiryItemsList(candidates);
   if (pending.reason === 'unnamed') {
+    if (upd.rate !== undefined && upd.rate !== null && upd.rate !== '') {
+      const rateVal = parseIndianAmount(upd.rate) ?? 0;
+      const rateFormatted = `₹${rateVal.toLocaleString('en-IN')}${upd.unit ? ` / ${upd.unit}` : ' / MT'}`;
+      return `📌 *Extracted Rate:* ${rateFormatted}\n\n` +
+        `*For which product is this rate for?*\n\n` +
+        `${list}\n\n` +
+        `👉 Reply with the *product name*, the *number* (1–${candidates.length}), *All* to update all products, or *Skip* to leave rates unchanged.`;
+    }
     return `This record has *${candidates.length} line items*. Which one do you want to update${changeText}?\n\n` +
       `${list}\n\n` +
       `👉 Reply with the *number* (1–${candidates.length}), the *product name*, or *All* to update all of them.`;
   }
   return `There are *${candidates.length} line items* named *${productName}* in this record. Which one do you want to update${changeText}?\n\n` +
     `${list}\n\n` +
-    `👉 Reply with the *number* (1–${candidates.length}), the *thickness / size*, or *All* to update all of them.`;
+    `👉 Reply with the *number* (1–${candidates.length}), the *thickness / size*, *All* to update all, or *Skip* to leave unchanged.`;
 }
 
 async function askLineItemChoiceIfNeeded(action, draft, senderPhone) {
@@ -3277,11 +3559,45 @@ async function handleLineItemChoiceReply(text, senderPhone, action, draft) {
     return null;
   }
 
+  const clean = String(text || '').trim();
+
+  // 1. User wants to skip assigning this rate / update
+  if (/^(?:skip|skip\s*this|skip\s*rate|ignore|leave|leave\s*it|none|rehne\s*do|skip\s*kar\s*do|no\s*rate|keep\s*existing|rehne\s*de)\.?$/i.test(clean)) {
+    if (pending.updateIndex >= 0 && pending.updateIndex < updates.length) {
+      updates.splice(pending.updateIndex, 1);
+      draft.line_item_updates = updates;
+    }
+    delete draft._pending_line_choice;
+
+    const nextChoice = await askLineItemChoiceIfNeeded(action, draft, senderPhone);
+    if (nextChoice) return nextChoice;
+
+    const missing = validateMandatoryFields(action, draft);
+    if (missing.length > 0) {
+      const missingList = missing.map((m) => `- **${m}**`).join('\n');
+      const askMissing = `Please provide the remaining details to update:\n\n${missingList}`;
+      await recordSessionMessage(senderPhone, 'assistant', askMissing, { action_type: action, customer_name: draft.company_name });
+      await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
+      return { handled: true, reply: askMissing };
+    }
+
+    const summary = buildConfirmationSummary(action, draft);
+    await recordSessionMessage(senderPhone, 'assistant', summary, { action_type: action, customer_name: draft.company_name });
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: summary,
+      interactiveType: 'buttons',
+      interactiveButtons: CONFIRMATION_BUTTONS,
+    };
+  }
+
   if (isDiscardOrCancelIntent(text)) {
     delete draft._pending_line_choice;
     return null;
   }
 
+  // 2. User picked an item or All
   const picked = pickLineItemChoice(text, items, pending.candidateIndexes);
   if (!picked) {
     const looksLikeNewUpdate = /\b(?:rate|price|qty|quantity|payment|delivery|stage|status)\b|₹/i.test(text);
@@ -3295,7 +3611,32 @@ async function handleLineItemChoiceReply(text, senderPhone, action, draft) {
     return { handled: true, reply: retry };
   }
 
-  pinLineUpdateToItems(upd, items, picked);
+  // Merge this rate into any existing updates targeting the chosen items
+  const targetIndexes = Array.isArray(picked) ? picked : [picked];
+  const otherUpdates = updates.filter((_, idx) => idx !== pending.updateIndex);
+  for (const pIdx of targetIndexes) {
+    const existingTargetUpd = otherUpdates.find(u => {
+      if (Array.isArray(u._target_indexes) && u._target_indexes.includes(pIdx)) return true;
+      if (items[pIdx]?.id && Array.isArray(u._target_item_ids) && u._target_item_ids.includes(String(items[pIdx].id))) return true;
+      return false;
+    });
+    if (existingTargetUpd) {
+      if (upd.rate !== null && upd.rate !== undefined && upd.rate !== '') existingTargetUpd.rate = upd.rate;
+      if (upd.quantity !== null && upd.quantity !== undefined && upd.quantity !== '') existingTargetUpd.quantity = upd.quantity;
+    }
+  }
+
+  const allMerged = targetIndexes.every(pIdx => otherUpdates.some(u => {
+    return (Array.isArray(u._target_indexes) && u._target_indexes.includes(pIdx)) ||
+           (items[pIdx]?.id && Array.isArray(u._target_item_ids) && u._target_item_ids.includes(String(items[pIdx].id)));
+  }));
+
+  if (allMerged) {
+    updates.splice(pending.updateIndex, 1);
+    draft.line_item_updates = updates;
+  } else {
+    pinLineUpdateToItems(upd, items, picked);
+  }
   delete draft._pending_line_choice;
 
   const nextChoice = await askLineItemChoiceIfNeeded(action, draft, senderPhone);
@@ -3386,7 +3727,9 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             const prevItem = existingList[idx] || (existingList.length === 1 ? existingList[0] : null);
             const qty = parseNumericValue(item.quantity) || (prevItem ? parseNumericValue(prevItem.quantity) || 0 : 0);
             const rawUnit = item.unit || prevItem?.unit || 'MT';
-            const rate = parseIndianAmount(item.rate) || (prevItem ? parseIndianAmount(prevItem.rate) || 0 : 0);
+            const rate = !isNumericOptionSelector(userInput)
+              ? (parseIndianAmount(item.rate) || (prevItem ? parseIndianAmount(prevItem.rate) || 0 : 0))
+              : (prevItem ? parseIndianAmount(prevItem.rate) || 0 : 0);
             const parsedAmt = parseIndianAmount(item.amount);
             const amt = parsedAmt ? parsedAmt : (qty && rate ? qty * rate : (prevItem?.amount ? parseIndianAmount(prevItem.amount) || 0 : 0));
             const rawSku = item.sku_text || item.description || prevItem?.sku_text || prevItem?.description || '';
@@ -3495,8 +3838,10 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             merged[key] = normalizeDateToDDMMYYYY(val);
           }
         } else if (key === 'rate' && (typeof val === 'string' || typeof val === 'number')) {
-          const parsedRate = parseIndianAmount(val);
-          merged.rate = parsedRate !== null ? parsedRate : val;
+          if (!isNumericOptionSelector(userInput)) {
+            const parsedRate = parseIndianAmount(val);
+            merged.rate = parsedRate !== null ? parsedRate : val;
+          }
         } else if (key === 'attachments' && Array.isArray(val)) {
           const prevAtts = Array.isArray(baseDraft.attachments) ? baseDraft.attachments : [];
           const existingUrls = new Set(prevAtts.map(a => a && (a.url || a.file_url)).filter(Boolean));
@@ -3554,7 +3899,7 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   }
 
   // Fallback rate extraction for LOG_ORDER / LOG_INQUIRY / UPDATE_INQUIRY
-  if (!merged.rate && ['LOG_ORDER', 'LOG_INQUIRY', 'UPDATE_INQUIRY'].includes(action)) {
+  if (!merged.rate && ['LOG_ORDER', 'LOG_INQUIRY', 'UPDATE_INQUIRY'].includes(action) && !isNumericOptionSelector(userInput)) {
     const rateMatch = userInput.match(/(?:rate|price|@|bhav)[\s:=-]*(?:to\s+|as\s+|is\s+|be\s+|ko\s+)?(?:₹|rs\.?)?\s*(\d+(?:,\d+)*(?:\.\d+)?(?:\s*(?:lakhs?|lacs?|crores?|k)(?![a-z]))?)/i) ||
       userInput.match(/(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:\/|\s*per\s*)(?:mt|ton|tonne|kg|pcs|sheet)/i) ||
       userInput.match(/(?:₹|rs\.?)\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:rate|bhav)?/i) ||
@@ -3603,10 +3948,11 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   // Fallback contact_person and mobile_number for LOG_NEW_CUSTOMER / LOG_VISIT / UPDATE_VISIT / LOG_INQUIRY / LOG_ORDER
   if (['LOG_NEW_CUSTOMER', 'LOG_VISIT', 'UPDATE_VISIT', 'LOG_INQUIRY', 'LOG_ORDER'].includes(action)) {
     if (!merged.mobile_number && !merged.contact_phone) {
-      const phoneMatch = userInput.match(/\b([6-9]\d{9})\b/);
+      const phoneMatch = userInput.match(/\b(?:\+?91[\s-]?)?([6-9]\d{9})\b/) || userInput.match(/\b(\d{10})\b/);
       if (phoneMatch) {
-        merged.mobile_number = phoneMatch[1];
-        if (action.includes('VISIT') || action === 'LOG_INQUIRY') merged.contact_phone = phoneMatch[1];
+        const extractedPhone = phoneMatch[1] || phoneMatch[0].replace(/\D/g, '').slice(-10);
+        merged.mobile_number = extractedPhone;
+        if (action.includes('VISIT') || action === 'LOG_INQUIRY') merged.contact_phone = extractedPhone;
       }
     }
     if (!merged.contact_person && !merged.person_met) {
@@ -3654,13 +4000,29 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
       if (qtyMatch) extractedQty = Number(qtyMatch[1]);
     }
 
-    const thkMatch = userInput.match(/(?:line\s*item[\s:=-]*)?.*?(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i) ||
-      userInput.match(/\b(\d+X\d+X\d+|\d+\s*x\s*\d+(?:\s*x\s*\d+)?)\b/i);
-    const extractedSpec = thkMatch ? thkMatch[1].trim() : null;
+    const transition = extractThicknessTransition(userInput);
+    const thkMatch = transition
+      ? null
+      : (userInput.match(/(?:line\s*item[\s:=-]*)?.*?(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i) ||
+         userInput.match(/\b(\d+X\d+X\d+|\d+\s*x\s*\d+(?:\s*x\s*\d+)?)\b/i));
+    const extractedSpec = transition ? transition.targetSpec : (thkMatch ? thkMatch[1].trim() : null);
+    const sourceSpec = transition ? transition.sourceSpec : null;
 
     let lineUpdates = Array.isArray(newExtracted.line_item_updates) ? newExtracted.line_item_updates : [];
     if (lineUpdates.length === 0 && Array.isArray(merged.line_item_updates)) {
       lineUpdates = merged.line_item_updates;
+    }
+    if (transition && lineUpdates.length > 0) {
+      lineUpdates.forEach(upd => {
+        if (!upd.source_spec && transition.sourceSpec) {
+          upd.source_spec = transition.sourceSpec;
+          upd.source_dimensions = transition.sourceSpec;
+        }
+        if (transition.targetSpec) {
+          upd.spec = transition.targetSpec;
+          upd.dimensions = transition.targetSpec;
+        }
+      });
     }
 
     if (lineUpdates.length > 0) {
@@ -3683,12 +4045,16 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
               mergedUpd.sku_text = newUpd.sku_text;
               mergedUpd.description = newUpd.sku_text;
             }
+            if (sourceSpec) {
+              mergedUpd.source_spec = sourceSpec;
+              mergedUpd.source_dimensions = sourceSpec;
+            }
             const updatedDim = (newUpd.spec && String(newUpd.spec).trim()) ||
                                (newUpd.dimensions && String(newUpd.dimensions).trim()) ||
                                extractedSpec ||
                                prevUpd.dimensions ||
                                prevUpd.spec;
-            if (updatedDim) {
+            if (updatedDim || sourceSpec) {
               mergedUpd.spec = updatedDim;
               mergedUpd.dimensions = updatedDim;
               delete mergedUpd._target_indexes;
@@ -3696,6 +4062,10 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             }
             mergedList[matchedPrevIdx] = mergedUpd;
           } else {
+            if (sourceSpec) {
+              newUpd.source_spec = sourceSpec;
+              newUpd.source_dimensions = sourceSpec;
+            }
             if (extractedSpec && !newUpd.dimensions && !newUpd.spec) {
               newUpd.dimensions = extractedSpec;
               newUpd.spec = extractedSpec;
@@ -3710,6 +4080,10 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             if (!u.dimensions && !u.spec) {
               u.dimensions = extractedSpec;
               u.spec = extractedSpec;
+            }
+            if (sourceSpec && !u.source_spec) {
+              u.source_spec = sourceSpec;
+              u.source_dimensions = sourceSpec;
             }
           });
         }
@@ -3771,9 +4145,25 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     }
   } else if (action === 'UPDATE_INQUIRY') {
     if (!merged.updates) merged.updates = {};
-    if (merged.rate && !merged.updates.rate) merged.updates.rate = merged.rate;
-    if (newExtracted.rate && !merged.updates.rate) merged.updates.rate = newExtracted.rate;
-    if (newExtracted.updates?.rate && !merged.updates.rate) merged.updates.rate = newExtracted.updates.rate;
+    const hasVal = v => v !== null && v !== undefined && v !== '';
+    if (hasVal(newExtracted.updates?.rate)) {
+      merged.updates.rate = newExtracted.updates.rate;
+    } else if (hasVal(newExtracted.rate)) {
+      merged.updates.rate = newExtracted.rate;
+    } else if (hasVal(merged.rate) && !hasVal(merged.updates.rate)) {
+      merged.updates.rate = merged.rate;
+    }
+
+    // Direct regex extraction for explicit rate in user message e.g. "rate 54000/MT", "rate: 54000", "54000/MT"
+    const explicitRateMatch = userInput.match(/\b(?:rate|price|pricing|bhav)\s*[:=-]?\s*(?:rs\.?|inr|₹)?\s*(\d+(?:,\d+)*(?:\.\d+)?(?:\s*(?:lakhs?|lacs?|crores?|k))?)/i) ||
+      userInput.match(/(?:(?:rs\.?|inr|₹)\s*|\b)(\d+(?:,\d+)*(?:\.\d+)?(?:\s*(?:lakhs?|lacs?|crores?|k))?)\s*\/\s*(?:mt|ton|tonne|kg)\b/i);
+    if (explicitRateMatch) {
+      const pExpRate = parseIndianAmount(explicitRateMatch[1]);
+      if (pExpRate && pExpRate > 0) {
+        merged.updates.rate = pExpRate;
+      }
+    }
+
     if (newExtracted.delivery_location && !merged.updates.delivery_location) merged.updates.delivery_location = newExtracted.delivery_location;
     if (newExtracted.payment_terms && !merged.updates.payment_terms) merged.updates.payment_terms = newExtracted.payment_terms;
     if (newExtracted.preferred_make && !merged.updates.preferred_make) merged.updates.preferred_make = newExtracted.preferred_make;
@@ -3810,9 +4200,22 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
       if (pRate !== null) merged.updates.rate = pRate;
     }
 
+    const transition = extractThicknessTransition(userInput);
     let lineUpdates = Array.isArray(newExtracted.line_item_updates) ? newExtracted.line_item_updates : [];
     if (lineUpdates.length === 0 && Array.isArray(merged.line_item_updates)) {
       lineUpdates = merged.line_item_updates;
+    }
+    if (transition && lineUpdates.length > 0) {
+      lineUpdates.forEach(upd => {
+        if (!upd.source_spec && transition.sourceSpec) {
+          upd.source_spec = transition.sourceSpec;
+          upd.source_dimensions = transition.sourceSpec;
+        }
+        if (transition.targetSpec) {
+          upd.spec = transition.targetSpec;
+          upd.dimensions = transition.targetSpec;
+        }
+      });
     }
     if (lineUpdates.length > 0) {
       if (Array.isArray(baseDraft.line_item_updates) && baseDraft.line_item_updates.length > 0) {
@@ -3824,7 +4227,11 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
           });
           if (matchedPrevIdx >= 0) {
             const mergedUpd = { ...mergedList[matchedPrevIdx], ...newUpd };
-            if (newUpd.spec || newUpd.dimensions) {
+            if (transition && transition.sourceSpec) {
+              mergedUpd.source_spec = transition.sourceSpec;
+              mergedUpd.source_dimensions = transition.sourceSpec;
+            }
+            if (newUpd.spec || newUpd.dimensions || newUpd.source_spec) {
               delete mergedUpd._target_indexes;
               delete mergedUpd._target_item_ids;
             }
@@ -3838,16 +4245,20 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
         merged.line_item_updates = lineUpdates;
       }
     } else {
-      const thkMatch = userInput.match(/(?:line\s*item[\s:=-]*)?.*?(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i) || userInput.match(/\b(\d+X\d+X\d+|\d+\s*x\s*\d+(?:\s*x\s*\d+)?)\b/i);
+      const thkMatch = transition
+        ? null
+        : (userInput.match(/(?:line\s*item[\s:=-]*)?.*?(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i) || userInput.match(/\b(\d+X\d+X\d+|\d+\s*x\s*\d+(?:\s*x\s*\d+)?)\b/i));
       const qtyMatch = userInput.match(/(\d+(?:\.\d+)?)\s*(?:mt|ton|tonne|kg|pcs|nos|sheets?|plates?|coils?)\b/i) || userInput.match(/(?:qty|quantity)[\s:=-]*(\d+(?:\.\d+)?)/i);
-      if (thkMatch || qtyMatch) {
-        const extractedSpec = thkMatch ? thkMatch[1].trim() : null;
+      if (transition || thkMatch || qtyMatch) {
+        const extractedSpec = transition ? transition.targetSpec : (thkMatch ? thkMatch[1].trim() : null);
+        const sourceSpec = transition ? transition.sourceSpec : null;
         const extractedQty = qtyMatch ? Number(qtyMatch[1]) : null;
         const extractedUnit = userInput.match(/\b(mt|ton|tonne|kg|pcs|nos|sheets?|plates?|coils?)\b/i)?.[1]?.toUpperCase() || 'MT';
         if (extractedSpec || extractedQty) {
           merged.line_item_updates = [{
             operation: 'update',
             item_reference: 'Line Item',
+            ...(sourceSpec ? { source_spec: sourceSpec, source_dimensions: sourceSpec } : {}),
             ...(extractedQty !== null ? { quantity: extractedQty, unit: extractedUnit } : {}),
             ...(extractedSpec ? { spec: extractedSpec, dimensions: extractedSpec } : {}),
           }];
@@ -4104,7 +4515,6 @@ function validateMandatoryFields(action, draft) {
       if (!draft.delivery_location && (draft.city_location || draft.location || draft.address)) {
         draft.delivery_location = draft.city_location || draft.location || draft.address;
       }
-      if (!draft.inquiry_id) missing.push('Inquiry ID (e.g. INQ-F4D982)');
       if (!draft.company_name) missing.push('Company Name');
       if (!draft.po_number) missing.push('PO Number (e.g. PO-2026-0042)');
       if (!draft.po_date) missing.push('PO Date (e.g. 10-09-2026)');
@@ -4251,6 +4661,75 @@ function validateMandatoryFields(action, draft) {
   }
 
   return missing;
+}
+
+/**
+ * Checks whether a company name is already registered company-wide in recurring_customers.
+ * If registered, returns conflict details with the assigned representative's name, phone, etc.
+ */
+async function checkCompanyWideCustomerRegistration(companyName, senderPhone) {
+  if (!companyName) return null;
+  const cleanName = String(companyName).trim();
+  if (!cleanName || cleanName.toLowerCase() === 'unknown' || cleanName.toLowerCase() === 'null') return null;
+
+  try {
+    const coreName = normalizeCoreCompanyName(cleanName);
+    let query = supabase.from('recurring_customers').select('*');
+    if (coreName && coreName.length >= 3) {
+      query = query.or(`customer_name.ilike.%${cleanName}%,customer_name.ilike.%${coreName}%`);
+    } else {
+      query = query.ilike('customer_name', `%${cleanName}%`);
+    }
+
+    const { data: existingCusts, error } = await query.limit(20);
+    if (error) {
+      console.error('[CatalogFlow] checkCompanyWideCustomerRegistration query error:', error.message);
+      return null;
+    }
+
+    const exactMatch = (existingCusts || []).find((c) => {
+      const dbName = (c.customer_name || '').trim().toLowerCase();
+      const targetName = cleanName.toLowerCase();
+      if (dbName === targetName) return true;
+      const dbCore = normalizeCoreCompanyName(c.customer_name);
+      const targetCore = normalizeCoreCompanyName(cleanName);
+      if (dbCore && targetCore && dbCore === targetCore) return true;
+      return false;
+    });
+
+    if (exactMatch) {
+      const normSender = String(senderPhone || '').replace(/\D/g, '').slice(-10);
+      const normAssigned = String(exactMatch.assigned_salesperson_phone || '').replace(/\D/g, '').slice(-10);
+      let repInfo = '';
+      if (normAssigned && normAssigned !== normSender) {
+        const { getEmployeeByPhone } = require('../supabase');
+        const repEmp = await getEmployeeByPhone(normAssigned);
+        const repName = repEmp?.name || 'Another Representative';
+        repInfo = `• *Assigned Representative:* ${repName} (${normAssigned})\n`;
+      } else if (normAssigned && normAssigned === normSender) {
+        repInfo = `• *Assigned Representative:* You (already registered in your accounts)\n`;
+      }
+
+      const conflictMsg = `⚠️ *Customer Already Registered!*\n\n` +
+        `• *Company Name:* ${exactMatch.customer_name}\n` +
+        repInfo +
+        (exactMatch.contact_person ? `• *Contact Person:* ${exactMatch.contact_person}\n` : '') +
+        (exactMatch.customer_phone ? `• *Mobile Number:* ${exactMatch.customer_phone}\n` : '') +
+        (exactMatch.customer_address ? `• *Location:* ${exactMatch.customer_address}\n` : '') +
+        (exactMatch.customer_gst ? `• *GST:* ${exactMatch.customer_gst}\n` : '') +
+        `\n_This customer is already registered in the system under another representative's portfolio. Duplicate account creation is not permitted. Please contact your Sales Manager or Administrator to reassign this account._`;
+
+      return {
+        isRegistered: true,
+        match: exactMatch,
+        isOtherRep: Boolean(normAssigned && normAssigned !== normSender),
+        conflictMessage: conflictMsg,
+      };
+    }
+  } catch (err) {
+    console.error('[CatalogFlow] checkCompanyWideCustomerRegistration error:', err.message);
+  }
+  return null;
 }
 
 // ── VERIFY DRAFT CUSTOMER (ROLE & ACCOUNT SCOPED) ───────────────────────────
@@ -4415,25 +4894,45 @@ async function findMatchingInquiriesForPo(customerName, lineItems = [], senderPh
     return { status: 'NO_MATCH', candidates: [] };
   }
 
-  // Check product match overlap
-  const poProducts = (lineItems || []).map(it => {
-    const raw = it.sku_text || it.description || it.product_name || '';
-    const norm = normalizeProductToCatalog(raw);
-    return norm.isValid ? norm.catalogName.toLowerCase() : raw.toLowerCase().trim();
-  }).filter(Boolean);
+  // Check product match overlap with Master Catalog, HSN root, and category guards
+  function getProductDetails(it) {
+    const raw = (it.sku_text || it.description || it.product_name || '').trim();
+    const dim = (it.dimensions || it.spec || '').trim();
+    const norm = normalizeProductToCatalog(raw, dim);
+    const hsn = norm.hsnCode || detectHsnCode(raw, dim);
+    const hsnRoot = hsn ? hsn.slice(0, 4) : null;
+    return {
+      raw: raw.toLowerCase(),
+      catalogName: norm.isValid ? norm.catalogName.toLowerCase() : null,
+      category: norm.category || null,
+      hsnRoot,
+      dim: dim.toLowerCase()
+    };
+  }
+
+  function itemsMatch(p, c) {
+    if (p.catalogName && c.catalogName && p.catalogName === c.catalogName) return true;
+    if (p.hsnRoot && c.hsnRoot && p.hsnRoot === c.hsnRoot) {
+      if (p.category && c.category && p.category === c.category) return true;
+    }
+    if (p.category && c.category && p.category !== c.category) {
+      return false;
+    }
+    if (p.raw && c.raw && (p.raw.includes(c.raw) || c.raw.includes(p.raw))) return true;
+    return false;
+  }
+
+  const poProductDetails = (lineItems || []).map(getProductDetails).filter(p => p.raw || p.catalogName);
 
   let matchedCandidates = [];
-  if (poProducts.length > 0) {
-    matchedCandidates = allCustCandidates.filter(c => {
-      const items = Array.isArray(c.deal_items) ? c.deal_items : [];
-      const cProducts = items.map(it => {
-        const raw = it.sku_text || it.description || it.product_name || '';
-        const norm = normalizeProductToCatalog(raw);
-        return norm.isValid ? norm.catalogName.toLowerCase() : raw.toLowerCase().trim();
-      }).filter(Boolean);
+  if (poProductDetails.length > 0) {
+    matchedCandidates = allCustCandidates.filter(cand => {
+      const items = Array.isArray(cand.deal_items) ? cand.deal_items : [];
+      if (items.length === 0) return true;
+      const cProductDetails = items.map(getProductDetails).filter(c => c.raw || c.catalogName);
+      if (cProductDetails.length === 0) return true;
 
-      if (cProducts.length === 0) return true;
-      return poProducts.some(p => cProducts.some(cp => cp.includes(p) || p.includes(cp) || cp === p));
+      return poProductDetails.some(poP => cProductDetails.some(cP => itemsMatch(poP, cP)));
     });
   }
 
@@ -4511,8 +5010,18 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
     attachments: [attachmentObj],
     _customer_verified: Boolean(officialCustomerName),
   };
+  try {
+    const session = await getFullActiveSession(senderPhone);
+    const intent = session?.last_intent || '';
+    if (intent.includes('|LOG_INQUIRY|')) {
+      const existing = safeParseJSON(intent.split('|').slice(2).join('|'), {});
+      if (existing && existing.source_channel && !draft.source_channel) {
+        draft.source_channel = existing.source_channel;
+      }
+    }
+  } catch (e) {}
 
-  if (caption && caption.length > 3) {
+  if (caption && caption.length > 3 && !/^(?:attached image|photo uploaded)$/i.test(String(caption).trim())) {
     try {
       const captionExtracted = await extractFieldsWithLLM('LOG_INQUIRY', caption, draft);
       mergeDraft('LOG_INQUIRY', draft, captionExtracted, caption);
@@ -4562,6 +5071,27 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
   }
 }
 
+async function finishUnlinkedOrderDraft(draft, senderPhone, notice) {
+  const missing = validateMandatoryFields('LOG_ORDER', draft);
+  if (missing.length > 0) {
+    const missingList = missing.map((m) => `• *${m}*`).join('\n');
+    const askMissing = `${notice || ''}Please provide the remaining mandatory details for this order:\n\n${missingList}`;
+    await recordSessionMessage(senderPhone, 'assistant', askMissing, { action_type: 'LOG_ORDER' });
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_ORDER|${JSON.stringify(draft)}`);
+    return { handled: true, reply: askMissing };
+  }
+  const summary = buildConfirmationSummary('LOG_ORDER', draft);
+  const fullReply = `${notice || ''}${summary}`;
+  await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'LOG_ORDER' });
+  await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|LOG_ORDER|${JSON.stringify(draft)}`);
+  return {
+    handled: true,
+    reply: fullReply,
+    interactiveType: 'buttons',
+    interactiveButtons: CONFIRMATION_BUTTONS,
+  };
+}
+
 /**
  * Processes an incoming Purchase Order (PO) document inside an active LOG_ORDER flow session.
  * Auto-matches against open inquiries belonging to the salesperson.
@@ -4607,22 +5137,39 @@ async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, captio
 
   const poDate = extraction.po_date ? normalizeDateToDDMMYYYY(extraction.po_date) : formatDateDDMMYYYY(new Date());
 
-  const draft = {
-    company_name: finalCustomerName,
-    po_number: extraction.po_number && String(extraction.po_number).trim().length > 2 ? String(extraction.po_number).trim() : null,
-    po_date: poDate,
-    delivery_location: extraction.delivery_location || null,
-    payment_terms: extraction.payment_terms || null,
-    line_items: lineItems,
-    attachments: [attachmentObj],
-    _customer_verified: Boolean(officialCustomerName),
-  };
+  let existingDraft = {};
+  try {
+    const session = await getFullActiveSession(senderPhone);
+    const intent = session?.last_intent || '';
+    if (intent.startsWith('catalog_flow|LOG_ORDER|') || intent.startsWith('catalog_editing|LOG_ORDER|')) {
+      existingDraft = safeParseJSON(intent.split('|').slice(2).join('|'), {}) || {};
+    }
+  } catch (e) {}
+
+  const draft = { ...existingDraft };
+  if (!draft.company_name && finalCustomerName) draft.company_name = finalCustomerName;
+  if (!draft.po_number && extraction.po_number && String(extraction.po_number).trim().length > 2) {
+    draft.po_number = String(extraction.po_number).trim();
+  }
+  if (!draft.po_date && extraction.po_date) draft.po_date = normalizeDateToDDMMYYYY(extraction.po_date);
+  if (!draft.po_date && !draft._direct_order) draft.po_date = poDate;
+  if (!draft.delivery_location && extraction.delivery_location) draft.delivery_location = extraction.delivery_location;
+  if (!draft.payment_terms && extraction.payment_terms) draft.payment_terms = extraction.payment_terms;
+  if ((!Array.isArray(draft.line_items) || draft.line_items.length === 0) && lineItems.length > 0) {
+    draft.line_items = lineItems;
+  }
+  draft.attachments = [...(Array.isArray(existingDraft.attachments) ? existingDraft.attachments : []), attachmentObj];
+  if (officialCustomerName) draft._customer_verified = true;
 
   if (caption && caption.length > 3) {
     try {
       const captionExtracted = await extractFieldsWithLLM('LOG_ORDER', caption, draft);
       mergeDraft('LOG_ORDER', draft, captionExtracted, caption);
     } catch (e) {}
+  }
+
+  if (draft._direct_order) {
+    return await finishUnlinkedOrderDraft(draft, senderPhone, '');
   }
 
   // 1. Auto-match to existing inquiries by Customer + Product
@@ -4675,19 +5222,11 @@ async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, captio
     };
   }
 
-  // NO_MATCH case
-  const notice = `ℹ️ *No matching inquiry found for this customer and product. Order will be recorded without an inquiry link.*\n\n`;
-  const summary = buildConfirmationSummary('LOG_ORDER', draft);
-  const fullReply = notice + summary;
-
-  await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'LOG_ORDER' });
-  await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|LOG_ORDER|${JSON.stringify(draft)}`);
-  return {
-    handled: true,
-    reply: fullReply,
-    interactiveType: 'buttons',
-    interactiveButtons: CONFIRMATION_BUTTONS,
-  };
+  return await finishUnlinkedOrderDraft(
+    draft,
+    senderPhone,
+    `ℹ️ *No matching inquiry found for this customer and product. Order will be recorded without an inquiry link.*\n\n`,
+  );
 }
 
 // ── VALIDATE ORDER INQUIRY STAGE GATE ───────────────────────────────────────
@@ -4827,7 +5366,7 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   draft.inquiry_id = formattedCode;
   draft._inquiry_display_id = formattedCode;
 
-  const sessionRate = draft.rate ? (parseIndianAmount(draft.rate) ?? 0) : (Array.isArray(draft.line_items) && draft.line_items[0]?.rate ? Number(draft.line_items[0].rate) : null);
+  const sessionRate = draft.rate ? (parseIndianAmount(draft.rate) ?? 0) : null;
 
   // 1. Customer Name
   if (!draft.company_name) {
@@ -4879,7 +5418,8 @@ async function validateOrderInquiryStage(draft, senderPhone) {
     if (!Array.isArray(draft.line_items) || draft.line_items.length === 0) {
       draft.line_items = dbItems.map(it => {
         const qty = Number(it.quantity) || 0;
-        const rate = (sessionRate && sessionRate > 0) ? sessionRate : (Number(it.rate) || (matchedInq?.ai_extraction_json?.rate ? Number(matchedInq.ai_extraction_json.rate) : 0));
+        const itemRate = Number(it.rate) || (Number(it.amount) && Number(it.quantity) ? Number(it.amount) / Number(it.quantity) : 0);
+        const rate = itemRate > 0 ? itemRate : ((sessionRate && sessionRate > 0) ? sessionRate : (matchedInq?.ai_extraction_json?.rate ? Number(matchedInq.ai_extraction_json.rate) : 0));
         const amount = qty > 0 && rate > 0 ? qty * rate : (Number(it.amount) || 0);
         const sku = it.sku_text || it.description || 'Metal Product';
         const dim = it.dimensions || it.spec || null;
@@ -4904,7 +5444,8 @@ async function validateOrderInquiryStage(draft, senderPhone) {
       draft.line_items = draft.line_items.map((it, idx) => {
         const fallbackDb = dbItems[idx] || dbItems[0] || {};
         const qty = Number(it.quantity) || Number(fallbackDb.quantity) || 0;
-        const rate = (sessionRate && sessionRate > 0) ? sessionRate : (Number(it.rate) || Number(fallbackDb.rate) || 0);
+        const itemRate = Number(it.rate) || Number(fallbackDb.rate) || (Number(it.amount) && Number(it.quantity) ? Number(it.amount) / Number(it.quantity) : 0);
+        const rate = itemRate > 0 ? itemRate : ((sessionRate && sessionRate > 0) ? sessionRate : 0);
         const amount = qty > 0 && rate > 0 ? qty * rate : (Number(it.amount) || 0);
         const sku = it.sku_text || it.description || fallbackDb.sku_text || fallbackDb.description || 'Metal Product';
         const dim = it.dimensions || it.spec || fallbackDb.dimensions || fallbackDb.spec || null;
@@ -5445,7 +5986,7 @@ function formatStageLabel(st) {
   const s = String(st || '').toLowerCase();
   if (s.includes('won') || s.includes('order')) return 'Won';
   if (s.includes('lost')) return 'Lost';
-  if (s.includes('quote') || s.includes('price')) return 'Quoted';
+  if (s.includes('quote') || s.includes('price') || s.includes('qualif') || s.includes('confirmed') || s.includes('proposal')) return 'Quoted';
   if (s.includes('negot')) return 'Negotiation';
   if (s.includes('hold')) return 'On Hold';
   return 'New Inquiry';
@@ -5971,7 +6512,28 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
     const dealByInqId = new Map();
     const wonOrClosedInqIds = new Set();
     const terminalStages = new Set(['won', 'lost', 'closed', 'completed', 'cancelled']);
-    const ELIGIBLE_ORDER_STAGES = new Set(['quoted', 'negotiation', 'on_hold', 'hold']);
+    const ELIGIBLE_ORDER_STAGES = new Set([
+      'quoted',
+      'price_quote',
+      'price quote',
+      'qualified',
+      'confirmed',
+      'proposal',
+      'saved',
+      'quotation_sent',
+      'negotiation',
+      'on_hold',
+      'hold'
+    ]);
+
+    const isEligibleOrderStage = (st) => {
+      if (!st) return false;
+      const s = String(st).toLowerCase().trim();
+      if (terminalStages.has(s) || s.includes('won') || s.includes('lost') || s.includes('closed') || s.includes('cancel')) return false;
+      if (ELIGIBLE_ORDER_STAGES.has(s)) return true;
+      if (s.includes('quote') || s.includes('price') || s.includes('qualif') || s.includes('proposal') || s.includes('negot') || s.includes('hold')) return true;
+      return false;
+    };
 
     scopedDeals.forEach(d => {
       const stage = (d.stage || '').toLowerCase().trim();
@@ -6003,11 +6565,11 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
       if (rawLower.startsWith('[po document attached:') || rawLower.includes('po number:')) return;
 
       const linkedDeal = dealByInqId.get(inq.id);
-      const stage = (linkedDeal?.stage || inq.status || 'new_inquiry').toLowerCase().trim();
+      const stage = (linkedDeal?.stage || inq.stage || inq.status || 'new_inquiry').toLowerCase().trim();
       if (terminalStages.has(stage)) return;
 
       // STRICT STAGE FILTER FOR LOG_ORDER: Price Quote, Negotiation, On Hold only. Exclude new_inquiry & review.
-      if (action === 'LOG_ORDER' && !ELIGIBLE_ORDER_STAGES.has(stage)) return;
+      if (action === 'LOG_ORDER' && !isEligibleOrderStage(stage)) return;
 
       const cleanCode = (inq.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
       const displayId = `INQ-${cleanCode}`;
@@ -6067,7 +6629,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
       if (terminalStages.has(stage) || Boolean(d.po_number)) return;
 
       // STRICT STAGE FILTER FOR LOG_ORDER: Price Quote, Negotiation, On Hold only. Exclude new_inquiry & review.
-      if (action === 'LOG_ORDER' && !ELIGIBLE_ORDER_STAGES.has(stage)) return;
+      if (action === 'LOG_ORDER' && !isEligibleOrderStage(stage)) return;
 
       const cleanCode = (d.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
       const displayId = `INQ-${cleanCode}`;
@@ -6340,7 +6902,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
     } else {
       switch (action) {
         case 'LOG_ORDER':
-          emptyReply = `ℹ️ *No Eligible Inquiries Found for Order Creation*\n\nThere are no inquiries currently in Price Quote, Negotiation, or On Hold stage ready for an order.\n\nTo create a new inquiry, reply with *1* or send the inquiry details.`;
+          emptyReply = `ℹ️ *No Eligible Inquiries Found for Order Creation*\n\nThere are no inquiries currently in Price Quote, Negotiation, or On Hold stage.\n\n*No Inquiry available - Create Order Directly*`;
           break;
         case 'UPDATE_INQUIRY':
           emptyReply = `ℹ️ *No Editable Inquiries Found*\n\nThere are no active or editable inquiries recorded in your portfolio.\n\nIf you would like to log a new inquiry, reply with *1* or send the inquiry details.`;
@@ -6362,6 +6924,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
     return {
       hasRecords: false,
       reply: emptyReply,
+      interactiveButtons: action === 'LOG_ORDER' ? DIRECT_ORDER_BUTTONS : null,
       state: {
         action,
         page: 1,
@@ -6428,7 +6991,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
 
   let footerText = '';
   if (action === 'LOG_ORDER') {
-    footerText = `Reply with the serial number or Inquiry ID to create an order. Type "Next" for more, or send a customer name to search.`;
+    footerText = `Reply with the serial number or Inquiry ID to create an order. Type "Next" for more, or send a customer name to search.\n\n*No Inquiry available - Create Order Directly*`;
   } else {
     let footerIdLabel = 'Inquiry ID';
     if (action === 'UPDATE_ORDER') footerIdLabel = 'Order / PO Number';
@@ -6442,6 +7005,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
   return {
     hasRecords: true,
     reply: fullReply,
+    interactiveButtons: action === 'LOG_ORDER' ? DIRECT_ORDER_BUTTONS : null,
     state: {
       action,
       page: curPage,
@@ -6469,6 +7033,11 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return { handled: true, reply: deniedReply };
     }
+  }
+
+  // Direct order, with no inquiry linked
+  if (action === 'LOG_ORDER' && isDirectOrderRequest(clean)) {
+    return await beginDirectOrder(senderPhone, null);
   }
 
   // 1. Cancel / Discard / Menu
@@ -6506,7 +7075,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
       const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, { page: 1, customerFilter: null });
       await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
       await saveActiveSession(senderPhone, 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-      return { handled: true, reply: selectionRes.reply };
+      return catalogSelectionResult(selectionRes);
     }
   }
 
@@ -6522,7 +7091,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, { page: 1, customerFilter: null });
     await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
     await saveActiveSession(senderPhone, 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-    return { handled: true, reply: selectionRes.reply };
+    return catalogSelectionResult(selectionRes);
   }
 
   // 3. Pagination ("Next", "more", "view more", "page 2", etc.)
@@ -6541,7 +7110,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     });
     await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
     await saveActiveSession(senderPhone, selectionState.customerFilter || 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-    return { handled: true, reply: selectionRes.reply };
+    return catalogSelectionResult(selectionRes);
   }
 
   // 4. Candidate Match Resolution (by Serial Number, Record ID, Date, or Name)
@@ -6592,8 +7161,10 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
       candidateIds.push(directCleanId);
     }
 
+    const CANDIDATE_ID_STOPWORDS = new Set(['FOR', 'TO', 'IS', 'OF', 'IN', 'ON', 'AT', 'NEW', 'LOG', 'NOW', 'TODAY', 'DATED', 'WITH', 'FROM', 'THE', 'AND', 'AN', 'A', 'ORDER', 'INQUIRY', 'DEAL', 'PO', 'UPDATE']);
+
     for (const cleanId of candidateIds) {
-      if (!cleanId || cleanId.length < 2) continue;
+      if (!cleanId || cleanId.length < 2 || CANDIDATE_ID_STOPWORDS.has(cleanId)) continue;
       matchedRecord = cached.find(r => {
         const dId = (r.displayId || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
         const rId = (r.id || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
@@ -6609,6 +7180,97 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
           const po = (r.po_number || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
           return dId.includes(cleanId) || rId.startsWith(cleanId) || (po && po.includes(cleanId));
         });
+      }
+
+      if (!matchedRecord && (action === 'LOG_ORDER' || action === 'UPDATE_INQUIRY' || action === 'UPDATE_ORDER')) {
+        try {
+          const { getAccessibleSalespersonPhonesForBot, expandPhoneVariants, isPhoneInScope } = require('../supabase');
+          const scope = senderPhone ? await getAccessibleSalespersonPhonesForBot(senderPhone) : { phones: null, isAdmin: true };
+          const targetPhones = expandPhoneVariants(scope.phones || (senderPhone ? [senderPhone] : []));
+
+          const { data: dbInqs } = await supabase
+            .from('inquiries')
+            .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, stage, inquiry_type, created_at, salesperson_phone, inquiry_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+            .order('created_at', { ascending: false })
+            .limit(500);
+
+          const accessibleInqs = (dbInqs || []).filter(i => {
+            if (scope.isAdmin || scope.phones === null) return true;
+            return i.salesperson_phone && isPhoneInScope(i.salesperson_phone, targetPhones);
+          });
+
+          const foundInq = accessibleInqs.find(i => {
+            const rawId = (i.id || '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
+            return rawId.startsWith(cleanId) || rawId.includes(cleanId);
+          });
+
+          if (foundInq) {
+            let { data: linkedDeals } = await supabase
+              .from('deals')
+              .select('id, inquiry_id, customer_name, customer_phone, po_number, stage, total_amount, payment_terms, delivery_location, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+              .eq('inquiry_id', foundInq.id);
+
+            const linkedDeal = (linkedDeals && linkedDeals.length > 0) ? linkedDeals[0] : null;
+            const rawStage = (linkedDeal?.stage || foundInq.stage || foundInq.status || 'new_inquiry').toLowerCase().trim();
+            const cleanCode = (foundInq.id || '').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toUpperCase();
+            const displayId = `INQ-${cleanCode}`;
+
+            if (action === 'LOG_ORDER') {
+              const isTerminal = ['won', 'lost', 'closed', 'completed', 'cancelled'].includes(rawStage) || Boolean(linkedDeal?.po_number);
+              if (isTerminal) {
+                const terminalReply = `⚠️ Inquiry *${displayId}* (${foundInq.sender_name || 'Customer'}) has already been converted to an order or closed (Stage: ${formatStageLabel(rawStage)}).\n\nType another Inquiry ID or Customer Name, or reply "All" to view eligible inquiries.`;
+                await recordSessionMessage(senderPhone, 'assistant', terminalReply, { action_type: action });
+                return { handled: true, reply: terminalReply };
+              }
+
+              const isEligible = typeof isEligibleOrderStage === 'function' ? isEligibleOrderStage(rawStage) : ['quoted', 'price_quote', 'qualified', 'confirmed', 'proposal', 'negotiation', 'on_hold', 'hold'].includes(rawStage);
+              if (!isEligible) {
+                const ineligibleReply = `⚠️ Inquiry *${displayId}* (${foundInq.sender_name || 'Customer'}) is currently in *${formatStageLabel(rawStage)}* stage.\n\nOrders can only be logged for inquiries in *Price Quote*, *Negotiation*, or *On Hold* stages.\n\nType another Inquiry ID or Customer Name, or reply "Cancel" to exit.`;
+                await recordSessionMessage(senderPhone, 'assistant', ineligibleReply, { action_type: action });
+                return { handled: true, reply: ineligibleReply };
+              }
+            }
+
+            const ai = foundInq.ai_extraction_json || {};
+            const prodSummary = linkedDeal ? formatProductSummaryCompact(linkedDeal) : formatProductSummaryCompact(foundInq);
+            const inqAttrs = extractInquiryAttributes(foundInq, linkedDeal);
+            const inqDealItems = (linkedDeal?.deal_items && linkedDeal.deal_items.length > 0)
+              ? linkedDeal.deal_items
+              : (foundInq.inquiry_items && foundInq.inquiry_items.length > 0)
+                ? foundInq.inquiry_items
+                : (ai.line_items && ai.line_items.length > 0)
+                  ? ai.line_items
+                  : [];
+
+            let calcTotal = Number(linkedDeal?.total_amount) || Number(ai.totalAmount) || Number(ai.total_amount) || 0;
+            if (!calcTotal && inqDealItems.length > 0) {
+              calcTotal = inqDealItems.reduce((s, it) => s + (Number(it.amount || 0) || (Number(it.quantity || 0) * Number(it.rate || 0))), 0);
+            }
+
+            matchedRecord = {
+              id: foundInq.id,
+              deal_id: linkedDeal?.id || null,
+              inquiry_id: foundInq.id,
+              displayId,
+              clean_code: cleanCode,
+              customer_name: linkedDeal?.customer_name || foundInq.sender_name || ai.companyName || 'Customer',
+              product_summary: prodSummary,
+              stage: formatStageLabel(rawStage),
+              raw_stage: rawStage,
+              date_formatted: formatDateDDMMYYYY(foundInq.created_at),
+              payment_terms: inqAttrs.payment_terms || 'Not specified',
+              delivery_location: inqAttrs.delivery_location || 'Not specified',
+              preferred_make: inqAttrs.preferred_make || null,
+              additional_notes: inqAttrs.additional_notes || null,
+              total_amount: calcTotal,
+              deal_items: inqDealItems,
+              created_at: foundInq.created_at,
+            };
+            break;
+          }
+        } catch (fallbackErr) {
+          console.warn('[CatalogFlow] candidate ID DB fallback error:', fallbackErr.message);
+        }
       }
 
       if (matchedRecord) break;
@@ -6799,7 +7461,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, { page: 1, customerFilter: clean });
     await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
     await saveActiveSession(senderPhone, clean, `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-    return { handled: true, reply: selectionRes.reply };
+    return catalogSelectionResult(selectionRes);
   }
 
   // 7. Check if user typed an out-of-bounds number
@@ -7447,7 +8109,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
     const s = String(st || '').toLowerCase();
     if (s.includes('won') || s.includes('order')) return 'Won';
     if (s.includes('lost')) return 'Lost';
-    if (s.includes('quote') || s.includes('price')) return 'Price Quote';
+    if (s.includes('quote') || s.includes('price') || s.includes('qualif') || s.includes('confirmed') || s.includes('proposal')) return 'Price Quote';
     if (s.includes('negot')) return 'Negotiation';
     if (s.includes('hold')) return 'On Hold';
     return 'New Inquiry';
@@ -8920,7 +9582,7 @@ async function executeAction(action, draft, senderPhone) {
         const { data: inqRow, error: inqErr } = await supabase
           .from('inquiries')
           .insert({
-            source_channel: 'WhatsApp',
+            source_channel: draft.source_channel || 'WhatsApp',
             sender_name: companyName,
             customer_name: companyName,
             raw_text: humanRawText.trim(),
@@ -9274,7 +9936,8 @@ async function executeAction(action, draft, senderPhone) {
         const stageInput = updates.stage || updates.status || draft.stage || draft.status || draft.new_stage;
         if (stageInput) {
           const s = String(stageInput).toLowerCase();
-          if (s.includes('won') || s.includes('order')) dealUpdates.stage = 'won';
+          if (/\b(?:new\s*inquiry|new\s*enquiry|new)\b/i.test(s)) dealUpdates.stage = 'new_inquiry';
+          else if (s.includes('won') || s.includes('order')) dealUpdates.stage = 'won';
           else if (s.includes('lost')) dealUpdates.stage = 'lost';
           else if (s.includes('negot')) dealUpdates.stage = 'negotiation';
           else if (s.includes('hold')) dealUpdates.stage = 'on_hold';
@@ -9353,7 +10016,6 @@ async function executeAction(action, draft, senderPhone) {
 
         // 1. Specific line item updates
         if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0 && dItems && dItems.length > 0) {
-          const spillGeneralRate = updates.rate && !isGeneralRateDuplicateOfLineRate(updates.rate, draft.line_item_updates);
           for (let i = 0; i < dItems.length; i++) {
             const currentItem = dItems[i];
             const matchedUpd = matchLineItemUpdate(currentItem, i, dItems.length, draft.line_item_updates);
@@ -9389,9 +10051,6 @@ async function executeAction(action, draft, senderPhone) {
                   }
                 }
               }
-            } else if (spillGeneralRate) {
-              const globalRate = parseIndianAmount(updates.rate) || 0;
-              if (globalRate > 0) itRate = globalRate;
             }
 
             const itAmt = itQty > 0 && itRate > 0 ? itQty * itRate : 0;
@@ -9420,8 +10079,8 @@ async function executeAction(action, draft, senderPhone) {
             totalAmount += addedLines.addedAmount;
             itemsUpdated = true;
           }
-        } else if (updates.rate && dItems && dItems.length > 0) {
-          // 2. Global rate update across all items
+        } else if (updates.rate && dItems && dItems.length > 0 && (dItems.length === 1 || draft._apply_rate_to_all)) {
+          // 2. Global rate update across all items (only for single item or explicit all)
           const newRate = parseIndianAmount(updates.rate) || 0;
           if (newRate > 0) {
             for (const it of dItems) {
@@ -9852,7 +10511,7 @@ async function executeAction(action, draft, senderPhone) {
             const { data: inqRow, error: inqErr } = await supabase
               .from('inquiries')
               .insert({
-                source_channel: 'WhatsApp',
+                source_channel: draft.source_channel || 'WhatsApp',
                 customer_name: companyName,
                 sender_name: companyName,
                 raw_text: humanRawText.trim(),
@@ -11009,25 +11668,9 @@ async function executeAction(action, draft, senderPhone) {
         const email = draft.email ? String(draft.email).trim() : null;
 
         // 1. Exact duplicate check across recurring_customers
-        const { data: existingCusts } = await supabase
-          .from('recurring_customers')
-          .select('*')
-          .ilike('customer_name', companyName)
-          .limit(10);
-
-        const exactMatch = (existingCusts || []).find(c =>
-          c.customer_name.trim().toLowerCase() === companyName.toLowerCase() ||
-          (normalizeCoreCompanyName(c.customer_name) && normalizeCoreCompanyName(c.customer_name) === normalizeCoreCompanyName(companyName))
-        );
-
-        if (exactMatch) {
-          return `⚠️ *Customer Already Exists!*\n\n` +
-            `• *Company Name:* ${exactMatch.customer_name}\n` +
-            (exactMatch.contact_person ? `• *Contact Person:* ${exactMatch.contact_person}\n` : '') +
-            (exactMatch.customer_phone ? `• *Mobile Number:* ${exactMatch.customer_phone}\n` : '') +
-            (exactMatch.customer_address ? `• *Location:* ${exactMatch.customer_address}\n` : '') +
-            (exactMatch.customer_gst ? `• *GST:* ${exactMatch.customer_gst}\n` : '') +
-            `\n_This customer is already registered in the system. Duplicate record creation was prevented._`;
+        const regCheck = await checkCompanyWideCustomerRegistration(companyName, senderPhone);
+        if (regCheck && regCheck.isRegistered) {
+          return regCheck.conflictMessage;
         }
 
         // 2. Insert new record into recurring_customers
@@ -11659,14 +12302,44 @@ function isStageUpdatePrompt(text) {
   if (!text || typeof text !== 'string') return false;
   const lower = text.toLowerCase().trim();
 
-  const stageWord = '(?:stage|satge|stgae|stag)';
+  // If explicitly logging or creating a new record, it is a write operation that must remain menu-gated
+  if (/^\s*(?:log|record|create|add)\s+(?:new\s+)?(?:inquiry|deal|order|visit|field\s*visit|complaint)\b/i.test(lower)) {
+    return false;
+  }
+
+  const stageWord = '(?:stage|satge|stgae|stag|stages|satges)';
+  const stageTarget = '(?:won|lost|closed\\s*won|closed\\s*lost|order\\s*confirmed|order\\s*placed|negotiat\\w*|quoted|quotated|price\\s*quotes?|price\\s*quotations?|on\\s*hold|hold|new\\s*inquiry|new\\s*enquiry|sauda\\s*pakka(?:\\s*ho\\s*gaya)?|deal\\s*pakk[ai]|deal\\s*confirm(?:ed)?|order\\s*mil\\s*gaya|final\\s*ho\\s*gaya|deal\\s*done)';
+
+  // 1. Explicit stage keyword (e.g. "stage update to won", "update stage to quoted", "change stage to new inquiry")
+  if (new RegExp(`\\b(?:${stageWord}\\s*(?:update|change|status|to|is|:)|(?:update|upadte|change|set|move|mark)\\s+(?:the\\s+)?${stageWord})\\b`, 'i').test(lower)) {
+    return true;
+  }
+
+  // 2. Direct Hinglish or English deal closing phrases anywhere in text
+  // e.g. "sauda pakka ho gaya for ABC infra", "deal pakki for XYZ", "order mil gaya from ABC"
+  if (/\b(?:sauda\s*pakka(?:\s*ho\s*gaya)?|deal\s*pakk[ai]|deal\s*confirm(?:ed)?|order\s*mil\s*gaya|final\s*ho\s*gaya|deal\s*done)\b/i.test(lower)) {
+    return true;
+  }
+
+  // 3. Mark/update with customer or target in between, e.g. "mark ABC infra deal won", "mark ABC infra as won", "mark deal won for ABC"
+  if (new RegExp(`\\b(?:mark|move|put|change|set|update|upadte)\\s+.{1,40}?\\b(?:as\\s+|to\\s+)?(?:won|lost|closed\\s*won|closed\\s*lost|quoted|negotiat\\w*|on\\s*hold|hold)\\b`, 'i').test(lower)) {
+    return true;
+  }
+
+  // 4. "deal won", "deal lost", "inquiry quoted", "order won", etc.
+  if (new RegExp(`\\b(?:deal|inquiry|order)\\s+(?:won|lost|closed|quoted|negotiat\\w*|on\\s*hold|hold)\\b`, 'i').test(lower)) {
+    return true;
+  }
+
+  // 5. "${closingTarget} for / of / from <Customer>" e.g. "deal won for ABC infra", "won for ABC infra"
+  if (new RegExp(`\\b(?:won|lost|closed|quoted|negotiat\\w*|on\\s*hold|deal\\s*done|sauda\\s*pakka)\\s+(?:for|of|from)\\b`, 'i').test(lower)) {
+    return true;
+  }
+
+  // 6. Direct command or status phrase
   if (
-    new RegExp(`\\b(?:${stageWord}\\s+update|(?:update|upadte|change|set|move)\\s+(?:the\\s+)?${stageWord})\\b`, 'i').test(lower) ||
-    new RegExp(`\\b(?:mark|move|put|change|set|update|upadte)\\s+(?:the\\s+|a\\s+)?(?:deal|inquiry|status|${stageWord})?\\s*(?:as\\s+|to\\s+)?(won|lost|negotiation|quoted|quotated|price\\s*quote|price\\s*quotation|on\\s+hold|hold|new\\s*inquiry)\\b`, 'i').test(lower) ||
-    /\b(?:deal\s+won|deal\s+lost|inquiry\s+won|inquiry\s+lost|deal\s+quoted|deal\s+negotiation|deal\s+on\s+hold)\b/i.test(lower) ||
-    /^(?:stage\s+(?:is\s+)?(?:to\s+)?(?:won|lost|negotiation|quoted|on\s+hold|price\s*quote)|marked?\s+(?:as\s+)?(?:won|lost|negotiation|quoted|on\s+hold|price\s*quote))\b/i.test(lower) ||
-    /^(?:mark\s+as\s+won|mark\s+as\s+lost|mark\s+as\s+negotiation|mark\s+as\s+quoted|mark\s+as\s+price\s*quote|mark\s+as\s+on\s+hold)$/i.test(lower) ||
-    /^(?:won|lost|negotiation|quoted|on\s+hold)$/i.test(lower)
+    new RegExp(`^(?:${stageWord}\\s+(?:is\\s+)?(?:to\\s+)?${stageTarget}|marked?\\s+(?:as\\s+)?${stageTarget})\\b`, 'i').test(lower) ||
+    new RegExp(`^(?:mark\\s+as\\s+)?${stageTarget}(?:\\s+for\\s+.+)?$`, 'i').test(lower)
   ) {
     return true;
   }
@@ -11696,11 +12369,35 @@ async function saveStageOnlyInquiryUpdateIfNeeded(text, senderPhone, activeState
 
 function isStageOnlyUpdate(text) {
   if (!isStageUpdatePrompt(text)) return false;
-  const stripped = String(text)
+
+  // Remove entity IDs (e.g. INQ-734D48, DEAL-123456, ORD-123, PO-123)
+  let stripped = String(text)
+    .replace(/\b(?:INQ|DEAL|ORD|PO)[-_][A-Z0-9]+\b/gi, ' ')
     .replace(/\b(?:price\s*quotes?|price\s*quotations?)\b/gi, ' ')
-    .replace(/\b(?:quoted|quotated|negotiation|on\s*hold|new\s*inquiry|won|lost|stage|status|update|upadte|change|set|mark|move|put|the|to|as|for|inquiry|deal|this|above|it)\b/gi, ' ');
-  if (/\b(?:rate|qty|quantity|payment|delivery|location|notes|make|line\s*items?|tonnage)\b/i.test(stripped)) return false;
-  if (/\b\d+(?:\.\d+)?\s*(?:mt|tons?|tonne|kg|mm)\b/i.test(stripped)) return false;
+    .replace(/\b(?:quoted|quotated|negotiation|on\s*hold|new\s*inquiry|new\s*enquiry|won|lost|closed\s*won|closed\s*lost)\b/gi, ' ')
+    .replace(/\b(?:sauda\s*pakka(?:\s*ho\s*gaya)?|deal\s*pakk[ai]|deal\s*confirm(?:ed)?|order\s*mil\s*gaya|final\s*ho\s*gaya|deal\s*done)\b/gi, ' ')
+    .replace(/\b(?:stage|satge|stgae|stages|satges|status)\b/gi, ' ')
+    .replace(/\b(?:update|upadte|updated|change|changed|set|mark|marked|move|moved|put|make|turn)\b/gi, ' ')
+    .replace(/\b(?:the|to|as|for|inquiry|deal|order|this|above|it|ko|kar\s*do|karo|me|in|of|and|an|a|is|ho|gaya|gayi|mil|pakka|pakki)\b/gi, ' ');
+
+  // 1. Any keywords indicating other fields (rates, prices, quantities, delivery, payment, notes, etc.)
+  if (/\b(?:rate|rates|price|prices|pricing|target\s*price|unit\s*price|cost|bhav|daam|amount)\b/i.test(stripped)) return false;
+  if (/\b(?:qty|quantity|quantities|tonnage|tons?|tonne|kg|pieces?|pcs|nos|sheets?|meters?|mtr|dimension|dimensions|spec|specs|specification|specifications|thickness|thk|gauge|size|grade)\b/i.test(stripped)) return false;
+  if (/\b(?:payment|terms?|credit|advance|days?|din|pdc|lc|cad|rtgs|neft|cod)\b/i.test(stripped)) return false;
+  if (/\b(?:delivery|dispatch|dispatched|destination|address|location|site|transport|freight|city)\b/i.test(stripped)) return false;
+  if (/\b(?:notes?|remarks?|comments?|make|brand|preferred\s*make)\b/i.test(stripped)) return false;
+  if (/\b(?:po\s*number|po\s*no|po\s*date|delivery\s*date)\b/i.test(stripped)) return false;
+
+  // 2. Common steel product names or categories
+  if (/\b(?:coil|coils|sheet|sheets|plate|plates|pipe|pipes|tube|tubes|bar|bars|tmt|beam|beams|channel|channels|angle|angles|billet|billets|wire\s*rod|structure|structural|hr|cr|ms|ss|gi|gp)\b/i.test(stripped)) return false;
+
+  // 3. Currency or unit syntax (e.g. 8/MT, ₹500, @ 50, etc.)
+  if (/[₹@]|(?:rs\.?|inr)\b/i.test(stripped)) return false;
+  if (/(?:\/|per|\s*@\s*)\s*(?:mt|tons?|tonne|kg|mm|mtr|nos|pcs|pieces?)/i.test(stripped)) return false;
+
+  // 4. Any numbers remaining (rates, quantities, dimensions)
+  if (/\b\d+(?:\.\d+)?\b/.test(stripped)) return false;
+
   return true;
 }
 
@@ -11901,23 +12598,24 @@ async function handleMidFlowStageUpdate(text, senderPhone, activeState, action, 
   // 1. Identify target stage
   let targetStage = null;
   let stageDisplayName = null;
+  let targetCustomerName = null;
 
-  if (/\b(?:price\s*quote|price\s*quotation|quoted|quote|proposal|prop)\b/i.test(lower)) {
+  if (/\b(?:price\s*quote|price\s*quotation|quoted|quote|proposal|prop|quotation\s*bheja|quote\s*bheja|quote\s*diya|bhav\s*diya|proposal\s*diya)\b/i.test(lower)) {
     targetStage = 'quoted';
     stageDisplayName = 'Price Quote';
-  } else if (/\b(?:negotiat(?:ion|ing|e)?|negot)\b/i.test(lower)) {
+  } else if (/\b(?:negotiat(?:ion|ing|e)?|negot|baatcheet|mol\s*bhav|rate\s*discussion|discussion\s*in\s*progress)\b/i.test(lower)) {
     targetStage = 'negotiation';
     stageDisplayName = 'Negotiation';
-  } else if (/\b(?:on\s*hold|hold)\b/i.test(lower)) {
+  } else if (/\b(?:on\s*hold|hold|hold\s*pe|baad\s*me|pending\s*discussion)\b/i.test(lower)) {
     targetStage = 'on_hold';
     stageDisplayName = 'On Hold';
-  } else if (/\b(?:won|closed\s*won|order\s*confirmed|order\s*placed|deal\s*won)\b/i.test(lower)) {
+  } else if (/\b(?:won|closed\s*won|order\s*confirmed|order\s*placed|deal\s*won|sauda\s*pakka|deal\s*pakki|deal\s*confirm|order\s*mil\s*gaya|final\s*ho\s*gaya|deal\s*done)\b/i.test(lower)) {
     targetStage = 'won';
     stageDisplayName = 'Closed Won';
-  } else if (/\b(?:lost|closed\s*lost|deal\s*lost|cancelled|canceled|drop)\b/i.test(lower)) {
+  } else if (/\b(?:lost|closed\s*lost|deal\s*lost|cancelled|canceled|drop|mana\s*kar\s*diya|mana\s*kiya|deal\s*cancel|party\s*ne\s*mana\s*kiya|deal\s*drop)\b/i.test(lower)) {
     targetStage = 'lost';
     stageDisplayName = 'Closed Lost';
-  } else if (/\b(?:new\s*inquiry|new\s*enquiry|new)\b/i.test(lower)) {
+  } else if (/\b(?:new\s*inquiry|new\s*enquiry|naya\s*inquiry|naya\s*enquiry|initial\s*stage)\b/i.test(lower)) {
     targetStage = 'new_inquiry';
     stageDisplayName = 'New Inquiry';
   }
@@ -11944,16 +12642,38 @@ async function handleMidFlowStageUpdate(text, senderPhone, activeState, action, 
     }
   }
 
+  // Fast regex customer extraction: "for <Customer>", "mark <Customer>", "<Customer> deal won", etc.
+  if (!targetCustomerName) {
+    const forCustMatch = clean.match(/\b(?:for|of|from)\s+([A-Za-z0-9\s.&'-]{2,40}?)(?:\s+(?:deal|inquiry|order|stage|as|to|won|lost|quoted)|\s*$)/i);
+    if (forCustMatch && !/^(?:the|above|this|it|deal|inquiry|order)$/i.test(forCustMatch[1].trim())) {
+      targetCustomerName = forCustMatch[1].trim();
+    }
+    if (!targetCustomerName) {
+      const markCustMatch = clean.match(/\b(?:mark|move|put|change|set|update)\s+([A-Za-z0-9\s.&'-]{2,40}?)\s+(?:as|to|deal|inquiry|stage|won|lost|quoted)\b/i);
+      if (markCustMatch && !/^(?:the|a|an|deal|inquiry|order|status|stage)$/i.test(markCustMatch[1].trim())) {
+        targetCustomerName = markCustMatch[1].trim();
+      }
+    }
+    if (!targetCustomerName) {
+      const beforeDealMatch = clean.match(/^([A-Za-z0-9\s.&'-]{2,40}?)\s+(?:deal\s+won|deal\s+lost|sauda\s+pakka|order\s+won)\b/i);
+      if (beforeDealMatch && !/^(?:the|a|an|deal|inquiry|order|status|stage|mark|update)$/i.test(beforeDealMatch[1].trim())) {
+        targetCustomerName = beforeDealMatch[1].trim();
+      }
+    }
+  }
+
   // If targetStage or targetInqId is still missing, attempt LLM extraction
   if (!targetStage || !targetInqId) {
     try {
-      const extractPrompt = `Extract the target deal/inquiry ID and new pipeline stage from the following message:
+      const extractPrompt = `Extract the target deal/inquiry ID, customer/company name, and new pipeline stage from the following message:
 Message: "${clean}"
 Active draft inquiry ID: "${draft?.inquiry_id || ''}"
+Active draft customer name: "${draft?.company_name || ''}"
 
 Return ONLY JSON:
 {
   "inquiry_id": "<Inquiry ID e.g. INQ-D013D7 or null>",
+  "customer_name": "<Customer / Company Name e.g. ABC Steels or null>",
   "target_stage": "quoted|negotiation|on_hold|won|lost|new_inquiry|null"
 }`;
       const res = await invokeWithFallback([new HumanMessage(extractPrompt)], null);
@@ -11973,14 +12693,65 @@ Return ONLY JSON:
       if (!targetInqId && jsonParsed.inquiry_id) {
         targetInqId = String(jsonParsed.inquiry_id).replace(/^#?(?:INQ|DEAL)[-_:#\s]*/i, '').replace(/^#+/, '').replace(/-/g, '').trim().toUpperCase();
       }
+      if (!targetCustomerName && jsonParsed.customer_name) {
+        targetCustomerName = String(jsonParsed.customer_name).trim();
+      }
     } catch (e) {
       console.warn('[CatalogFlow] handleMidFlowStageUpdate LLM extraction notice:', e.message);
     }
   }
 
   if (!targetStage) {
-    targetStage = 'quoted';
-    stageDisplayName = 'Price Quote';
+    const stageClarificationPrompt = `Which stage would you like to update this inquiry to?\n\n` +
+      `1️⃣ *Price Quote* (Quoted)\n` +
+      `2️⃣ *Negotiation*\n` +
+      `3️⃣ *Closed Won*\n` +
+      `4️⃣ *Closed Lost*\n` +
+      `5️⃣ *On Hold*\n` +
+      `6️⃣ *New Inquiry*\n\n` +
+      `Please reply with the stage name or option number (1–6).`;
+
+    if (activeState === 'general' || !draft) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      await recordSessionMessage(senderPhone, 'assistant', stageClarificationPrompt, { action_type: 'UPDATE_INQUIRY' });
+      await saveActiveSession(senderPhone, 'Customer', 'general');
+      return {
+        handled: true,
+        reply: stageClarificationPrompt,
+        interactiveType: 'buttons',
+        interactiveButtons: [
+          { id: 'stage_quoted', title: 'Price Quote' },
+          { id: 'stage_negotiation', title: 'Negotiation' },
+          { id: 'stage_won', title: 'Closed Won' },
+        ],
+      };
+    }
+
+    const resumeMsg = buildResumePrompt(action, draft);
+    const combinedReply = `${stageClarificationPrompt}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
+
+    await recordSessionMessage(senderPhone, 'user', text);
+    await recordSessionMessage(senderPhone, 'assistant', combinedReply, {
+      action_type: action,
+      customer_name: draft?.company_name || null,
+    });
+
+    await saveActiveSession(
+      senderPhone,
+      draft?.company_name || 'Customer',
+      `catalog_resume_ask|${activeState}|${action}|${JSON.stringify(draft || {})}`
+    );
+
+    return {
+      handled: true,
+      reply: combinedReply,
+      interactiveType: 'buttons',
+      interactiveButtons: [
+        { id: 'stage_quoted', title: 'Price Quote' },
+        { id: 'stage_negotiation', title: 'Negotiation' },
+        { id: 'stage_won', title: 'Closed Won' },
+      ],
+    };
   }
 
   const cleanInqCode = targetInqId ? targetInqId.replace(/-/g, '').toUpperCase() : null;
@@ -12075,11 +12846,12 @@ Return ONLY JSON:
     }
   }
 
-  // 3c. Fallback by draft company_name ONLY if cleanInqCode was not provided or not matched
-  if (!deal && !inq && draft?.company_name) {
+  // 3c. Fallback by customer name (from user message or active draft company_name)
+  const searchCustomerName = targetCustomerName || draft?.company_name;
+  if (!deal && !inq && searchCustomerName) {
     if (deals && deals.length > 0) {
-      deal = deals.find(d => isCustomerMatch(draft.company_name, null, d.customer_name, null)) ||
-             deals.find(d => d.customer_name && d.customer_name.toLowerCase().includes(draft.company_name.toLowerCase())) || null;
+      deal = deals.find(d => isCustomerMatch(searchCustomerName, null, d.customer_name, null)) ||
+             deals.find(d => d.customer_name && d.customer_name.toLowerCase().includes(searchCustomerName.toLowerCase())) || null;
     }
 
     if (!deal) {
@@ -12093,7 +12865,8 @@ Return ONLY JSON:
         const matched = matchInqs.find(i => {
           const ai = i.ai_extraction_json || {};
           const cName = i.sender_name || ai.companyName || ai.customer_name || '';
-          return isCustomerMatch(draft.company_name, null, cName, null);
+          return isCustomerMatch(searchCustomerName, null, cName, null) ||
+                 (cName && cName.toLowerCase().includes(searchCustomerName.toLowerCase()));
         });
         if (matched) {
           inq = matched;
@@ -12105,7 +12878,17 @@ Return ONLY JSON:
 
   // If no deal or inquiry found
   if (!deal && !inq) {
-    const errorMsg = `❌ *Inquiry Not Found*\n\nCould not find an inquiry or deal matching ${targetInqId ? `"${targetInqId}"` : 'the specified reference'}.\n\nPlease check the Inquiry ID (e.g. INQ-D013D7) and try again.`;
+    const missingRef = targetInqId ? `"${targetInqId}"` : (targetCustomerName ? `customer "${targetCustomerName}"` : 'the specified reference');
+    const errorMsg = `❌ *Inquiry Not Found*\n\nCould not find an inquiry or deal matching ${missingRef}.\n\nPlease check the Inquiry ID (e.g. INQ-D013D7) or Customer Name and try again.`;
+    if (activeState === 'general' || !draft) {
+      await recordSessionMessage(senderPhone, 'user', text);
+      await recordSessionMessage(senderPhone, 'assistant', errorMsg, { action_type: action || 'UPDATE_INQUIRY' });
+      await saveActiveSession(senderPhone, 'Customer', 'general');
+      return {
+        handled: true,
+        reply: errorMsg,
+      };
+    }
     const resumeMsg = buildResumePrompt(action, draft);
     const combinedReply = `${errorMsg}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
 
@@ -12174,6 +12957,16 @@ Return ONLY JSON:
   }
 
   if (transitionError) {
+    if (activeState === 'general' || !draft) {
+      const errReply = `⚠️ ${transitionError}`;
+      await recordSessionMessage(senderPhone, 'user', text);
+      await recordSessionMessage(senderPhone, 'assistant', errReply, { action_type: action || 'UPDATE_INQUIRY' });
+      await saveActiveSession(senderPhone, 'Customer', 'general');
+      return {
+        handled: true,
+        reply: errReply,
+      };
+    }
     const resumeMsg = buildResumePrompt(action, draft);
     const combinedReply = `⚠️ ${transitionError}\n\n━━━━━━━━━━━━━━━━━━━━\n${resumeMsg}`;
 
@@ -12253,6 +13046,23 @@ Return ONLY JSON:
         delete draft.updates.status;
       }
     }
+  }
+
+  const cleanCust = deal?.customer_name || inq?.sender_name || inq?.ai_extraction_json?.companyName || draft?.company_name || '';
+  if (activeState === 'general' || !draft) {
+    const cleanConfirmation = `✅ *Inquiry Stage Updated!*\n\n• *Inquiry:* ${formattedDisplayId}${cleanCust ? ` (${cleanCust})` : ''}\n• *New Stage:* *${stageDisplayName}*`;
+    await recordSessionMessage(senderPhone, 'user', text);
+    await recordSessionMessage(senderPhone, 'assistant', cleanConfirmation, {
+      action_type: 'UPDATE_INQUIRY',
+      customer_name: cleanCust || null,
+    });
+    await saveActiveSession(senderPhone, cleanCust || 'Customer', 'general');
+    return {
+      handled: true,
+      reply: cleanConfirmation,
+      interactiveType: 'buttons',
+      interactiveButtons: getPostActivityButtons('UPDATE_INQUIRY'),
+    };
   }
 
   const confirmationMsg = `Stage for ${formattedDisplayId} has been updated to ${stageDisplayName}.`;
@@ -12373,10 +13183,7 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
       customerFilter: draft.customerFilter || null,
     });
     await saveActiveSession(senderPhone, draft.customerFilter || 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-    return {
-      handled: true,
-      reply: selectionRes.reply,
-    };
+    return catalogSelectionResult(selectionRes);
   }
 
   if (interruptedState === 'catalog_confirm') {
@@ -12649,8 +13456,13 @@ async function classifyActiveSessionIntent(activeActivity, text) {
     return { classification: 'SAME_ACTIVITY' };
   }
 
-  // 2. Candidate disambiguation selections (1, 2, option 1, date strings) are field inputs
-  if (/^(?:option\s*|choice\s*|#\s*)?(?:[1-9]|10)\s*[.)]?$/i.test(trimmed)) {
+  // 1b. Fast guard for candidate list pagination and navigation commands ("next 10 customers", "more", "prev", etc.)
+  if (isPaginationRequest(trimmed) || isPreviousPaginationRequest(trimmed)) {
+    return { classification: 'SAME_ACTIVITY' };
+  }
+
+  // 2. Candidate disambiguation selections (1, 2, option 1, 16, etc.) are field inputs
+  if (/^(?:option\s*|choice\s*|#\s*)?(?:[1-9]\d?)\s*[.)]?$/i.test(trimmed)) {
     return { classification: 'SAME_ACTIVITY' };
   }
 
@@ -12687,15 +13499,15 @@ async function classifyActiveSessionIntent(activeActivity, text) {
     return { classification: 'OUT_OF_SCOPE_GENERIC' };
   }
 
-  // In UPDATE_INQUIRY, updating stage/status, rate, quantity, or line items is part of editing the active inquiry
-  if (activeActivity === 'UPDATE_INQUIRY') {
-    const inqMatch = trimmed.match(/\b(?:INQ|DEAL)-([A-Z0-9]+)\b/i);
-    if (!inqMatch) {
+  // In UPDATE_INQUIRY or UPDATE_ORDER, updating stage/status, rate, quantity, or line items is part of editing the active record
+  if (activeActivity === 'UPDATE_INQUIRY' || activeActivity === 'UPDATE_ORDER') {
+    const targetMatch = trimmed.match(/\b(?:INQ|DEAL|ORD|PO)-([A-Z0-9]+)\b/i);
+    if (!targetMatch) {
       if (!isOutOfScopeGenericPrompt(trimmed) && !detectOutOfScopeActionAttempt(activeActivity, trimmed)) {
         if (isStageOnlyUpdate(trimmed)) {
           return { classification: 'STAGE_UPDATE' };
         }
-        if (isStageUpdatePrompt(trimmed) || /\b(?:rate|price|qty|quantity)\b/i.test(trimmed)) {
+        if (isStageUpdatePrompt(trimmed) || /\b(?:rate|price|qty|quantity|po|date|payment|delivery|status|stage|satge)\b/i.test(trimmed)) {
           return { classification: 'SAME_ACTIVITY' };
         }
       }
@@ -12709,14 +13521,14 @@ Incoming message: "${trimmed}"
 
 Classify this incoming message:
 - If this message asks to change, edit, rename, or set a SYSTEM-GENERATED field of the current record (Inquiry ID, Deal ID, Enquiry Number, Inquiry Date / date of the inquiry, Order ID, Complaint Ticket ID, Visit ID, Customer ID, Logged By / Created By, Creation Date, Salesperson), e.g. "edit inquiry id for ABC Steels to IN897", "change inquiry number to 897", "INQ-F2785B ko IN897 kar do", "change created date", "update the date of the inquiry to tomorrow" -> SAME_ACTIVITY (the active workflow will explain that the field can't be edited). NEVER classify these as STAGE_UPDATE, RETRIEVAL_QUERY, or DIFFERENT_ACTIVITY.
-- If the user is in [UPDATE_INQUIRY], updating stage/status (Negotiation, Won, Lost, Quoted, On Hold), rate, quantity, or line items is a core field edit for the active inquiry -> SAME_ACTIVITY. Do NOT classify as STAGE_UPDATE unless a DIFFERENT inquiry ID is explicitly specified.
-- If this message is requesting to update, change, set, move, or mark the stage/status of an inquiry or deal (e.g. "update the stage to price quote for above inquiry", "update stage to quoted", "mark as negotiation", "move to on hold", "set status to price quote", "stage won", "set stage to lost") -> STAGE_UPDATE
+- If the user is in [UPDATE_INQUIRY] or [UPDATE_ORDER], updating stage/status (Negotiation, Won, Lost, Quoted, On Hold, Confirmed, Pending, Processing, Dispatched, Delivered), rate, price, quantity, PO details, delivery, or line items is a core field edit for the active record -> SAME_ACTIVITY. Do NOT classify as STAGE_UPDATE unless a DIFFERENT record ID is explicitly specified or it is strictly a stage-only update without any other fields.
+- If the user provides field details (rates, prices, quantities, products, PO details, delivery location, payment terms, remarks, notes, or compound stage + rate updates) for the active [${activeActivity}] (${activityDisplayName}) form -> SAME_ACTIVITY
+- If this message is STRICTLY requesting to update, change, set, move, or mark ONLY the pipeline stage/status of an inquiry or deal WITHOUT other product or pricing details (e.g. "update the stage to price quote for above inquiry", "update stage to quoted", "mark as negotiation", "move to on hold", "set status to price quote", "stage won", "set stage to lost") -> STAGE_UPDATE
 - If this message is reporting or logging a customer complaint, quality issue, defect, damage, rust, shortage, service problem, or delivery issue -> DIFFERENT_ACTIVITY:LOG_COMPLAINT
 - If this message is recording or logging a purchase order / PO -> DIFFERENT_ACTIVITY:LOG_ORDER
 - If this message is logging a new customer inquiry, requirement, or RFQ -> DIFFERENT_ACTIVITY:LOG_INQUIRY
 - If this message is onboarding a new customer profile -> DIFFERENT_ACTIVITY:LOG_NEW_CUSTOMER
 - If this message is logging a customer field visit / client meeting -> DIFFERENT_ACTIVITY:LOG_VISIT
-- If this message provides field details (payment terms e.g. "45 days" / "advance", delivery location e.g. "Mumbai" / "Kolhapur", person met, contact phone, meeting remarks, visit date, outcome, company name, rate, tonnage, quantity, notes, make) for the active [${activeActivity}] (${activityDisplayName}) form -> SAME_ACTIVITY
 - If this message is asking a read-only data query or search about Enlight Metals sales data or CRM records (asking for rates, checking status, listing inquiries, checking orders) -> RETRIEVAL_QUERY
 - If this message is asking an out-of-scope generic question or prompt (celebrities, sports, cricketers, trivia, science, geography, jokes, coding, recipes) -> OUT_OF_SCOPE_GENERIC
 
@@ -12741,7 +13553,7 @@ Classification:`;
     console.log('[CatalogFlow] AI active session intent classifier raw response:', JSON.stringify(raw));
 
     if (/STAGE_UPDATE/i.test(raw)) {
-      if (activeActivity === 'UPDATE_INQUIRY' && !isStageOnlyUpdate(trimmed) && !trimmed.match(/\b(?:INQ|DEAL)-([A-Z0-9]+)\b/i)) {
+      if (!isStageOnlyUpdate(trimmed) && !trimmed.match(/\b(?:INQ|DEAL|ORD|PO)-([A-Z0-9]+)\b/i)) {
         return { classification: 'SAME_ACTIVITY' };
       }
       return { classification: 'STAGE_UPDATE' };
@@ -12765,7 +13577,7 @@ Classification:`;
     }
 
     if (/SAME_ACTIVITY/i.test(raw)) {
-      if (isStageOnlyUpdate(trimmed) || (activeActivity !== 'UPDATE_INQUIRY' && isStageUpdatePrompt(trimmed))) {
+      if (isStageOnlyUpdate(trimmed)) {
         return { classification: 'STAGE_UPDATE' };
       }
       // Check if deterministic regex detects a clear cross-module action that LLM might have missed
@@ -12781,6 +13593,9 @@ Classification:`;
 
   // Deterministic fallback if model call failed or was ambiguous
   if (isStageUpdatePrompt(trimmed)) {
+    if (!isStageOnlyUpdate(trimmed) && !trimmed.match(/\b(?:INQ|DEAL|ORD|PO)-([A-Z0-9]+)\b/i)) {
+      return { classification: 'SAME_ACTIVITY' };
+    }
     return { classification: 'STAGE_UPDATE' };
   }
 
@@ -12858,12 +13673,12 @@ function detectOutOfScopeActionAttempt(currentAction, text) {
  * { handled: false } if message should proceed to general LangGraph Orchestrator
  */
 async function handleCatalogFlow(rawText, senderPhone, options = {}) {
-  if (!rawText || typeof rawText !== 'string') return { handled: false };
-  const text = rawText.trim();
-  if (text.length === 0) return { handled: false };
+  const text = typeof rawText === 'string' ? rawText.trim() : '';
+  if (!text && !options.imageBuffer) return { handled: false };
 
   const { photoDataUrl, gpsData, attachmentObj, incomingAttachments } = extractPhotoAndGps(rawText, options);
   const canUpdateVisits = await canUserUpdateVisits(senderPhone);
+  const callerSourceChannel = options.source_channel || options.channel || null;
 
   // ── 1. FETCH ACTIVE SESSION STATE ──────────────────────────────────────────
   const activeSession = await getFullActiveSession(senderPhone);
@@ -12875,6 +13690,39 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   }
 
   const hasActiveCatalogSession = lastIntent.startsWith('catalog_');
+
+  if (options.imageBuffer && (
+    lastIntent.startsWith('catalog_flow|LOG_INQUIRY') ||
+    lastIntent.startsWith('catalog_editing|LOG_INQUIRY') ||
+    lastIntent.startsWith('catalog_confirm|LOG_INQUIRY') ||
+    lastIntent.startsWith('catalog_selection|LOG_INQUIRY')
+  )) {
+    const caption = /^(?:attached image|photo uploaded)$/i.test(text) ? '' : text;
+    return await handleInquiryDocumentOcr(
+      options.imageBuffer,
+      options.imageMimeType || 'image/jpeg',
+      senderPhone,
+      caption,
+    );
+  }
+
+  if (options.imageBuffer && (
+    lastIntent.startsWith('catalog_flow|LOG_ORDER') ||
+    lastIntent.startsWith('catalog_editing|LOG_ORDER') ||
+    lastIntent.startsWith('catalog_confirm|LOG_ORDER')
+  )) {
+    const caption = /^(?:attached image|photo uploaded)$/i.test(text) ? '' : text;
+    return await handleOrderDocumentOcr(
+      options.imageBuffer,
+      options.imageMimeType || 'image/jpeg',
+      senderPhone,
+      caption,
+    );
+  }
+
+  if (isDirectOrderRequest(text)) {
+    return await beginDirectOrder(senderPhone, callerSourceChannel);
+  }
 
   // ── 2-0. BARE NUMBER WITH NO OPEN SESSION ──
   // Only a displayed catalog menu (or a "reply with N" prompt) makes "1".."10" a catalog selection.
@@ -12930,22 +13778,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       const selectionRes = await fetchAndRenderUpdateSelection(explicitAction, senderPhone, { page: 1, customerFilter: null });
       await startNewCatalogSession(senderPhone, selectionRes.reply);
       await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: explicitAction });
-      if (selectionRes.hasRecords) {
+      if (selectionRes.hasRecords || explicitAction === 'LOG_ORDER') {
         await saveActiveSession(senderPhone, 'Unknown', `catalog_update_select|${explicitAction}|${JSON.stringify(selectionRes.state)}`);
       } else {
         await saveActiveSession(senderPhone, 'Unknown', 'general');
       }
-      return {
-        handled: true,
-        reply: selectionRes.reply,
-      };
+      return catalogSelectionResult(selectionRes);
     }
 
     const initialPrompt = MODULE_PROMPTS[explicitAction];
     if (initialPrompt) {
       await startNewCatalogSession(senderPhone, initialPrompt);
       await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: explicitAction });
-      await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${explicitAction}|{}`);
+      const initialDraft = callerSourceChannel ? { source_channel: callerSourceChannel } : {};
+      await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${explicitAction}|${JSON.stringify(initialDraft)}`);
       return {
         handled: true,
         reply: initialPrompt,
@@ -13224,6 +14070,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const unrecognizedName = jsonStartIdx >= 0 ? afterAction.slice(0, jsonStartIdx) : parts[2];
     const originalDraftJsonStr = jsonStartIdx >= 0 ? afterAction.slice(jsonStartIdx + 1) : parts.slice(3).join('|');
     const originalDraft = safeParseJSON(originalDraftJsonStr, {});
+    if (callerSourceChannel && !originalDraft.source_channel) {
+      originalDraft.source_channel = callerSourceChannel;
+    }
 
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
 
@@ -13274,11 +14123,47 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         custDraft = await extractFieldsWithLLM('LOG_NEW_CUSTOMER', text, custDraft);
       }
 
+      // Immediate duplicate registration check across recurring_customers
+      const regCheck = await checkCompanyWideCustomerRegistration(custDraft.company_name || unrecognizedName, senderPhone);
+      if (regCheck && regCheck.isRegistered) {
+        const conflictReply = `${regCheck.conflictMessage}\n\n` +
+          `What would you like to do?\n` +
+          `• Reply with a different customer name to continue your ${getActionFriendlyName(originalAction)}.\n` +
+          `• Or reply *cancel* to discard this entry.`;
+        await recordSessionMessage(senderPhone, 'assistant', conflictReply, {
+          action_type: originalAction,
+          customer_name: custDraft.company_name || unrecognizedName,
+        });
+        originalDraft.company_name = null;
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return {
+          handled: true,
+          reply: conflictReply,
+          interactiveType: 'buttons',
+          interactiveButtons: [
+            { id: 'btn_confirm_cancel', title: 'Discard Draft' },
+          ],
+        };
+      }
+
       const custMissing = validateMandatoryFields('LOG_NEW_CUSTOMER', custDraft);
 
       if (custMissing.length === 0) {
         // All customer mandatory fields already supplied (e.g. from field visit or direct input)
-        await executeAction('LOG_NEW_CUSTOMER', custDraft, senderPhone);
+        const custActionRes = await executeAction('LOG_NEW_CUSTOMER', custDraft, senderPhone);
+        if (isExecutionFailureReply(custActionRes) || (typeof custActionRes === 'string' && (custActionRes.includes('Customer Already') || custActionRes.includes('Failed to add customer')))) {
+          const conflictReply = `${custActionRes}\n\n` +
+            `What would you like to do?\n` +
+            `• Reply with a different customer name to continue your ${getActionFriendlyName(originalAction)}.\n` +
+            `• Or reply *cancel* to discard this entry.`;
+          await recordSessionMessage(senderPhone, 'assistant', conflictReply, {
+            action_type: originalAction,
+            customer_name: custDraft.company_name,
+          });
+          originalDraft.company_name = null;
+          await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+          return { handled: true, reply: conflictReply };
+        }
 
         forwardCustomerDetailsToParentDraft(originalAction, originalDraft, custDraft);
         const custProdCheck = validateDraftProducts(originalAction, originalDraft);
@@ -13368,18 +14253,44 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     ) {
       originalDraft.company_name = null;
       const assignedList = await getAssignedCustomersList(senderPhone);
-      const listDisplay = assignedList && assignedList.length > 0
-        ? `\n\n*Your Assigned Accounts:*\n` + assignedList.slice(0, 10).map((c, i) => `  ${i + 1}. *${c.customer_name}*`).join('\n')
-        : '';
+      const customerNames = (assignedList || []).map(c => c.customer_name).filter(Boolean);
+      const pageSize = 10;
+      const totalPages = Math.ceil(customerNames.length / pageSize);
+      originalDraft._all_customer_candidates = customerNames;
+      originalDraft._customer_candidates = customerNames.slice(0, pageSize);
+      originalDraft._customer_candidates_page = 1;
 
-      const reEnterPrompt = `Understood! 👍 Please reply with the correct *Company Name* so we can proceed with your ${getActionFriendlyName(originalAction)}.${listDisplay}\n\n` +
+      let listDisplay = '';
+      if (customerNames.length > 0) {
+        const pageItems = customerNames.slice(0, pageSize);
+        listDisplay = `\n\n*Your Assigned Accounts (1–${pageItems.length} of ${customerNames.length}):*\n` +
+          pageItems.map((name, i) => `  ${i + 1}. *${name}*`).join('\n');
+      }
+
+      const paginationHint = totalPages > 1
+        ? `\n\n👉 Reply with the *Company Name* (or option number 1–${customerNames.length}), or tap *Next 10 Customers* to view more.`
+        : (customerNames.length > 0 ? `\n\n👉 Reply with the *Company Name* or option number (1–${customerNames.length}).` : '');
+
+      const reEnterPrompt = `Understood! 👍 Please reply with the correct *Company Name* so we can proceed with your ${getActionFriendlyName(originalAction)}.${listDisplay}${paginationHint}\n\n` +
         `_(Your other entered details have been preserved)_`;
 
       await recordSessionMessage(senderPhone, 'assistant', reEnterPrompt, {
         action_type: originalAction,
       });
       await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
-      return { handled: true, reply: reEnterPrompt };
+
+      const buttons = [];
+      if (totalPages > 1) {
+        buttons.push({ id: 'btn_next_customers', title: 'Next 10 Customers' });
+      }
+      buttons.push({ id: 'btn_confirm_cancel', title: 'Discard Draft' });
+
+      return {
+        handled: true,
+        reply: reEnterPrompt,
+        interactiveType: 'buttons',
+        interactiveButtons: buttons,
+      };
     }
 
     // If user directly typed the correct company name
@@ -13470,11 +14381,53 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       return outOfScopeRes;
     }
 
-    const updatedCustDraft = await extractFieldsWithLLM('LOG_NEW_CUSTOMER', text, custDraft);
+    let updatedCustDraft = await extractFieldsWithLLM('LOG_NEW_CUSTOMER', text, custDraft);
+    if (!updatedCustDraft || typeof updatedCustDraft !== 'object') {
+      updatedCustDraft = { ...custDraft };
+    }
+    if (!updatedCustDraft._parentDraft && custDraft._parentDraft) {
+      updatedCustDraft._parentDraft = custDraft._parentDraft;
+    }
+
+    // Deterministic fallback for mobile_number if not yet extracted
+    if (!updatedCustDraft.mobile_number) {
+      const cleanDigits = text.replace(/\D/g, '');
+      if (cleanDigits.length === 10) {
+        updatedCustDraft.mobile_number = cleanDigits;
+      } else if (cleanDigits.length === 12 && cleanDigits.startsWith('91')) {
+        updatedCustDraft.mobile_number = cleanDigits.slice(-10);
+      } else if (cleanDigits.length === 11 && cleanDigits.startsWith('0')) {
+        updatedCustDraft.mobile_number = cleanDigits.slice(-10);
+      }
+    }
+
+    // Deterministic fallback for delivery_location if phone is already set and text has no phone digits
+    if (!updatedCustDraft.delivery_location && updatedCustDraft.mobile_number) {
+      const cleanLoc = text.replace(/^(?:delivery\s*location|location|city|address)\s*[:=-]?\s*/i, '').trim();
+      const hasPhoneDigits = /\b\d{10}\b/.test(text) || text.replace(/\D/g, '').length >= 10;
+      if (!hasPhoneDigits && cleanLoc && cleanLoc.length >= 2 && cleanLoc.length <= 60 && !isDiscardOrCancelIntent(cleanLoc)) {
+        updatedCustDraft.delivery_location = cleanLoc;
+      }
+    }
+
     const custMissing = validateMandatoryFields('LOG_NEW_CUSTOMER', updatedCustDraft);
 
     if (custMissing.length === 0) {
-      await executeAction('LOG_NEW_CUSTOMER', updatedCustDraft, senderPhone);
+      const custActionRes = await executeAction('LOG_NEW_CUSTOMER', updatedCustDraft, senderPhone);
+      if (isExecutionFailureReply(custActionRes) || (typeof custActionRes === 'string' && (custActionRes.includes('Customer Already') || custActionRes.includes('Failed to add customer')))) {
+        const conflictReply = `${custActionRes}\n\n` +
+          `What would you like to do?\n` +
+          `• Reply with a different customer name to continue your ${getActionFriendlyName(originalAction)}.\n` +
+          `• Or reply *cancel* to discard this entry.`;
+        await recordSessionMessage(senderPhone, 'assistant', conflictReply, {
+          action_type: originalAction,
+          customer_name: updatedCustDraft.company_name,
+        });
+        const originalDraft = updatedCustDraft._parentDraft || {};
+        originalDraft.company_name = null;
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return { handled: true, reply: conflictReply };
+      }
 
       const originalDraft = updatedCustDraft._parentDraft || {};
       forwardCustomerDetailsToParentDraft(originalAction, originalDraft, updatedCustDraft);
@@ -13521,11 +14474,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       if (updatedCustDraft.contact_person) {
         alreadyProvided.push(`• *Contact Person:* ${updatedCustDraft.contact_person}`);
       }
-      if (updatedCustDraft.delivery_location) {
-        alreadyProvided.push(`• *Delivery Location:* ${updatedCustDraft.delivery_location}`);
-      }
       if (updatedCustDraft.mobile_number) {
         alreadyProvided.push(`• *Mobile Number:* ${updatedCustDraft.mobile_number}`);
+      }
+      if (updatedCustDraft.delivery_location) {
+        alreadyProvided.push(`• *Delivery Location:* ${updatedCustDraft.delivery_location}`);
       }
 
       const missingList = custMissing.map(m => `• *${m}*`).join('\n');
@@ -13549,6 +14502,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const action = parts[1];
     const draftJsonStr = parts.slice(2).join('|');
     const draft = safeParseJSON(draftJsonStr, {});
+    if (callerSourceChannel && !draft.source_channel) {
+      draft.source_channel = callerSourceChannel;
+    }
 
     if (await isMidFlowReadQuery(text)) {
       return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_confirm', action, draft);
@@ -13592,7 +14548,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         if (custCheck.isUnrecognizedCustomer) {
           await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
           await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(draft)}`);
-          return { handled: true, reply: custCheck.prompt };
+          return {
+            handled: true,
+            reply: custCheck.prompt,
+            interactiveType: 'buttons',
+            interactiveButtons: NEW_CUSTOMER_BUTTONS,
+          };
         } else {
           draft.company_name = null;
           await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
@@ -13889,6 +14850,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const action = parts[1];
     const draftJsonStr = parts.slice(2).join('|');
     const draft = safeParseJSON(draftJsonStr, {});
+    if (callerSourceChannel && !draft.source_channel) {
+      draft.source_channel = callerSourceChannel;
+    }
 
     const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
 
@@ -14018,7 +14982,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
-        return { handled: true, reply: custCheck.prompt };
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: NEW_CUSTOMER_BUTTONS,
+        };
       } else {
         updatedDraft.company_name = null;
         await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
@@ -14092,6 +15061,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     let action = parts[1];
     const draftJsonStr = parts.slice(2).join('|');
     let existingDraft = safeParseJSON(draftJsonStr, {});
+    if (callerSourceChannel && !existingDraft.source_channel) {
+      existingDraft.source_channel = callerSourceChannel;
+    }
 
     await recordSessionMessage(senderPhone, 'user', text);
 
@@ -14101,7 +15073,59 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // ── Pagination Handler for Candidate Lists (View More / Next) ────────────
-    if (isPaginationRequest(text)) {
+    if (isPaginationRequest(text) || isPreviousPaginationRequest(text)) {
+      if (existingDraft._all_customer_candidates && Array.isArray(existingDraft._all_customer_candidates)) {
+        const pool = existingDraft._all_customer_candidates;
+        const pageSize = 10;
+        const totalPages = Math.ceil(pool.length / pageSize);
+        const currentPage = Number(existingDraft._customer_candidates_page) || 1;
+        const isPrev = isPreviousPaginationRequest(text);
+        let targetPage = isPrev ? currentPage - 1 : currentPage + 1;
+
+        if (isPrev && targetPage < 1) {
+          targetPage = 1;
+        }
+
+        if (!isPrev && targetPage > totalPages) {
+          const noMoreMsg = `ℹ️ *All ${pool.length} assigned accounts have already been displayed.*\n\n👉 Reply with the *Company Name* or *Option Number* (1–${pool.length}) to proceed with your ${getActionFriendlyName(action)}.`;
+          await recordSessionMessage(senderPhone, 'assistant', noMoreMsg, { action_type: action });
+          return {
+            handled: true,
+            reply: noMoreMsg,
+            interactiveType: 'buttons',
+            interactiveButtons: [
+              { id: 'btn_confirm_cancel', title: 'Discard Draft' },
+            ],
+          };
+        }
+
+        existingDraft._customer_candidates_page = targetPage;
+        const startIdx = (targetPage - 1) * pageSize;
+        const pageItems = pool.slice(startIdx, startIdx + pageSize);
+        existingDraft._customer_candidates = pageItems;
+
+        const listDisplay = pageItems.map((name, i) => `  ${startIdx + i + 1}. *${name}*`).join('\n');
+        const headerText = `*Your Assigned Accounts (${startIdx + 1}–${startIdx + pageItems.length} of ${pool.length}):*`;
+        const promptText = `Understood! 👍 Please reply with the correct *Company Name* so we can proceed with your ${getActionFriendlyName(action)}.\n\n${headerText}\n${listDisplay}\n\n` +
+          `👉 Reply with the *Company Name* (or option number 1–${pool.length})${targetPage < totalPages ? ', or tap *Next 10 Customers* to view more.' : '.'}\n\n` +
+          `_(Your other entered details have been preserved)_`;
+
+        const buttons = [];
+        if (targetPage < totalPages) {
+          buttons.push({ id: 'btn_next_customers', title: 'Next 10 Customers' });
+        }
+        buttons.push({ id: 'btn_confirm_cancel', title: 'Discard Draft' });
+
+        await recordSessionMessage(senderPhone, 'assistant', promptText, { action_type: action });
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+        return {
+          handled: true,
+          reply: promptText,
+          interactiveType: 'buttons',
+          interactiveButtons: buttons,
+        };
+      }
+
       if (existingDraft._all_visit_candidates && Array.isArray(existingDraft._all_visit_candidates)) {
         const pool = existingDraft._all_visit_candidates;
         const pageSize = 10;
@@ -14296,13 +15320,15 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       (existingDraft._visit_candidates && existingDraft._visit_candidates.length) ||
       (existingDraft._inquiry_candidates && existingDraft._inquiry_candidates.length) ||
       (existingDraft._order_candidates && existingDraft._order_candidates.length) ||
-      (existingDraft._complaint_candidates && existingDraft._complaint_candidates.length) || 0;
+      (existingDraft._complaint_candidates && existingDraft._complaint_candidates.length) ||
+      (existingDraft._customer_candidates && existingDraft._customer_candidates.length) || 0;
 
     const totalAllCandidates =
       (existingDraft._all_visit_candidates && existingDraft._all_visit_candidates.length) ||
       (existingDraft._all_inquiry_candidates && existingDraft._all_inquiry_candidates.length) ||
       (existingDraft._all_order_candidates && existingDraft._all_order_candidates.length) ||
-      (existingDraft._all_complaint_candidates && existingDraft._all_complaint_candidates.length) || totalVisibleCandidates;
+      (existingDraft._all_complaint_candidates && existingDraft._all_complaint_candidates.length) ||
+      (existingDraft._all_customer_candidates && existingDraft._all_customer_candidates.length) || totalVisibleCandidates;
 
     const maxAllowedCandidates = (action === 'LOG_ORDER' && (existingDraft._all_inquiry_candidates || existingDraft._inquiry_candidates))
       ? (totalAllCandidates + 1)
@@ -14691,6 +15717,69 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       }
     }
 
+    // ── 5. Check Assigned Customer Candidate Selection ───────────────────────
+    if (existingDraft._all_customer_candidates && Array.isArray(existingDraft._all_customer_candidates)) {
+      const numIdx = extractCandidateIndex(text, totalAllCandidates || existingDraft._all_customer_candidates.length);
+      let matchedCust = null;
+      if (numIdx !== null && numIdx >= 1 && numIdx <= existingDraft._all_customer_candidates.length) {
+        matchedCust = existingDraft._all_customer_candidates[numIdx - 1];
+      } else {
+        const lowerInput = text.toLowerCase().trim();
+        if (lowerInput.length >= 2 && !isPaginationRequest(text) && !isPreviousPaginationRequest(text) && !isDiscardOrCancelIntent(text)) {
+          matchedCust = existingDraft._all_customer_candidates.find(name => {
+            const lowerName = name.toLowerCase();
+            return lowerName === lowerInput || lowerName.includes(lowerInput) || lowerInput.includes(lowerName);
+          });
+        }
+      }
+
+      if (matchedCust) {
+        existingDraft.company_name = matchedCust;
+        existingDraft._customer_verified = true;
+        delete existingDraft._all_customer_candidates;
+        delete existingDraft._customer_candidates;
+        delete existingDraft._customer_candidates_page;
+
+        const custProdCheck = validateDraftProducts(action, existingDraft);
+        if (!custProdCheck.isValid) {
+          await recordSessionMessage(senderPhone, 'assistant', custProdCheck.clarificationMessage, {
+            action_type: action,
+            customer_name: existingDraft.company_name,
+          });
+          await saveActiveSession(senderPhone, existingDraft.company_name, `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+          return { handled: true, reply: custProdCheck.clarificationMessage };
+        }
+
+        const missing = validateMandatoryFields(action, existingDraft);
+        if (missing.length === 0) {
+          const lineChoice = await askLineItemChoiceIfNeeded(action, existingDraft, senderPhone);
+          if (lineChoice) return lineChoice;
+
+          const summary = buildConfirmationSummary(action, existingDraft);
+          await recordSessionMessage(senderPhone, 'assistant', summary, {
+            action_type: action,
+            customer_name: existingDraft.company_name,
+          });
+          await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(existingDraft)}`);
+          return {
+            handled: true,
+            reply: summary,
+            interactiveType: 'buttons',
+            interactiveButtons: CONFIRMATION_BUTTONS,
+          };
+        } else {
+          const missingList = missing.map(m => `• *${m}*`).join('\n');
+          const askMissing = `✅ *Company:* ${existingDraft.company_name}\n\nPlease provide the remaining mandatory details for this ${getActionFriendlyName(action)}:\n\n${missingList}`;
+          await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+            action_type: action,
+            customer_name: existingDraft.company_name,
+          });
+          await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
+          return { handled: true, reply: askMissing };
+        }
+      }
+    }
+
     // Check if user replied "No" to complaint attachment prompt (this is NOT a discard intent)
     const isAttachmentNo = action === 'LOG_COMPLAINT' && isComplaintAttachmentSkip(text, existingDraft);
 
@@ -14731,7 +15820,13 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const existingProdCheck = validateDraftProducts(action, existingDraft);
     let resolvedProd = null;
     if (!existingProdCheck.isValid && existingProdCheck.invalidProducts.length > 0) {
-      resolvedProd = resolveClarifiedProduct(text, existingProdCheck.invalidProducts[0]);
+      for (const invProd of existingProdCheck.invalidProducts) {
+        const candidate = resolveClarifiedProduct(text, invProd);
+        if (candidate) {
+          resolvedProd = candidate;
+          break;
+        }
+      }
       if (resolvedProd) {
         if (Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0) {
           existingDraft.line_item_updates.forEach((it) => {
@@ -14768,7 +15863,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // Extract fields from user message
-    const isPureCandidateSelection = (candidateResolved || inquiryCandidateResolved || orderCandidateResolved) && isPureOptionSelectorOnly(text);
+    const isPureCandidateSelection = (candidateResolved || inquiryCandidateResolved || orderCandidateResolved || complaintCandidateResolved || resolvedProd) && isPureOptionSelectorOnly(text);
     const isGenericMediaCaption = /^(?:image\s*received|document\s*received|photo\s*uploaded|evidence\s*(?:attachment|photo|photos|document)?\s*uploaded|uploaded\s*photo|attachment\s*uploaded)$/i.test(text.trim());
 
     const updatedDraft = (isPureCandidateSelection || isAttachmentNo || (incomingAttachments.length > 0 && isGenericMediaCaption) || existingDraft._skip_llm_extract)
@@ -14800,8 +15895,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           if (!textHasNewQty && prev.quantity !== null && prev.quantity !== undefined) {
             it.quantity = prev.quantity;
           }
-          if (!textHasNewRate && prev.rate !== null && prev.rate !== undefined) {
-            it.rate = prev.rate;
+          if (!textHasNewRate) {
+            it.rate = (prev.rate !== null && prev.rate !== undefined) ? prev.rate : null;
           }
         });
       }
@@ -14829,14 +15924,23 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           if (!textHasNewQty && prev.quantity !== null && prev.quantity !== undefined) {
             it.quantity = prev.quantity;
           }
-          if (!textHasNewRate && prev.rate !== null && prev.rate !== undefined) {
-            it.rate = prev.rate;
+          if (!textHasNewRate) {
+            it.rate = (prev.rate !== null && prev.rate !== undefined) ? prev.rate : null;
+          }
+          if (!it.rate) {
+            it.amount = null;
+          } else if (it.rate && it.quantity) {
+            it.amount = Number(it.rate) * Number(it.quantity);
           }
         });
+      }
+      if (!textHasNewRate) {
+        updatedDraft.rate = (existingDraft.rate !== null && existingDraft.rate !== undefined) ? existingDraft.rate : null;
       }
     }
 
     const preserveKeys = [
+      'source_channel',
       'visit_id', 'visit_date', 'inquiry_id', '_inquiry_display_id', '_inquiry_verified',
       'deal_id', 'po_number', 'linked_inquiry_or_po', 'affected_product', '_order_verified',
       'complaint_type', 'complaint_description', 'company_name', 'complaint_id', '_complaint_verified',
@@ -14852,6 +15956,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
     if (existingDraft._inquiry_display_id && !updatedDraft._inquiry_display_id) {
       updatedDraft._inquiry_display_id = existingDraft._inquiry_display_id;
+    }
+    if (callerSourceChannel && !updatedDraft.source_channel) {
+      updatedDraft.source_channel = callerSourceChannel;
     }
 
     if (action === 'LOG_VISIT') {
@@ -14933,7 +16040,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // 0. LOG_ORDER Inquiry Quoted Stage Gate check
-    if (action === 'LOG_ORDER') {
+    if (action === 'LOG_ORDER' && (updatedDraft.inquiry_id || updatedDraft.deal_id || updatedDraft._inquiry_display_id)) {
       const stageCheck = await validateOrderInquiryStage(updatedDraft, senderPhone);
       if (!stageCheck.isValid) {
         await recordSessionMessage(senderPhone, 'assistant', stageCheck.reply, { action_type: action });
@@ -14958,6 +16065,36 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
         await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
         return { handled: true, reply: custCheck.rejectionMessage };
+      }
+    }
+
+    if (custCheck.isValid && updatedDraft._all_customer_candidates) {
+      delete updatedDraft._all_customer_candidates;
+      delete updatedDraft._customer_candidates;
+      delete updatedDraft._customer_candidates_page;
+    }
+
+    if (action === 'LOG_NEW_CUSTOMER' && updatedDraft.company_name) {
+      const regCheck = await checkCompanyWideCustomerRegistration(updatedDraft.company_name, senderPhone);
+      if (regCheck && regCheck.isRegistered) {
+        const conflictReply = `${regCheck.conflictMessage}\n\n` +
+          `What would you like to do?\n` +
+          `• Reply with a different customer name to continue adding a customer.\n` +
+          `• Or reply *cancel* to discard this entry.`;
+        await recordSessionMessage(senderPhone, 'assistant', conflictReply, {
+          action_type: action,
+          customer_name: updatedDraft.company_name,
+        });
+        updatedDraft.company_name = null;
+        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|LOG_NEW_CUSTOMER|${JSON.stringify(updatedDraft)}`);
+        return {
+          handled: true,
+          reply: conflictReply,
+          interactiveType: 'buttons',
+          interactiveButtons: [
+            { id: 'btn_confirm_cancel', title: 'Discard Draft' },
+          ],
+        };
       }
     }
 
@@ -15185,19 +16322,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       const selectionRes = await fetchAndRenderUpdateSelection(matchedAction, senderPhone, { page: 1, customerFilter: null });
       await startNewCatalogSession(senderPhone, selectionRes.reply);
       await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: matchedAction });
-      if (selectionRes.hasRecords) {
+      if (selectionRes.hasRecords || matchedAction === 'LOG_ORDER') {
         await saveActiveSession(senderPhone, 'Unknown', `catalog_update_select|${matchedAction}|${JSON.stringify(selectionRes.state)}`);
       } else {
         await saveActiveSession(senderPhone, 'Unknown', 'general');
       }
-      return { handled: true, reply: selectionRes.reply };
+      return catalogSelectionResult(selectionRes);
     }
 
     const initialPrompt = MODULE_PROMPTS[matchedAction];
     if (initialPrompt) {
       await startNewCatalogSession(senderPhone, initialPrompt);
       await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: matchedAction });
-      await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${matchedAction}|{}`);
+      const initialDraft = callerSourceChannel ? { source_channel: callerSourceChannel } : {};
+      await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|${matchedAction}|${JSON.stringify(initialDraft)}`);
       return { handled: true, reply: initialPrompt };
     }
   }
@@ -15494,6 +16632,13 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
   }
 
+  // ── 7.5 STAGE UPDATES IN IDLE / STALE / EMPTY STATE ──
+  // Per requirement: In stale/empty state, ONLY data retrieval queries and stage updates
+  // are allowed to be processed directly. All other write actions remain strictly gated.
+  if (isStageUpdatePrompt(text)) {
+    return await handleMidFlowStageUpdate(text, senderPhone, 'general', 'UPDATE_INQUIRY', null);
+  }
+
   // ── 8. ALL OTHER MESSAGES OUTSIDE ACTIVE SESSION -> STRICT CATALOG GATING ──
   // Per architecture requirement:
   // Direct write logging outside an active catalog flow is disabled.
@@ -15531,6 +16676,7 @@ module.exports = {
   isSalesOsDomainQuery,
   isOutOfScopeGenericPrompt,
   isStageUpdatePrompt,
+  isStageOnlyUpdate,
   detectOperationalAction,
   extractFieldsWithLLM,
   mergeDraft,
@@ -15592,4 +16738,14 @@ module.exports = {
   handleResumeMenuButton,
   getAllowedFieldsListForAction,
   getEditPromptForAction,
+  scoreLineItemAgainstUpdate,
+  matchLineItemUpdate,
+  resolveLineItemUpdateTargets,
+  pickLineItemChoice,
+  pinLineUpdateToItems,
+  buildLineItemChoicePrompt,
+  handleLineItemChoiceReply,
+  isPureOptionSelectorOnly,
+  isNumericOptionSelector,
+  extractThicknessTransition,
 };

@@ -479,7 +479,31 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
       return rec;
     }
 
-    // 2. Insert new record only if caller is Admin or explicit customer creation flow
+    // 2. Prevent duplicate records: Check company-wide before inserting
+    const { data: globalExistingCheck } = await supabase
+      .from('recurring_customers')
+      .select('*')
+      .ilike('customer_name', cleanName)
+      .limit(1);
+
+    if (globalExistingCheck && globalExistingCheck.length > 0) {
+      const rec = globalExistingCheck[0];
+      const assignedClean = (rec.assigned_salesperson_phone || '').replace(/\D/g, '').slice(-10);
+      const isDummyPhone = !assignedClean || assignedClean.startsWith('000000') || assignedClean === '9999999999';
+      if ((scope.isAdmin && extraData.assigned_salesperson_phone) || isDummyPhone) {
+        await supabase
+          .from('recurring_customers')
+          .update({
+            assigned_salesperson_phone: extraData.assigned_salesperson_phone || senderPhone,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', rec.id);
+        rec.assigned_salesperson_phone = extraData.assigned_salesperson_phone || senderPhone;
+      }
+      return rec;
+    }
+
+    // 3. Insert new record only if caller is Admin or explicit customer creation flow
     if (!scope.isAdmin && !extraData.allowCreate) {
       return null;
     }
