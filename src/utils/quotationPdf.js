@@ -454,9 +454,9 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       doc.fillColor('#334155').font(fontRegular).fontSize(8.5).text('Bank Details: -', leftX, 72);
 
       doc.fillColor('#475569').font(fontRegular).fontSize(8.5);
-      doc.text('Bank Name: HDFC Bank', leftX, 86);
-      doc.text('IFSC Code: HDFC0002454', leftX, 99);
-      doc.text('Account Number: 50200107323747', leftX, 112);
+      doc.text('Bank Name: Kotak Mahindra Bank', leftX, 86);
+      doc.text('IFSC Code: KKBK0001792', leftX, 99);
+      doc.text('Account Number: 2500112233', leftX, 112);
       doc.text('Account Name: Enlight Metals Private Limited', leftX, 125);
 
       // Terms & Conditions

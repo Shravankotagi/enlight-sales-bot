@@ -245,7 +245,7 @@ router.post('/message', requireWebApiKey, async (req, res) => {
     }
 
     const rawText = normalizeIncomingButtonPayload(message || '');
-    const empName = userPayload.name || employeeName || 'Sales Staff';
+    const empName = userPayload?.name || employeeName || 'Sales Staff';
 
     let augmentedText = rawText;
     if (gps && typeof gps.latitude === 'number' && typeof gps.longitude === 'number') {
