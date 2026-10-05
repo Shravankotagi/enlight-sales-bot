@@ -217,15 +217,52 @@ router.post('/message', requireWebApiKey, async (req, res) => {
     let imageMimeType = null;
     let photoDataUrl = null;
     if (image && image.base64) {
-      const base64Clean = image.base64.replace(/^data:image\/\w+;base64,/, '');
+      const dataUrlMatch = image.base64.match(/^data:([^;]+);base64,(.*)$/s);
+      const base64Clean = dataUrlMatch ? dataUrlMatch[2] : image.base64;
       imageBuffer = Buffer.from(base64Clean, 'base64');
-      imageMimeType = image.mimeType || 'image/jpeg';
+      imageMimeType = image.mimeType || dataUrlMatch?.[1] || 'image/jpeg';
       photoDataUrl = image.base64.startsWith('data:')
         ? image.base64
         : `data:${imageMimeType};base64,${base64Clean}`;
     }
 
     console.log(`[WebChat] Processing message from ${empName} (${cleanPhone}): "${augmentedText.slice(0, 80)}" (image: ${Boolean(imageBuffer)}, gps: ${Boolean(gps)})`);
+
+    // Reuse the same document OCR handlers used by WhatsApp for PDFs uploaded
+    // during the guided inquiry/order logging flows.
+    if (imageBuffer && imageMimeType && imageMimeType.toLowerCase() === 'application/pdf') {
+      const activeSession = await getFullActiveSession(cleanPhone);
+      const lastIntent = activeSession?.last_intent || '';
+      const isInquiryFlow = ['catalog_flow', 'catalog_editing', 'catalog_confirm', 'catalog_selection']
+        .some(state => lastIntent.startsWith(`${state}|LOG_INQUIRY`));
+      const isOrderFlow = ['catalog_flow', 'catalog_editing', 'catalog_confirm', 'catalog_selection']
+        .some(state => lastIntent.startsWith(`${state}|LOG_ORDER`));
+      const documentHandler = isInquiryFlow
+        ? 'inquiry'
+        : isOrderFlow
+          ? 'order'
+          : null;
+
+      if (documentHandler) {
+        const {
+          handleInquiryDocumentOcr,
+          handleOrderDocumentOcr,
+        } = require('../core/catalogFlow');
+        const ocrResult = documentHandler === 'inquiry'
+          ? await handleInquiryDocumentOcr(imageBuffer, imageMimeType, cleanPhone, rawText)
+          : await handleOrderDocumentOcr(imageBuffer, imageMimeType, cleanPhone, rawText);
+        const formattedReply = formatForWeb(ocrResult.reply || 'Document processed.');
+        return res.json({
+          success: true,
+          reply: formattedReply,
+          type: ocrResult.interactiveType || 'text',
+          interactiveType: ocrResult.interactiveType || 'text',
+          interactiveButtons: ocrResult.interactiveButtons || null,
+          interactiveList: ocrResult.interactiveList || null,
+          data: ocrResult.interactiveButtons || ocrResult.interactiveList || null,
+        });
+      }
+    }
 
     // LAYER 1: Guided Catalog & Conversational Form Flow (Greetings, 1-10 Routing, Confirmations)
     const catalogResult = await handleCatalogFlow(augmentedText, cleanPhone, {
