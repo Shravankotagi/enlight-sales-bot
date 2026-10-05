@@ -1582,13 +1582,7 @@ Please find attached our detailed quotation for the materials as requested. The 
 
 We kindly request you to review the quotation carefully. If you have any issues kindly connect with us. We look forward to your confirmation and remain available to discuss any points at your convenience.
 
-Thank you once again for considering us.
-
-Bank Details:
-- Bank Name: Kotak Mahindra Bank
-- IFSC Code: KKBK0001792
-- Account Number: 2500112233
-- Account Name: Enlight Metals Private Limited`;
+Thank you once again for considering us.`;
 
   const attachments = [];
   try {
