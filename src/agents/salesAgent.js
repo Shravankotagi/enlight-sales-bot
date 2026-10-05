@@ -1576,27 +1576,19 @@ async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
 
   const textContent = `Dear ${customerName},
 
-Thank you for partnering with Enlight Metals Private Limited.
+Thank you for your enquiry and for giving us the opportunity to quote for your requirements.
 
-Please find attached our official Commercial Price Quotation (Ref #: ${qRefNum}) detailing the complete material specifications, unit rates, delivery location, and commercial terms.
+Please find attached our detailed quotation for the materials as requested. The quotation includes unit prices, applicable taxes & duties, payment terms, validity of the offer, delivery details, and other commercial conditions.
 
-Summary:
-- Reference Number: ${qRefNum}
-- Issue Date: ${todayDateStr}
-- Items & Specifications:
-${itemsSummary}
-- Subtotal (Base Amount): ₹ ${Number(baseAmt).toLocaleString('en-IN')}
-- CGST (9%): ₹ ${Number(cgstAmt).toLocaleString('en-IN')}
-- SGST (9%): ₹ ${Number(sgstAmt).toLocaleString('en-IN')}
-- Grand Total (incl. GST): ₹ ${Number(grandTotal).toLocaleString('en-IN')}
-${deal.payment_terms ? `- Payment Terms: ${deal.payment_terms}\n` : ''}${deal.delivery_location ? `- Delivery Location: ${deal.delivery_location}\n` : ''}
-The attached PDF document contains our official pricing structure and complete commercial terms.
+We kindly request you to review the quotation carefully. If you have any issues kindly connect with us. We look forward to your confirmation and remain available to discuss any points at your convenience.
 
-Warm regards,
+Thank you once again for considering us.
 
-Sales Operations Team
-Enlight Metals Private Limited
-MIDC Industrial Zone, Mumbai - 400001`;
+Bank Details:
+- Bank Name: Kotak Mahindra Bank
+- IFSC Code: KKBK0001792
+- Account Number: 2500112233
+- Account Name: Enlight Metals Private Limited`;
 
   const attachments = [];
   try {
@@ -1652,6 +1644,9 @@ MIDC Industrial Zone, Mumbai - 400001`;
         {
           from: `Enlight Metals <${fromEmail}>`,
           to: [targetEmail],
+          cc: ['dj@enlightmetals.com', 'vedant@enlightmetals.com'].filter(
+            (email) => email.toLowerCase() !== String(targetEmail || '').trim().toLowerCase(),
+          ),
           subject: `Quotation ${qRefNum} - Enlight Metals - ${customerName}`,
           text: textContent,
           attachments: attachments.length > 0 ? attachments : undefined,
