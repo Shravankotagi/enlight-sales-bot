@@ -13,6 +13,7 @@
 const { supabase, saveInquiry, verifyAndGetCustomerName } = require('../supabase');
 const { extractFromImage } = require('../gemini');
 const { logBotActivity } = require('../utils/activityLogger');
+const { resolveFinalPo, claimPoNumber } = require('../core/poResolver');
 const {
   calculateLineItems,
   calculateSubtotal,
@@ -68,14 +69,10 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         String(extraction.po_number).trim().length > 2)
     );
 
-    let poNumber = null;
+    let referencePoNumber = null;
     if (isPo) {
       if (extraction.po_number && extraction.po_number !== 'null' && String(extraction.po_number).trim().length > 2) {
-        poNumber = String(extraction.po_number).trim();
-      } else {
-        const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-        const randomNum = Math.floor(1000 + Math.random() * 9000);
-        poNumber = `PO-${todayStr}-${randomNum}`;
+        referencePoNumber = String(extraction.po_number).trim();
       }
     }
 
@@ -102,6 +99,8 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         gstRate: pricingSummary.gstRate,
       },
       calculation_warning: pricingSummary.calculationWarning || extraction.calculation_warning || null,
+      po_number: null,
+      reference_po_number: referencePoNumber,
       line_items: pricingSummary.lineItems.map(item => ({
         sku_text: item.sku_text || item.product_name || item.description || null,
         dimensions: item.dimensions || null,
@@ -134,7 +133,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
       // For Purchase Orders: Save media attachment linked with inquiry_type 'purchase_order'
       savedInq = await saveInquiry({
         source_channel: 'whatsapp_po',
-        raw_text: `[PO Document Attached: ${poNumber}] ${rawSummary}`,
+        raw_text: `[PO Document Attached: ${referencePoNumber || 'Reference PO not provided'}] ${rawSummary}`,
         media_urls: [base64Data],
         sender_phone: customerPhone || null,
         sender_name: finalCustomerName,
@@ -144,12 +143,15 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         message_id: messageId || null,
         status: 'order_created',
         inquiry_type: 'purchase_order',
+        po_number: null,
+        reference_po_number: referencePoNumber,
         overall_confidence: extraction.overall_confidence || 0.98,
         ai_extraction_json: structuredExtraction,
       });
     }
 
     let dealId = null;
+    let canonicalPoNumber = null;
 
     if (isPo) {
       // ──────────────────────────────────────────────────────────────────
@@ -165,7 +167,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         const backendPayload = {
           customer_name: finalCustomerName,
           customer_phone: customerPhone || null,
-          po_number: poNumber,
+          reference_po_number: referencePoNumber,
           po_date: poDate,
           total_amount: finalOrderAmount,
           delivery_location: extraction.delivery_location || null,
@@ -184,7 +186,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
           })),
         };
 
-        console.log('[OCRAgent] Calling backend process-po for PO:', poNumber, 'customer:', finalCustomerName);
+        console.log('[OCRAgent] Calling backend process-po for reference PO:', referencePoNumber, 'customer:', finalCustomerName);
 
         const headers = {
           'Content-Type': 'application/json',
@@ -198,6 +200,10 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         );
 
         dealId = poResponse.data?.id || poResponse.data?.data?.id || null;
+        canonicalPoNumber =
+          poResponse.data?.po_number ||
+          poResponse.data?.data?.po_number ||
+          null;
         console.log('[OCRAgent] Backend process-po-internal success, dealId:', dealId);
 
       } catch (backendErr) {
@@ -206,7 +212,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         // FALLBACK: Direct Supabase write with correct NOT IN syntax and salesperson scoping
         let openDealsQuery = supabase
           .from('deals')
-          .select('id, stage, customer_name')
+          .select('id, stage, customer_name, po_number, reference_po_number, generated_po_number, po_generated_at, delivery_location, payment_terms')
           .ilike('customer_name', `%${finalCustomerName}%`)
           .not('stage', 'in', '(won,lost)')
           .order('created_at', { ascending: false });
@@ -223,12 +229,26 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
 
         if (openDeals && openDeals.length > 0) {
           dealId = openDeals[0].id;
+          const fallbackPo = await resolveFinalPo({
+            generatedPoNumber: openDeals[0].generated_po_number,
+            referencePoNumber: referencePoNumber || openDeals[0].reference_po_number,
+            reservationToken: `ocr:${messageId || Date.now()}`,
+            dealId,
+            existingDeal: openDeals[0],
+          });
+          canonicalPoNumber = fallbackPo.po_number;
           const { error: updateErr } = await supabase
             .from('deals')
             .update({
               stage: 'won',
               won_at: new Date().toISOString(),
-              po_number: poNumber,
+              po_number: fallbackPo.po_number,
+              reference_po_number: fallbackPo.reference_po_number,
+              generated_po_number: fallbackPo.generated_po_number,
+              po_source: fallbackPo.po_source,
+              po_status: 'confirmed',
+              po_generated_at: fallbackPo.po_generated_at,
+              po_confirmed_at: fallbackPo.po_confirmed_at,
               po_date: poDate,
               total_amount: finalOrderAmount,
               delivery_location: extraction.delivery_location || openDeals[0].delivery_location,
@@ -240,9 +260,19 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
           if (updateErr) {
             console.error('[OCRAgent] Fallback deal update error:', updateErr.message);
           } else {
+            await claimPoNumber(
+              fallbackPo.po_number,
+              fallbackPo.po_reservation_token,
+              dealId,
+            );
             console.log('[OCRAgent] Fallback: updated existing deal to won, dealId:', dealId);
           }
         } else {
+          const fallbackPo = await resolveFinalPo({
+            referencePoNumber,
+            reservationToken: `ocr:${messageId || Date.now()}`,
+          });
+          canonicalPoNumber = fallbackPo.po_number;
           const { data: newWonDeal, error: insertErr } = await supabase
             .from('deals')
             .insert({
@@ -252,7 +282,13 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
               customer_phone: customerPhone,
               stage: 'won',
               won_at: new Date().toISOString(),
-              po_number: poNumber,
+              po_number: fallbackPo.po_number,
+              reference_po_number: fallbackPo.reference_po_number,
+              generated_po_number: fallbackPo.generated_po_number,
+              po_source: fallbackPo.po_source,
+              po_status: 'confirmed',
+              po_generated_at: fallbackPo.po_generated_at,
+              po_confirmed_at: fallbackPo.po_confirmed_at,
               po_date: poDate,
               total_amount: finalOrderAmount,
               delivery_location: extraction.delivery_location || null,
@@ -269,6 +305,13 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
             console.error('[OCRAgent] Fallback deal insert error:', insertErr.message, insertErr);
           } else {
             dealId = newWonDeal?.id || null;
+            if (dealId) {
+              await claimPoNumber(
+                fallbackPo.po_number,
+                fallbackPo.po_reservation_token,
+                dealId,
+              );
+            }
             console.log('[OCRAgent] Fallback: created new won deal, dealId:', dealId);
           }
         }
@@ -323,6 +366,29 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
       }
     }
 
+    if (isPo && dealId) {
+      const { data: savedDeal } = await supabase
+        .from('deals')
+        .select('po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, po_confirmed_at')
+        .eq('id', dealId)
+        .maybeSingle();
+      if (savedDeal) {
+        canonicalPoNumber = savedDeal.po_number || canonicalPoNumber;
+        referencePoNumber = savedDeal.reference_po_number || referencePoNumber;
+        if (savedInq?.id) {
+          await supabase.from('inquiries').update({
+            po_number: savedDeal.po_number,
+            reference_po_number: savedDeal.reference_po_number || null,
+            generated_po_number: savedDeal.generated_po_number || null,
+            po_source: savedDeal.po_source || null,
+            po_status: savedDeal.po_status || 'confirmed',
+            po_generated_at: savedDeal.po_generated_at || null,
+            po_confirmed_at: savedDeal.po_confirmed_at || null,
+          }).eq('id', savedInq.id);
+        }
+      }
+    }
+
     // 4. If PO: Log KRA 1 and create Payment Tracking record
     if (isPo && dealId) {
       // Log KRA 1 Sales Achievement
@@ -333,7 +399,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
         kra_type: 'sales_achievement',
         metric_name: 'won_deal_value',
         value: finalOrderAmount,
-        notes: `PO Received: ${poNumber} for ${finalCustomerName} - ₹${finalOrderAmount.toLocaleString('en-IN')}`,
+        notes: `PO Received: ${canonicalPoNumber || '-'}${referencePoNumber ? ` (Reference PO: ${referencePoNumber})` : ''} for ${finalCustomerName} - ₹${finalOrderAmount.toLocaleString('en-IN')}`,
         created_at: new Date().toISOString(),
       });
 
@@ -402,7 +468,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
       if (isPo) {
         logBotActivity({
           salesperson_phone: senderPhone,
-          description: `New order created for ${finalCustomerName}${poNumber ? ` (PO: ${poNumber})` : ''}`,
+          description: `New order created for ${finalCustomerName}${canonicalPoNumber ? ` (PO: ${canonicalPoNumber})` : ''}`,
           module: 'Orders',
           customer_name: finalCustomerName,
         });
@@ -441,7 +507,8 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
       return (
         `🎉 *PURCHASE ORDER RECEIVED & DEAL WON!* 🏆\n\n` +
         `Customer: *${finalCustomerName || '-'}*\n` +
-        `PO Number: *${poNumber}* 📄\n` +
+        `System PO Number: *${canonicalPoNumber || '-'}* 📄\n` +
+        (referencePoNumber ? `Reference PO: *${referencePoNumber}*\n` : '') +
         `PO Date: *${poDate}*\n` +
         `Stage: *WON / DELIVERED 🎉*\n\n` +
         (itemsBreakdown ? `Line Items:\n${itemsBreakdown}\n` : '') +

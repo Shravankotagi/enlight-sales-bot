@@ -111,7 +111,7 @@ async function runTests() {
     const draftForSelection = {
       action: 'LOG_ORDER',
       company_name: 'Apex Infrastructure',
-      po_number: 'PO-APEX-9988',
+      reference_po_number: 'PO-APEX-9988',
       po_date: '26/09/2026',
       line_items: [{ sku_text: 'HR Coil', quantity: 25, unit: 'MT', rate: 52000, amount: 1300000 }],
       _inquiry_candidates: mockCandidates,
@@ -136,7 +136,7 @@ async function runTests() {
     const draftForNone = {
       action: 'LOG_ORDER',
       company_name: 'Apex Infrastructure',
-      po_number: 'PO-APEX-9999',
+      reference_po_number: 'PO-APEX-9999',
       po_date: '26/09/2026',
       line_items: [{ sku_text: 'HR Coil', quantity: 25, unit: 'MT', rate: 52000, amount: 1300000 }],
       _inquiry_candidates: mockCandidates,
@@ -196,7 +196,7 @@ async function runTests() {
       const orderDraft = {
         action: 'LOG_ORDER',
         company_name: testCompanyName,
-        po_number: `PO-${Date.now()}`,
+        reference_po_number: `PO-CUSTOMER-${Date.now()}`,
         po_date: '26/09/2026',
         inquiry_id: newInq.id,
         deal_id: newDeal ? newDeal.id : null,
@@ -211,18 +211,25 @@ async function runTests() {
       // 4. Verify inquiry updated to 'won' and status: 'confirmed'
       const { data: updatedInq } = await supabase
         .from('inquiries')
-        .select('stage, status, won_at, po_number')
+        .select('stage, status, won_at, po_number, generated_po_number, reference_po_number')
         .eq('id', newInq.id)
         .single();
 
       assert(updatedInq && updatedInq.stage === 'won', 'Inquiry stage updated to won');
       assert(updatedInq && updatedInq.status === 'confirmed', 'Inquiry status updated to confirmed');
       assert(updatedInq && Boolean(updatedInq.won_at), 'Inquiry won_at timestamp is set');
+      assert(updatedInq && /^EM\/PO\/\d+$/.test(updatedInq.po_number || ''), 'Inquiry stores an EM/PO/N canonical PO');
+      assert(updatedInq && updatedInq.generated_po_number === updatedInq.po_number, 'Generated PO is preserved on first confirmation');
+      assert(updatedInq && updatedInq.reference_po_number === orderDraft.reference_po_number, 'Customer PO is stored as Reference PO');
 
       // Clean up test rows
+      const allocatedPo = updatedInq?.po_number;
       await supabase.from('inquiries').delete().eq('id', newInq.id);
       if (newDeal) await supabase.from('deals').delete().eq('id', newDeal.id);
-      await supabase.from('orders').delete().eq('po_number', orderDraft.po_number);
+      if (allocatedPo) {
+        await supabase.from('po_number_allocations').delete()
+          .eq('normalized_po_number', allocatedPo.toLowerCase());
+      }
     }
   }
 

@@ -8,6 +8,7 @@
     "predev": "node -e \"if (!require('fs').existsSync('./node_modules/express')) { console.log('Dependencies missing. Installing...'); require('child_process').execSync('npm install', { stdio: 'inherit' }); }\"",
     "dev": "node --watch index.js",
     "dev:nodemon": "nodemon index.js",
+    "test": "node --test src/**/*.test.js",
     "chat": "node scripts/chat_cli.js"
   },
   "dependencies": {
