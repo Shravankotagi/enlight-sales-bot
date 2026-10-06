@@ -184,7 +184,6 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
         year: 'numeric',
       });
 
-      const salesperson = details.salespersonName || details.salesperson_name || details.salesperson || 'Sales Team';
       const compName = (details.companyName || customerName || 'Valued Customer').toUpperCase();
       const rawAddress = (details.deliveryLocation || details.delivery_location || details.customerAddress || details.address || '').trim();
 
@@ -278,12 +277,6 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
         align: 'right',
       });
 
-      doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('Sales person :', rightBoxX, metaRightY + 16, { width: 75 });
-      doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(salesperson, rightBoxX + 75, metaRightY + 16, {
-        width: 85,
-        align: 'right',
-      });
-
       // 3. Line Items Table
       const rawLineItems = Array.isArray(details.lineItems) && details.lineItems.length > 0
         ? details.lineItems
@@ -320,17 +313,20 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       const grandTot = Math.round(exactTot);
       const roundingVal = Math.round((grandTot - exactTot) * 100) / 100;
 
-      const tableY = currY + 14;
-      doc.rect(leftX, tableY, contentWidth, 24).fill('#525E6F');
-      doc.fillColor('#FFFFFF').font(fontBold).fontSize(8.5);
-      doc.text('#', leftX, tableY + 7.5, { width: 26, align: 'center' });
-      doc.text('Item & Description', 70, tableY + 7.5, { width: 205 });
-      doc.text('HSN/SAC', 278, tableY + 7.5, { width: 62, align: 'center' });
-      doc.text('Qty', 342, tableY + 7.5, { width: 68, align: 'right' });
-      doc.text('Rate', 412, tableY + 7.5, { width: 65, align: 'right' });
-      doc.text('Amount', 479, tableY + 7.5, { width: 76.28, align: 'right' });
+      const drawItemHeader = (headerY) => {
+        doc.rect(leftX, headerY, contentWidth, 24).fill('#525E6F');
+        doc.fillColor('#FFFFFF').font(fontBold).fontSize(8.5);
+        doc.text('#', leftX, headerY + 7.5, { width: 26, align: 'center', lineBreak: false });
+        doc.text('Item & Description', 70, headerY + 7.5, { width: 205, lineBreak: false });
+        doc.text('HSN/SAC', 278, headerY + 7.5, { width: 62, align: 'center', lineBreak: false });
+        doc.text('Qty', 342, headerY + 7.5, { width: 68, align: 'right', lineBreak: false });
+        doc.text('Rate', 412, headerY + 7.5, { width: 65, align: 'right', lineBreak: false });
+        doc.text('Amount', 479, headerY + 7.5, { width: 76.28, align: 'right', lineBreak: false });
+        return headerY + 24;
+      };
 
-      let rowY = tableY + 24;
+      const tableY = currY + 14;
+      let rowY = drawItemHeader(tableY);
       lineItems.forEach((item, idx) => {
         doc.font(fontBold).fontSize(8.5);
         const skuH = doc.heightOfString(item.sku_text, { width: 205 });
@@ -338,6 +334,11 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
           ? doc.font(fontRegular).fontSize(7.5).heightOfString(item.dimensions, { width: 205 }) + 3
           : 0;
         const rowH = Math.max(34, skuH + dimH + 18);
+
+        if (rowY + rowH > doc.page.maxY()) {
+          doc.addPage();
+          rowY = drawItemHeader(doc.page.margins.top);
+        }
 
         doc.rect(leftX, rowY, contentWidth, rowH).fill('#FFFFFF');
 
@@ -391,6 +392,10 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       });
 
       // 4. Financial Totals & Summary Block
+      if (rowY + 90 > doc.page.maxY()) {
+        doc.addPage();
+        rowY = doc.page.margins.top;
+      }
       const summaryY = rowY + 22;
       doc.moveTo(leftX, rowY + 10).lineTo(rightEdge, rowY + 10).strokeColor('#E2E8F0').lineWidth(0.75).stroke();
 
@@ -477,6 +482,16 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
 
       // Authorized Signature
       doc.fillColor('#0F172A').font(fontBold).fontSize(10).text('Authorized Signature', leftX, 310);
+
+      const signatureName = String(details.salespersonName || details.salesperson_name || '').trim();
+      if (
+        signatureName &&
+        signatureName !== 'Sales Operations Team' &&
+        signatureName !== 'Sales Team'
+      ) {
+        doc.fillColor('#0F172A').font(fontRegular).fontSize(10).text(signatureName, leftX, 328);
+        doc.moveTo(leftX, 372).lineTo(leftX + 160, 372).strokeColor('#0F172A').lineWidth(0.8).stroke();
+      }
 
       doc.end();
     } catch (err) {
