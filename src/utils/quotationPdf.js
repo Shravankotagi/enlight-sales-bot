@@ -184,7 +184,6 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
         year: 'numeric',
       });
 
-      const salesperson = details.salespersonName || details.salesperson_name || details.salesperson || 'Sales Team';
       const compName = (details.companyName || customerName || 'Valued Customer').toUpperCase();
       const rawAddress = (details.deliveryLocation || details.delivery_location || details.customerAddress || details.address || '').trim();
 
@@ -274,12 +273,6 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       const metaRightY = currY - 34;
       doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('Order Date :', rightBoxX, metaRightY, { width: 75 });
       doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(todayDate, rightBoxX + 75, metaRightY, {
-        width: 85,
-        align: 'right',
-      });
-
-      doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('Sales person :', rightBoxX, metaRightY + 16, { width: 75 });
-      doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(salesperson, rightBoxX + 75, metaRightY + 16, {
         width: 85,
         align: 'right',
       });
@@ -477,6 +470,16 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
 
       // Authorized Signature
       doc.fillColor('#0F172A').font(fontBold).fontSize(10).text('Authorized Signature', leftX, 310);
+
+      const signatureName = String(details.salespersonName || details.salesperson_name || '').trim();
+      if (
+        signatureName &&
+        signatureName !== 'Sales Operations Team' &&
+        signatureName !== 'Sales Team'
+      ) {
+        doc.fillColor('#0F172A').font(fontRegular).fontSize(10).text(signatureName, leftX, 328);
+        doc.moveTo(leftX, 372).lineTo(leftX + 160, 372).strokeColor('#0F172A').lineWidth(0.8).stroke();
+      }
 
       doc.end();
     } catch (err) {
