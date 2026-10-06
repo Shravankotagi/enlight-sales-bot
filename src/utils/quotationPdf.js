@@ -264,17 +264,17 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
 
       currY += 10;
 
-      doc.fillColor('#1E293B').font(fontBold).fontSize(8.5).text('Place Of Supply: ', leftX, currY, { continued: true })
+      const placeY = currY;
+      doc.fillColor('#1E293B').font(fontBold).fontSize(8.5).text('Place Of Supply: ', leftX, placeY, { continued: true })
         .font(fontRegular).fillColor('#475569').text(placeOfSupply);
-      currY += 16;
+      currY = placeY + 16;
 
-      // Right Column: Order Date & Sales Person
       const rightBoxX = 395;
-      const metaRightY = currY - 34;
-      doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('Order Date :', rightBoxX, metaRightY, { width: 75 });
-      doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(todayDate, rightBoxX + 75, metaRightY, {
+      doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('Order Date :', rightBoxX, placeY, { width: 75, lineBreak: false });
+      doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(todayDate, rightBoxX + 75, placeY, {
         width: 85,
         align: 'right',
+        lineBreak: false,
       });
 
       // 3. Line Items Table
@@ -481,15 +481,17 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       doc.text('2) All disputes are Subject to Pune Jurisdiction only.', leftX, 248);
 
       // Authorized Signature
-      doc.fillColor('#0F172A').font(fontBold).fontSize(10).text('Authorized Signature', leftX, 310);
+      doc.fillColor('#0F172A').font(fontBold).fontSize(10).text('Authorized Signature', leftX, 310, { lineBreak: false });
 
-      const signatureName = String(details.salespersonName || details.salesperson_name || '').trim();
+      const signatureName = String(
+        details.senderName || details.salespersonName || details.salesperson_name || '',
+      ).trim();
       if (
         signatureName &&
         signatureName !== 'Sales Operations Team' &&
         signatureName !== 'Sales Team'
       ) {
-        doc.fillColor('#0F172A').font(fontRegular).fontSize(10).text(signatureName, leftX, 328);
+        doc.fillColor('#0F172A').font(fontRegular).fontSize(10).text(signatureName, leftX, 328, { lineBreak: false });
         doc.moveTo(leftX, 372).lineTo(leftX + 160, 372).strokeColor('#0F172A').lineWidth(0.8).stroke();
       }
 
