@@ -1925,6 +1925,7 @@ LOG_INQUIRY:
   "line_items": [
     {
       "sku_text": "<Literal product name mentioned by user e.g. 'Sheet', 'CR Sheet', 'HR Coil', 'MS Angle', 'Pipe', 'TMT Bar'>",
+      "grade": "<Steel grade written by the user, e.g. E350, E250, E410, E450, SAILMA, Fe500, Fe550, Fe500D, Fe550D. If one grade is stated for the whole list, repeat it on every line. else null>",
       "description": "<Full product text e.g. 'MS Sheet 5MM THK (1250 x 2500)'>",
       "dimensions": "<Dimensions / specifications e.g. '1250 x 2500', '1000 x 2000 mm'>",
       "spec": "<Dimensions / specifications>",
@@ -2208,6 +2209,7 @@ If only a single company is mentioned or if filling missing fields for an existi
   The backend validation engine will automatically detect generic/ambiguous terms and ask the user to clarify the exact catalog variant.
 - In LOG_COMPLAINT: if no official catalog product name is mentioned, leave 'affected_product' as null so the system automatically resolves it from the linked Order / PO!
 - "dimensions" / "spec": Extract thickness, gauge, width, and size (e.g. '8mm', '1250 x 2500', '50x50x6').
+- "grade": When the user writes a steel grade such as E350, E250, E410, E450, SAILMA, Fe500, Fe550, Fe500D, or Fe550D, return it on each line item. If that grade is written once before a size list (e.g. "HR E350" then several sizes), repeat the same grade on every line. Do not put make names such as SAIL or NMDC in grade.
 11. TOTAL ORDER VALUE / DIRECT MONEY MODIFICATION (CRITICAL):
 - In UPDATE_ORDER: Total order value (or total money / total amount / grand total) is a computed calculation derived strictly from line item rates, quantities, and taxes.
 - Users CANNOT directly modify or override the total order value at the header level.
@@ -3678,6 +3680,52 @@ function hasExplicitVisitOutcomeInput(userInput = '') {
     /\b(?:change|update|set|mark)\b[\s\S]{0,40}\b(?:visit\s+)?outcome\b[\s\S]{0,40}\b(?:positive|negative|neutral|follow[-\s]*up(?:\s+required)?)\b/i.test(input);
 }
 
+const STEEL_GRADE_PATTERN = /\b(SAILMA|Fe\s*550\s*D|Fe\s*500\s*D|Fe\s*600|Fe\s*550|Fe\s*500|E\s*550|E\s*450|E\s*410|E\s*350|E\s*250)\b/gi;
+
+function compactSteelGrade(token) {
+  return String(token || '').replace(/\s+/g, '').toUpperCase();
+}
+
+function extractSteelGradeTokens(text) {
+  const found = [];
+  if (!text) return found;
+  const re = new RegExp(STEEL_GRADE_PATTERN.source, 'gi');
+  const source = String(text);
+  let match;
+  while ((match = re.exec(source))) {
+    found.push({ token: compactSteelGrade(match[1]), index: match.index });
+  }
+  return found;
+}
+
+function gradeMatchesCatalog(beforeText, canonicalSku) {
+  const before = String(beforeText || '').toLowerCase();
+  const sku = String(canonicalSku || '').toLowerCase().trim();
+  if (!sku) return false;
+  if (before.includes(sku)) return true;
+  const family = sku.split(/\s+/)[0];
+  return Boolean(family && family.length >= 2 && new RegExp(`\\b${family}\\b`, 'i').test(before));
+}
+
+function resolveCapturedSteelGrade({ rawSku, description, itemGrade, prevGrade, userInput, canonicalSku }) {
+  const own = extractSteelGradeTokens(`${rawSku || ''} ${description || ''} ${itemGrade || ''} ${prevGrade || ''}`);
+  if (own.length) return own[0].token;
+
+  const messageGrades = extractSteelGradeTokens(userInput);
+  if (!messageGrades.length) return null;
+
+  const attached = messageGrades.filter((grade) => {
+    const start = Math.max(0, grade.index - 24);
+    return gradeMatchesCatalog(String(userInput).slice(start, grade.index), canonicalSku);
+  });
+  const uniqueAttached = [...new Set(attached.map((grade) => grade.token))];
+  if (uniqueAttached.length === 1) return uniqueAttached[0];
+
+  const uniqueMessage = [...new Set(messageGrades.map((grade) => grade.token))];
+  if (uniqueMessage.length === 1) return uniqueMessage[0];
+  return null;
+}
+
 function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   const merged = { ...baseDraft, action };
   if (baseDraft.updates && typeof baseDraft.updates === 'object' && !Array.isArray(baseDraft.updates)) {
@@ -3737,11 +3785,20 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             const norm = normalizeProductToCatalog(rawSku, itemDim);
             const canonicalSku = norm.isValid ? norm.catalogName : rawSku;
             const hsn = item.hsn_code || item.hsn_sac || (norm.isValid ? norm.hsnCode : (detectHsnCode(rawSku, itemDim) || detectHsnCode(item.description || '') || prevItem?.hsn_code || null));
+            const grade = resolveCapturedSteelGrade({
+              rawSku,
+              description: item.description || prevItem?.description || '',
+              itemGrade: item.grade,
+              prevGrade: prevItem?.grade,
+              userInput,
+              canonicalSku,
+            });
             return {
               sku_text: canonicalSku,
               description: item.description || prevItem?.description || canonicalSku,
               dimensions: itemDim,
               spec: itemDim,
+              grade: grade || null,
               hsn_sac: hsn,
               hsn_code: hsn,
               is_valid_catalog: norm.isValid,
@@ -5995,7 +6052,11 @@ function formatStageLabel(st) {
 function formatDetailedInquiryItemsList(items, { includeHsn = false } = {}) {
   if (!Array.isArray(items) || items.length === 0) return '';
   return items.map((item, idx) => {
-    const name = item.sku_text || item.product_requirement || item.product_name || item.description || item.pName || 'Steel Item';
+    const rawName = item.sku_text || item.product_requirement || item.product_name || item.description || item.pName || 'Steel Item';
+    const grade = String(item.grade || '').trim();
+    const name = grade && !rawName.toLowerCase().includes(grade.toLowerCase())
+      ? `${rawName} ${grade}`
+      : rawName;
     const dim = item.dimensions || item.spec || item.thickness || item.size;
     let spec = '';
     if (dim) {
@@ -6006,13 +6067,11 @@ function formatDetailedInquiryItemsList(items, { includeHsn = false } = {}) {
       } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
         spec = ` (${dim})`;
       }
-    } else if (item.grade && !name.toLowerCase().includes(String(item.grade).toLowerCase())) {
-      spec = ` (${item.grade})`;
     }
 
     let hsnBlock = '';
     if (includeHsn) {
-      const detected = (typeof detectHsnCode === 'function') ? detectHsnCode(name, dim || '') : null;
+      const detected = (typeof detectHsnCode === 'function') ? detectHsnCode(rawName, dim || '') : null;
       const hsn = item.hsn_code || item.hsn_sac || item.hsn || detected;
       if (hsn) {
         hsnBlock = ` [HSN: ${hsn}]`;
@@ -9517,6 +9576,7 @@ async function executeAction(action, draft, senderPhone) {
                 description: it.description || sText,
                 dimensions: sDim,
                 spec: sDim,
+                grade: it.grade || null,
                 hsn_code: hCode,
                 hsn_sac: hCode,
                 quantity: itQty,
