@@ -313,17 +313,20 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       const grandTot = Math.round(exactTot);
       const roundingVal = Math.round((grandTot - exactTot) * 100) / 100;
 
-      const tableY = currY + 14;
-      doc.rect(leftX, tableY, contentWidth, 24).fill('#525E6F');
-      doc.fillColor('#FFFFFF').font(fontBold).fontSize(8.5);
-      doc.text('#', leftX, tableY + 7.5, { width: 26, align: 'center' });
-      doc.text('Item & Description', 70, tableY + 7.5, { width: 205 });
-      doc.text('HSN/SAC', 278, tableY + 7.5, { width: 62, align: 'center' });
-      doc.text('Qty', 342, tableY + 7.5, { width: 68, align: 'right' });
-      doc.text('Rate', 412, tableY + 7.5, { width: 65, align: 'right' });
-      doc.text('Amount', 479, tableY + 7.5, { width: 76.28, align: 'right' });
+      const drawItemHeader = (headerY) => {
+        doc.rect(leftX, headerY, contentWidth, 24).fill('#525E6F');
+        doc.fillColor('#FFFFFF').font(fontBold).fontSize(8.5);
+        doc.text('#', leftX, headerY + 7.5, { width: 26, align: 'center', lineBreak: false });
+        doc.text('Item & Description', 70, headerY + 7.5, { width: 205, lineBreak: false });
+        doc.text('HSN/SAC', 278, headerY + 7.5, { width: 62, align: 'center', lineBreak: false });
+        doc.text('Qty', 342, headerY + 7.5, { width: 68, align: 'right', lineBreak: false });
+        doc.text('Rate', 412, headerY + 7.5, { width: 65, align: 'right', lineBreak: false });
+        doc.text('Amount', 479, headerY + 7.5, { width: 76.28, align: 'right', lineBreak: false });
+        return headerY + 24;
+      };
 
-      let rowY = tableY + 24;
+      const tableY = currY + 14;
+      let rowY = drawItemHeader(tableY);
       lineItems.forEach((item, idx) => {
         doc.font(fontBold).fontSize(8.5);
         const skuH = doc.heightOfString(item.sku_text, { width: 205 });
@@ -331,6 +334,11 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
           ? doc.font(fontRegular).fontSize(7.5).heightOfString(item.dimensions, { width: 205 }) + 3
           : 0;
         const rowH = Math.max(34, skuH + dimH + 18);
+
+        if (rowY + rowH > doc.page.maxY()) {
+          doc.addPage();
+          rowY = drawItemHeader(doc.page.margins.top);
+        }
 
         doc.rect(leftX, rowY, contentWidth, rowH).fill('#FFFFFF');
 
@@ -384,6 +392,10 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       });
 
       // 4. Financial Totals & Summary Block
+      if (rowY + 90 > doc.page.maxY()) {
+        doc.addPage();
+        rowY = doc.page.margins.top;
+      }
       const summaryY = rowY + 22;
       doc.moveTo(leftX, rowY + 10).lineTo(rightEdge, rowY + 10).strokeColor('#E2E8F0').lineWidth(0.75).stroke();
 
