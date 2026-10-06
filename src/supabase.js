@@ -245,6 +245,20 @@ async function saveInquiry(data) {
       salesperson_phone: effectiveSalespersonPhone,
       employee_id: data.employee_id || null,
       inquiry_type: data.inquiry_type || null,
+      po_number:
+        data.po_status === 'confirmed'
+          ? data.po_number || data.generated_po_number || null
+          : null,
+      reference_po_number:
+        data.reference_po_number ||
+        data.customer_po_number ||
+        (data.po_status === 'confirmed' ? null : data.po_number) ||
+        null,
+      generated_po_number: data.generated_po_number || null,
+      po_source: data.po_source || null,
+      po_status: data.po_status || null,
+      po_generated_at: data.po_generated_at || null,
+      po_confirmed_at: data.po_confirmed_at || null,
       ai_extraction_json: data.ai_extraction_json || null,
       overall_confidence:
         data.overall_confidence != null
@@ -295,16 +309,33 @@ async function getInquiries() {
 async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
   try {
     const poDate = extraction.po_date || null;
-    let poNumber = extraction.po_number || null;
-    if (
-      !poNumber &&
-      (extraction.inquiry_type === 'purchase_order' ||
-        extraction.stage === 'won')
-    ) {
-      const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      const randomNum = Math.floor(1000 + Math.random() * 9000);
-      poNumber = `PO-${todayStr}-${randomNum}`;
+    const isConfirmedOrder =
+      extraction.po_status === 'confirmed' ||
+      extraction.stage === 'won' ||
+      extraction.action === 'LOG_ORDER';
+    const referencePoNumber =
+      extraction.reference_po_number ||
+      extraction.customer_po_number ||
+      (!extraction.generated_po_number ? extraction.po_number : null) ||
+      null;
+    let poResolution = null;
+
+    if (isConfirmedOrder) {
+      const { resolveFinalPo, claimPoNumber } = require('./core/poResolver');
+      poResolution = await resolveFinalPo({
+        poNumber:
+          extraction.po_status === 'confirmed'
+            ? extraction.po_number
+            : extraction.generated_po_number,
+        generatedPoNumber: extraction.generated_po_number,
+        referencePoNumber,
+        reservationToken:
+          extraction.po_reservation_token || `legacy-save-deal:${inquiryId || Date.now()}`,
+        dealId: null,
+      });
     }
+
+    const poNumber = poResolution?.po_number || null;
 
     let effectiveSalespersonPhone = senderPhone;
     const targetCustName =
@@ -334,8 +365,14 @@ async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
       .from('deals')
       .insert({
         inquiry_id: inquiryId,
-        stage: 'new_inquiry',
+        stage: isConfirmedOrder ? 'won' : 'new_inquiry',
         po_number: poNumber,
+        reference_po_number: referencePoNumber,
+        generated_po_number: poResolution?.generated_po_number || null,
+        po_source: poResolution?.po_source || null,
+        po_status: poResolution?.po_status || null,
+        po_generated_at: poResolution?.po_generated_at || null,
+        po_confirmed_at: poResolution?.po_confirmed_at || null,
         po_date: poDate,
         customer_name: extraction.customer?.name || null,
         customer_phone: extraction.customer?.phone || null,
@@ -361,6 +398,25 @@ async function saveDeal(inquiryId, extraction, senderPhone, employeeId) {
     if (dealError) {
       console.error('Error saving deal:', dealError);
       return null;
+    }
+
+    if (isConfirmedOrder && poResolution?.po_number) {
+      await claimPoNumber(
+        poResolution.po_number,
+        poResolution.po_reservation_token,
+        deal.id,
+      );
+      if (inquiryId) {
+        await supabase.from('inquiries').update({
+          po_number: poResolution.po_number,
+          reference_po_number: poResolution.reference_po_number || null,
+          generated_po_number: poResolution.generated_po_number || null,
+          po_source: poResolution.po_source || null,
+          po_status: poResolution.po_status || 'confirmed',
+          po_generated_at: poResolution.po_generated_at || null,
+          po_confirmed_at: poResolution.po_confirmed_at || null,
+        }).eq('id', inquiryId);
+      }
     }
 
     // Save line items
