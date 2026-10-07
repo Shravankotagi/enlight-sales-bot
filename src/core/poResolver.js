@@ -102,6 +102,33 @@ async function claimPoNumber(poNumber, reservationToken = null, dealId = null) {
   return result;
 }
 
+async function releasePoReservation(
+  reservationToken,
+  poNumber = null,
+  dealId = null,
+) {
+  const token = cleanPo(reservationToken);
+  if (!token) {
+    return { released: false, reason: 'Reservation token is required' };
+  }
+
+  const { data, error } = await getSupabase().rpc('release_po_reservation', {
+    p_reservation_token: token,
+    p_po_number: cleanPo(poNumber),
+    p_deal_id: cleanDealId(dealId),
+  });
+
+  if (error || !data || typeof data !== 'object') {
+    const failure = new Error(
+      error?.message || 'PO reservation could not be released',
+    );
+    failure.code = 'PO_ALLOCATOR_UNAVAILABLE';
+    throw failure;
+  }
+
+  return Array.isArray(data) ? data[0] || { released: false } : data;
+}
+
 /**
  * Adds a stable system PO to a conversational draft without writing an order
  * row. The current po_number remains editable; generated_po_number records the
@@ -205,6 +232,7 @@ module.exports = {
   allocateSystemPo,
   checkPoAvailability,
   claimPoNumber,
+  releasePoReservation,
   ensureDraftSystemPo,
   resolveFinalPo,
 };

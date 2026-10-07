@@ -41,6 +41,7 @@ const {
   ensureDraftSystemPo,
   resolveFinalPo,
   claimPoNumber,
+  releasePoReservation,
 } = require('./poResolver');
 const {
   startNewCatalogSession,
@@ -472,10 +473,33 @@ const SAVE_CONFIRM_WORDS = new Set([
 // ── INACTIVE DRAFT & STALE BUTTON TRACKING ──────────────────────────────────
 const lastInactiveDraftMetadata = new Map();
 
+function releaseOrderDraftPoReservation(action, draft, status) {
+  const d = (typeof draft === 'object' && draft !== null) ? draft : {};
+  const isOrderDraft =
+    action === 'LOG_ORDER' ||
+    action === 'UPDATE_ORDER' ||
+    d._direct_order === true;
+  const token = d.po_reservation_token;
+  if (!isOrderDraft || !token || status === 'saved') return;
+
+  const poNumber = d.generated_po_number || d.po_number;
+  void releasePoReservation(token, poNumber, d.deal_id || d.order_id)
+    .catch(error => {
+      console.error('[SystemPO] Bot order draft release failed', {
+        action,
+        reservationToken: token,
+        poNumber,
+        dealId: d.deal_id || d.order_id || null,
+        error,
+      });
+    });
+}
+
 function recordInactiveDraft(senderPhone, action, draft, status = 'discarded') {
   if (!senderPhone) return;
   const canonicalPhone = cleanPhone(senderPhone);
   const d = (typeof draft === 'object' && draft !== null) ? draft : {};
+  releaseOrderDraftPoReservation(action || d._action, d, status);
   lastInactiveDraftMetadata.set(canonicalPhone, {
     action: action || d._action || null,
     draft: d,
