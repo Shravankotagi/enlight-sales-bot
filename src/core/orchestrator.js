@@ -585,7 +585,7 @@ function stripAsterisks(text) {
       .trim();
 
     if (!reply) {
-      reply = 'Activity updated in your CRM & KRA Dashboard!';
+      reply = 'Activity updated in your CRM';
     }
 
     // Post-processor: Guarantee Inquiry ID is included for newly CREATED or UPDATED deals (never on read-only queries or lookups)
