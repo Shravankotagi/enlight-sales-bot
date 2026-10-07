@@ -85,7 +85,29 @@ function convertLineItemToMt(item) {
   const normUnit = normalizeUnit(rawUnit);
 
   if (!qty || qty <= 0) return 0;
+
+  // Priority 0: Stored normalized weight from database or Gemini unit converter
+  if (
+    item.weight_mt !== undefined &&
+    item.weight_mt !== null &&
+    !isNaN(Number(item.weight_mt)) &&
+    Number(item.weight_mt) > 0
+  ) {
+    return Number(item.weight_mt);
+  }
+  if (
+    item.converted_mt !== undefined &&
+    item.converted_mt !== null &&
+    !isNaN(Number(item.converted_mt)) &&
+    Number(item.converted_mt) > 0
+  ) {
+    return Number(item.converted_mt);
+  }
+
+  // 1. MT: No conversion needed
   if (normUnit === 'MT') return qty;
+
+  // 2. KG: MT = KG / 1000
   if (normUnit === 'KG') return qty / 1000;
 
   const combinedText = [
@@ -94,7 +116,7 @@ function convertLineItemToMt(item) {
     item.description || '',
   ].join(' ').toLowerCase();
 
-  // 1. TMT Rebars: (Dia^2 / 162) * Len * Qty / 1000
+  // 3a. TMT Rebars: (Dia^2 / 162) * Len * Qty / 1000
   if (combinedText.includes('tmt') || combinedText.includes('rebar')) {
     const diaMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm|dia|diameter)/);
     if (diaMatch) {
@@ -105,7 +127,7 @@ function convertLineItemToMt(item) {
     }
   }
 
-  // 2. Round Bars: (pi/4) * (Dia_cm^2) * Len_cm * 7.85 / 1000 * Qty / 1000
+  // 3b. Round Bars: (pi/4) * (Dia_cm^2) * Len_cm * 7.85 / 1000 * Qty / 1000
   if (combinedText.includes('round bar') || combinedText.includes('bright bar')) {
     const diaMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm|dia|diameter)/);
     if (diaMatch) {
@@ -119,7 +141,7 @@ function convertLineItemToMt(item) {
     }
   }
 
-  // 3. Angles: (A + B - t) * t * 0.00785 * Len * Qty / 1000
+  // 3c. Angles: (A + B - t) * t * 0.00785 * Len * Qty / 1000
   if (combinedText.includes('angle') || combinedText.includes('isa')) {
     const angleMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*]\s*(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*]\s*(\d+(?:\.\d+)?)/);
     if (angleMatch) {
@@ -132,28 +154,86 @@ function convertLineItemToMt(item) {
     }
   }
 
-  // 4. Sheets / Plates / Coils: Length(m) * Width(m) * Thickness(mm) * 7.85 * Qty / 1000
+  // 3d. MS Channels / Beams / Joist / Square Pipe:
+  const isPipe =
+    combinedText.includes('pipe') ||
+    combinedText.includes('tube') ||
+    combinedText.includes('shs') ||
+    combinedText.includes('rhs') ||
+    combinedText.includes('square');
+  if (isPipe) {
+    const pipeMatch = combinedText.match(
+      /(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*]\s*(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*]\s*(\d+(?:\.\d+)?)/
+    );
+    if (pipeMatch) {
+      const od = parseFloat(pipeMatch[1]);
+      const t = parseFloat(pipeMatch[3]);
+      const len = 6;
+      const wtKg = (od - t) * t * 0.0157 * len * qty;
+      return wtKg / 1000;
+    }
+  }
+
+  // 3e. Cable Trays (Perforated & Ladder): Girth(m) * Thk(mm) * 7.85 * Length(m) * Qty / 1000
+  if (combinedText.includes('cable tray')) {
+    let widthMm = 300;
+    const wMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm\s*width|mm\s*w\b|\bwidth\s*(\d+)|w\s*(\d+))/);
+    if (wMatch) {
+      widthMm = parseFloat(wMatch[1] || wMatch[2] || wMatch[3]);
+    } else {
+      const dimMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*]\s*(\d+(?:\.\d+)?)/);
+      if (dimMatch) {
+        const v1 = parseFloat(dimMatch[1]);
+        const v2 = parseFloat(dimMatch[2]);
+        widthMm = Math.max(v1, v2);
+      }
+    }
+    const collarMm = 50; // standard 50mm collar
+    const girthM = (widthMm + 2 * collarMm) / 1000;
+    const lenM = 2.5; // standard 2.5m section
+    const thkMm = 1.6; // standard 1.6mm sheet
+    const isPerforated = !combinedText.includes('ladder');
+    const factor = isPerforated ? 0.88 : 1.0;
+    const wtPerPieceKg = girthM * lenM * thkMm * 7.85 * factor;
+    return Math.round(((wtPerPieceKg * qty) / 1000) * 1000) / 1000;
+  }
+
+  // 3f. Slotted Angle:
+  if (combinedText.includes('slotted angle')) {
+    const wtPerPieceKg = 3.5; // standard 40x40x2mm 2.5m piece
+    return Math.round(((wtPerPieceKg * qty) / 1000) * 1000) / 1000;
+  }
+
+  // 3g. Sheets / Plates / Coils: Length(m) * Width(m) * Thickness(mm) * 7.85 * Qty / 1000
   let thickness = null;
-  const thkMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm\s*thk|mm\s*thickness|mm|\bthk\b)/);
-  if (thkMatch) thickness = parseFloat(thkMatch[1]);
+  const thkMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm\s*thk|mm\s*thickness|\bthk\b)/);
+  if (thkMatch) {
+    const candidate = parseFloat(thkMatch[1]);
+    if (candidate <= 50) {
+      thickness = candidate;
+    }
+  }
 
   let widthM = null;
   let lengthM = null;
 
-  const dim3Match = combinedText.match(/(\d+(?:\.\d+)?)\s*[xX*×]\s*(\d+(?:\.\d+)?)\s*[xX*×]\s*(\d+(?:\.\d+)?)/);
+  const dim3Match = combinedText.match(
+    /(\d+(?:\.\d+)?)\s*(?:mm|m)?\s*[xX*×]\s*(\d+(?:\.\d+)?)\s*(?:mm|m)?\s*[xX*×]\s*(\d+(?:\.\d+)?)\s*(?:mm|m)?/
+  );
   if (dim3Match) {
     const n1 = parseFloat(dim3Match[1]);
     const n2 = parseFloat(dim3Match[2]);
     const n3 = parseFloat(dim3Match[3]);
     const sorted = [n1, n2, n3].sort((a, b) => a - b);
-    // In steel specs (e.g. 05X1500X6300MM), the smallest dimension is always thickness in mm
-    thickness = sorted[0];
+    if (!thickness && sorted[0] <= 50) thickness = sorted[0];
     const w = sorted[1];
     const l = sorted[2];
     widthM = w > 20 ? w / 1000 : w;
     lengthM = l > 20 ? l / 1000 : l;
   } else {
-    const dim2Match = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*×]\s*(\d+(?:\.\d+)?)\s*(?:mm)?/);
+    const dim2Match = combinedText.match(
+      /(\d+(?:\.\d+)?)\s*(?:mm|m)?\s*[xX*×]\s*(\d+(?:\.\d+)?)\s*(?:mm|m)?/
+    );
     if (dim2Match) {
       const d1 = parseFloat(dim2Match[1]);
       const d2 = parseFloat(dim2Match[2]);
@@ -161,21 +241,33 @@ function convertLineItemToMt(item) {
       const l = Math.max(d1, d2);
       widthM = w > 20 ? w / 1000 : w;
       lengthM = l > 20 ? l / 1000 : l;
-      if (thickness && thickness >= w) {
-        thickness = null;
-      }
     }
   }
 
-  if (thickness && widthM && lengthM) {
-    const wtKgPerPc = lengthM * widthM * thickness * 8;
+  const isSheetOrPlate =
+    combinedText.includes('sheet') ||
+    combinedText.includes('plate') ||
+    combinedText.includes('chequered') ||
+    combinedText.includes('cr ') ||
+    combinedText.includes('hr ') ||
+    combinedText.includes('hrpo') ||
+    normUnit === 'Sheets' ||
+    normUnit === 'Plates';
+
+  if (thickness && widthM && lengthM && isSheetOrPlate) {
+    const wtKgPerPc = lengthM * widthM * thickness * 7.85;
     return (wtKgPerPc * qty) / 1000;
   }
 
-  if (thickness) {
+  if (thickness && isSheetOrPlate) {
     // Default sheet size: 1.25m x 2.5m (1250 x 2500 mm)
-    const wtKgPerPc = 2.5 * 1.25 * thickness * 8;
+    const wtKgPerPc = 2.5 * 1.25 * thickness * 7.85;
     return (wtKgPerPc * qty) / 1000;
+  }
+
+  // If the unit is discrete and unconvertible, do NOT return qty as MT
+  if (['Nos', 'Pcs', 'Pieces', 'Units', 'Bundles', 'Sheets', 'Plates', 'Coils'].includes(normUnit)) {
+    return null;
   }
 
   return qty;
@@ -319,13 +411,13 @@ function calculatePricingSummary(input, options = {}) {
     totalQuantityMt = totalQuantity;
     formattedQuantity = `${totalQuantity.toLocaleString('en-IN')} MT`;
   } else {
-    totalQuantityMt = processedItems.reduce((sum, item) => sum + convertToMt(Number(item.quantity) || 0, item.unit), 0);
+    // Mixed units or piece/count units: compute converted MT using physical formulas
+    const tonnageRes = calculateTotalTonnageMt(processedItems);
+    totalQuantityMt = tonnageRes.totalMt;
     totalQuantity = isUniformUnit
       ? processedItems.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0)
       : totalQuantityMt;
-    formattedQuantity = isUniformUnit
-      ? `${totalQuantity.toLocaleString('en-IN')} ${primaryUnit}`
-      : `${totalQuantityMt.toLocaleString('en-IN')} MT`;
+    formattedQuantity = tonnageRes.formattedText;
   }
 
   // Line-item derived subtotal always takes strict priority when line items exist
@@ -386,7 +478,7 @@ function calculatePricingSummary(input, options = {}) {
  */
 function calculateTotalTonnageMt(lineItems) {
   if (!Array.isArray(lineItems) || lineItems.length === 0) {
-    return { totalMt: 0, hasUnconvertible: false, formattedText: '0.00 MT' };
+    return { totalMt: 0, hasUnconvertible: false, formattedText: '0.00 MT', summaryText: '0 Items' };
   }
 
   const validItems = lineItems.filter(i => {
@@ -395,49 +487,29 @@ function calculateTotalTonnageMt(lineItems) {
   });
 
   if (validItems.length === 0) {
-    return { totalMt: 0, hasUnconvertible: false, formattedText: '0.00 MT' };
+    return { totalMt: 0, hasUnconvertible: false, formattedText: '0.00 MT', summaryText: '0 Items' };
   }
 
-  const units = validItems.map(i => normalizeUnit(i.unit || 'MT'));
-  const uniqueUnits = Array.from(new Set(units));
-  const isSameUnit = uniqueUnits.length === 1;
-  const commonUnit = isSameUnit ? uniqueUnits[0] : null;
+  // 1. Group items by unit to build a clean commercial summary breakdown
+  const unitTotals = new Map();
+  for (const item of validItems) {
+    const rawUnit = (item.unit || 'MT').trim();
+    const normUnit = normalizeUnit(rawUnit);
+    const q = Number(item.quantity ?? item.quantity_mt ?? item.qty ?? 0) || 0;
+    unitTotals.set(normUnit, (unitTotals.get(normUnit) || 0) + q);
+  }
 
-  if (isSameUnit && commonUnit) {
-    const totalSum = validItems.reduce(
-      (sum, i) => sum + (Number(i.quantity ?? i.quantity_mt ?? i.qty ?? 0) || 0),
-      0
+  const breakdownParts = [];
+  for (const [u, totalQ] of unitTotals.entries()) {
+    const roundedQ = Math.round(totalQ * 1000) / 1000;
+    breakdownParts.push(
+      `${roundedQ.toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${u}`
     );
-    const roundedQty = Math.round(totalSum * 1000) / 1000;
-    const formattedQty = roundedQty.toLocaleString('en-IN', {
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 3,
-    });
-
-    if (commonUnit === 'MT') {
-      return {
-        totalMt: roundedQty,
-        hasUnconvertible: false,
-        formattedText: `${formattedQty} MT`,
-      };
-    }
-
-    if (commonUnit === 'KG') {
-      const mtVal = Math.round((totalSum / 1000) * 1000) / 1000;
-      return {
-        totalMt: mtVal,
-        hasUnconvertible: false,
-        formattedText: `${formattedQty} KG (${mtVal.toLocaleString('en-IN', { maximumFractionDigits: 3 })} MT)`,
-      };
-    }
-
-    return {
-      totalMt: roundedQty,
-      hasUnconvertible: false,
-      formattedText: `${formattedQty} ${commonUnit}`,
-    };
   }
+  const summaryText = breakdownParts.join(', ');
+  const itemCountText = `${validItems.length} ${validItems.length === 1 ? 'item' : 'items'}`;
 
+  // 2. Convert each line item to MT
   let totalMt = 0;
   let hasUnconvertible = false;
   const unconvertibleItems = [];
@@ -458,10 +530,26 @@ function calculateTotalTonnageMt(lineItems) {
     maximumFractionDigits: 3,
   });
 
+  // 3. Format result with clean dual representation
+  const isPureMt = unitTotals.size === 1 && unitTotals.has('MT');
+  let formattedText = `${formattedMtStr} MT`;
+
+  if (isPureMt) {
+    formattedText = `${formattedMtStr} MT`;
+  } else if (roundedMt > 0) {
+    formattedText = `${summaryText} • Est. Total Weight: ${formattedMtStr} MT`;
+  } else if (hasUnconvertible) {
+    formattedText = `${summaryText} (Weight conversion unavailable)`;
+  }
+
   return {
     totalMt: roundedMt,
     hasUnconvertible,
-    formattedText: `${formattedMtStr} MT`,
+    unconvertedDetails:
+      unconvertibleItems.length > 0 ? unconvertibleItems.join(', ') : undefined,
+    formattedText,
+    summaryText,
+    itemBreakdownText: `${summaryText} (${itemCountText})`,
   };
 }
 
