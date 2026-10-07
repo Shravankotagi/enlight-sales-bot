@@ -3765,6 +3765,21 @@ function resolveCapturedSteelGrade({ rawSku, description, itemGrade, prevGrade, 
 
 function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   const merged = { ...baseDraft, action };
+  const sourceCandidate = String(userInput || '').trim();
+  const isControlInput =
+    !sourceCandidate ||
+    /^\d{1,2}$/.test(sourceCandidate) ||
+    /^(?:yes|y|no|n|ok|okay|save|confirm|cancel|discard|edit|change|modify|btn_|menu_)/i.test(
+      sourceCandidate,
+    );
+  if (
+    (action === 'LOG_INQUIRY' || action === 'LOG_ORDER') &&
+    !merged._source_original_text &&
+    sourceCandidate.length >= 3 &&
+    !isControlInput
+  ) {
+    merged._source_original_text = sourceCandidate;
+  }
   const explicitSystemPoEdit =
     Boolean(baseDraft._editing_system_po) ||
     /\b(?:system|internal|generated|enlight|our)\s+po\b/i.test(userInput) ||
@@ -9766,6 +9781,11 @@ async function executeAction(action, draft, senderPhone) {
         if (draft.payment_terms) humanRawText += `Payment Terms: ${draft.payment_terms}\n`;
         if (draft.delivery_location) humanRawText += `Delivery Location: ${draft.delivery_location}\n`;
         if (draft.additional_notes) humanRawText += `Notes: ${draft.additional_notes}\n`;
+        const inquirySourceMediaUrls = Array.isArray(draft.attachments)
+          ? draft.attachments
+            .map(a => a?.url || a?.file_url)
+            .filter(Boolean)
+          : [];
 
         // 1. Insert into inquiries (primary canonical table with pipeline fields)
         const { data: inqRow, error: inqErr } = await supabase
@@ -9774,7 +9794,8 @@ async function executeAction(action, draft, senderPhone) {
             source_channel: draft.source_channel || 'WhatsApp',
             sender_name: companyName,
             customer_name: companyName,
-            raw_text: humanRawText.trim(),
+            raw_text: (draft._source_original_text || humanRawText).trim(),
+            media_urls: inquirySourceMediaUrls,
             sender_phone: senderPhone,
             salesperson_phone: senderPhone,
             status: 'new_inquiry',
@@ -10598,7 +10619,19 @@ async function executeAction(action, draft, senderPhone) {
           overall_confidence: 0.98,
         };
 
-        let humanRawText = `Customer: ${companyName}\nSystem PO Number: ${draft.po_number}\n`;
+        const sourceOriginalText = String(draft._source_original_text || '').trim();
+        const hasSourceDocument =
+          Array.isArray(draft.attachments) && draft.attachments.length > 0;
+        const sourceMediaUrls = hasSourceDocument
+          ? draft.attachments
+            .map(a => a?.url || a?.file_url)
+            .filter(Boolean)
+          : [];
+        let humanRawText = sourceOriginalText
+          ? sourceOriginalText
+          : hasSourceDocument
+            ? `[PO Document Attached: ${draft.po_number}] ${companyName} - Original PO Document`
+            : `Customer: ${companyName}\nSystem PO Number: ${draft.po_number}\n`;
         if (draft.reference_po_number) humanRawText += `Reference PO: ${draft.reference_po_number}\n`;
         humanRawText += `PO Date: ${draft.po_date}\n`;
         if (draft.inquiry_id) humanRawText += `Linked Inquiry: ${draft.inquiry_id}\n`;
@@ -10713,6 +10746,9 @@ async function executeAction(action, draft, senderPhone) {
                 delivery_location: draft.delivery_location || null,
                 payment_terms: draft.payment_terms || null,
                 ai_extraction_json: structuredAiJson,
+                ...(sourceMediaUrls.length > 0
+                  ? { media_urls: sourceMediaUrls }
+                  : {}),
               })
               .eq('id', finalInquiryId);
 
@@ -10727,6 +10763,7 @@ async function executeAction(action, draft, senderPhone) {
                 customer_name: companyName,
                 sender_name: companyName,
                 raw_text: humanRawText.trim(),
+                media_urls: sourceMediaUrls,
                 sender_phone: senderPhone,
                 salesperson_phone: senderPhone,
                 status: 'confirmed',
