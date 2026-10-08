@@ -1550,9 +1550,9 @@ async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
   const todayDateStr = new Date().toLocaleDateString('en-IN');
 
   const baseAmt = Number(deal.total_amount) || dealItems.reduce((s, i) => s + (Number(i.amount) || 0), 0);
-  const cgstAmt = Math.round(baseAmt * 0.09);
-  const sgstAmt = Math.round(baseAmt * 0.09);
-  const grandTotal = baseAmt + cgstAmt + sgstAmt;
+  const cgstAmt = dealItems.reduce((s, i) => s + (Number(i.cgst_amount) || Math.round((Number(i.amount) || 0) * 0.09 * 100) / 100), 0) || Math.round(baseAmt * 0.09 * 100) / 100;
+  const sgstAmt = dealItems.reduce((s, i) => s + (Number(i.sgst_amount) || Math.round((Number(i.amount) || 0) * 0.09 * 100) / 100), 0) || Math.round(baseAmt * 0.09 * 100) / 100;
+  const grandTotal = Math.round(baseAmt + cgstAmt + sgstAmt);
 
   let itemsSummary = '';
   if (dealItems.length > 0) {
@@ -1564,15 +1564,19 @@ async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
         const qtyStr = `${Number(item.quantity || 0).toLocaleString('en-IN')} ${unit}`;
         const rate = Number(item.rate || 0);
         const amt = Number(item.amount || (Number(item.quantity || 0) * Number(item.rate || 0)));
+        const itemCgst = item.cgst_amount !== undefined ? Number(item.cgst_amount) : Math.round(amt * 0.09 * 100) / 100;
+        const itemSgst = item.sgst_amount !== undefined ? Number(item.sgst_amount) : Math.round(amt * 0.09 * 100) / 100;
+        const itemFinal = item.final_amount !== undefined ? Number(item.final_amount) : Math.round((amt + itemCgst + itemSgst) * 100) / 100;
         if (rate > 0) {
-          const lineTotalStr = amt > 0 ? ` | Line Total: ₹${amt.toLocaleString('en-IN')}` : '';
+          const lineTotalStr = amt > 0 ? ` | Base: ₹${amt.toLocaleString('en-IN')} | Final (Incl. 18% GST): ₹${itemFinal.toLocaleString('en-IN')}` : '';
           return `  ${prefix}${item.sku_text || 'Material'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
         }
         return `  ${prefix}${item.sku_text || 'Material'}${spec} | ${qtyStr}`;
       })
       .join('\n');
   } else {
-    itemsSummary = `  1. Steel Material | 1 MT | ₹${Number(baseAmt).toLocaleString('en-IN')} /MT | Line Total: ₹${Number(baseAmt).toLocaleString('en-IN')}`;
+    const defaultFinal = Math.round(Number(baseAmt) * 1.18);
+    itemsSummary = `  1. Steel Material | 1 MT | ₹${Number(baseAmt).toLocaleString('en-IN')} /MT | Base: ₹${Number(baseAmt).toLocaleString('en-IN')} | Final (Incl. 18% GST): ₹${defaultFinal.toLocaleString('en-IN')}`;
   }
 
   const textContent = `Dear ${customerName},

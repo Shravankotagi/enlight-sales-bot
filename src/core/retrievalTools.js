@@ -640,9 +640,9 @@ function cleanLegalSuffixes(str) {
 function getDealTonnage(deal) {
   if (!deal) return 0;
   if (Array.isArray(deal.deal_items) && deal.deal_items.length > 0) {
-    return deal.deal_items.reduce((sum, item) => sum + convertLineItemToMt(item), 0);
+    return Math.round(deal.deal_items.reduce((sum, item) => sum + (Number(convertLineItemToMt(item)) || 0), 0) * 1000) / 1000;
   }
-  return convertLineItemToMt(deal);
+  return Math.round((Number(convertLineItemToMt(deal)) || 0) * 1000) / 1000;
 }
 
 /**
@@ -918,8 +918,9 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
         if (Array.isArray(rawAiItems) && rawAiItems.length > 0) {
           lineItems = rawAiItems;
           lineItems.forEach((li) => {
-            estTonnage += convertLineItemToMt(li);
+            estTonnage += (Number(convertLineItemToMt(li)) || 0);
           });
+          estTonnage = Math.round(estTonnage * 1000) / 1000;
         }
         dimensions = parsed.dimensions || null;
         deliveryLoc = parsed.delivery_location || parsed.delivery_address || parsed.customer?.city || null;
