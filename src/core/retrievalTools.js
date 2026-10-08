@@ -1042,9 +1042,6 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
             spec = ` (${dim})`;
           }
         }
-        const qtyVal = (it.quantity !== undefined && it.quantity !== null && it.quantity !== '')
-          ? it.quantity
-          : (it.quantity_mt !== undefined && it.quantity_mt !== null ? it.quantity_mt : '');
         const calc = calculateLineItem(it);
         const unit = calc.unit || it.unit || 'MT';
         const qtyVal = calc.quantity || it.quantity || it.quantity_mt || '';
@@ -3533,6 +3530,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
         } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
           spec = ` (${dim})`;
         }
+      }
       const calc = calculateLineItem(it);
       const qty = calc.quantity || 0;
       const unit = calc.unit || it.unit || 'MT';
@@ -3602,6 +3600,7 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
               } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
                 spec = ` (${dim})`;
               }
+            }
             const calc = calculateLineItem(it);
             const qty = calc.quantity || 0;
             const unit = calc.unit || it.unit || 'MT';
