@@ -293,7 +293,12 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
               },
             ];
 
-      const lineItems = rawLineItems.map(item => ({
+      const validPricedSrc = rawLineItems.filter(
+        item => Number(item.rate || item.unitPrice || 0) > 0
+      );
+      const effectiveSrc = validPricedSrc.length > 0 ? validPricedSrc : rawLineItems;
+
+      const lineItems = effectiveSrc.map(item => ({
         sku_text: (item.sku_text || item.description || item.productType || 'HR - COIL / SHEET').toUpperCase(),
         dimensions: item.dimensions || undefined,
         hsn_code: item.hsn_code || item.hsn || detectHsnCode(item.sku_text || item.description || '', item.dimensions),
