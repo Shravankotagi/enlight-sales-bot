@@ -5,6 +5,12 @@ create table if not exists deals (
   inquiry_id uuid references inquiries(id),
   stage text default 'new_inquiry',
   po_number text,
+  reference_po_number text,
+  generated_po_number text,
+  po_source text,
+  po_status text,
+  po_generated_at timestamptz,
+  po_confirmed_at timestamptz,
   po_date text,
   customer_name text,
   customer_phone text,
@@ -37,4 +43,10 @@ create table if not exists deal_items (
 -- Also add these columns to existing inquiries table
 alter table inquiries 
   add column if not exists ai_extraction_json jsonb,
-  add column if not exists overall_confidence numeric;
+    add column if not exists overall_confidence numeric,
+    add column if not exists reference_po_number text,
+    add column if not exists generated_po_number text,
+    add column if not exists po_source text,
+    add column if not exists po_status text,
+    add column if not exists po_generated_at timestamptz,
+    add column if not exists po_confirmed_at timestamptz;

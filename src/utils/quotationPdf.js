@@ -184,7 +184,6 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
         year: 'numeric',
       });
 
-      const salesperson = details.salespersonName || details.salesperson_name || details.salesperson || 'Sales Team';
       const compName = (details.companyName || customerName || 'Valued Customer').toUpperCase();
       const rawAddress = (details.deliveryLocation || details.delivery_location || details.customerAddress || details.address || '').trim();
 
@@ -265,23 +264,17 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
 
       currY += 10;
 
-      doc.fillColor('#1E293B').font(fontBold).fontSize(8.5).text('Place Of Supply: ', leftX, currY, { continued: true })
+      const placeY = currY;
+      doc.fillColor('#1E293B').font(fontBold).fontSize(8.5).text('Place Of Supply: ', leftX, placeY, { continued: true })
         .font(fontRegular).fillColor('#475569').text(placeOfSupply);
-      currY += 16;
+      currY = placeY + 16;
 
-      // Right Column: Order Date & Sales Person
       const rightBoxX = 395;
-      const metaRightY = currY - 34;
-      doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('Order Date :', rightBoxX, metaRightY, { width: 75 });
-      doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(todayDate, rightBoxX + 75, metaRightY, {
+      doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('Order Date :', rightBoxX, placeY, { width: 75, lineBreak: false });
+      doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(todayDate, rightBoxX + 75, placeY, {
         width: 85,
         align: 'right',
-      });
-
-      doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('Sales person :', rightBoxX, metaRightY + 16, { width: 75 });
-      doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(salesperson, rightBoxX + 75, metaRightY + 16, {
-        width: 85,
-        align: 'right',
+        lineBreak: false,
       });
 
       // 3. Line Items Table
@@ -300,7 +293,12 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
               },
             ];
 
-      const lineItems = rawLineItems.map(item => ({
+      const validPricedSrc = rawLineItems.filter(
+        item => Number(item.rate || item.unitPrice || 0) > 0
+      );
+      const effectiveSrc = validPricedSrc.length > 0 ? validPricedSrc : rawLineItems;
+
+      const lineItems = effectiveSrc.map(item => ({
         sku_text: (item.sku_text || item.description || item.productType || 'HR - COIL / SHEET').toUpperCase(),
         dimensions: item.dimensions || undefined,
         hsn_code: item.hsn_code || item.hsn || detectHsnCode(item.sku_text || item.description || '', item.dimensions),
@@ -320,17 +318,20 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       const grandTot = Math.round(exactTot);
       const roundingVal = Math.round((grandTot - exactTot) * 100) / 100;
 
-      const tableY = currY + 14;
-      doc.rect(leftX, tableY, contentWidth, 24).fill('#525E6F');
-      doc.fillColor('#FFFFFF').font(fontBold).fontSize(8.5);
-      doc.text('#', leftX, tableY + 7.5, { width: 26, align: 'center' });
-      doc.text('Item & Description', 70, tableY + 7.5, { width: 205 });
-      doc.text('HSN/SAC', 278, tableY + 7.5, { width: 62, align: 'center' });
-      doc.text('Qty', 342, tableY + 7.5, { width: 68, align: 'right' });
-      doc.text('Rate', 412, tableY + 7.5, { width: 65, align: 'right' });
-      doc.text('Amount', 479, tableY + 7.5, { width: 76.28, align: 'right' });
+      const drawItemHeader = (headerY) => {
+        doc.rect(leftX, headerY, contentWidth, 24).fill('#525E6F');
+        doc.fillColor('#FFFFFF').font(fontBold).fontSize(8.5);
+        doc.text('#', leftX, headerY + 7.5, { width: 26, align: 'center', lineBreak: false });
+        doc.text('Item & Description', 70, headerY + 7.5, { width: 205, lineBreak: false });
+        doc.text('HSN/SAC', 278, headerY + 7.5, { width: 62, align: 'center', lineBreak: false });
+        doc.text('Qty', 342, headerY + 7.5, { width: 68, align: 'right', lineBreak: false });
+        doc.text('Rate', 412, headerY + 7.5, { width: 65, align: 'right', lineBreak: false });
+        doc.text('Amount', 479, headerY + 7.5, { width: 76.28, align: 'right', lineBreak: false });
+        return headerY + 24;
+      };
 
-      let rowY = tableY + 24;
+      const tableY = currY + 14;
+      let rowY = drawItemHeader(tableY);
       lineItems.forEach((item, idx) => {
         doc.font(fontBold).fontSize(8.5);
         const skuH = doc.heightOfString(item.sku_text, { width: 205 });
@@ -338,6 +339,11 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
           ? doc.font(fontRegular).fontSize(7.5).heightOfString(item.dimensions, { width: 205 }) + 3
           : 0;
         const rowH = Math.max(34, skuH + dimH + 18);
+
+        if (rowY + rowH > doc.page.maxY()) {
+          doc.addPage();
+          rowY = drawItemHeader(doc.page.margins.top);
+        }
 
         doc.rect(leftX, rowY, contentWidth, rowH).fill('#FFFFFF');
 
@@ -391,6 +397,10 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       });
 
       // 4. Financial Totals & Summary Block
+      if (rowY + 90 > doc.page.maxY()) {
+        doc.addPage();
+        rowY = doc.page.margins.top;
+      }
       const summaryY = rowY + 22;
       doc.moveTo(leftX, rowY + 10).lineTo(rightEdge, rowY + 10).strokeColor('#E2E8F0').lineWidth(0.75).stroke();
 
@@ -454,9 +464,9 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       doc.fillColor('#334155').font(fontRegular).fontSize(8.5).text('Bank Details: -', leftX, 72);
 
       doc.fillColor('#475569').font(fontRegular).fontSize(8.5);
-      doc.text('Bank Name: HDFC Bank', leftX, 86);
-      doc.text('IFSC Code: HDFC0002454', leftX, 99);
-      doc.text('Account Number: 50200107323747', leftX, 112);
+      doc.text('Bank Name: Kotak Mahindra Bank', leftX, 86);
+      doc.text('IFSC Code: KKBK0001792', leftX, 99);
+      doc.text('Account Number: 2500112233', leftX, 112);
       doc.text('Account Name: Enlight Metals Private Limited', leftX, 125);
 
       // Terms & Conditions
@@ -476,7 +486,19 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       doc.text('2) All disputes are Subject to Pune Jurisdiction only.', leftX, 248);
 
       // Authorized Signature
-      doc.fillColor('#0F172A').font(fontBold).fontSize(10).text('Authorized Signature', leftX, 310);
+      doc.fillColor('#0F172A').font(fontBold).fontSize(10).text('Authorized Signature', leftX, 310, { lineBreak: false });
+
+      const signatureName = String(
+        details.senderName || details.salespersonName || details.salesperson_name || '',
+      ).trim();
+      if (
+        signatureName &&
+        signatureName !== 'Sales Operations Team' &&
+        signatureName !== 'Sales Team'
+      ) {
+        doc.fillColor('#0F172A').font(fontRegular).fontSize(10).text(signatureName, leftX, 328, { lineBreak: false });
+        doc.moveTo(leftX, 372).lineTo(leftX + 160, 372).strokeColor('#0F172A').lineWidth(0.8).stroke();
+      }
 
       doc.end();
     } catch (err) {

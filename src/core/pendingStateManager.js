@@ -18,6 +18,7 @@
 const { supabase, getFullActiveSession, saveActiveSession } = require('../supabase');
 const { calculateSubtotal } = require('../utils/pricingEngine');
 const { safeParseJSON } = require('../utils/jsonUtils');
+const { resolveFinalPo } = require('./poResolver');
 
 async function handlePendingSessionState(rawText, senderPhone) {
   if (!rawText || !senderPhone) return null;
@@ -125,29 +126,58 @@ async function handlePendingSessionState(rawText, senderPhone) {
     if (cleanInput === '2' || cleanInput.toLowerCase().includes('won')) {
       const { data: existingDealRow } = await supabase
         .from('deals')
-        .select('po_number')
+        .select('id, inquiry_id, po_number, reference_po_number, generated_po_number, po_generated_at')
         .eq('id', dealId)
         .limit(1);
 
-      let targetPoNumber = existingDealRow?.[0]?.po_number;
-      if (!targetPoNumber) {
-        const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-        const randomNum = Math.floor(1000 + Math.random() * 9000);
-        targetPoNumber = `PO-${todayStr}-${randomNum}`;
-      }
+      const existingDeal = existingDealRow?.[0] || null;
+      const poResolution = await resolveFinalPo({
+        poNumber: existingDeal?.generated_po_number
+          ? existingDeal.po_number
+          : null,
+        generatedPoNumber: existingDeal?.generated_po_number,
+        referencePoNumber: existingDeal?.reference_po_number,
+        reservationToken: `pending-payment:${dealId}`,
+        dealId,
+        existingDeal,
+      });
 
       const { error: wonErr } = await supabase
         .from('deals')
         .update({
           stage: 'won',
           won_at: new Date().toISOString(),
-          po_number: targetPoNumber,
+          po_number: poResolution.po_number,
+          reference_po_number: poResolution.reference_po_number,
+          generated_po_number: poResolution.generated_po_number,
+          po_source: poResolution.po_source,
+          po_status: 'confirmed',
+          po_generated_at: poResolution.po_generated_at,
+          po_confirmed_at: poResolution.po_confirmed_at,
         })
         .eq('id', dealId);
 
       if (wonErr) {
         console.error('[PendingState] Mark won error:', wonErr);
         return `❌ Failed to mark deal as won for ${customerName}: ${wonErr.message}. Please try again.`;
+      }
+
+      if (existingDeal?.inquiry_id) {
+        await supabase
+          .from('inquiries')
+          .update({
+            stage: 'won',
+            status: 'confirmed',
+            won_at: poResolution.po_confirmed_at,
+            po_number: poResolution.po_number,
+            reference_po_number: poResolution.reference_po_number,
+            generated_po_number: poResolution.generated_po_number,
+            po_source: poResolution.po_source,
+            po_status: 'confirmed',
+            po_generated_at: poResolution.po_generated_at,
+            po_confirmed_at: poResolution.po_confirmed_at,
+          })
+          .eq('id', existingDeal.inquiry_id);
       }
 
       await saveActiveSession(senderPhone, customerName, 'general');

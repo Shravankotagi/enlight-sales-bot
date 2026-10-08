@@ -88,6 +88,7 @@ async function testOrderAtomicityAndRevalidation() {
     if (!inqId) return;
     try {
       await supabase.from('deal_items').delete().eq('deal_id', inqId);
+      await supabase.from('po_number_allocations').delete().eq('deal_id', inqId);
       await supabase.from('deals').delete().eq('id', inqId);
       await supabase.from('inquiry_items').delete().eq('inquiry_id', inqId);
       await supabase.from('inquiries').delete().eq('id', inqId);
@@ -105,7 +106,7 @@ async function testOrderAtomicityAndRevalidation() {
       action: 'LOG_ORDER',
       inquiry_id: inqCode,
       company_name: seeded.customer_name,
-      po_number: 'PO-TEST-LOST-01',
+      reference_po_number: 'PO-TEST-LOST-01',
       po_date: '29-09-2026',
       delivery_location: 'Pune',
       payment_terms: '30 Days',
@@ -139,7 +140,7 @@ async function testOrderAtomicityAndRevalidation() {
       action: 'LOG_ORDER',
       inquiry_id: inqCode,
       company_name: seeded.customer_name,
-      po_number: 'PO-TEST-NEW-02',
+      reference_po_number: 'PO-TEST-NEW-02',
       po_date: '29-09-2026',
       delivery_location: 'Pune',
       payment_terms: '30 Days',
@@ -169,7 +170,7 @@ async function testOrderAtomicityAndRevalidation() {
       action: 'LOG_ORDER',
       inquiry_id: inqCode,
       company_name: seeded.customer_name,
-      po_number: 'PO-DUPLICATE-03',
+      reference_po_number: 'PO-DUPLICATE-03',
       po_date: '29-09-2026',
       delivery_location: 'Pune',
       payment_terms: '30 Days',
@@ -196,7 +197,7 @@ async function testOrderAtomicityAndRevalidation() {
       action: 'LOG_ORDER',
       inquiry_id: inqCode,
       company_name: seeded.customer_name,
-      po_number: 'PO-SUCCESS-04',
+      reference_po_number: 'PO-SUCCESS-04',
       po_date: '29-09-2026',
       delivery_location: 'Pune MIDC',
       payment_terms: '45 Days',
@@ -207,16 +208,28 @@ async function testOrderAtomicityAndRevalidation() {
 
     const reply = await executeAction('LOG_ORDER', draft, '919975003940');
     assert.ok(reply.includes('Order Recorded & Deal Marked as WON'), `Reply should confirm won order: ${reply}`);
-    assert.ok(reply.includes('PO-SUCCESS-04'), 'Reply should include PO number');
+    assert.ok(reply.includes('EM/PO/'), 'Reply should include the generated system PO');
 
     // Verify Inquiries, Deals, Inquiry Items, Deal Items
-    const { data: checkInq } = await supabase.from('inquiries').select('stage, status, po_number').eq('id', seeded.id).single();
+    const { data: checkInq } = await supabase
+      .from('inquiries')
+      .select('stage, status, po_number, generated_po_number, reference_po_number')
+      .eq('id', seeded.id)
+      .single();
     assert.strictEqual(checkInq.stage, 'won', 'Inquiry stage must be won');
-    assert.strictEqual(checkInq.po_number, 'PO-SUCCESS-04', 'Inquiry po_number must be saved');
+    assert.match(checkInq.po_number, /^EM\/PO\/\d+$/, 'Inquiry must store a system-generated PO');
+    assert.strictEqual(checkInq.generated_po_number, checkInq.po_number, 'Generated PO must be preserved');
+    assert.strictEqual(checkInq.reference_po_number, 'PO-SUCCESS-04', 'Customer PO must be stored as Reference PO');
 
-    const { data: checkDeal } = await supabase.from('deals').select('stage, po_number').eq('id', seeded.id).single();
+    const { data: checkDeal } = await supabase
+      .from('deals')
+      .select('stage, po_number, generated_po_number, reference_po_number')
+      .eq('id', seeded.id)
+      .single();
     assert.strictEqual(checkDeal.stage, 'won', 'Deal stage must be won');
-    assert.strictEqual(checkDeal.po_number, 'PO-SUCCESS-04', 'Deal po_number must be saved');
+    assert.match(checkDeal.po_number, /^EM\/PO\/\d+$/, 'Deal must store a system-generated PO');
+    assert.strictEqual(checkDeal.generated_po_number, checkDeal.po_number, 'Deal generated PO must be preserved');
+    assert.strictEqual(checkDeal.reference_po_number, 'PO-SUCCESS-04', 'Deal customer PO must be stored as Reference PO');
 
     const { data: inqItems } = await supabase.from('inquiry_items').select('*').eq('inquiry_id', seeded.id);
     assert.ok(inqItems && inqItems.length > 0, 'Inquiry items must be present');

@@ -95,7 +95,8 @@ async function testLogOrderInquirySelect() {
     assert.ok(prompt.includes('HR Coil (7mm) | 45 MT | ₹88 /MT | Total: ₹3,960'), 'Prompt must show line item breakdown');
     assert.ok(prompt.includes('Delivery Location') && prompt.includes('Satara'), 'Prompt must show delivery location');
     assert.ok(prompt.includes('Payment Terms') && prompt.includes('70 Days'), 'Prompt must show payment terms');
-    assert.ok(prompt.includes('*PO Number* (or type "Auto" to generate)'), 'Prompt must ask for PO Number with Auto hint');
+    assert.ok(prompt.includes('*System PO Number* (editable)'), 'Prompt must identify the editable system PO');
+    assert.ok(prompt.includes('*Reference PO* (optional customer/document PO)'), 'Prompt must separate the customer/document PO');
     assert.ok(prompt.includes('*PO Date* (or "Today")'), 'Prompt must ask for PO Date with Today hint');
   });
 
@@ -150,7 +151,7 @@ async function testLogOrderInquirySelect() {
     // Step 3: User replies "Auto Today"
     const step3 = await handleCatalogFlow('Auto Today', testPhone);
     assert.ok(step3.handled, 'Step 3 should be handled');
-    assert.ok(step3.reply.includes('PO-'), 'Step 3 should have auto-generated a PO Number');
+    assert.ok(step3.reply.includes('EM/PO/'), 'Step 3 should have a system-generated EM/PO/N number');
     assert.ok(
       step3.reply.includes('Order Confirmation') || step3.reply.includes('Order Value') || step3.reply.includes('GST (18%)'),
       'Step 3 should move to interactive order confirmation'

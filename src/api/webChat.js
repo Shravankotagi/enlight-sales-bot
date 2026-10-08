@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const { handleCatalogFlow } = require('../core/catalogFlow');
 const { runOrchestrator } = require('../core/orchestrator');
@@ -20,6 +21,31 @@ function requireWebApiKey(req, res, next) {
     return res.status(401).json({ success: false, error: 'Unauthorized: Invalid or missing API key' });
   }
   next();
+}
+
+function verifyUserToken(token) {
+  const raw = String(token || '').replace(/^Bearer\s+/i, '').trim();
+  const parts = raw.split('.');
+  if (parts.length !== 3) return null;
+  const secret = process.env.JWT_SECRET || 'enlight-sales-jwt-secret-2026';
+  const data = `${parts[0]}.${parts[1]}`;
+  const expected = crypto.createHmac('sha256', secret).update(data).digest();
+  let actual;
+  try {
+    actual = Buffer.from(parts[2], 'base64url');
+  } catch (e) {
+    return null;
+  }
+  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    if (payload.exp && Date.now() / 1000 >= Number(payload.exp)) return null;
+    return payload;
+  } catch (e) {
+    return null;
+  }
 }
 
 /**
@@ -164,9 +190,16 @@ function normalizeIncomingButtonPayload(rawInput) {
  */
 router.post('/reset', requireWebApiKey, async (req, res) => {
   try {
-    const { employeePhone } = req.body;
-    let cleanPhone = String(employeePhone || '').replace(/\D/g, '');
-    if (cleanPhone.length < 10) cleanPhone = '9619226169';
+    const userPayload = verifyUserToken(req.headers['x-user-token']);
+    const rawPhone = userPayload?.phone || req.body?.employeePhone;
+    let cleanPhone = String(rawPhone || '').replace(/\D/g, '');
+    if (cleanPhone.length < 10) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized: valid user token or phone required to reset the assistant',
+      });
+    }
+    cleanPhone = cleanPhone.slice(-10);
 
     await saveActiveSession(cleanPhone, 'Unknown', 'general');
     await clearActiveSession(cleanPhone);
@@ -185,17 +218,24 @@ router.post('/reset', requireWebApiKey, async (req, res) => {
  */
 router.post('/message', requireWebApiKey, async (req, res) => {
   try {
-    const { message, employeePhone, userId, employeeName, role, resetSession, image, gps } = req.body;
+    const { message, employeePhone, employeeName, resetSession, image, gps } = req.body;
 
     if (!message && !image) {
       return res.status(400).json({ success: false, error: 'message string or image is required' });
     }
 
-    let cleanPhone = String(employeePhone || '').replace(/\D/g, '');
+    const userToken = req.headers['x-user-token'];
+    const userPayload = verifyUserToken(userToken);
+    const rawPhone = userPayload?.phone || employeePhone;
+    let cleanPhone = String(rawPhone || '').replace(/\D/g, '');
     if (cleanPhone.length >= 10) {
       cleanPhone = cleanPhone.slice(-10);
     } else {
-      cleanPhone = '9619226169'; // Default fallback phone for sales ops
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized: valid user token or account phone required',
+        reply: 'Please sign in again to use the assistant.',
+      });
     }
 
     // Optional reset if starting fresh conversation
@@ -205,7 +245,7 @@ router.post('/message', requireWebApiKey, async (req, res) => {
     }
 
     const rawText = normalizeIncomingButtonPayload(message || '');
-    const empName = employeeName || 'Sales Staff';
+    const empName = userPayload?.name || employeeName || 'Sales Staff';
 
     let augmentedText = rawText;
     if (gps && typeof gps.latitude === 'number' && typeof gps.longitude === 'number') {
@@ -217,15 +257,52 @@ router.post('/message', requireWebApiKey, async (req, res) => {
     let imageMimeType = null;
     let photoDataUrl = null;
     if (image && image.base64) {
-      const base64Clean = image.base64.replace(/^data:image\/\w+;base64,/, '');
+      const dataUrlMatch = image.base64.match(/^data:([^;]+);base64,(.*)$/s);
+      const base64Clean = dataUrlMatch ? dataUrlMatch[2] : image.base64;
       imageBuffer = Buffer.from(base64Clean, 'base64');
-      imageMimeType = image.mimeType || 'image/jpeg';
+      imageMimeType = image.mimeType || dataUrlMatch?.[1] || 'image/jpeg';
       photoDataUrl = image.base64.startsWith('data:')
         ? image.base64
         : `data:${imageMimeType};base64,${base64Clean}`;
     }
 
     console.log(`[WebChat] Processing message from ${empName} (${cleanPhone}): "${augmentedText.slice(0, 80)}" (image: ${Boolean(imageBuffer)}, gps: ${Boolean(gps)})`);
+
+    // Reuse the same document OCR handlers used by WhatsApp for PDFs uploaded
+    // during the guided inquiry/order logging flows.
+    if (imageBuffer && imageMimeType && imageMimeType.toLowerCase() === 'application/pdf') {
+      const activeSession = await getFullActiveSession(cleanPhone);
+      const lastIntent = activeSession?.last_intent || '';
+      const isInquiryFlow = ['catalog_flow', 'catalog_editing', 'catalog_confirm', 'catalog_selection']
+        .some(state => lastIntent.startsWith(`${state}|LOG_INQUIRY`));
+      const isOrderFlow = ['catalog_flow', 'catalog_editing', 'catalog_confirm', 'catalog_selection']
+        .some(state => lastIntent.startsWith(`${state}|LOG_ORDER`));
+      const documentHandler = isInquiryFlow
+        ? 'inquiry'
+        : isOrderFlow
+          ? 'order'
+          : null;
+
+      if (documentHandler) {
+        const {
+          handleInquiryDocumentOcr,
+          handleOrderDocumentOcr,
+        } = require('../core/catalogFlow');
+        const ocrResult = documentHandler === 'inquiry'
+          ? await handleInquiryDocumentOcr(imageBuffer, imageMimeType, cleanPhone, rawText)
+          : await handleOrderDocumentOcr(imageBuffer, imageMimeType, cleanPhone, rawText);
+        const formattedReply = formatForWeb(ocrResult.reply || 'Document processed.');
+        return res.json({
+          success: true,
+          reply: formattedReply,
+          type: ocrResult.interactiveType || 'text',
+          interactiveType: ocrResult.interactiveType || 'text',
+          interactiveButtons: ocrResult.interactiveButtons || null,
+          interactiveList: ocrResult.interactiveList || null,
+          data: ocrResult.interactiveButtons || ocrResult.interactiveList || null,
+        });
+      }
+    }
 
     // LAYER 1: Guided Catalog & Conversational Form Flow (Greetings, 1-10 Routing, Confirmations)
     const catalogResult = await handleCatalogFlow(augmentedText, cleanPhone, {

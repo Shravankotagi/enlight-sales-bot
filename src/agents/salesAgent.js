@@ -22,6 +22,7 @@ const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
 const { supabase, verifyAndGetCustomerName, saveActiveSession, getActiveSession } = require('../supabase');
 const { syncActivity } = require('./biginSyncAgent');
 const { logBotActivity } = require('../utils/activityLogger');
+const { resolveFinalPo, claimPoNumber } = require('../core/poResolver');
 const { detectHsnCode, normalizeProductToCatalog, isValidCatalogProduct, isConversationalNoise, getUnknownProductClarificationMessage, MASTER_PRODUCTS_CATALOG } = require('../utils/hsnDetector');
 
 function extractDealIdFromText(text) {
@@ -232,7 +233,7 @@ const PRODUCT_FAMILIES = {
   galvalume_sheet: ['galvalume sheet', 'gl sheet', 'galvalume corrugation', 'corrugated sheet', 'galvalume'],
   chequered_coil: ['chequered coil', 'checkered coil', 'tear drop coil'],
   chequered_sheet: ['chequered sheet', 'checkered sheet', 'chequered plate', 'checkered plate', 'tear drop sheet', 'tear drop plate', 'chequered', 'checkered'],
-  
+
   // Structural Steel
   ms_round_bar: ['round bar', 'ms round bar', 'bright bar', 'round rod', 'en8', 'en19', 'c45', 'ms rod', 'bright round'],
   ms_flat_bar: ['ms flat bar', 'flat bar', 'ms flat', 'flats', 'patti', 'ms patti'],
@@ -637,7 +638,7 @@ function extractRuleBasedLineItems(textRaw) {
       const rawProductAndDim = lineM[1].trim().replace(/^(?:\d+[-.)]|[-*•])\s*/, '');
       const lineQty = parseFloat(lineM[2]);
       const lineUnit = lineM[3] ? lineM[3].toUpperCase() : 'MT';
-      
+
       let linePName = null;
       for (const kp of KNOWN_CATALOG_PRODUCTS) {
         if (kp.regex.test(rawProductAndDim)) {
@@ -1576,27 +1577,13 @@ async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
 
   const textContent = `Dear ${customerName},
 
-Thank you for partnering with Enlight Metals Private Limited.
+Thank you for your enquiry and for giving us the opportunity to quote for your requirements.
 
-Please find attached our official Commercial Price Quotation (Ref #: ${qRefNum}) detailing the complete material specifications, unit rates, delivery location, and commercial terms.
+Please find attached our detailed quotation for the materials as requested. The quotation includes unit prices, applicable taxes & duties, payment terms, validity of the offer, delivery details, and other commercial conditions.
 
-Summary:
-- Reference Number: ${qRefNum}
-- Issue Date: ${todayDateStr}
-- Items & Specifications:
-${itemsSummary}
-- Subtotal (Base Amount): ₹ ${Number(baseAmt).toLocaleString('en-IN')}
-- CGST (9%): ₹ ${Number(cgstAmt).toLocaleString('en-IN')}
-- SGST (9%): ₹ ${Number(sgstAmt).toLocaleString('en-IN')}
-- Grand Total (incl. GST): ₹ ${Number(grandTotal).toLocaleString('en-IN')}
-${deal.payment_terms ? `- Payment Terms: ${deal.payment_terms}\n` : ''}${deal.delivery_location ? `- Delivery Location: ${deal.delivery_location}\n` : ''}
-The attached PDF document contains our official pricing structure and complete commercial terms.
+We kindly request you to review the quotation carefully. If you have any issues kindly connect with us. We look forward to your confirmation and remain available to discuss any points at your convenience.
 
-Warm regards,
-
-Sales Operations Team
-Enlight Metals Private Limited
-MIDC Industrial Zone, Mumbai - 400001`;
+Thank you once again for considering us.`;
 
   const attachments = [];
   try {
@@ -1652,6 +1639,9 @@ MIDC Industrial Zone, Mumbai - 400001`;
         {
           from: `Enlight Metals <${fromEmail}>`,
           to: [targetEmail],
+          cc: ['dj@enlightmetals.com', 'vedant@enlightmetals.com'].filter(
+            (email) => email.toLowerCase() !== String(targetEmail || '').trim().toLowerCase(),
+          ),
           subject: `Quotation ${qRefNum} - Enlight Metals - ${customerName}`,
           text: textContent,
           attachments: attachments.length > 0 ? attachments : undefined,
@@ -3398,32 +3388,6 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
 
       // Stage Gate 4: WON Stage Validation (Requires PO Number & Quoted Line Items)
       if (dbStage === 'won') {
-        let extractedPo = data.po_number || data.poNumber || extractPoNumber(effectiveTextForLLM || text) || dealToUpdate.po_number || null;
-        if (extractedPo && /^(?:null|undefined|none|na|n\/a)$/i.test(String(extractedPo).trim())) {
-          extractedPo = null;
-        }
-
-        if (!extractedPo) {
-          const pendingPayload = {
-            dealId: dealToUpdate.id,
-            dealCode,
-            inquiryId: dealToUpdate.inquiry_id,
-            customerName: dealToUpdate.customer_name,
-            totalAmount: dealAmount,
-            isInquirySource: dealToUpdate.is_inquiry_source,
-          };
-          await saveActiveSession(
-            senderPhone,
-            dealToUpdate.customer_name,
-            `pending_po_for_deal|${dealToUpdate.customer_name}|${JSON.stringify(pendingPayload)}`
-          );
-          return `⚠️ Purchase Order (PO) number is required to mark Inquiry ${dealCode} as WON and log it in the Orders module.\n\n` +
-            `Customer: ${dealToUpdate.customer_name}\n` +
-            `Inquiry ID: ${dealCode}\n` +
-            (dealAmount > 0 ? `Total Value: Rs. ${Number(dealAmount).toLocaleString('en-IN')}\n\n` : '\n') +
-            `Please reply with the official PO number (e.g. "PO-2026-0042" or "PO number is 9912").`;
-        }
-
         // Quoted Rates check: deal must have valid rates on line items and total amount > 0
         const items = dealToUpdate.deal_items || [];
         const hasUnquotedItems = isNewInquiryStage || (items.length > 0 && items.some(i => !i.rate || Number(i.rate) <= 0));
@@ -3435,9 +3399,50 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
         const effectiveDelivery = extractedDeliveryLoc || data.delivery_location || dealToUpdate.delivery_location || null;
         const effectivePayment = extractedPaymentTermsVal || data.payment_terms || dealToUpdate.payment_terms || null;
 
-        data.po_number = extractedPo;
+        const explicitSystemPoEdit =
+          /\b(?:system|internal|generated|enlight|our)\s+po\b/i.test(effectiveTextForLLM || text) ||
+          Boolean(data._editing_system_po);
+        const extractedCustomerPo =
+          data.reference_po_number ||
+          (!explicitSystemPoEdit
+            ? data.po_number || data.poNumber || extractPoNumber(effectiveTextForLLM || text)
+            : null);
+        const requestedSystemPo = explicitSystemPoEdit
+          ? data.po_number || data.poNumber || extractPoNumber(effectiveTextForLLM || text)
+          : null;
+
+        data.po_number = requestedSystemPo || null;
+        data.reference_po_number =
+          extractedCustomerPo || dealToUpdate.reference_po_number || null;
         if (effectiveDelivery) data.delivery_location = effectiveDelivery;
         if (effectivePayment) data.payment_terms = effectivePayment;
+
+        try {
+          const poResolution = await resolveFinalPo({
+            poNumber: data.po_number,
+            generatedPoNumber: dealToUpdate.generated_po_number,
+            referencePoNumber: data.reference_po_number,
+            reservationToken: `sales-stage:${dealToUpdate.id}`,
+            dealId: dealToUpdate.is_inquiry_source ? null : dealToUpdate.id,
+            existingDeal: dealToUpdate,
+          });
+          Object.assign(data, {
+            po_number: poResolution.po_number,
+            reference_po_number: poResolution.reference_po_number,
+            generated_po_number: poResolution.generated_po_number,
+            po_source: poResolution.po_source,
+            po_status: poResolution.po_status,
+            po_generated_at: poResolution.po_generated_at,
+            po_confirmed_at: poResolution.po_confirmed_at,
+            po_reservation_token: poResolution.po_reservation_token,
+          });
+        } catch (poErr) {
+          console.error('[SalesAgent] PO resolution failed:', poErr);
+          if (poErr.code === 'PO_CONFLICT') {
+            return `⚠️ *System PO number already exists.*\n\nPlease choose a different editable system PO number for ${dealCode}.`;
+          }
+          return `❌ Could not generate the system PO for ${dealCode}. Please try again.`;
+        }
       }
 
       if (dealToUpdate.is_inquiry_source) {
@@ -3454,6 +3459,12 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
         if (dbStage === 'won') {
           newDealPayload.won_at = new Date().toISOString();
           newDealPayload.po_number = data.po_number;
+          newDealPayload.reference_po_number = data.reference_po_number || null;
+          newDealPayload.generated_po_number = data.generated_po_number || null;
+          newDealPayload.po_source = data.po_source || null;
+          newDealPayload.po_status = 'confirmed';
+          newDealPayload.po_generated_at = data.po_generated_at || null;
+          newDealPayload.po_confirmed_at = data.po_confirmed_at || newDealPayload.won_at;
           newDealPayload.po_date = data.po_date || new Date().toISOString().split('T')[0];
           if (data.delivery_location) newDealPayload.delivery_location = data.delivery_location;
           if (data.payment_terms) newDealPayload.payment_terms = data.payment_terms;
@@ -3485,6 +3496,12 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
         if (dbStage === 'won') {
           updatePayload.won_at = new Date().toISOString();
           updatePayload.po_number = data.po_number;
+          updatePayload.reference_po_number = data.reference_po_number || null;
+          updatePayload.generated_po_number = data.generated_po_number || null;
+          updatePayload.po_source = data.po_source || null;
+          updatePayload.po_status = 'confirmed';
+          updatePayload.po_generated_at = data.po_generated_at || null;
+          updatePayload.po_confirmed_at = data.po_confirmed_at || updatePayload.won_at;
           updatePayload.po_date = data.po_date || new Date().toISOString().split('T')[0];
           if (data.delivery_location) updatePayload.delivery_location = data.delivery_location;
           if (data.payment_terms) updatePayload.payment_terms = data.payment_terms;
@@ -3509,6 +3526,30 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
           const inqStatus = dbStage === 'won' ? 'confirmed' : dbStage;
           await supabase.from('inquiries').update({ status: inqStatus, stage: dbStage }).eq('id', dealToUpdate.inquiry_id);
         }
+      }
+
+      if (dbStage === 'won' && dealToUpdate.inquiry_id) {
+        await supabase.from('inquiries').update({
+          status: 'confirmed',
+          stage: 'won',
+          won_at: dealToUpdate.won_at || new Date().toISOString(),
+          po_number: data.po_number,
+          reference_po_number: data.reference_po_number || null,
+          generated_po_number: data.generated_po_number || null,
+          po_source: data.po_source || null,
+          po_status: 'confirmed',
+          po_generated_at: data.po_generated_at || null,
+          po_confirmed_at: data.po_confirmed_at || dealToUpdate.won_at || new Date().toISOString(),
+          po_date: data.po_date || dealToUpdate.po_date || null,
+        }).eq('id', dealToUpdate.inquiry_id);
+      }
+
+      if (dbStage === 'won' && data.po_number) {
+        await claimPoNumber(
+          data.po_number,
+          data.po_reservation_token || `sales-stage:${dealToUpdate.id}`,
+          dealToUpdate.id,
+        );
       }
 
       // Mandatory Database Write Verification
@@ -3558,6 +3599,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
           `Customer: ${dealToUpdate.customer_name}\n` +
           `Inquiry ID: ${dealCode}\n` +
           `Official PO Number: ${dealToUpdate.po_number || data.po_number}\n` +
+          (data.reference_po_number ? `Reference PO: ${data.reference_po_number}\n` : '') +
           `Total Value: Rs. ${Number(dealToUpdate.total_amount || 0).toLocaleString('en-IN')} + GST\n` +
           `Delivery Location: ${finalDelivery}\n` +
           `Payment Terms: ${finalPayment}\n\n` +
@@ -4277,32 +4319,57 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
     });
 
     const poDate = data.po_date || existingDeal?.po_date || (dbStage === 'won' ? new Date().toISOString().split('T')[0] : null);
-    let poNumber = existingDeal ? existingDeal.po_number : null;
+    let poNumber = dbStage === 'won' && existingDeal?.generated_po_number
+      ? existingDeal.po_number
+      : null;
+    let referencePoNumber = dbStage === 'won'
+      ? (existingDeal?.reference_po_number || null)
+      : null;
+    let generatedPoNumber = dbStage === 'won'
+      ? (existingDeal?.generated_po_number || null)
+      : null;
+    let poSource = dbStage === 'won' ? (existingDeal?.po_source || null) : null;
+    let poStatus = dbStage === 'won' ? 'confirmed' : null;
+    let poGeneratedAt = dbStage === 'won' ? (existingDeal?.po_generated_at || null) : null;
+    let poConfirmedAt = dbStage === 'won' ? new Date().toISOString() : null;
+    let poReservationToken = null;
 
     if (dbStage === 'won') {
-      const explicitPo = data.po_number || data.poNumber || extractPoNumber(effectiveTextForLLM || text) || (existingDeal ? existingDeal.po_number : null);
-      if (explicitPo && explicitPo !== 'null' && explicitPo !== 'None' && String(explicitPo).trim().length >= 2) {
-        poNumber = String(explicitPo).trim();
-      } else {
-        const targetInqRef = existingDeal?.inquiry_id || dealId;
-        const pendingPayload = {
-          dealId,
-          dealCode: targetInqRef ? `INQ-${targetInqRef.replace(/-/g, '').substring(0, 6).toUpperCase()}` : null,
-          customerName: finalCustomerName,
-          totalAmount: dealAmount,
-        };
-        await saveActiveSession(
-          senderPhone,
-          finalCustomerName,
-          `pending_po_for_deal|${finalCustomerName}|${JSON.stringify(pendingPayload)}`
-        );
-        return `⚠️ Purchase Order (PO) number is required to confirm this order and mark it as WON.\n\n` +
-          `Customer: ${finalCustomerName}\n` +
-          (dealAmount > 0 ? `Total Value: Rs. ${Number(dealAmount).toLocaleString('en-IN')}\n\n` : '\n') +
-          `Please reply with the official PO number (e.g. "PO-2026-0042" or "PO number is 9912").`;
+      const explicitSystemPoEdit =
+        /\b(?:system|internal|generated|enlight|our)\s+po\b/i.test(effectiveTextForLLM || text) ||
+        Boolean(data._editing_system_po);
+      const extractedCustomerPo =
+        data.reference_po_number ||
+        (!explicitSystemPoEdit
+          ? data.po_number || data.poNumber || extractPoNumber(effectiveTextForLLM || text)
+          : null);
+      const requestedSystemPo = explicitSystemPoEdit
+        ? data.po_number || data.poNumber || extractPoNumber(effectiveTextForLLM || text)
+        : null;
+      try {
+        const poResolution = await resolveFinalPo({
+          poNumber: requestedSystemPo,
+          generatedPoNumber: existingDeal?.generated_po_number,
+          referencePoNumber: extractedCustomerPo || existingDeal?.reference_po_number,
+          reservationToken: `sales-order:${senderPhone}:${dealId || Date.now()}`,
+          dealId: dealId || null,
+          existingDeal,
+        });
+        poNumber = poResolution.po_number;
+        referencePoNumber = poResolution.reference_po_number;
+        generatedPoNumber = poResolution.generated_po_number;
+        poSource = poResolution.po_source;
+        poStatus = poResolution.po_status;
+        poGeneratedAt = poResolution.po_generated_at;
+        poConfirmedAt = poResolution.po_confirmed_at;
+        poReservationToken = poResolution.po_reservation_token;
+      } catch (poErr) {
+        console.error('[SalesAgent] System PO resolution failed:', poErr);
+        if (poErr.code === 'PO_CONFLICT') {
+          return `⚠️ *System PO number already exists.*\n\nPlease choose a different editable system PO number.`;
+        }
+        return `❌ Could not generate the system PO. Please try again.`;
       }
-    } else {
-      poNumber = null;
     }
 
     const totalQty = processedItems.reduce((s, i) => s + i.qty, 0);
@@ -4324,6 +4391,11 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
       quantityTons: totalQty || processedItems[0]?.qty || 0,
       unitPrice: processedItems[0]?.rate > 0 ? processedItems[0]?.rate : null,
       total_amount: dealAmount > 0 ? dealAmount : (pricingSummary.subtotal > 0 ? pricingSummary.subtotal : null),
+      po_number: dbStage === 'won' ? poNumber : null,
+      reference_po_number: dbStage === 'won' ? referencePoNumber : null,
+      generated_po_number: dbStage === 'won' ? generatedPoNumber : null,
+      po_source: dbStage === 'won' ? poSource : null,
+      po_status: dbStage === 'won' ? poStatus : null,
       line_items: processedItems.map((pi) => {
         const norm = normalizeProductToCatalog(pi.pName, pi.dimensions);
         return {
@@ -4408,6 +4480,12 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
         payment_terms: finalPaymentTerms,
         total_amount: dealAmount || 0,
         po_number: poNumber,
+        reference_po_number: effectiveStage === 'won' ? referencePoNumber : null,
+        generated_po_number: effectiveStage === 'won' ? generatedPoNumber : null,
+        po_source: effectiveStage === 'won' ? poSource : null,
+        po_status: effectiveStage === 'won' ? poStatus : null,
+        po_generated_at: effectiveStage === 'won' ? poGeneratedAt : null,
+        po_confirmed_at: effectiveStage === 'won' ? poConfirmedAt : null,
         po_date: poDate,
         inquiry_id: inqId,
       };
@@ -4531,6 +4609,12 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
           payment_terms:     finalPaymentTerms,
           po_date:           poDate,
           po_number:         poNumber,
+          reference_po_number: effectiveStage === 'won' ? referencePoNumber : null,
+          generated_po_number: effectiveStage === 'won' ? generatedPoNumber : null,
+          po_source: effectiveStage === 'won' ? poSource : null,
+          po_status: effectiveStage === 'won' ? poStatus : null,
+          po_generated_at: effectiveStage === 'won' ? poGeneratedAt : null,
+          po_confirmed_at: effectiveStage === 'won' ? poConfirmedAt : null,
           won_at:            effectiveStage === 'won' ? new Date().toISOString() : null,
           lost_reason:       effectiveStage === 'lost' ? data.loss_reason : null,
           created_at:        new Date().toISOString(),
@@ -4562,6 +4646,28 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
           }
           await syncInquiryFromDeal(inqId, newDeal, finalPersistedItems);
         }
+      }
+    }
+
+    if (dbStage === 'won' && poNumber && dealId) {
+      await claimPoNumber(
+        poNumber,
+        poReservationToken || `sales-order:${senderPhone}:${dealId}`,
+        dealId,
+      );
+      if (inqId) {
+        await supabase.from('inquiries').update({
+          po_number: poNumber,
+          reference_po_number: referencePoNumber || null,
+          generated_po_number: generatedPoNumber || null,
+          po_source: poSource || null,
+          po_status: poStatus || 'confirmed',
+          po_generated_at: poGeneratedAt || null,
+          po_confirmed_at: poConfirmedAt || null,
+          po_date: poDate || null,
+          status: 'confirmed',
+          stage: 'won',
+        }).eq('id', inqId);
       }
     }
 
@@ -4641,6 +4747,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
         `Customer: ${finalCustomerName}\n` +
         `Inquiry ID: ${dealCode}\n` +
         `Official PO Number: ${poNumber}\n` +
+        (referencePoNumber ? `Reference PO: ${referencePoNumber}\n` : '') +
         `Total Value: Rs. ${Number(activeTotalForSummary).toLocaleString('en-IN')} + GST\n` +
         (poDate ? `PO Date: ${poDate}\n` : '') +
         `\nUpdated Sales Achievement Card!`;

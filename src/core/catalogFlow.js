@@ -38,6 +38,12 @@ const {
 const { safeParseJSON } = require('../utils/jsonUtils');
 const { calculateQuotationBreakdown, normalizeUnit, convertLineItemToMt } = require('../utils/pricingEngine');
 const {
+  ensureDraftSystemPo,
+  resolveFinalPo,
+  claimPoNumber,
+  releasePoReservation,
+} = require('./poResolver');
+const {
   startNewCatalogSession,
   recordSessionMessage,
   finalizeCurrentSession,
@@ -206,6 +212,60 @@ const STAGE_UPDATE_RESUME_BUTTONS = [
 const ATTACHMENT_PROMPT_BUTTONS = [
   { id: 'btn_att_no', title: 'No' },
 ];
+
+const DIRECT_ORDER_BUTTONS = [
+  { id: 'log_order_direct', title: 'Create directly' },
+];
+
+const DIRECT_ORDER_PROMPT = `🛒 *Record New Order*
+
+No Inquiry available - Create Order Directly
+
+Send the order in your own words, or send the PO document (photo or PDF).
+
+*Required:*
+• *Company Name*
+• *PO Number*
+• *PO Date*
+• *Delivery Location*
+• *Payment Terms*
+• *Line Items* (Product, Quantity, Rate)
+
+You can send some of these now. I will ask only for what is still missing.`;
+
+function isDirectOrderRequest(text) {
+  const clean = String(text || '').toLowerCase().replace(/[!.,?*]/g, '').replace(/\s+/g, ' ').trim();
+  return (
+    clean === 'log_order_direct' ||
+    clean === 'create directly' ||
+    clean === 'no inquiry available - create order directly' ||
+    clean === 'no inquiry available create order directly'
+  );
+}
+
+function catalogSelectionResult(selectionRes) {
+  const result = { handled: true, reply: selectionRes.reply };
+  if (selectionRes && selectionRes.interactiveButtons) {
+    result.interactiveType = 'buttons';
+    result.interactiveButtons = selectionRes.interactiveButtons;
+  }
+  return result;
+}
+
+async function beginDirectOrder(senderPhone, sourceChannel) {
+  const draft = { _direct_order: true };
+  if (sourceChannel) draft.source_channel = sourceChannel;
+  await ensureDraftSystemPo(
+    draft,
+    `catalog-direct:${senderPhone}:${Date.now()}`,
+  );
+  const prompt = `${DIRECT_ORDER_PROMPT}\n\n🔢 *System PO Number:* ${draft.po_number}\n_This number is generated automatically and can be edited before confirmation._`;
+  await recordSessionMessage(senderPhone, 'user', 'Create directly');
+  await startNewCatalogSession(senderPhone, prompt);
+  await recordSessionMessage(senderPhone, 'assistant', prompt, { action_type: 'LOG_ORDER' });
+  await saveActiveSession(senderPhone, 'Unknown', `catalog_flow|LOG_ORDER|${JSON.stringify(draft)}`);
+  return { handled: true, reply: prompt };
+}
 
 function isComplaintAttachmentSkip(text, draft) {
   const clean = String(text || '').trim();
@@ -413,10 +473,33 @@ const SAVE_CONFIRM_WORDS = new Set([
 // ── INACTIVE DRAFT & STALE BUTTON TRACKING ──────────────────────────────────
 const lastInactiveDraftMetadata = new Map();
 
+function releaseOrderDraftPoReservation(action, draft, status) {
+  const d = (typeof draft === 'object' && draft !== null) ? draft : {};
+  const isOrderDraft =
+    action === 'LOG_ORDER' ||
+    action === 'UPDATE_ORDER' ||
+    d._direct_order === true;
+  const token = d.po_reservation_token;
+  if (!isOrderDraft || !token || status === 'saved') return;
+
+  const poNumber = d.generated_po_number || d.po_number;
+  void releasePoReservation(token, poNumber, d.deal_id || d.order_id)
+    .catch(error => {
+      console.error('[SystemPO] Bot order draft release failed', {
+        action,
+        reservationToken: token,
+        poNumber,
+        dealId: d.deal_id || d.order_id || null,
+        error,
+      });
+    });
+}
+
 function recordInactiveDraft(senderPhone, action, draft, status = 'discarded') {
   if (!senderPhone) return;
   const canonicalPhone = cleanPhone(senderPhone);
   const d = (typeof draft === 'object' && draft !== null) ? draft : {};
+  releaseOrderDraftPoReservation(action || d._action, d, status);
   lastInactiveDraftMetadata.set(canonicalPhone, {
     action: action || d._action || null,
     draft: d,
@@ -1876,6 +1959,7 @@ LOG_INQUIRY:
   "line_items": [
     {
       "sku_text": "<Literal product name mentioned by user e.g. 'Sheet', 'CR Sheet', 'HR Coil', 'MS Angle', 'Pipe', 'TMT Bar'>",
+      "grade": "<Steel grade written by the user, e.g. E350, E250, E410, E450, SAILMA, Fe500, Fe550, Fe500D, Fe550D. If one grade is stated for the whole list, repeat it on every line. else null>",
       "description": "<Full product text e.g. 'MS Sheet 5MM THK (1250 x 2500)'>",
       "dimensions": "<Dimensions / specifications e.g. '1250 x 2500', '1000 x 2000 mm'>",
       "spec": "<Dimensions / specifications>",
@@ -1941,7 +2025,8 @@ LOG_ORDER:
   "action": "LOG_ORDER",
   "inquiry_id": "<Inquiry ID e.g. INQ-F4D982, INQ-2026-0042, else null>",
   "company_name": "<Company Name, else null>",
-  "po_number": "<PO Number e.g. PO-2026-0042, else null>",
+  "po_number": "<Only an explicit edit to the generated system PO; otherwise null>",
+  "reference_po_number": "<Customer/document PO or voucher number, else null>",
   "po_date": "<PO Date in DD-MM-YYYY format, else null>",
   "delivery_location": "<Delivery Location, else null>",
   "payment_terms": "<Payment Terms, else null>",
@@ -1977,7 +2062,8 @@ UPDATE_ORDER:
 {
   "action": "UPDATE_ORDER",
   "inquiry_id": "<Inquiry ID if mentioned e.g. INQ-936C7B, INQ-3C86DE, INQ-2026-0042, else null>",
-  "po_number": "<PO Number to lookup or attach e.g. PO-2026-0042, else null>",
+  "po_number": "<Only a new/editable system PO when the user explicitly says system/internal/generated PO; otherwise null>",
+  "reference_po_number": "<Customer/document PO to store as Reference PO, else null>",
   "company_name": "<Customer / Company Name if mentioned, else null>",
   "updates": {
     "po_number": "<new or attached PO number if updating/attaching to inquiry e.g. PO-2026-8899, else null>",
@@ -2143,12 +2229,13 @@ CRITICAL RULES:
 4. If a field was NOT mentioned by the user, leave it as null or empty string. NEVER fabricate or guess.
 5. In LOG_INQUIRY and LOG_ORDER: if multiple products are listed, extract EACH individual item into the line_items array with its own product name, dimensions/spec, quantity, and unit.
 6. If an existing draft is provided, you are completing or updating fields for THAT ACTIVE DRAFT (${cleanDraftForLLM.company_name || 'the current draft'}). PRESERVE existing draft fields unless explicitly changed by the user message.
+6b. In LOG_ORDER, the platform always supplies a generated system PO. Put a customer/document/voucher PO in 'reference_po_number', never replace the generated 'po_number' unless the user explicitly asks to edit the system/internal PO.
 6a. VISIT OUTCOME AUTHORITY (CRITICAL): In LOG_VISIT and UPDATE_VISIT, \`visit_outcome\` is an explicit field, not sentiment analysis. If the active draft already has an outcome, return null for \`visit_outcome\` unless the user explicitly supplies or changes the outcome (for example, "Visit Outcome: Negative" or "change outcome to Neutral"). Never infer or change it from meeting remarks, requirements, or general discussion text.
 7. MULTIPLE ENTITIES / COMPANIES (CRITICAL): If and only if the user message itself introduces multiple distinct companies/records (e.g. 'Visited two customers today: ABC Steel in Mumbai (positive) and Sharma Construction in Pune (neutral)' or 'Inquiry from ABC for 10 MT and XYZ for 20 MT'):
 Output an 'entries' array containing a separate object for EACH individual customer/visit/inquiry/complaint!
 If only a single company is mentioned or if filling missing fields for an existing draft, return the top-level fields (e.g. company_name, person_met, contact_phone, etc.) and do NOT output an entries array.
 8. In LOG_ORDER: If the user provides an Inquiry ID (e.g. INQ-F4D982 or 'regarding inquiry INQ-F4D982'), extract the inquiry ID into 'inquiry_id'.
-9. In UPDATE_ORDER: If the user provides an Inquiry ID (e.g. INQ-936C7B, INQ-3C86DE) and asks to attach/set/update a PO number (e.g. 'attach PO-2026-8899 to INQ-936C7B' or 'INQ-936C7B PO is PO-2026-8899'), extract the inquiry ID into 'inquiry_id' and the PO number into 'po_number' and 'updates.po_number'.
+9. In UPDATE_ORDER: If the user explicitly asks to change the system/internal/generated PO, extract it into 'po_number' and 'updates.po_number'. If the user mentions a customer/document/voucher PO, extract it into 'reference_po_number' and never replace the canonical system PO.
 10. PRODUCT EXTRACTION & CATALOG INTEGRITY RULES (CRITICAL):
 - Extract the EXACT, LITERAL product term mentioned by the user (e.g. 'Sheet', 'Coil', 'Plate', 'Pipe', 'Tube', 'MS Sheet', 'HR Sheet', 'CR Coil', 'MS Angle', 'TMT Bar').
 - ZERO FABRICATION / ZERO AUTO-CONVERSION: NEVER guess, assume, or auto-convert generic or ambiguous words (e.g. 'sheet', 'coil', 'plate', 'pipe', 'tube', 'bar', 'rod') to a specific catalog variant.
@@ -2159,6 +2246,7 @@ If only a single company is mentioned or if filling missing fields for an existi
   The backend validation engine will automatically detect generic/ambiguous terms and ask the user to clarify the exact catalog variant.
 - In LOG_COMPLAINT: if no official catalog product name is mentioned, leave 'affected_product' as null so the system automatically resolves it from the linked Order / PO!
 - "dimensions" / "spec": Extract thickness, gauge, width, and size (e.g. '8mm', '1250 x 2500', '50x50x6').
+- "grade": When the user writes a steel grade such as E350, E250, E410, E450, SAILMA, Fe500, Fe550, Fe500D, or Fe550D, return it on each line item. If that grade is written once before a size list (e.g. "HR E350" then several sizes), repeat the same grade on every line. Do not put make names such as SAIL or NMDC in grade.
 11. TOTAL ORDER VALUE / DIRECT MONEY MODIFICATION (CRITICAL):
 - In UPDATE_ORDER: Total order value (or total money / total amount / grand total) is a computed calculation derived strictly from line item rates, quantities, and taxes.
 - Users CANNOT directly modify or override the total order value at the header level.
@@ -3629,8 +3717,87 @@ function hasExplicitVisitOutcomeInput(userInput = '') {
     /\b(?:change|update|set|mark)\b[\s\S]{0,40}\b(?:visit\s+)?outcome\b[\s\S]{0,40}\b(?:positive|negative|neutral|follow[-\s]*up(?:\s+required)?)\b/i.test(input);
 }
 
+const STEEL_GRADE_PATTERN = /\b(SAILMA|Fe\s*550\s*D|Fe\s*500\s*D|Fe\s*600|Fe\s*550|Fe\s*500|E\s*550|E\s*450|E\s*410|E\s*350|E\s*250)\b/gi;
+
+function compactSteelGrade(token) {
+  return String(token || '').replace(/\s+/g, '').toUpperCase();
+}
+
+function extractSteelGradeTokens(text) {
+  const found = [];
+  if (!text) return found;
+  const re = new RegExp(STEEL_GRADE_PATTERN.source, 'gi');
+  const source = String(text);
+  let match;
+  while ((match = re.exec(source))) {
+    found.push({ token: compactSteelGrade(match[1]), index: match.index });
+  }
+  return found;
+}
+
+function gradeMatchesCatalog(beforeText, canonicalSku) {
+  const before = String(beforeText || '').toLowerCase();
+  const sku = String(canonicalSku || '').toLowerCase().trim();
+  if (!sku) return false;
+  if (before.includes(sku)) return true;
+  const family = sku.split(/\s+/)[0];
+  return Boolean(family && family.length >= 2 && new RegExp(`\\b${family}\\b`, 'i').test(before));
+}
+
+function resolveCapturedSteelGrade({ rawSku, description, itemGrade, prevGrade, userInput, canonicalSku }) {
+  const own = extractSteelGradeTokens(`${rawSku || ''} ${description || ''} ${itemGrade || ''} ${prevGrade || ''}`);
+  if (own.length) return own[0].token;
+
+  const messageGrades = extractSteelGradeTokens(userInput);
+  if (!messageGrades.length) return null;
+
+  const attached = messageGrades.filter((grade) => {
+    const start = Math.max(0, grade.index - 24);
+    return gradeMatchesCatalog(String(userInput).slice(start, grade.index), canonicalSku);
+  });
+  const uniqueAttached = [...new Set(attached.map((grade) => grade.token))];
+  if (uniqueAttached.length === 1) return uniqueAttached[0];
+
+  const uniqueMessage = [...new Set(messageGrades.map((grade) => grade.token))];
+  if (uniqueMessage.length === 1) return uniqueMessage[0];
+  return null;
+}
+
 function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   const merged = { ...baseDraft, action };
+  const sourceCandidate = String(userInput || '').trim();
+  const isControlInput =
+    !sourceCandidate ||
+    /^\d{1,2}$/.test(sourceCandidate) ||
+    /^(?:yes|y|no|n|ok|okay|save|confirm|cancel|discard|edit|change|modify|btn_|menu_)/i.test(
+      sourceCandidate,
+    );
+  if (
+    (action === 'LOG_INQUIRY' || action === 'LOG_ORDER') &&
+    !merged._source_original_text &&
+    sourceCandidate.length >= 3 &&
+    !isControlInput
+  ) {
+    merged._source_original_text = sourceCandidate;
+  }
+  const explicitSystemPoEdit =
+    Boolean(baseDraft._editing_system_po) ||
+    /\b(?:system|internal|generated|enlight|our)\s+po\b/i.test(userInput) ||
+    /\b(?:change|edit|set|update)\b.*\b(?:system|internal|generated|enlight|our)\s+po\b/i.test(userInput);
+  const extractedPo = newExtracted?.po_number;
+  if (
+    action === 'LOG_ORDER' &&
+    extractedPo &&
+    baseDraft.generated_po_number &&
+    !explicitSystemPoEdit
+  ) {
+    newExtracted = {
+      ...newExtracted,
+      reference_po_number:
+        newExtracted.reference_po_number || extractedPo,
+      po_number: baseDraft.po_number,
+    };
+  }
   if (baseDraft.updates && typeof baseDraft.updates === 'object' && !Array.isArray(baseDraft.updates)) {
     merged.updates = { ...baseDraft.updates };
   }
@@ -3688,11 +3855,20 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             const norm = normalizeProductToCatalog(rawSku, itemDim);
             const canonicalSku = norm.isValid ? norm.catalogName : rawSku;
             const hsn = item.hsn_code || item.hsn_sac || (norm.isValid ? norm.hsnCode : (detectHsnCode(rawSku, itemDim) || detectHsnCode(item.description || '') || prevItem?.hsn_code || null));
+            const grade = resolveCapturedSteelGrade({
+              rawSku,
+              description: item.description || prevItem?.description || '',
+              itemGrade: item.grade,
+              prevGrade: prevItem?.grade,
+              userInput,
+              canonicalSku,
+            });
             return {
               sku_text: canonicalSku,
               description: item.description || prevItem?.description || canonicalSku,
               dimensions: itemDim,
               spec: itemDim,
+              grade: grade || null,
               hsn_sac: hsn,
               hsn_code: hsn,
               is_valid_catalog: norm.isValid,
@@ -3861,31 +4037,35 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     }
   }
 
-  // Fallback PO number extraction for LOG_ORDER / UPDATE_ORDER / LOG_COMPLAINT / UPDATE_COMPLAINT
+  // Fallback PO extraction. Customer-provided values are Reference PO for a
+  // new order unless the user is explicitly editing the system PO.
   if (!merged.po_number && ['LOG_ORDER', 'UPDATE_ORDER', 'LOG_COMPLAINT', 'UPDATE_COMPLAINT'].includes(action)) {
     const poMatch = userInput.match(/\b(?:PO[-_:#\s]*([A-Za-z0-9_-]+)|(?:po\s*number|po\s*no\.?|po#)[\s:=-]*([A-Za-z0-9_-]+))\b/i);
     if (poMatch) {
       const candidate = (poMatch[1] || poMatch[2] || '').trim();
       if (candidate && !/^(?:date|for|to|is|with|number|no|details?)$/i.test(candidate)) {
-        merged.po_number = candidate.toUpperCase().startsWith('PO') ? candidate.toUpperCase() : `PO-${candidate.toUpperCase()}`;
+        const normalizedCandidate = candidate.toUpperCase().startsWith('PO')
+          ? candidate.toUpperCase()
+          : `PO-${candidate.toUpperCase()}`;
+        const isSystemEdit =
+          action !== 'LOG_ORDER' ||
+          explicitSystemPoEdit ||
+          Boolean(merged._editing_system_po);
+        if (isSystemEdit) {
+          merged.po_number = normalizedCandidate;
+        } else {
+          merged.reference_po_number = normalizedCandidate;
+        }
         if (['LOG_COMPLAINT', 'UPDATE_COMPLAINT'].includes(action) && !merged.linked_inquiry_or_po) {
           merged.linked_inquiry_or_po = merged.po_number;
         }
       }
-    } else if (action === 'LOG_ORDER' && /\b(?:auto|generate|auto[-_ ]?generate)\b/i.test(userInput)) {
-      const d = new Date();
-      const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-      const rand4 = Math.floor(1000 + Math.random() * 9000);
-      merged.po_number = `PO-${ymd}-${rand4}`;
     }
   }
 
-  // If LLM extracted literal "Auto" or "auto" as po_number in LOG_ORDER, replace with generated PO number
+  // The allocator, not the LLM or a random fallback, owns generated POs.
   if (action === 'LOG_ORDER' && merged.po_number && /^(?:auto|generate|autogenerate|auto\s*generate)$/i.test(String(merged.po_number).trim())) {
-    const d = new Date();
-    const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-    const rand4 = Math.floor(1000 + Math.random() * 9000);
-    merged.po_number = `PO-${ymd}-${rand4}`;
+    merged.po_number = baseDraft.po_number || null;
   }
 
   // Fallback payment_terms extraction for LOG_INQUIRY / LOG_ORDER / UPDATE_INQUIRY / UPDATE_ORDER
@@ -4466,9 +4646,8 @@ function validateMandatoryFields(action, draft) {
       if (!draft.delivery_location && (draft.city_location || draft.location || draft.address)) {
         draft.delivery_location = draft.city_location || draft.location || draft.address;
       }
-      if (!draft.inquiry_id) missing.push('Inquiry ID (e.g. INQ-F4D982)');
       if (!draft.company_name) missing.push('Company Name');
-      if (!draft.po_number) missing.push('PO Number (e.g. PO-2026-0042)');
+      // System PO is allocated automatically at draft creation/finalization.
       if (!draft.po_date) missing.push('PO Date (e.g. 10-09-2026)');
       if (!draft.delivery_location) missing.push('Delivery Location');
       if (!draft.payment_terms) missing.push('Payment Terms');
@@ -4962,8 +5141,18 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
     attachments: [attachmentObj],
     _customer_verified: Boolean(officialCustomerName),
   };
+  try {
+    const session = await getFullActiveSession(senderPhone);
+    const intent = session?.last_intent || '';
+    if (intent.includes('|LOG_INQUIRY|')) {
+      const existing = safeParseJSON(intent.split('|').slice(2).join('|'), {});
+      if (existing && existing.source_channel && !draft.source_channel) {
+        draft.source_channel = existing.source_channel;
+      }
+    }
+  } catch (e) {}
 
-  if (caption && caption.length > 3) {
+  if (caption && caption.length > 3 && !/^(?:attached image|photo uploaded)$/i.test(String(caption).trim())) {
     try {
       const captionExtracted = await extractFieldsWithLLM('LOG_INQUIRY', caption, draft);
       mergeDraft('LOG_INQUIRY', draft, captionExtracted, caption);
@@ -5013,6 +5202,27 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
   }
 }
 
+async function finishUnlinkedOrderDraft(draft, senderPhone, notice) {
+  const missing = validateMandatoryFields('LOG_ORDER', draft);
+  if (missing.length > 0) {
+    const missingList = missing.map((m) => `• *${m}*`).join('\n');
+    const askMissing = `${notice || ''}Please provide the remaining mandatory details for this order:\n\n${missingList}`;
+    await recordSessionMessage(senderPhone, 'assistant', askMissing, { action_type: 'LOG_ORDER' });
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_ORDER|${JSON.stringify(draft)}`);
+    return { handled: true, reply: askMissing };
+  }
+  const summary = buildConfirmationSummary('LOG_ORDER', draft);
+  const fullReply = `${notice || ''}${summary}`;
+  await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'LOG_ORDER' });
+  await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|LOG_ORDER|${JSON.stringify(draft)}`);
+  return {
+    handled: true,
+    reply: fullReply,
+    interactiveType: 'buttons',
+    interactiveButtons: CONFIRMATION_BUTTONS,
+  };
+}
+
 /**
  * Processes an incoming Purchase Order (PO) document inside an active LOG_ORDER flow session.
  * Auto-matches against open inquiries belonging to the salesperson.
@@ -5058,22 +5268,44 @@ async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, captio
 
   const poDate = extraction.po_date ? normalizeDateToDDMMYYYY(extraction.po_date) : formatDateDDMMYYYY(new Date());
 
-  const draft = {
-    company_name: finalCustomerName,
-    po_number: extraction.po_number && String(extraction.po_number).trim().length > 2 ? String(extraction.po_number).trim() : null,
-    po_date: poDate,
-    delivery_location: extraction.delivery_location || null,
-    payment_terms: extraction.payment_terms || null,
-    line_items: lineItems,
-    attachments: [attachmentObj],
-    _customer_verified: Boolean(officialCustomerName),
-  };
+  let existingDraft = {};
+  try {
+    const session = await getFullActiveSession(senderPhone);
+    const intent = session?.last_intent || '';
+    if (intent.startsWith('catalog_flow|LOG_ORDER|') || intent.startsWith('catalog_editing|LOG_ORDER|')) {
+      existingDraft = safeParseJSON(intent.split('|').slice(2).join('|'), {}) || {};
+    }
+  } catch (e) {}
+
+  const draft = { ...existingDraft };
+  await ensureDraftSystemPo(
+    draft,
+    draft.po_reservation_token || `catalog-ocr:${senderPhone}:${Date.now()}`,
+    draft.deal_id || null,
+  );
+  if (!draft.company_name && finalCustomerName) draft.company_name = finalCustomerName;
+  if (extraction.po_number && String(extraction.po_number).trim().length > 2) {
+    draft.reference_po_number = String(extraction.po_number).trim();
+  }
+  if (!draft.po_date && extraction.po_date) draft.po_date = normalizeDateToDDMMYYYY(extraction.po_date);
+  if (!draft.po_date && !draft._direct_order) draft.po_date = poDate;
+  if (!draft.delivery_location && extraction.delivery_location) draft.delivery_location = extraction.delivery_location;
+  if (!draft.payment_terms && extraction.payment_terms) draft.payment_terms = extraction.payment_terms;
+  if ((!Array.isArray(draft.line_items) || draft.line_items.length === 0) && lineItems.length > 0) {
+    draft.line_items = lineItems;
+  }
+  draft.attachments = [...(Array.isArray(existingDraft.attachments) ? existingDraft.attachments : []), attachmentObj];
+  if (officialCustomerName) draft._customer_verified = true;
 
   if (caption && caption.length > 3) {
     try {
       const captionExtracted = await extractFieldsWithLLM('LOG_ORDER', caption, draft);
       mergeDraft('LOG_ORDER', draft, captionExtracted, caption);
     } catch (e) {}
+  }
+
+  if (draft._direct_order) {
+    return await finishUnlinkedOrderDraft(draft, senderPhone, '');
   }
 
   // 1. Auto-match to existing inquiries by Customer + Product
@@ -5126,19 +5358,11 @@ async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, captio
     };
   }
 
-  // NO_MATCH case
-  const notice = `ℹ️ *No matching inquiry found for this customer and product. Order will be recorded without an inquiry link.*\n\n`;
-  const summary = buildConfirmationSummary('LOG_ORDER', draft);
-  const fullReply = notice + summary;
-
-  await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'LOG_ORDER' });
-  await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|LOG_ORDER|${JSON.stringify(draft)}`);
-  return {
-    handled: true,
-    reply: fullReply,
-    interactiveType: 'buttons',
-    interactiveButtons: CONFIRMATION_BUTTONS,
-  };
+  return await finishUnlinkedOrderDraft(
+    draft,
+    senderPhone,
+    `ℹ️ *No matching inquiry found for this customer and product. Order will be recorded without an inquiry link.*\n\n`,
+  );
 }
 
 // ── VALIDATE ORDER INQUIRY STAGE GATE ───────────────────────────────────────
@@ -5173,7 +5397,7 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   // 1. Fetch candidate deals matching cleanInqCode
   let dQuery = supabase
     .from('deals')
-    .select('id, inquiry_id, customer_name, stage, po_number, delivery_location, payment_terms, salesperson_phone, created_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
+    .select('id, inquiry_id, customer_name, stage, po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, delivery_location, payment_terms, salesperson_phone, created_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
     .order('created_at', { ascending: false });
 
   if (!scope.isAdmin && targetPhones.length > 0) {
@@ -5193,7 +5417,7 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   if (!matchedDeal) {
     let iQuery = supabase
       .from('inquiries')
-      .select('id, sender_name, sender_phone, status, salesperson_phone, created_at, ai_extraction_json')
+      .select('id, sender_name, sender_phone, status, stage, po_number, reference_po_number, generated_po_number, salesperson_phone, created_at, ai_extraction_json')
       .order('created_at', { ascending: false });
 
     if (!scope.isAdmin && targetPhones.length > 0) {
@@ -5213,7 +5437,7 @@ async function validateOrderInquiryStage(draft, senderPhone) {
   if (!matchedDeal && !matchedInq && cleanInqCode) {
     const { data: allDeals } = await supabase
       .from('deals')
-      .select('id, inquiry_id, customer_name, stage, po_number, delivery_location, payment_terms, salesperson_phone, created_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
+      .select('id, inquiry_id, customer_name, stage, po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, delivery_location, payment_terms, salesperson_phone, created_at, deal_items(sku_text, dimensions, quantity, unit, rate, amount)')
       .order('created_at', { ascending: false })
       .limit(500);
 
@@ -5227,7 +5451,7 @@ async function validateOrderInquiryStage(draft, senderPhone) {
     if (!matchedDeal) {
       const { data: allInqs } = await supabase
         .from('inquiries')
-        .select('id, sender_name, sender_phone, status, salesperson_phone, created_at, ai_extraction_json')
+        .select('id, sender_name, sender_phone, status, stage, po_number, reference_po_number, generated_po_number, salesperson_phone, created_at, ai_extraction_json')
         .order('created_at', { ascending: false })
         .limit(500);
 
@@ -5303,9 +5527,24 @@ async function validateOrderInquiryStage(draft, senderPhone) {
     draft.po_date = formatDateDDMMYYYY(new Date());
   }
 
-  // 5. PO Number
-  if (!draft.po_number && matchedDeal?.po_number) {
-    draft.po_number = matchedDeal.po_number;
+  // 5. Preserve a customer PO from a quoted legacy record as Reference PO.
+  // The draft's generated system PO remains the canonical editable value.
+  if (!draft.reference_po_number) {
+    draft.reference_po_number =
+      matchedDeal?.reference_po_number ||
+      matchedInq?.reference_po_number ||
+      (
+        matchedDeal?.po_number &&
+        !/^EM\/PO\/\d+$/i.test(String(matchedDeal.po_number).trim())
+          ? matchedDeal.po_number
+          : null
+      ) ||
+      (
+        matchedInq?.po_number &&
+        !/^EM\/PO\/\d+$/i.test(String(matchedInq.po_number).trim())
+          ? matchedInq.po_number
+          : null
+      );
   }
 
   // 6. Fetch DB line items
@@ -5907,7 +6146,11 @@ function formatStageLabel(st) {
 function formatDetailedInquiryItemsList(items, { includeHsn = false } = {}) {
   if (!Array.isArray(items) || items.length === 0) return '';
   return items.map((item, idx) => {
-    const name = item.sku_text || item.product_requirement || item.product_name || item.description || item.pName || 'Steel Item';
+    const rawName = item.sku_text || item.product_requirement || item.product_name || item.description || item.pName || 'Steel Item';
+    const grade = String(item.grade || '').trim();
+    const name = grade && !rawName.toLowerCase().includes(grade.toLowerCase())
+      ? `${rawName} ${grade}`
+      : rawName;
     const dim = item.dimensions || item.spec || item.thickness || item.size;
     let spec = '';
     if (dim) {
@@ -5918,13 +6161,11 @@ function formatDetailedInquiryItemsList(items, { includeHsn = false } = {}) {
       } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
         spec = ` (${dim})`;
       }
-    } else if (item.grade && !name.toLowerCase().includes(String(item.grade).toLowerCase())) {
-      spec = ` (${item.grade})`;
     }
 
     let hsnBlock = '';
     if (includeHsn) {
-      const detected = (typeof detectHsnCode === 'function') ? detectHsnCode(name, dim || '') : null;
+      const detected = (typeof detectHsnCode === 'function') ? detectHsnCode(rawName, dim || '') : null;
       const hsn = item.hsn_code || item.hsn_sac || item.hsn || detected;
       if (hsn) {
         hsnBlock = ` [HSN: ${hsn}]`;
@@ -6157,6 +6398,7 @@ function formatSelectedOrderPrompt(matchedRecord, itemsListText) {
   return `✏️ *Selected Order ${displayId} (${custName}):*\n\n` +
     `• *Linked Inquiry:* ${formatAttributeValue(linkedInquiry)}\n` +
     `• *PO Number:* ${formatAttributeValue(poNumberStr)}\n` +
+    (matchedRecord.reference_po_number ? `• *Reference PO:* ${formatAttributeValue(matchedRecord.reference_po_number)}\n` : '') +
     `• *PO Date:* ${formatAttributeValue(poDateStr)}\n` +
     `• *Stage:* ${formatAttributeValue(stageStr)}\n` +
     `• *Delivery Location:* ${formatAttributeValue(delLocStr)}\n` +
@@ -6195,10 +6437,11 @@ function formatSelectedInquiryForOrderPrompt(matchedRecord) {
     `${itemsText}\n` +
     (loc ? `• *Delivery Location:* ${loc}\n` : '') +
     (pay ? `• *Payment Terms:* ${pay}\n` : '') +
-    `\nPlease provide:\n` +
-    `• *PO Number* (or type "Auto" to generate)\n` +
+    `\nA system PO number has been generated and can be edited before confirmation.\n` +
+    `• *System PO Number* (editable)\n` +
+    `• *Reference PO* (optional customer/document PO)\n` +
     `• *PO Date* (or "Today")\n\n` +
-    `_(e.g. "Auto Today" or "PO-9988 28-09-2026")_`;
+    `_(e.g. "change system PO to EM/PO/42" or "Reference PO: PO-9988")_`;
 
   return prompt;
 }
@@ -6386,12 +6629,12 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
   if (action === 'UPDATE_INQUIRY' || action === 'LOG_ORDER') {
     let dealsQuery = supabase
       .from('deals')
-      .select('id, inquiry_id, customer_name, customer_phone, po_number, stage, total_amount, payment_terms, delivery_location, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+      .select('id, inquiry_id, customer_name, customer_phone, po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, stage, total_amount, payment_terms, delivery_location, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
       .order('created_at', { ascending: false });
 
     let inqsQuery = supabase
       .from('inquiries')
-      .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, inquiry_type, created_at, salesperson_phone, inquiry_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+      .select('id, sender_name, sender_phone, raw_text, ai_extraction_json, status, stage, po_number, reference_po_number, generated_po_number, inquiry_type, created_at, salesperson_phone, inquiry_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
       .neq('inquiry_type', 'purchase_order')
       .order('created_at', { ascending: false });
 
@@ -6527,6 +6770,9 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         preferred_make: inqAttrs.preferred_make || null,
         additional_notes: inqAttrs.additional_notes || null,
         total_amount: calculatedTotalAmt,
+        po_number: linkedDeal?.po_number || inq.po_number || null,
+        reference_po_number: linkedDeal?.reference_po_number || inq.reference_po_number || null,
+        generated_po_number: linkedDeal?.generated_po_number || inq.generated_po_number || null,
         deal_items: inqDealItems,
         created_at: inq.created_at,
       });
@@ -6577,6 +6823,9 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         preferred_make: dealAttrs.preferred_make || null,
         additional_notes: dealAttrs.additional_notes || null,
         total_amount: calculatedDealTotalAmt,
+        po_number: d.po_number || null,
+        reference_po_number: d.reference_po_number || null,
+        generated_po_number: d.generated_po_number || null,
         deal_items: dDealItems,
         created_at: d.created_at,
       });
@@ -6598,7 +6847,7 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
     const [dealsRes, customersRes] = await Promise.all([
       supabase
         .from('deals')
-        .select('id, inquiry_id, customer_name, customer_phone, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+        .select('id, inquiry_id, customer_name, customer_phone, po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, po_confirmed_at, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
         .eq('stage', 'won')
         .order('won_at', { ascending: false, nullsFirst: false })
         .limit(500),
@@ -6645,6 +6894,8 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
         inquiry_id: d.inquiry_id || d.id,
         displayId,
         po_number: d.po_number || null,
+        reference_po_number: d.reference_po_number || null,
+        generated_po_number: d.generated_po_number || null,
         po_date: d.po_date || null,
         deal_code: displayInq,
         clean_code: cleanCode,
@@ -6814,7 +7065,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
     } else {
       switch (action) {
         case 'LOG_ORDER':
-          emptyReply = `ℹ️ *No Eligible Inquiries Found for Order Creation*\n\nThere are no inquiries currently in Price Quote, Negotiation, or On Hold stage ready for an order.\n\nTo create a new inquiry, reply with *1* or send the inquiry details.`;
+          emptyReply = `ℹ️ *No Eligible Inquiries Found for Order Creation*\n\nThere are no inquiries currently in Price Quote, Negotiation, or On Hold stage.\n\n*No Inquiry available - Create Order Directly*`;
           break;
         case 'UPDATE_INQUIRY':
           emptyReply = `ℹ️ *No Editable Inquiries Found*\n\nThere are no active or editable inquiries recorded in your portfolio.\n\nIf you would like to log a new inquiry, reply with *1* or send the inquiry details.`;
@@ -6836,6 +7087,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
     return {
       hasRecords: false,
       reply: emptyReply,
+      interactiveButtons: action === 'LOG_ORDER' ? DIRECT_ORDER_BUTTONS : null,
       state: {
         action,
         page: 1,
@@ -6902,7 +7154,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
 
   let footerText = '';
   if (action === 'LOG_ORDER') {
-    footerText = `Reply with the serial number or Inquiry ID to create an order. Type "Next" for more, or send a customer name to search.`;
+    footerText = `Reply with the serial number or Inquiry ID to create an order. Type "Next" for more, or send a customer name to search.\n\n*No Inquiry available - Create Order Directly*`;
   } else {
     let footerIdLabel = 'Inquiry ID';
     if (action === 'UPDATE_ORDER') footerIdLabel = 'Order / PO Number';
@@ -6916,6 +7168,7 @@ async function fetchAndRenderUpdateSelection(action, senderPhone, { page = 1, pa
   return {
     hasRecords: true,
     reply: fullReply,
+    interactiveButtons: action === 'LOG_ORDER' ? DIRECT_ORDER_BUTTONS : null,
     state: {
       action,
       page: curPage,
@@ -6943,6 +7196,11 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
       await saveActiveSession(senderPhone, 'Unknown', 'general');
       return { handled: true, reply: deniedReply };
     }
+  }
+
+  // Direct order, with no inquiry linked
+  if (action === 'LOG_ORDER' && isDirectOrderRequest(clean)) {
+    return await beginDirectOrder(senderPhone, null);
   }
 
   // 1. Cancel / Discard / Menu
@@ -6980,7 +7238,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
       const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, { page: 1, customerFilter: null });
       await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
       await saveActiveSession(senderPhone, 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-      return { handled: true, reply: selectionRes.reply };
+      return catalogSelectionResult(selectionRes);
     }
   }
 
@@ -6996,7 +7254,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, { page: 1, customerFilter: null });
     await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
     await saveActiveSession(senderPhone, 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-    return { handled: true, reply: selectionRes.reply };
+    return catalogSelectionResult(selectionRes);
   }
 
   // 3. Pagination ("Next", "more", "view more", "page 2", etc.)
@@ -7015,7 +7273,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     });
     await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
     await saveActiveSession(senderPhone, selectionState.customerFilter || 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-    return { handled: true, reply: selectionRes.reply };
+    return catalogSelectionResult(selectionRes);
   }
 
   // 4. Candidate Match Resolution (by Serial Number, Record ID, Date, or Name)
@@ -7235,10 +7493,23 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
         product_description: matchedRecord.product_summary || null,
         _inquiry_display_id: matchedRecord.displayId,
         _inquiry_verified: true,
+        reference_po_number:
+          matchedRecord.reference_po_number ||
+          (
+            matchedRecord.po_number &&
+            !/^EM\/PO\/\d+$/i.test(String(matchedRecord.po_number).trim())
+              ? matchedRecord.po_number
+              : null
+          ),
         delivery_location: matchedRecord.delivery_location && matchedRecord.delivery_location !== 'Not specified' ? matchedRecord.delivery_location : null,
         payment_terms: matchedRecord.payment_terms && matchedRecord.payment_terms !== 'Not specified' ? matchedRecord.payment_terms : null,
         total_amount: Number(matchedRecord.total_amount || 0),
       };
+      await ensureDraftSystemPo(
+        draft,
+        `catalog-selection:${senderPhone}:${matchedRecord.id || Date.now()}`,
+        matchedRecord.deal_id || null,
+      );
     } else if (action === 'UPDATE_INQUIRY') {
       const inqItems = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
       draft = {
@@ -7262,6 +7533,8 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
         inquiry_id: matchedRecord.inquiry_id || matchedRecord.id,
         deal_id: matchedRecord.deal_id || matchedRecord.id,
         po_number: matchedRecord.po_number || null,
+        reference_po_number: matchedRecord.reference_po_number || null,
+        generated_po_number: matchedRecord.generated_po_number || null,
         po_date: matchedRecord.po_date || null,
         stage: matchedRecord.stage || 'Won',
         delivery_location: matchedRecord.delivery_location || null,
@@ -7294,7 +7567,10 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     if (isPureSelect) {
       let prompt = '';
       if (action === 'LOG_ORDER') {
-        prompt = formatSelectedInquiryForOrderPrompt(matchedRecord);
+        prompt =
+          `${formatSelectedInquiryForOrderPrompt(matchedRecord)}\n\n` +
+          `🔢 *System PO Number:* ${draft.po_number}\n` +
+          `_Generated automatically; you can edit it before confirmation._`;
       } else if (action === 'UPDATE_INQUIRY') {
         let itemsListText = '';
         const items = Array.isArray(matchedRecord.deal_items) ? matchedRecord.deal_items : [];
@@ -7366,7 +7642,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     const selectionRes = await fetchAndRenderUpdateSelection(action, senderPhone, { page: 1, customerFilter: clean });
     await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: action });
     await saveActiveSession(senderPhone, clean, `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-    return { handled: true, reply: selectionRes.reply };
+    return catalogSelectionResult(selectionRes);
   }
 
   // 7. Check if user typed an out-of-bounds number
@@ -8277,9 +8553,10 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
   const rawInqId = (draft.inquiry_id || '').trim();
   const cleanInqId = rawInqId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/[^0-9A-Z]/gi, '').toUpperCase();
   const rawPo = (draft.updates?.po_number || draft.po_number || '').trim();
+  const rawReferencePo = (draft.updates?.reference_po_number || draft.reference_po_number || '').trim();
   const cleanPo = rawPo.replace(/^(?:PO[-_:#\s]*)/i, '').trim();
   const rawCompany = (draft.company_name || '').trim();
-  const hasFilter = Boolean(cleanInqId || rawPo || rawCompany);
+  const hasFilter = Boolean(cleanInqId || rawPo || rawReferencePo || rawCompany);
 
   if (draft._order_verified && !originalText.match(/\b(?:PO[-_:#\s]*[A-Za-z0-9_-]+|INQ-[A-Z0-9]+)\b/i)) {
     return { handled: false, status: 'ALREADY_VERIFIED', draft };
@@ -8288,7 +8565,7 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
   // 1. Fetch recent deals strictly scoped by role
   let dealsQuery = supabase
     .from('deals')
-    .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+    .select('id, inquiry_id, customer_name, po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, po_confirmed_at, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
     .order('created_at', { ascending: false });
 
   if (scope.phones !== null) {
@@ -8328,7 +8605,7 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
     const formatDeal = (d, idx) => {
       const cleanCode = (d.id || '').replace(/^(?:INQ|DEAL)-/i, '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 6).toUpperCase();
       const dealCode = `INQ-${cleanCode}`;
-      const poRef = d.po_number ? `PO: *${d.po_number}* (${dealCode})` : `*${dealCode}*`;
+      const poRef = d.po_number ? `*${d.po_number}* (${dealCode})` : `*${dealCode}*`;
       const dateFormatted = d.po_date || (d.created_at ? formatDateDDMMYYYY(d.created_at) : '');
       const lines = [
         `${startIdx + idx + 1}. ${poRef} — *${d.customer_name || 'Customer'}* — _${d.stage || 'Won'}_`,
@@ -8338,6 +8615,9 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
       }
       if (d.delivery_location) {
         lines.push(`   • *Delivery Location:* ${d.delivery_location}`);
+      }
+      if (d.reference_po_number) {
+        lines.push(`   • *Reference PO:* ${d.reference_po_number}`);
       }
       if (dateFormatted) {
         lines.push(`   • *Date:* ${dateFormatted}`);
@@ -8406,6 +8686,9 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
         return dPo.toLowerCase() === rawPo.toLowerCase() || (cleanPo && dPo.toLowerCase().includes(cleanPo.toLowerCase()));
       }) || null;
     }
+    if (!deal && rawReferencePo) {
+      deal = deals.find(d => String(d.reference_po_number || '').toLowerCase() === rawReferencePo.toLowerCase()) || null;
+    }
     if (!deal && rawCompany) {
       const companyDeals = deals.filter(d => isCustomerMatch(rawCompany, null, d.customer_name, null));
       if (!cleanInqId && !rawPo) {
@@ -8423,7 +8706,7 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
   if (!deal && cleanInqId) {
     let inqsQuery = supabase
       .from('inquiries')
-      .select('id, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
+      .select('id, sender_name, sender_phone, salesperson_phone, status, po_number, reference_po_number, generated_po_number, ai_extraction_json, deals(*)')
       .order('created_at', { ascending: false });
 
     if (scope.phones !== null) {
@@ -8452,6 +8735,8 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
               delivery_location: inqJson.delivery_location || inqJson.location || null,
               payment_terms: inqJson.payment_terms || null,
               po_number: rawPo || null,
+              reference_po_number: inq.reference_po_number || null,
+              generated_po_number: inq.generated_po_number || null,
               stage: inq.status || 'new_inquiry',
             };
           }
@@ -8465,7 +8750,7 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
   if (!deal && (cleanInqId || rawPo)) {
     const { data: rawAllDeals } = await supabase
       .from('deals')
-      .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
+      .select('id, inquiry_id, customer_name, po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, po_confirmed_at, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
       .order('created_at', { ascending: false })
       .limit(500);
     const allDeals = await filterRecordsToCallerScope(rawAllDeals, scope, { customerField: 'customer_name' });
@@ -8485,12 +8770,15 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
           return dPo.toLowerCase() === rawPo.toLowerCase() || (cleanPo && dPo.toLowerCase().includes(cleanPo.toLowerCase()));
         }) || null;
       }
+      if (!deal && rawReferencePo) {
+        deal = allDeals.find(d => String(d.reference_po_number || '').toLowerCase() === rawReferencePo.toLowerCase()) || null;
+      }
     }
 
     if (!deal && cleanInqId) {
       const { data: rawAllInqs } = await supabase
         .from('inquiries')
-        .select('id, sender_name, sender_phone, salesperson_phone, status, ai_extraction_json, deals(*)')
+        .select('id, sender_name, sender_phone, salesperson_phone, status, po_number, reference_po_number, generated_po_number, ai_extraction_json, deals(*)')
         .order('created_at', { ascending: false })
         .limit(500);
       const allInqs = await filterRecordsToCallerScope(rawAllInqs, scope, { customerField: 'sender_name' });
@@ -8511,6 +8799,8 @@ async function checkOrdersForUpdate(action, draft, senderPhone, originalText = '
                 delivery_location: inqJson.delivery_location || inqJson.location || null,
                 payment_terms: inqJson.payment_terms || null,
                 po_number: rawPo || null,
+                reference_po_number: inq.reference_po_number || null,
+                generated_po_number: inq.generated_po_number || null,
                 stage: inq.status || 'new_inquiry',
               };
             }
@@ -8936,6 +9226,9 @@ function buildConfirmationSummary(action, draft) {
       }
       summary += `• *Customer / Company:* ${draft.company_name || '-'}\n`;
       summary += `• *PO Number:* ${draft.po_number || '-'}\n`;
+      if (draft.reference_po_number) {
+        summary += `• *Reference PO:* ${draft.reference_po_number}\n`;
+      }
       summary += `• *PO Date:* ${draft.po_date || '-'}\n`;
       summary += `• *Delivery Location:* ${draft.delivery_location || '-'}\n`;
       summary += `• *Payment Terms:* ${draft.payment_terms || '-'}\n`;
@@ -9422,6 +9715,7 @@ async function executeAction(action, draft, senderPhone) {
                 description: it.description || sText,
                 dimensions: sDim,
                 spec: sDim,
+                grade: it.grade || null,
                 hsn_code: hCode,
                 hsn_sac: hCode,
                 quantity: itQty,
@@ -9463,6 +9757,11 @@ async function executeAction(action, draft, senderPhone) {
           unitPrice: globalRate || (structuredLineItems[0]?.rate ?? null),
           total_amount: totalAmount || null,
           totalAmount: totalAmount || null,
+          po_number: draft.po_number || null,
+          reference_po_number: draft.reference_po_number || null,
+          generated_po_number: draft.generated_po_number || null,
+          po_source: draft.po_source || null,
+          po_status: 'confirmed',
           product_requirement: draft.product_description || (structuredLineItems[0] ? structuredLineItems[0].sku_text : null),
           productType: structuredLineItems[0] ? structuredLineItems[0].sku_text : null,
           line_items: structuredLineItems,
@@ -9482,6 +9781,11 @@ async function executeAction(action, draft, senderPhone) {
         if (draft.payment_terms) humanRawText += `Payment Terms: ${draft.payment_terms}\n`;
         if (draft.delivery_location) humanRawText += `Delivery Location: ${draft.delivery_location}\n`;
         if (draft.additional_notes) humanRawText += `Notes: ${draft.additional_notes}\n`;
+        const inquirySourceMediaUrls = Array.isArray(draft.attachments)
+          ? draft.attachments
+            .map(a => a?.url || a?.file_url)
+            .filter(Boolean)
+          : [];
 
         // 1. Insert into inquiries (primary canonical table with pipeline fields)
         const { data: inqRow, error: inqErr } = await supabase
@@ -9490,7 +9794,8 @@ async function executeAction(action, draft, senderPhone) {
             source_channel: draft.source_channel || 'WhatsApp',
             sender_name: companyName,
             customer_name: companyName,
-            raw_text: humanRawText.trim(),
+            raw_text: (draft._source_original_text || humanRawText).trim(),
+            media_urls: inquirySourceMediaUrls,
             sender_phone: senderPhone,
             salesperson_phone: senderPhone,
             status: 'new_inquiry',
@@ -10238,6 +10543,15 @@ async function executeAction(action, draft, senderPhone) {
 
       case 'LOG_ORDER': {
         const companyName = (draft.company_name || 'Customer').trim();
+        const poResolution = await resolveFinalPo({
+          poNumber: draft.po_number,
+          generatedPoNumber: draft.generated_po_number,
+          referencePoNumber:
+            draft.reference_po_number || draft.customer_po_number,
+          reservationToken: draft.po_reservation_token,
+          dealId: draft.deal_id || null,
+        });
+        Object.assign(draft, poResolution);
         await ensureCustomerRecord(companyName, senderPhone, {
           allowCreate: true,
           city: draft.delivery_location || null,
@@ -10282,6 +10596,12 @@ async function executeAction(action, draft, senderPhone) {
           companyName: companyName,
           inquiry_id: draft.inquiry_id || null,
           po_number: draft.po_number,
+          reference_po_number: draft.reference_po_number || null,
+          generated_po_number: draft.generated_po_number || null,
+          po_source: draft.po_source || null,
+          po_status: 'confirmed',
+          po_generated_at: draft.po_generated_at || null,
+          po_confirmed_at: draft.po_confirmed_at || null,
           po_date: draft.po_date,
           delivery_location: draft.delivery_location || null,
           delivery_address: draft.delivery_location || null,
@@ -10299,7 +10619,21 @@ async function executeAction(action, draft, senderPhone) {
           overall_confidence: 0.98,
         };
 
-        let humanRawText = `Customer: ${companyName}\nPO Number: ${draft.po_number}\nPO Date: ${draft.po_date}\n`;
+        const sourceOriginalText = String(draft._source_original_text || '').trim();
+        const hasSourceDocument =
+          Array.isArray(draft.attachments) && draft.attachments.length > 0;
+        const sourceMediaUrls = hasSourceDocument
+          ? draft.attachments
+            .map(a => a?.url || a?.file_url)
+            .filter(Boolean)
+          : [];
+        let humanRawText = sourceOriginalText
+          ? sourceOriginalText
+          : hasSourceDocument
+            ? `[PO Document Attached: ${draft.po_number}] ${companyName} - Original PO Document`
+            : `Customer: ${companyName}\nSystem PO Number: ${draft.po_number}\n`;
+        if (draft.reference_po_number) humanRawText += `Reference PO: ${draft.reference_po_number}\n`;
+        humanRawText += `PO Date: ${draft.po_date}\n`;
         if (draft.inquiry_id) humanRawText += `Linked Inquiry: ${draft.inquiry_id}\n`;
         if (structuredLineItems.length > 0) {
           humanRawText += `Line Items:\n` + structuredLineItems.map((it, i) => `${i + 1}. ${it.description || it.sku_text} ${it.dimensions ? `(${it.dimensions})` : ''} - ${it.quantity} ${it.unit} @ ₹${it.rate}/${it.unit}`).join('\n') + `\n`;
@@ -10319,7 +10653,7 @@ async function executeAction(action, draft, senderPhone) {
           const cleanCode = String(rawRef).replace(/^#?(?:INQ|DEAL)-?/i, '').replace(/-/g, '').toUpperCase();
           const { data: rawMatchedInqRows } = await supabase
             .from('inquiries')
-            .select('id, salesperson_phone, sender_phone, sender_name, status, stage, po_number, po_date, total_amount, delivery_location, payment_terms, ai_extraction_json, won_at')
+            .select('id, salesperson_phone, sender_phone, sender_name, status, stage, po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, po_confirmed_at, po_date, total_amount, delivery_location, payment_terms, ai_extraction_json, won_at')
             .order('created_at', { ascending: false })
             .limit(500);
           const matchedInqRows = await filterRecordsToCallerScope(rawMatchedInqRows, orderScope, { customerField: 'sender_name' });
@@ -10327,7 +10661,7 @@ async function executeAction(action, draft, senderPhone) {
 
           const { data: rawMatchedDealRows } = await supabase
             .from('deals')
-            .select('id, inquiry_id, salesperson_phone, customer_name, stage, po_number, po_date, total_amount, delivery_location, payment_terms, won_at, customer_address')
+            .select('id, inquiry_id, salesperson_phone, customer_name, stage, po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, po_confirmed_at, po_date, total_amount, delivery_location, payment_terms, won_at, customer_address')
             .order('created_at', { ascending: false })
             .limit(500);
           const matchedDealRows = await filterRecordsToCallerScope(rawMatchedDealRows, orderScope, { customerField: 'customer_name' });
@@ -10401,11 +10735,20 @@ async function executeAction(action, draft, senderPhone) {
                 status: 'confirmed',
                 won_at: new Date().toISOString(),
                 po_number: draft.po_number,
+                reference_po_number: draft.reference_po_number || null,
+                generated_po_number: draft.generated_po_number || null,
+                po_source: draft.po_source || null,
+                po_status: 'confirmed',
+                po_generated_at: draft.po_generated_at || null,
+                po_confirmed_at: draft.po_confirmed_at || null,
                 po_date: draft.po_date,
                 total_amount: totalAmount,
                 delivery_location: draft.delivery_location || null,
                 payment_terms: draft.payment_terms || null,
                 ai_extraction_json: structuredAiJson,
+                ...(sourceMediaUrls.length > 0
+                  ? { media_urls: sourceMediaUrls }
+                  : {}),
               })
               .eq('id', finalInquiryId);
 
@@ -10420,12 +10763,19 @@ async function executeAction(action, draft, senderPhone) {
                 customer_name: companyName,
                 sender_name: companyName,
                 raw_text: humanRawText.trim(),
+                media_urls: sourceMediaUrls,
                 sender_phone: senderPhone,
                 salesperson_phone: senderPhone,
                 status: 'confirmed',
                 stage: 'won',
                 won_at: new Date().toISOString(),
                 po_number: draft.po_number,
+                reference_po_number: draft.reference_po_number || null,
+                generated_po_number: draft.generated_po_number || null,
+                po_source: draft.po_source || null,
+                po_status: 'confirmed',
+                po_generated_at: draft.po_generated_at || null,
+                po_confirmed_at: draft.po_confirmed_at || null,
                 po_date: draft.po_date,
                 total_amount: totalAmount,
                 delivery_location: draft.delivery_location || null,
@@ -10476,6 +10826,12 @@ async function executeAction(action, draft, senderPhone) {
                 stage: 'won',
                 won_at: new Date().toISOString(),
                 po_number: draft.po_number,
+                reference_po_number: draft.reference_po_number || null,
+                generated_po_number: draft.generated_po_number || null,
+                po_source: draft.po_source || null,
+                po_status: 'confirmed',
+                po_generated_at: draft.po_generated_at || null,
+                po_confirmed_at: draft.po_confirmed_at || null,
                 po_date: draft.po_date,
                 total_amount: totalAmount,
                 delivery_location: draft.delivery_location,
@@ -10495,6 +10851,12 @@ async function executeAction(action, draft, senderPhone) {
               stage: 'won',
               won_at: new Date().toISOString(),
               po_number: draft.po_number,
+              reference_po_number: draft.reference_po_number || null,
+              generated_po_number: draft.generated_po_number || null,
+              po_source: draft.po_source || null,
+              po_status: 'confirmed',
+              po_generated_at: draft.po_generated_at || null,
+              po_confirmed_at: draft.po_confirmed_at || null,
               po_date: draft.po_date,
               customer_name: companyName,
               customer_address: draft.delivery_location || null,
@@ -10513,6 +10875,12 @@ async function executeAction(action, draft, senderPhone) {
             finalDealId = newDealRow.id;
             isNewDealInserted = true;
           }
+
+          await claimPoNumber(
+            draft.po_number,
+            draft.po_reservation_token,
+            finalDealId,
+          );
 
           // D. Update or Insert deal_items (Crucial for Orders line items in frontend)
           if (finalDealId && structuredLineItems.length > 0) {
@@ -10575,6 +10943,12 @@ async function executeAction(action, draft, senderPhone) {
                 status: prevInquirySnapshot.status,
                 won_at: prevInquirySnapshot.won_at,
                 po_number: prevInquirySnapshot.po_number,
+                reference_po_number: prevInquirySnapshot.reference_po_number,
+                generated_po_number: prevInquirySnapshot.generated_po_number,
+                po_source: prevInquirySnapshot.po_source,
+                po_status: prevInquirySnapshot.po_status,
+                po_generated_at: prevInquirySnapshot.po_generated_at,
+                po_confirmed_at: prevInquirySnapshot.po_confirmed_at,
                 po_date: prevInquirySnapshot.po_date,
                 total_amount: prevInquirySnapshot.total_amount,
                 delivery_location: prevInquirySnapshot.delivery_location,
@@ -10591,6 +10965,12 @@ async function executeAction(action, draft, senderPhone) {
                 stage: prevDealSnapshot.stage,
                 won_at: prevDealSnapshot.won_at,
                 po_number: prevDealSnapshot.po_number,
+                reference_po_number: prevDealSnapshot.reference_po_number,
+                generated_po_number: prevDealSnapshot.generated_po_number,
+                po_source: prevDealSnapshot.po_source,
+                po_status: prevDealSnapshot.po_status,
+                po_generated_at: prevDealSnapshot.po_generated_at,
+                po_confirmed_at: prevDealSnapshot.po_confirmed_at,
                 po_date: prevDealSnapshot.po_date,
                 total_amount: prevDealSnapshot.total_amount,
                 delivery_location: prevDealSnapshot.delivery_location,
@@ -10624,6 +11004,7 @@ async function executeAction(action, draft, senderPhone) {
           inqDisplay +
           `• *Customer / Company:* ${companyName}\n` +
           `• *PO Number:* ${draft.po_number}\n` +
+          (draft.reference_po_number ? `• *Reference PO:* ${draft.reference_po_number}\n` : '') +
           `• *PO Date:* ${draft.po_date}\n` +
           `• *Delivery Location:* ${draft.delivery_location}\n` +
           `• *Payment Terms:* ${draft.payment_terms}\n` +
@@ -10639,6 +11020,11 @@ async function executeAction(action, draft, senderPhone) {
         const rawInqId = (draft.inquiry_id || '').trim();
         const cleanInqId = rawInqId.replace(/^#?(?:DEAL|INQ)-?/i, '').replace(/-/g, '').trim().toUpperCase();
         const rawPo = (draft.updates?.po_number || draft.po_number || '').trim();
+        const rawReferencePo = (
+          draft.updates?.reference_po_number ||
+          draft.reference_po_number ||
+          ''
+        ).trim();
         const cleanPo = rawPo.replace(/^(?:PO[-_:#\s]*)/i, '').trim();
         const rawCompany = (draft.company_name || '').trim();
 
@@ -10648,7 +11034,7 @@ async function executeAction(action, draft, senderPhone) {
         // 1. Fetch recent deals to match
         let dealsQuery = supabase
           .from('deals')
-          .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone')
+          .select('id, inquiry_id, customer_name, po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, po_confirmed_at, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone')
           .order('created_at', { ascending: false });
 
         if (!scope.isAdmin && targetPhones.length > 0) {
@@ -10726,7 +11112,8 @@ async function executeAction(action, draft, senderPhone) {
                     salesperson_phone: inq.salesperson_phone || senderPhone,
                     stage: 'won',
                     won_at: new Date().toISOString(),
-                    po_number: rawPo || null,
+                    po_number: null,
+                    reference_po_number: rawPo || null,
                     po_date: formatIsoDateIST(new Date()),
                     total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0),
                     delivery_location: inqJson.delivery_location || inqJson.location || null,
@@ -10748,7 +11135,7 @@ async function executeAction(action, draft, senderPhone) {
         if (!deal && (cleanInqId || rawPo)) {
           const { data: rawAllDeals } = await supabase
             .from('deals')
-            .select('id, inquiry_id, customer_name, po_number, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone')
+            .select('id, inquiry_id, customer_name, po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, po_confirmed_at, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone')
             .order('created_at', { ascending: false })
             .limit(500);
           const allDeals = await filterRecordsToCallerScope(rawAllDeals, scope, { customerField: 'customer_name' });
@@ -10793,7 +11180,8 @@ async function executeAction(action, draft, senderPhone) {
                       salesperson_phone: inq.salesperson_phone || senderPhone,
                       stage: 'won',
                       won_at: new Date().toISOString(),
-                      po_number: rawPo || null,
+                      po_number: null,
+                      reference_po_number: rawPo || null,
                       po_date: formatIsoDateIST(new Date()),
                       total_amount: Number(inqJson.total_amount || inqJson.totalAmount || 0),
                       delivery_location: inqJson.delivery_location || inqJson.location || null,
@@ -10817,16 +11205,55 @@ async function executeAction(action, draft, senderPhone) {
           return `❌ Could not find an existing order or inquiry matching ${missingIdentifier}.\n\nPlease check the Inquiry ID or PO Number and try again.`;
         }
 
-        const displayPo = deal.po_number || rawPo || 'N/A';
-        const displayCust = deal.customer_name || draft.company_name || 'Customer';
-
         const updates = draft.updates || {};
         const dealUpdates = {};
 
-        // Attach / update PO number
-        if (rawPo) {
-          dealUpdates.po_number = rawPo;
+        const shouldBeWon = deal.stage === 'won' ||
+          String(updates.status || updates.stage || '').toLowerCase().includes('won');
+        const legacyReferencePo =
+          !deal.generated_po_number &&
+          deal.po_number &&
+          !/^EM\/PO\/\d+$/i.test(String(deal.po_number).trim())
+            ? deal.po_number
+            : null;
+
+        // Every bot-updated won order must have a canonical system PO. A
+        // supplied PO edits that canonical value; legacy PO values are kept
+        // as the customer/reference PO instead of being reused as the
+        // system identifier.
+        if (rawPo || shouldBeWon) {
+          try {
+            const poResolution = await resolveFinalPo({
+              poNumber: rawPo || (deal.generated_po_number ? deal.po_number : null),
+              generatedPoNumber: deal.generated_po_number,
+              referencePoNumber: rawReferencePo || deal.reference_po_number || legacyReferencePo,
+              reservationToken: `bot-update:${deal.id}`,
+              dealId: deal.id,
+              existingDeal: deal,
+            });
+            dealUpdates.po_number = poResolution.po_number;
+            dealUpdates.reference_po_number = poResolution.reference_po_number;
+            dealUpdates.generated_po_number = poResolution.generated_po_number;
+            dealUpdates.po_source = poResolution.po_source;
+            dealUpdates.po_status = poResolution.po_status;
+            dealUpdates.po_generated_at = poResolution.po_generated_at;
+            dealUpdates.po_confirmed_at = poResolution.po_confirmed_at;
+            deal.po_number = poResolution.po_number;
+            deal.reference_po_number = poResolution.reference_po_number;
+            deal.generated_po_number = poResolution.generated_po_number;
+          } catch (poErr) {
+            console.error('[CatalogFlow] PO update conflict:', poErr);
+            if (poErr.code === 'PO_CONFLICT') {
+              return `⚠️ *PO Number already exists.*\n\nThe system PO "${rawPo || deal.po_number}" is already assigned to another order. Please choose a different PO number.`;
+            }
+            return `❌ *Could not generate or validate the system PO.*\n\nReason: ${poErr.message || 'PO allocator unavailable'}. Please try again.`;
+          }
         }
+        if (rawReferencePo && !dealUpdates.reference_po_number) {
+          dealUpdates.reference_po_number = rawReferencePo;
+        }
+        const displayPo = deal.po_number || rawPo || 'N/A';
+        const displayCust = deal.customer_name || draft.company_name || 'Customer';
         if (updates.po_date) {
           dealUpdates.po_date = updates.po_date;
         }
@@ -10967,7 +11394,10 @@ async function executeAction(action, draft, senderPhone) {
           const { data: inqRow, error: fetchInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status').eq('id', deal.inquiry_id).single();
           if (inqRow) {
             const aiJson = inqRow.ai_extraction_json || {};
-            if (rawPo) aiJson.po_number = rawPo;
+            if (dealUpdates.po_number) aiJson.po_number = dealUpdates.po_number;
+            if (dealUpdates.reference_po_number) {
+              aiJson.reference_po_number = dealUpdates.reference_po_number;
+            }
             if (updates.po_date) aiJson.po_date = updates.po_date;
             if (dealUpdates.delivery_date) aiJson.delivery_date = dealUpdates.delivery_date;
             if (fulfillmentStatus) {
@@ -11027,11 +11457,12 @@ async function executeAction(action, draft, senderPhone) {
             }
 
             let updatedRawText = inqRow.raw_text || '';
-            if (rawPo) {
+            const poTextForRaw = dealUpdates.po_number || rawPo;
+            if (poTextForRaw) {
               if (/(?:po\s*(?:number|no)?|purchase\s*order)\s*[:=-]\s*([^\n|]+)/i.test(updatedRawText)) {
-                updatedRawText = updatedRawText.replace(/(?:po\s*(?:number|no)?|purchase\s*order)\s*[:=-]\s*([^\n|]+)/i, `PO Number: ${rawPo}`);
+                updatedRawText = updatedRawText.replace(/(?:po\s*(?:number|no)?|purchase\s*order)\s*[:=-]\s*([^\n|]+)/i, `PO Number: ${poTextForRaw}`);
               } else {
-                updatedRawText += `\nPO Number: ${rawPo}`;
+                updatedRawText += `\nPO Number: ${poTextForRaw}`;
               }
             }
             if (updates.delivery_location) {
@@ -11053,6 +11484,17 @@ async function executeAction(action, draft, senderPhone) {
               ai_extraction_json: aiJson,
               raw_text: updatedRawText.trim(),
             };
+            if (dealUpdates.po_number) inqPayload.po_number = dealUpdates.po_number;
+            if (dealUpdates.reference_po_number !== undefined) {
+              inqPayload.reference_po_number = dealUpdates.reference_po_number;
+            }
+            if (dealUpdates.generated_po_number) {
+              inqPayload.generated_po_number = dealUpdates.generated_po_number;
+              inqPayload.po_source = dealUpdates.po_source;
+              inqPayload.po_status = dealUpdates.po_status;
+              inqPayload.po_generated_at = dealUpdates.po_generated_at;
+              inqPayload.po_confirmed_at = dealUpdates.po_confirmed_at;
+            }
             if (dealUpdates.stage === 'won' || deal.stage === 'won') {
               inqPayload.stage = 'won';
               inqPayload.status = 'confirmed';
@@ -13088,10 +13530,7 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
       customerFilter: draft.customerFilter || null,
     });
     await saveActiveSession(senderPhone, draft.customerFilter || 'Customer', `catalog_update_select|${action}|${JSON.stringify(selectionRes.state)}`);
-    return {
-      handled: true,
-      reply: selectionRes.reply,
-    };
+    return catalogSelectionResult(selectionRes);
   }
 
   if (interruptedState === 'catalog_confirm') {
@@ -13581,9 +14020,8 @@ function detectOutOfScopeActionAttempt(currentAction, text) {
  * { handled: false } if message should proceed to general LangGraph Orchestrator
  */
 async function handleCatalogFlow(rawText, senderPhone, options = {}) {
-  if (!rawText || typeof rawText !== 'string') return { handled: false };
-  const text = rawText.trim();
-  if (text.length === 0) return { handled: false };
+  const text = typeof rawText === 'string' ? rawText.trim() : '';
+  if (!text && !options.imageBuffer) return { handled: false };
 
   const { photoDataUrl, gpsData, attachmentObj, incomingAttachments } = extractPhotoAndGps(rawText, options);
   const canUpdateVisits = await canUserUpdateVisits(senderPhone);
@@ -13599,6 +14037,39 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   }
 
   const hasActiveCatalogSession = lastIntent.startsWith('catalog_');
+
+  if (options.imageBuffer && (
+    lastIntent.startsWith('catalog_flow|LOG_INQUIRY') ||
+    lastIntent.startsWith('catalog_editing|LOG_INQUIRY') ||
+    lastIntent.startsWith('catalog_confirm|LOG_INQUIRY') ||
+    lastIntent.startsWith('catalog_selection|LOG_INQUIRY')
+  )) {
+    const caption = /^(?:attached image|photo uploaded)$/i.test(text) ? '' : text;
+    return await handleInquiryDocumentOcr(
+      options.imageBuffer,
+      options.imageMimeType || 'image/jpeg',
+      senderPhone,
+      caption,
+    );
+  }
+
+  if (options.imageBuffer && (
+    lastIntent.startsWith('catalog_flow|LOG_ORDER') ||
+    lastIntent.startsWith('catalog_editing|LOG_ORDER') ||
+    lastIntent.startsWith('catalog_confirm|LOG_ORDER')
+  )) {
+    const caption = /^(?:attached image|photo uploaded)$/i.test(text) ? '' : text;
+    return await handleOrderDocumentOcr(
+      options.imageBuffer,
+      options.imageMimeType || 'image/jpeg',
+      senderPhone,
+      caption,
+    );
+  }
+
+  if (isDirectOrderRequest(text)) {
+    return await beginDirectOrder(senderPhone, callerSourceChannel);
+  }
 
   // ── 2-0. BARE NUMBER WITH NO OPEN SESSION ──
   // Only a displayed catalog menu (or a "reply with N" prompt) makes "1".."10" a catalog selection.
@@ -13654,15 +14125,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       const selectionRes = await fetchAndRenderUpdateSelection(explicitAction, senderPhone, { page: 1, customerFilter: null });
       await startNewCatalogSession(senderPhone, selectionRes.reply);
       await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: explicitAction });
-      if (selectionRes.hasRecords) {
+      if (selectionRes.hasRecords || explicitAction === 'LOG_ORDER') {
         await saveActiveSession(senderPhone, 'Unknown', `catalog_update_select|${explicitAction}|${JSON.stringify(selectionRes.state)}`);
       } else {
         await saveActiveSession(senderPhone, 'Unknown', 'general');
       }
-      return {
-        handled: true,
-        reply: selectionRes.reply,
-      };
+      return catalogSelectionResult(selectionRes);
     }
 
     const initialPrompt = MODULE_PROMPTS[explicitAction];
@@ -14384,6 +14852,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (callerSourceChannel && !draft.source_channel) {
       draft.source_channel = callerSourceChannel;
     }
+    if (action === 'LOG_ORDER') {
+      await ensureDraftSystemPo(
+        draft,
+        draft.po_reservation_token ||
+          `catalog-edit:${senderPhone}:${Date.now()}`,
+        draft.deal_id || null,
+      );
+    }
 
     if (await isMidFlowReadQuery(text)) {
       return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_confirm', action, draft);
@@ -14427,7 +14903,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         if (custCheck.isUnrecognizedCustomer) {
           await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
           await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(draft)}`);
-          return { handled: true, reply: custCheck.prompt };
+          return {
+            handled: true,
+            reply: custCheck.prompt,
+            interactiveType: 'buttons',
+            interactiveButtons: NEW_CUSTOMER_BUTTONS,
+          };
         } else {
           draft.company_name = null;
           await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
@@ -14532,8 +15013,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     ) {
       await recordSessionMessage(senderPhone, 'user', text);
       const editPrompt = getEditPromptForAction(action);
+      if (action === 'LOG_ORDER') draft._editing_system_po = true;
       await recordSessionMessage(senderPhone, 'assistant', editPrompt);
-      await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_editing|${action}|${draftJsonStr}`);
+      await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_editing|${action}|${JSON.stringify(draft)}`);
       return {
         handled: true,
         reply: editPrompt,
@@ -14794,6 +15276,15 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       ? { ...draft }
       : await extractFieldsWithLLM(action, text, draft);
     delete updatedDraft._skip_llm_extract;
+    if (action === 'LOG_ORDER') {
+      await ensureDraftSystemPo(
+        updatedDraft,
+        updatedDraft.po_reservation_token ||
+          `catalog-edit:${senderPhone}:${Date.now()}`,
+        updatedDraft.deal_id || null,
+      );
+      delete updatedDraft._editing_system_po;
+    }
 
     if (action === 'LOG_VISIT') {
       if (attachmentObj) {
@@ -14856,7 +15347,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
-        return { handled: true, reply: custCheck.prompt };
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: NEW_CUSTOMER_BUTTONS,
+        };
       } else {
         updatedDraft.company_name = null;
         await recordSessionMessage(senderPhone, 'assistant', custCheck.rejectionMessage, { action_type: action });
@@ -14932,6 +15428,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     let existingDraft = safeParseJSON(draftJsonStr, {});
     if (callerSourceChannel && !existingDraft.source_channel) {
       existingDraft.source_channel = callerSourceChannel;
+    }
+    if (action === 'LOG_ORDER') {
+      existingDraft = await ensureDraftSystemPo(
+        existingDraft,
+        existingDraft.po_reservation_token ||
+          `catalog-flow:${senderPhone}:${Date.now()}`,
+        existingDraft.deal_id || null,
+      );
     }
 
     await recordSessionMessage(senderPhone, 'user', text);
@@ -15909,7 +16413,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // 0. LOG_ORDER Inquiry Quoted Stage Gate check
-    if (action === 'LOG_ORDER') {
+    if (action === 'LOG_ORDER' && (updatedDraft.inquiry_id || updatedDraft.deal_id || updatedDraft._inquiry_display_id)) {
       const stageCheck = await validateOrderInquiryStage(updatedDraft, senderPhone);
       if (!stageCheck.isValid) {
         await recordSessionMessage(senderPhone, 'assistant', stageCheck.reply, { action_type: action });
@@ -16191,12 +16695,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       const selectionRes = await fetchAndRenderUpdateSelection(matchedAction, senderPhone, { page: 1, customerFilter: null });
       await startNewCatalogSession(senderPhone, selectionRes.reply);
       await recordSessionMessage(senderPhone, 'assistant', selectionRes.reply, { action_type: matchedAction });
-      if (selectionRes.hasRecords) {
+      if (selectionRes.hasRecords || matchedAction === 'LOG_ORDER') {
         await saveActiveSession(senderPhone, 'Unknown', `catalog_update_select|${matchedAction}|${JSON.stringify(selectionRes.state)}`);
       } else {
         await saveActiveSession(senderPhone, 'Unknown', 'general');
       }
-      return { handled: true, reply: selectionRes.reply };
+      return catalogSelectionResult(selectionRes);
     }
 
     const initialPrompt = MODULE_PROMPTS[matchedAction];

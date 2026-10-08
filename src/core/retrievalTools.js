@@ -3568,9 +3568,10 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
   if (custName) filtered = filtered.filter((d) => d.customer_name.toLowerCase().includes(custName));
   if (poFilter) {
     const cleanPo = poFilter.replace(/^[#]?(?:PO|ORDER|DEAL)[-:\s#]*/i, '').trim();
-    filtered = filtered.filter((d) => 
-      (d.po_number && (d.po_number.toLowerCase().includes(poFilter) || (cleanPo && d.po_number.toLowerCase().includes(cleanPo)))) ||
-      (d.inquiry_id && cleanPo && d.inquiry_id.toLowerCase().includes(cleanPo))
+    filtered = filtered.filter((d) =>
+      d.po_number &&
+      (d.po_number.toLowerCase().includes(poFilter) ||
+        (cleanPo && d.po_number.toLowerCase().includes(cleanPo))),
     );
     // If not found in caller's immediate portfolio, search company-wide deals for this specific PO
     if (filtered.length === 0) {
