@@ -2,6 +2,7 @@ const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
 const { ENLIGHT_LOGO_BASE64 } = require('./logoBase64');
+const { calculateLineItem } = require('./pricingEngine');
 
 function getCompanyLogoBuffer() {
   const possiblePaths = [
@@ -299,22 +300,23 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       const effectiveSrc = validPricedSrc.length > 0 ? validPricedSrc : rawLineItems;
 
       const lineItems = effectiveSrc.map(item => {
-        const qty = Number(item.quantity || 0);
-        const rate = Number(item.rate || item.unitPrice || 0);
-        const baseAmount = Number(item.amount || (qty * rate));
-        const cgstRate = Number(item.cgst_rate !== undefined ? item.cgst_rate : 9);
-        const sgstRate = Number(item.sgst_rate !== undefined ? item.sgst_rate : 9);
-        const cgstAmount = item.cgst_amount !== undefined ? Number(item.cgst_amount) : Math.round(baseAmount * (cgstRate / 100) * 100) / 100;
-        const sgstAmount = item.sgst_amount !== undefined ? Number(item.sgst_amount) : Math.round(baseAmount * (sgstRate / 100) * 100) / 100;
-        const totalGst = item.total_gst !== undefined ? Number(item.total_gst) : Math.round((cgstAmount + sgstAmount) * 100) / 100;
-        const finalAmount = item.final_amount !== undefined ? Number(item.final_amount) : Math.round((baseAmount + totalGst) * 100) / 100;
+        const calc = calculateLineItem(item);
+        const qty = Number(calc.quantity || 0);
+        const rate = Number(calc.rate || 0);
+        const baseAmount = Number(calc.amount || (qty * rate));
+        const cgstRate = Number(calc.cgst_rate !== undefined ? calc.cgst_rate : 9);
+        const sgstRate = Number(calc.sgst_rate !== undefined ? calc.sgst_rate : 9);
+        const cgstAmount = calc.cgst_amount !== undefined ? Number(calc.cgst_amount) : Math.round(baseAmount * (cgstRate / 100) * 100) / 100;
+        const sgstAmount = calc.sgst_amount !== undefined ? Number(calc.sgst_amount) : Math.round(baseAmount * (sgstRate / 100) * 100) / 100;
+        const totalGst = calc.total_gst !== undefined ? Number(calc.total_gst) : Math.round((cgstAmount + sgstAmount) * 100) / 100;
+        const finalAmount = calc.final_amount !== undefined ? Number(calc.final_amount) : Math.round((baseAmount + totalGst) * 100) / 100;
 
         return {
           sku_text: (item.sku_text || item.description || item.productType || 'HR - COIL / SHEET').toUpperCase(),
           dimensions: item.dimensions || undefined,
           hsn_code: item.hsn_code || item.hsn || detectHsnCode(item.sku_text || item.description || '', item.dimensions),
           quantity: qty,
-          unit: item.unit || 'MT',
+          unit: calc.unit || 'MT',
           rate: rate,
           amount: baseAmount,
           cgst_rate: cgstRate,

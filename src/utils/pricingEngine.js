@@ -61,16 +61,9 @@ function isDimensionCompatible(requestedText, skuText) {
 function normalizeUnit(rawUnit) {
   if (!rawUnit || typeof rawUnit !== 'string') return 'MT';
   const u = rawUnit.trim().toUpperCase();
-  if (u === 'KG' || u === 'KGS' || u === 'KILOGRAM' || u === 'KILOGRAMS') return 'KG';
-  if (u === 'MT' || u === 'TON' || u === 'TONS' || u === 'TONNE' || u === 'TONNES' || u === 'METRIC TON' || u === 'METRIC TONS') return 'MT';
-  if (u === 'PCS' || u === 'PIECE' || u === 'PIECES') return 'Pcs';
-  if (u === 'SHEET' || u === 'SHEETS') return 'Sheets';
-  if (u === 'PLATE' || u === 'PLATES') return 'Plates';
-  if (u === 'COIL' || u === 'COILS') return 'Coils';
-  if (u === 'BAR' || u === 'BARS') return 'Bars';
-  if (u === 'NOS' || u === 'NUMBER' || u === 'NUMBERS') return 'Nos';
-  if (u === 'BUNDLE' || u === 'BUNDLES') return 'Bundles';
-  if (u === 'PIPE' || u === 'PIPES' || u === 'TUBE' || u === 'TUBES') return 'Pipes';
+  if (['KG', 'KGS', 'KILOGRAM', 'KILOGRAMS'].includes(u)) return 'KG';
+  if (['MT', 'TON', 'TONS', 'TONNE', 'TONNES', 'METRIC TON', 'METRIC TONS', 'MTS', 'T'].includes(u)) return 'MT';
+  if (['NOS', 'NO', 'NO.', 'NUMBER', 'NUMBERS', 'PCS', 'PC', 'PIECE', 'PIECES', 'SHEET', 'SHEETS', 'PLATE', 'PLATES', 'COIL', 'COILS', 'BUNDLE', 'BUNDLES', 'BAR', 'BARS', 'PIPE', 'PIPES', 'TUBE', 'TUBES'].includes(u)) return 'Nos';
   return rawUnit.trim();
 }
 
@@ -442,54 +435,80 @@ function convertToMt(quantity, rawUnit) {
  * @returns {object} Normalized line item with exact calculated amount
  */
 function calculateLineItem(item) {
-  if (!item) return { quantity: 0, rate: 0, amount: 0, unit: 'MT' };
-  const quantity = Number(item.quantity || item.quantity_mt || item.qty || 0) || 0;
-  let rawRate = Number(item.rate || item.rate_per_mt || item.price_per_mt || item.unitPrice || 0) || 0;
+  if (!item) return { quantity: 0, rate: 0, amount: 0, unit: 'MT', cgst_rate: 9, cgst_amount: 0, sgst_rate: 9, sgst_amount: 0, total_gst: 0, final_amount: 0 };
+  const rawQuantity = Number(item.quantity ?? item.quantity_mt ?? item.qty ?? 0) || 0;
+  let rawRate = Number(item.rate ?? item.rate_per_mt ?? item.price_per_mt ?? item.unitPrice ?? 0) || 0;
   const unit = normalizeUnit(item.unit);
-
-  // If unit is MT/Ton and rate <= 250 (e.g. 52 or 54.5 representing Rs/Kg in Indian steel market), normalize to Rs/MT
-  let rate = rawRate;
-  if (['MT', 'TON', 'TONS'].includes(unit.toUpperCase()) && rawRate > 0 && rawRate <= 250) {
-    rate = rawRate * 1000;
-  }
 
   const conv = convertLineItemToMt(item);
   const effectiveMt = typeof conv === 'number' ? conv : (conv && conv.mt !== null && !isNaN(conv.mt) ? conv.mt : 0);
-  let amount = 0;
 
-  if (item.isManualAmount && item.amount !== undefined && Number(item.amount) > 0) {
-    amount = Number(item.amount);
-  } else if (quantity > 0 && rate > 0) {
-    if (effectiveMt > 0) {
-      amount = Math.round(effectiveMt * rate * 100) / 100;
-    } else if (unit === 'KG') {
-      amount = Math.round((quantity / 1000) * rate * 100) / 100;
-    } else {
-      amount = Math.round(quantity * rate * 100) / 100;
+  let quantity = rawQuantity;
+  let normalizedUnit = unit;
+  let rate = rawRate;
+
+  // 1. Convert to MT if convertible (KG or Nos with dimensions)
+  if (effectiveMt > 0) {
+    quantity = effectiveMt;
+    normalizedUnit = 'MT';
+
+    // Normalize rate to Rs/MT
+    const wasKg = unit === 'KG' || (rawRate > 0 && rawRate <= 250);
+    if (wasKg) {
+      if (item.amount && Number(item.amount) > 0) {
+        rate = Math.round(Number(item.amount) / effectiveMt);
+      } else {
+        rate = rawRate * 1000;
+      }
+    } else if (item.amount && Number(item.amount) > 0 && rawRate > 0 && Math.abs(Number(item.amount) - (effectiveMt * rawRate)) > 1) {
+      // If original rate was per piece, recalculate rate per MT
+      rate = Math.round(Number(item.amount) / effectiveMt);
     }
-  } else if (item.amount && Number(item.amount) > 0) {
-    amount = Number(item.amount);
+  } else if (['MT', 'TON', 'TONS'].includes(unit.toUpperCase()) && rawRate > 0 && rawRate <= 250) {
+    if (!item.amount || Math.abs(Number(item.amount) - (rawQuantity * rawRate * 1000)) < 1 || Number(item.amount) > (rawQuantity * rawRate)) {
+      rate = rawRate * 1000;
+    }
+    normalizedUnit = 'MT';
   }
 
+  // 2. Base Amount calculation
+  let amount = 0;
+  if (item.isManualAmount && item.amount !== undefined && Number(item.amount) > 0) {
+    amount = Number(item.amount);
+  } else if (item.amount && Number(item.amount) > 0) {
+    amount = Number(item.amount);
+  } else if (quantity > 0 && rate > 0) {
+    amount = Math.round(quantity * rate * 100) / 100;
+  }
+
+  // If rate was missing/0, but amount and quantity exist, infer rate
+  if (rate === 0 && quantity > 0 && amount > 0) {
+    rate = Math.round((amount / quantity) * 100) / 100;
+  }
+
+  // 3. Forward 18% GST (CGST 9% + SGST 9%)
   const cgst_rate = Number(item.cgst_rate !== undefined ? item.cgst_rate : 9);
   const sgst_rate = Number(item.sgst_rate !== undefined ? item.sgst_rate : 9);
-  const cgst_amount = Math.round(amount * (cgst_rate / 100) * 100) / 100;
-  const sgst_amount = Math.round(amount * (sgst_rate / 100) * 100) / 100;
-  const total_gst = Math.round((cgst_amount + sgst_amount) * 100) / 100;
-  const final_amount = Math.round((amount + total_gst) * 100) / 100;
+  const cgst_amount = item.cgst_amount !== undefined ? Number(item.cgst_amount) : Math.round(amount * (cgst_rate / 100) * 100) / 100;
+  const sgst_amount = item.sgst_amount !== undefined ? Number(item.sgst_amount) : Math.round(amount * (sgst_rate / 100) * 100) / 100;
+  const total_gst = item.total_gst !== undefined ? Number(item.total_gst) : Math.round((cgst_amount + sgst_amount) * 100) / 100;
+  const final_amount = item.final_amount !== undefined && Number(item.final_amount) > 0
+    ? Number(item.final_amount)
+    : Math.round((amount + total_gst) * 100) / 100;
 
   return {
     ...item,
     quantity,
+    unit: normalizedUnit,
     rate,
     amount,
-    unit,
     cgst_rate,
     cgst_amount,
     sgst_rate,
     sgst_amount,
     total_gst,
     final_amount,
+    ...(unit !== normalizedUnit ? { original_quantity: rawQuantity, original_unit: unit } : {}),
   };
 }
 
@@ -812,6 +831,19 @@ function calculateQuotationBreakdown(baseAmount, lineItems) {
   };
 }
 
+/**
+ * Helper to format Indian currency values with or without decimals cleanly.
+ */
+function formatMoneyValue(num) {
+  if (num === null || num === undefined || isNaN(Number(num))) return '0';
+  const n = Number(num);
+  const hasDec = (n % 1 !== 0);
+  return n.toLocaleString('en-IN', {
+    minimumFractionDigits: hasDec ? 2 : 0,
+    maximumFractionDigits: 2,
+  });
+}
+
 module.exports = {
   DEFAULT_GST_RATE,
   normalizeUnit,
@@ -820,6 +852,7 @@ module.exports = {
   extractDimensions,
   isDimensionCompatible,
   formatIndianCurrency,
+  formatMoneyValue,
   calculateLineItem,
   calculateLineItems,
   calculateSubtotal,

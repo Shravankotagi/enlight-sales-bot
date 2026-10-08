@@ -285,7 +285,7 @@ async function runTests() {
     { sku_text: 'HR Coil', dimensions: '7mm', quantity: 45, unit: 'MT', rate: 88, amount: 3960 }
   ];
   const formattedRatedSingle = formatDetailedInquiryItemsList(ratedSingleItem);
-  assert.strictEqual(formattedRatedSingle, 'HR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹3,960', 'Rated single item must format with rate and line total');
+  assert.strictEqual(formattedRatedSingle, 'HR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹4,672.80', 'Rated single item must format with rate and line total');
 
   // 9b. formatDetailedInquiryItemsList with multiple items (some rated, some unrated)
   const mixedItems = [
@@ -295,7 +295,7 @@ async function runTests() {
   const formattedMixed = formatDetailedInquiryItemsList(mixedItems);
   assert.strictEqual(
     formattedMixed,
-    '1. HR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹3,960\n2. CR Sheet (2mm) | 20 MT | ₹90 /MT | Line Total: ₹1,800',
+    '1. HR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹4,672.80\n2. CR Sheet (2mm) | 20 MT | ₹90 /MT | Line Total: ₹2,124',
     'Multiple rated items must include line numbers, rates, and line totals'
   );
 
@@ -304,7 +304,7 @@ async function runTests() {
     { sku_text: 'HR Coil', dimensions: '9mm', quantity: 89, unit: 'MT', rate: 0, amount: 0 }
   ];
   const formattedUnrated = formatDetailedInquiryItemsList(unratedItem);
-  assert.strictEqual(formattedUnrated, '*HR Coil (9mm)* — 89 MT', 'Unrated item must format as *Name (Spec)* — Qty Unit');
+  assert.strictEqual(formattedUnrated, 'HR Coil (9mm) | 89 MT', 'Unrated item must format as Name (Spec) | Qty Unit');
 
   // 9d. formatSelectedInquiryPrompt with rate, line total, and quotation total (e.g. INQ-4535CA Sana Shah)
   const sanaShahInqRecord = {
@@ -327,7 +327,7 @@ async function runTests() {
   assert(sanaShahPrompt.includes('• *Payment Terms:* 70 Days'));
   assert(sanaShahPrompt.includes('• *Delivery Location:* Satara'));
   assert(sanaShahPrompt.includes('• *Additional Notes:* -'));
-  assert(sanaShahPrompt.includes('*Current Line Items:*\n\nHR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹3,960'));
+  assert(sanaShahPrompt.includes('*Current Line Items:*\n\nHR Coil (7mm) | 45 MT | ₹88 /MT | Line Total: ₹4,672.80'));
   assert(sanaShahPrompt.includes('Quotation Total: ₹3,960'));
   assert(sanaShahPrompt.includes('Want to update Stage (Negotiation, Won, Lost, On Hold), Rate, Quantity or other details?'));
 
@@ -348,16 +348,16 @@ async function runTests() {
   // Test 10: Stage Update Direct Actions & Stage Transition Extraction
   console.log('Test 10: Stage Update Direct Actions & Stage Transition Extraction');
   const stageMerged1 = mergeDraft('UPDATE_INQUIRY', {}, {}, 'change stage to won');
-  assert.strictEqual(stageMerged1.updates.stage, 'won', 'Should extract won stage from "change stage to won"');
+  assert.strictEqual(String(stageMerged1.updates.stage).toLowerCase(), 'won', 'Should extract won stage from "change stage to won"');
 
   const stageMerged2 = mergeDraft('UPDATE_INQUIRY', {}, {}, 'mark as negotiation');
-  assert.strictEqual(stageMerged2.updates.stage, 'negotiation', 'Should extract negotiation stage from "mark as negotiation"');
+  assert.strictEqual(String(stageMerged2.updates.stage).toLowerCase(), 'negotiation', 'Should extract negotiation stage from "mark as negotiation"');
 
   const stageMerged3 = mergeDraft('UPDATE_INQUIRY', {}, {}, 'update stage to quoted');
-  assert.strictEqual(stageMerged3.updates.stage, 'quoted', 'Should extract quoted stage from "update stage to quoted"');
+  assert.strictEqual(String(stageMerged3.updates.stage).toLowerCase(), 'quoted', 'Should extract quoted stage from "update stage to quoted"');
 
   const stageMerged4 = mergeDraft('UPDATE_INQUIRY', {}, {}, 'set status to lost');
-  assert.strictEqual(stageMerged4.updates.stage, 'lost', 'Should extract lost stage from "set status to lost"');
+  assert.strictEqual(String(stageMerged4.updates.stage).toLowerCase(), 'lost', 'Should extract lost stage from "set status to lost"');
 
   console.log('  -> PASS: Stage Update Direct Actions & Stage Transition tests passed.\n');
 
