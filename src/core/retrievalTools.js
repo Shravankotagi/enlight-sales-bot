@@ -21,7 +21,7 @@
  */
 
 const { supabase, getEmployeeByPhone } = require('../supabase');
-const { convertLineItemToMt } = require('../utils/pricingEngine');
+const { convertLineItemToMt, calculateLineItem, formatMoneyValue } = require('../utils/pricingEngine');
 const { searchKnowledgeBase } = require('../services/kbRetrievalService');
 
 // ─── RBAC Role Helper Functions ─────────────────────────────────────────────
@@ -1045,15 +1045,16 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
         const qtyVal = (it.quantity !== undefined && it.quantity !== null && it.quantity !== '')
           ? it.quantity
           : (it.quantity_mt !== undefined && it.quantity_mt !== null ? it.quantity_mt : '');
-        const unit = it.unit || 'MT';
-        const qtyStr = qtyVal ? `${qtyVal} ${unit}` : '';
-        const rate = Number(it.rate || it.rate_per_mt || 0);
-        const itQty = Number(qtyVal || 0);
-        const lineTotal = Number(it.amount || 0) || (rate > 0 && itQty > 0 ? rate * itQty : 0);
+        const calc = calculateLineItem(it);
+        const unit = calc.unit || it.unit || 'MT';
+        const qtyVal = calc.quantity || it.quantity || it.quantity_mt || '';
+        const qtyStr = qtyVal ? `${Number(qtyVal).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${unit}` : '';
+        const rate = Number(calc.rate || 0);
+        const lineTotal = Number(calc.final_amount || 0) || (calc.amount ? Math.round(Number(calc.amount) * 1.18 * 100) / 100 : 0);
         const prefix = (matched.line_items || []).length > 1 ? `${idx + 1}. ` : '';
         if (rate > 0) {
-          const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
-          return `${prefix}${name}${spec}${qtyStr ? ` | ${qtyStr}` : ''} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+          const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${formatMoneyValue(lineTotal)}` : '';
+          return `${prefix}${name}${spec}${qtyStr ? ` | ${qtyStr}` : ''} | ₹${formatMoneyValue(rate)} /${unit}${lineTotalStr}`;
         }
         return `${prefix}${name}${spec}${qtyStr ? ` | ${qtyStr}` : ''}`;
       }).join('\n');
@@ -3532,17 +3533,17 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
         } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
           spec = ` (${dim})`;
         }
-      }
-      const qty = Number(it.quantity || 0);
-      const unit = it.unit || 'MT';
-      const rate = Number(it.rate || 0);
-      const lineTotal = Number(it.amount || (rate > 0 && qty > 0 ? rate * qty : 0));
+      const calc = calculateLineItem(it);
+      const qty = calc.quantity || 0;
+      const unit = calc.unit || it.unit || 'MT';
+      const rate = Number(calc.rate || 0);
+      const lineTotal = Number(calc.final_amount || 0) || (calc.amount ? Math.round(Number(calc.amount) * 1.18 * 100) / 100 : 0);
       const prefix = (d.deal_items || []).length > 1 ? `${idx + 1}. ` : '';
       if (rate > 0) {
-        const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
-        return `${prefix}${name}${spec} | ${qty} ${unit} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+        const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${formatMoneyValue(lineTotal)}` : '';
+        return `${prefix}${name}${spec} | ${Number(qty).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${unit} | ₹${formatMoneyValue(rate)} /${unit}${lineTotalStr}`;
       }
-      return `${prefix}${name}${spec} | ${qty} ${unit}`;
+      return `${prefix}${name}${spec} | ${Number(qty).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${unit}`;
     }).join('\n');
 
     return {
@@ -3601,17 +3602,17 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
               } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
                 spec = ` (${dim})`;
               }
-            }
-            const qty = Number(it.quantity || 0);
-            const unit = it.unit || 'MT';
-            const rate = Number(it.rate || 0);
-            const lineTotal = Number(it.amount || (rate > 0 && qty > 0 ? rate * qty : 0));
+            const calc = calculateLineItem(it);
+            const qty = calc.quantity || 0;
+            const unit = calc.unit || it.unit || 'MT';
+            const rate = Number(calc.rate || 0);
+            const lineTotal = Number(calc.final_amount || 0) || (calc.amount ? Math.round(Number(calc.amount) * 1.18 * 100) / 100 : 0);
             const prefix = (d.deal_items || []).length > 1 ? `${idx + 1}. ` : '';
             if (rate > 0) {
-              const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
-              return `${prefix}${name}${spec} | ${qty} ${unit} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+              const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${formatMoneyValue(lineTotal)}` : '';
+              return `${prefix}${name}${spec} | ${Number(qty).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${unit} | ₹${formatMoneyValue(rate)} /${unit}${lineTotalStr}`;
             }
-            return `${prefix}${name}${spec} | ${qty} ${unit}`;
+            return `${prefix}${name}${spec} | ${Number(qty).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${unit}`;
           }).join('\n');
 
           return {
@@ -4233,16 +4234,17 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
           spec = ` (${dim})`;
         }
       }
-      const qty = Number(it.quantity || 0);
-      const unit = it.unit || 'MT';
-      const rate = Number(it.rate || 0);
-      const lineTotal = Number(it.amount || (rate > 0 && qty > 0 ? rate * qty : 0));
+      const calc = calculateLineItem(it);
+      const qty = calc.quantity || 0;
+      const unit = calc.unit || it.unit || 'MT';
+      const rate = Number(calc.rate || 0);
+      const lineTotal = Number(calc.final_amount || 0) || (calc.amount ? Math.round(Number(calc.amount) * 1.18 * 100) / 100 : 0);
       const prefix = (d.deal_items || []).length > 1 ? `${idx + 1}. ` : '';
       if (rate > 0) {
-        const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
-        return `${prefix}${name}${spec} | ${qty} ${unit} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+        const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${formatMoneyValue(lineTotal)}` : '';
+        return `${prefix}${name}${spec} | ${Number(qty).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${unit} | ₹${formatMoneyValue(rate)} /${unit}${lineTotalStr}`;
       }
-      return `${prefix}${name}${spec} | ${qty} ${unit}`;
+      return `${prefix}${name}${spec} | ${Number(qty).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${unit}`;
     }).join('\n');
 
     return {

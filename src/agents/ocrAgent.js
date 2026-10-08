@@ -15,11 +15,13 @@ const { extractFromImage } = require('../gemini');
 const { logBotActivity } = require('../utils/activityLogger');
 const { resolveFinalPo, claimPoNumber } = require('../core/poResolver');
 const {
+  calculateLineItem,
   calculateLineItems,
   calculateSubtotal,
   calculateGst,
   calculateGrandTotal,
   calculatePricingSummary,
+  formatMoneyValue,
 } = require('../utils/pricingEngine');
 
 /**
@@ -104,10 +106,17 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
       line_items: pricingSummary.lineItems.map(item => ({
         sku_text: item.sku_text || item.product_name || item.description || null,
         dimensions: item.dimensions || null,
+        grade: item.grade || null,
         quantity: item.quantity,
         unit: item.unit || 'MT',
         rate: item.rate,
         amount: item.amount,
+        cgst_rate: item.cgst_rate || 9,
+        cgst_amount: item.cgst_amount,
+        sgst_rate: item.sgst_rate || 9,
+        sgst_amount: item.sgst_amount,
+        total_gst: item.total_gst,
+        final_amount: item.final_amount,
       })),
     };
 
@@ -488,17 +497,18 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
     if (extraction.line_items && extraction.line_items.length > 0) {
       itemsBreakdown = extraction.line_items
         .map((i, idx) => {
+          const calc = calculateLineItem(i);
           const prefix = extraction.line_items.length > 1 ? `${idx + 1}. ` : '';
-          const dimStr = i.dimensions ? ` (${i.dimensions})` : '';
-          const unit = i.unit || 'MT';
-          const qtyStr = `${Number(i.quantity || 0).toLocaleString('en-IN')} ${unit}`;
-          const rate = Number(i.rate || 0);
-          const lineTotal = Number(i.amount || 0) || (rate > 0 ? rate * Number(i.quantity || 0) : 0);
+          const dimStr = calc.dimensions ? ` (${calc.dimensions})` : '';
+          const unit = calc.unit || 'MT';
+          const qtyStr = `${Number(calc.quantity || 0).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${unit}`;
+          const rate = Number(calc.rate || 0);
+          const lineTotal = Number(calc.final_amount || 0) || (calc.amount ? Math.round(Number(calc.amount) * 1.18 * 100) / 100 : 0);
           if (rate > 0) {
-            const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${lineTotal.toLocaleString('en-IN')}` : '';
-            return `${prefix}${i.sku_text || 'Material'}${dimStr} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+            const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${formatMoneyValue(lineTotal)}` : '';
+            return `${prefix}${calc.sku_text || 'Material'}${dimStr} | ${qtyStr} | ₹${formatMoneyValue(rate)} /${unit}${lineTotalStr}`;
           }
-          return `${prefix}${i.sku_text || 'Material'}${dimStr} | ${qtyStr}`;
+          return `${prefix}${calc.sku_text || 'Material'}${dimStr} | ${qtyStr}`;
         })
         .join('\n');
     }

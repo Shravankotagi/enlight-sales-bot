@@ -251,10 +251,8 @@ function postProcessExtraction(parsed) {
         item.unit = 'MT';
       } else if (['KG', 'KGS', 'KILOGRAM', 'KILOGRAMS'].includes(uUpper)) {
         item.unit = 'KG';
-      } else if (['NOS', 'NO', 'NO.', 'NUMBER', 'NUMBERS'].includes(uUpper)) {
+      } else if (['NOS', 'NO', 'NO.', 'NUMBER', 'NUMBERS', 'PCS', 'PC', 'PIECE', 'PIECES', 'SHEET', 'SHEETS', 'PLATE', 'PLATES', 'BUNDLE', 'BUNDLES'].includes(uUpper)) {
         item.unit = 'Nos';
-      } else if (['PCS', 'PC', 'PIECE', 'PIECES'].includes(uUpper)) {
-        item.unit = 'PCS';
       }
 
       // Safeguard: Protect against OCR hallucinating product category ('Plates', 'Sheets', 'Coils') as unit

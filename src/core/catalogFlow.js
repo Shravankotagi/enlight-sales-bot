@@ -35,8 +35,13 @@ const {
   extractThickness,
   extractHeight,
 } = require('../utils/hsnDetector');
-const { safeParseJSON } = require('../utils/jsonUtils');
-const { calculateQuotationBreakdown, normalizeUnit, convertLineItemToMt } = require('../utils/pricingEngine');
+const {
+  calculateQuotationBreakdown,
+  normalizeUnit,
+  convertLineItemToMt,
+  calculateLineItem,
+  calculateLineItems,
+} = require('../utils/pricingEngine');
 const {
   ensureDraftSystemPo,
   resolveFinalPo,
@@ -5124,14 +5129,25 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
     uploaded_at: new Date().toISOString(),
   };
 
-  const lineItems = (extraction.line_items || []).map(it => ({
-    sku_text: it.sku_text || it.product_name || it.description || 'Steel',
-    dimensions: it.dimensions || null,
-    quantity: Number(it.quantity) || 0,
-    unit: it.unit || 'MT',
-    rate: it.rate ? Number(it.rate) : null,
-    amount: it.amount ? Number(it.amount) : null,
-  }));
+  const lineItems = (extraction.line_items || []).map(it => {
+    const calc = calculateLineItem(it);
+    return {
+      sku_text: it.sku_text || it.product_name || it.description || 'Steel',
+      dimensions: it.dimensions || null,
+      grade: it.grade || null,
+      hsn_code: it.hsn_code || (typeof detectHsnCode === 'function' ? detectHsnCode(it.sku_text || it.description || '', it.dimensions) : '72083840'),
+      quantity: calc.quantity,
+      unit: calc.unit || 'MT',
+      rate: calc.rate ? Number(calc.rate) : null,
+      amount: calc.amount ? Number(calc.amount) : null,
+      cgst_rate: calc.cgst_rate,
+      cgst_amount: calc.cgst_amount,
+      sgst_rate: calc.sgst_rate,
+      sgst_amount: calc.sgst_amount,
+      total_gst: calc.total_gst,
+      final_amount: calc.final_amount,
+    };
+  });
 
   const draft = {
     company_name: finalCustomerName,
@@ -5257,14 +5273,25 @@ async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, captio
     uploaded_at: new Date().toISOString(),
   };
 
-  const lineItems = (extraction.line_items || []).map(it => ({
-    sku_text: it.sku_text || it.product_name || it.description || 'Steel',
-    dimensions: it.dimensions || null,
-    quantity: Number(it.quantity) || 0,
-    unit: it.unit || 'MT',
-    rate: it.rate ? Number(it.rate) : 0,
-    amount: it.amount ? Number(it.amount) : 0,
-  }));
+  const lineItems = (extraction.line_items || []).map(it => {
+    const calc = calculateLineItem(it);
+    return {
+      sku_text: it.sku_text || it.product_name || it.description || 'Steel',
+      dimensions: it.dimensions || null,
+      grade: it.grade || null,
+      hsn_code: it.hsn_code || (typeof detectHsnCode === 'function' ? detectHsnCode(it.sku_text || it.description || '', it.dimensions) : '72083840'),
+      quantity: calc.quantity,
+      unit: calc.unit || 'MT',
+      rate: calc.rate ? Number(calc.rate) : 0,
+      amount: calc.amount ? Number(calc.amount) : 0,
+      cgst_rate: calc.cgst_rate,
+      cgst_amount: calc.cgst_amount,
+      sgst_rate: calc.sgst_rate,
+      sgst_amount: calc.sgst_amount,
+      total_gst: calc.total_gst,
+      final_amount: calc.final_amount,
+    };
+  });
 
   const poDate = extraction.po_date ? normalizeDateToDDMMYYYY(extraction.po_date) : formatDateDDMMYYYY(new Date());
 
@@ -6172,16 +6199,12 @@ function formatDetailedInquiryItemsList(items, { includeHsn = false } = {}) {
       }
     }
 
-    const rawQty = (item.quantity !== undefined && item.quantity !== null && item.quantity !== '')
-      ? item.quantity
-      : ((item.quantity_mt !== undefined && item.quantity_mt !== null && item.quantity_mt !== '')
-          ? item.quantity_mt
-          : ((item.qty !== undefined && item.qty !== null && item.qty !== '') ? item.qty : ''));
-    const unit = item.unit || item.uom || 'MT';
-    const qty = (rawQty !== '' && rawQty !== null && rawQty !== undefined) ? `${rawQty} ${unit}` : '';
-    const rate = Number(item.rate || item.rate_per_mt || item.target_price || item.unit_price || 0);
-    const itQty = Number(rawQty || 0);
-    const lineTotal = Number(item.amount || item.line_total || item.total || 0) || (rate > 0 && itQty > 0 ? (rate * itQty) : 0);
+    const calc = calculateLineItem(item);
+    const displayQty = (calc.quantity !== '' && calc.quantity !== null && calc.quantity !== undefined && Number(calc.quantity) > 0)
+      ? `${Number(calc.quantity).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${calc.unit || 'MT'}`
+      : '';
+    const rate = Number(calc.rate || 0);
+    const lineTotal = Number(calc.final_amount || 0) || (calc.amount ? Math.round(Number(calc.amount) * 1.18 * 100) / 100 : 0);
 
     const prefix = items.length > 1 ? `${idx + 1}. ` : '';
 
@@ -6189,10 +6212,10 @@ function formatDetailedInquiryItemsList(items, { includeHsn = false } = {}) {
       const formattedLineTotal = formatMoneyValue(lineTotal);
       const formattedRate = formatMoneyValue(rate);
       const lineTotalStr = lineTotal > 0 ? ` | Line Total: ₹${formattedLineTotal}` : '';
-      return `${prefix}${name}${spec}${hsnBlock}${qty ? ` | ${qty}` : ''} | ₹${formattedRate} /${unit}${lineTotalStr}`;
+      return `${prefix}${name}${spec}${hsnBlock}${displayQty ? ` | ${displayQty}` : ''} | ₹${formattedRate} /${calc.unit || 'MT'}${lineTotalStr}`;
     }
 
-    return `${prefix}${name}${spec}${hsnBlock}${qty ? ` | ${qty}` : ''}`;
+    return `${prefix}${name}${spec}${hsnBlock}${displayQty ? ` | ${displayQty}` : ''}`;
   }).join('\n');
 }
 
@@ -9703,12 +9726,13 @@ async function executeAction(action, draft, senderPhone) {
 
         const structuredLineItems = (Array.isArray(draft.line_items) && draft.line_items.length > 0)
           ? draft.line_items.map((it) => {
+              const calc = calculateLineItem(it);
               const sText = it.sku_text || it.description || '';
               const sDim = it.dimensions || it.spec || '';
-              const hCode = it.hsn_code || it.hsn_sac || detectHsnCode(sText, sDim) || detectHsnCode(it.description || '') || '72083840';
-              const itRate = Number(it.rate) || globalRate || 0;
-              const itQty = Number(it.quantity) || 0;
-              const itAmt = it.amount ? Number(it.amount) : (itQty && itRate ? itQty * itRate : 0);
+              const hCode = it.hsn_code || it.hsn_sac || (typeof detectHsnCode === 'function' ? detectHsnCode(sText, sDim) : null) || (typeof detectHsnCode === 'function' ? detectHsnCode(it.description || '') : null) || '72083840';
+              const itRate = calc.rate || globalRate || 0;
+              const itQty = calc.quantity || 0;
+              const itAmt = calc.amount || (itQty && itRate ? itQty * itRate : 0);
               totalAmount += itAmt;
               return {
                 sku_text: sText,
@@ -9719,9 +9743,15 @@ async function executeAction(action, draft, senderPhone) {
                 hsn_code: hCode,
                 hsn_sac: hCode,
                 quantity: itQty,
-                unit: it.unit || 'MT',
+                unit: calc.unit || 'MT',
                 rate: itRate || null,
                 amount: itAmt || null,
+                cgst_rate: calc.cgst_rate || 9,
+                cgst_amount: calc.cgst_amount || Math.round(itAmt * 0.09 * 100) / 100,
+                sgst_rate: calc.sgst_rate || 9,
+                sgst_amount: calc.sgst_amount || Math.round(itAmt * 0.09 * 100) / 100,
+                total_gst: calc.total_gst || Math.round(itAmt * 0.18 * 100) / 100,
+                final_amount: calc.final_amount || Math.round(itAmt * 1.18 * 100) / 100,
               };
             })
           : [
@@ -10560,13 +10590,14 @@ async function executeAction(action, draft, senderPhone) {
         let subtotal = 0;
         const structuredLineItems = (Array.isArray(draft.line_items) && draft.line_items.length > 0)
           ? draft.line_items.map((it) => {
+              const calc = calculateLineItem(it);
               const sText = it.sku_text || it.description || '';
               const sDim = it.dimensions || it.spec || '';
-              const qty = Number(it.quantity) || 0;
-              const rate = Number(it.rate) || 0;
-              const amt = Number(it.amount) || qty * rate;
+              const qty = calc.quantity || 0;
+              const rate = calc.rate || 0;
+              const amt = calc.amount || qty * rate;
               subtotal += amt;
-              const hCode = it.hsn_code || it.hsn_sac || detectHsnCode(sText, sDim) || detectHsnCode(it.description || '') || '72083840';
+              const hCode = it.hsn_code || it.hsn_sac || (typeof detectHsnCode === 'function' ? detectHsnCode(sText, sDim) : null) || (typeof detectHsnCode === 'function' ? detectHsnCode(it.description || '') : null) || '72083840';
               return {
                 sku_text: sText,
                 description: it.description || sText,
@@ -10575,9 +10606,15 @@ async function executeAction(action, draft, senderPhone) {
                 hsn_code: hCode,
                 hsn_sac: hCode,
                 quantity: qty,
-                unit: it.unit || 'MT',
+                unit: calc.unit || 'MT',
                 rate: rate,
                 amount: amt,
+                cgst_rate: calc.cgst_rate || 9,
+                cgst_amount: calc.cgst_amount || Math.round(amt * 0.09 * 100) / 100,
+                sgst_rate: calc.sgst_rate || 9,
+                sgst_amount: calc.sgst_amount || Math.round(amt * 0.09 * 100) / 100,
+                total_gst: calc.total_gst || Math.round(amt * 0.18 * 100) / 100,
+                final_amount: calc.final_amount || Math.round(amt * 1.18 * 100) / 100,
               };
             })
           : [];
