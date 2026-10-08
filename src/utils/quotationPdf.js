@@ -298,47 +298,67 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       );
       const effectiveSrc = validPricedSrc.length > 0 ? validPricedSrc : rawLineItems;
 
-      const lineItems = effectiveSrc.map(item => ({
-        sku_text: (item.sku_text || item.description || item.productType || 'HR - COIL / SHEET').toUpperCase(),
-        dimensions: item.dimensions || undefined,
-        hsn_code: item.hsn_code || item.hsn || detectHsnCode(item.sku_text || item.description || '', item.dimensions),
-        quantity: Number(item.quantity || 0),
-        unit: item.unit || 'MT',
-        rate: Number(item.rate || item.unitPrice || 0),
-        amount: Number(item.amount || (Number(item.quantity || 0) * Number(item.rate || item.unitPrice || 0))),
-      }));
+      const lineItems = effectiveSrc.map(item => {
+        const qty = Number(item.quantity || 0);
+        const rate = Number(item.rate || item.unitPrice || 0);
+        const baseAmount = Number(item.amount || (qty * rate));
+        const cgstRate = Number(item.cgst_rate !== undefined ? item.cgst_rate : 9);
+        const sgstRate = Number(item.sgst_rate !== undefined ? item.sgst_rate : 9);
+        const cgstAmount = item.cgst_amount !== undefined ? Number(item.cgst_amount) : Math.round(baseAmount * (cgstRate / 100) * 100) / 100;
+        const sgstAmount = item.sgst_amount !== undefined ? Number(item.sgst_amount) : Math.round(baseAmount * (sgstRate / 100) * 100) / 100;
+        const totalGst = item.total_gst !== undefined ? Number(item.total_gst) : Math.round((cgstAmount + sgstAmount) * 100) / 100;
+        const finalAmount = item.final_amount !== undefined ? Number(item.final_amount) : Math.round((baseAmount + totalGst) * 100) / 100;
+
+        return {
+          sku_text: (item.sku_text || item.description || item.productType || 'HR - COIL / SHEET').toUpperCase(),
+          dimensions: item.dimensions || undefined,
+          hsn_code: item.hsn_code || item.hsn || detectHsnCode(item.sku_text || item.description || '', item.dimensions),
+          quantity: qty,
+          unit: item.unit || 'MT',
+          rate: rate,
+          amount: baseAmount,
+          cgst_rate: cgstRate,
+          cgst_amount: cgstAmount,
+          sgst_rate: sgstRate,
+          sgst_amount: sgstAmount,
+          total_gst: totalGst,
+          final_amount: finalAmount,
+        };
+      });
 
       const computedSubtotal = lineItems.reduce((s, i) => s + (Number(i.amount) || 0), 0) || Number(details.totalAmount || 0);
       const totalTonnageMt = lineItems.reduce((s, i) => s + (i.unit === 'MT' ? i.quantity : 0), 0);
       const formattedTonnage = totalTonnageMt > 0 ? `${formatIndianCurrency(totalTonnageMt, false)} MT` : `${lineItems.length} items`;
 
-      const cgstVal = Math.round(computedSubtotal * 0.09 * 100) / 100;
-      const sgstVal = Math.round(computedSubtotal * 0.09 * 100) / 100;
+      const cgstVal = lineItems.reduce((s, i) => s + (Number(i.cgst_amount) || 0), 0) || Math.round(computedSubtotal * 0.09 * 100) / 100;
+      const sgstVal = lineItems.reduce((s, i) => s + (Number(i.sgst_amount) || 0), 0) || Math.round(computedSubtotal * 0.09 * 100) / 100;
       const exactTot = computedSubtotal + cgstVal + sgstVal;
       const grandTot = Math.round(exactTot);
       const roundingVal = Math.round((grandTot - exactTot) * 100) / 100;
 
       const drawItemHeader = (headerY) => {
         doc.rect(leftX, headerY, contentWidth, 24).fill('#525E6F');
-        doc.fillColor('#FFFFFF').font(fontBold).fontSize(8.5);
-        doc.text('#', leftX, headerY + 7.5, { width: 26, align: 'center', lineBreak: false });
-        doc.text('Item & Description', 70, headerY + 7.5, { width: 205, lineBreak: false });
-        doc.text('HSN/SAC', 278, headerY + 7.5, { width: 62, align: 'center', lineBreak: false });
-        doc.text('Qty', 342, headerY + 7.5, { width: 68, align: 'right', lineBreak: false });
-        doc.text('Rate', 412, headerY + 7.5, { width: 65, align: 'right', lineBreak: false });
-        doc.text('Amount', 479, headerY + 7.5, { width: 76.28, align: 'right', lineBreak: false });
+        doc.fillColor('#FFFFFF').font(fontBold).fontSize(7.5);
+        doc.text('#', 40, headerY + 8, { width: 18, align: 'center', lineBreak: false });
+        doc.text('Item & Description', 62, headerY + 8, { width: 175, lineBreak: false });
+        doc.text('HSN/SAC', 240, headerY + 8, { width: 46, align: 'center', lineBreak: false });
+        doc.text('Qty', 289, headerY + 8, { width: 48, align: 'right', lineBreak: false });
+        doc.text('Rate', 340, headerY + 8, { width: 48, align: 'right', lineBreak: false });
+        doc.text('CGST (9%)', 392, headerY + 8, { width: 48, align: 'right', lineBreak: false });
+        doc.text('SGST (9%)', 444, headerY + 8, { width: 48, align: 'right', lineBreak: false });
+        doc.text('Amount', 496, headerY + 8, { width: 59.28, align: 'right', lineBreak: false });
         return headerY + 24;
       };
 
       const tableY = currY + 14;
       let rowY = drawItemHeader(tableY);
       lineItems.forEach((item, idx) => {
-        doc.font(fontBold).fontSize(8.5);
-        const skuH = doc.heightOfString(item.sku_text, { width: 205 });
+        doc.font(fontBold).fontSize(8);
+        const skuH = doc.heightOfString(item.sku_text, { width: 175 });
         const dimH = item.dimensions
-          ? doc.font(fontRegular).fontSize(7.5).heightOfString(item.dimensions, { width: 205 }) + 3
+          ? doc.font(fontRegular).fontSize(7).heightOfString(item.dimensions, { width: 175 }) + 3
           : 0;
-        const rowH = Math.max(34, skuH + dimH + 18);
+        const rowH = Math.max(32, skuH + dimH + 16);
 
         if (rowY + rowH > doc.page.maxY()) {
           doc.addPage();
@@ -348,47 +368,63 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
         doc.rect(leftX, rowY, contentWidth, rowH).fill('#FFFFFF');
 
         // Index
-        doc.fillColor('#64748B').font(fontRegular).fontSize(8.5).text(String(idx + 1), leftX, rowY + 9, {
-          width: 26,
+        doc.fillColor('#64748B').font(fontRegular).fontSize(7.5).text(String(idx + 1), 40, rowY + 8, {
+          width: 18,
           align: 'center',
         });
 
         // SKU title
-        doc.fillColor('#0F172A').font(fontBold).fontSize(8.5).text(item.sku_text, 70, rowY + 9, { width: 205 });
+        doc.fillColor('#0F172A').font(fontBold).fontSize(8).text(item.sku_text, 62, rowY + 8, { width: 175 });
 
         // Dimensions
         if (item.dimensions) {
-          doc.fillColor('#64748B').font(fontRegular).fontSize(7.5).text(item.dimensions, 70, rowY + 9 + skuH + 3, { width: 205 });
+          doc.fillColor('#64748B').font(fontRegular).fontSize(7).text(item.dimensions, 62, rowY + 8 + skuH + 2, { width: 175 });
         }
 
         // HSN/SAC
-        doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text(item.hsn_code, 278, rowY + 9, {
-          width: 62,
+        doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(item.hsn_code, 240, rowY + 8, {
+          width: 46,
           align: 'center',
         });
 
         // Qty
-        doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(
+        doc.fillColor('#0F172A').font(fontRegular).fontSize(7.5).text(
           `${formatIndianCurrency(item.quantity, false)} ${item.unit || 'MT'}`,
-          342,
-          rowY + 9,
-          { width: 68, align: 'right' }
+          289,
+          rowY + 8,
+          { width: 48, align: 'right' }
         );
 
         // Rate
-        doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text(
+        doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(
           formatIndianCurrency(item.rate, true),
-          412,
-          rowY + 9,
-          { width: 65, align: 'right' }
+          340,
+          rowY + 8,
+          { width: 48, align: 'right' }
         );
 
-        // Amount
-        doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(
-          formatIndianCurrency(item.amount, true),
-          479,
-          rowY + 9,
-          { width: 76.28, align: 'right' }
+        // CGST (9%)
+        doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(
+          formatIndianCurrency(item.cgst_amount, true),
+          392,
+          rowY + 8,
+          { width: 48, align: 'right' }
+        );
+
+        // SGST (9%)
+        doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(
+          formatIndianCurrency(item.sgst_amount, true),
+          444,
+          rowY + 8,
+          { width: 48, align: 'right' }
+        );
+
+        // Amount (Base + 18% GST)
+        doc.fillColor('#0F172A').font(fontBold).fontSize(7.5).text(
+          formatIndianCurrency(item.final_amount, true),
+          496,
+          rowY + 8,
+          { width: 59.28, align: 'right' }
         );
 
         // Divider
