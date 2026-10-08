@@ -55,6 +55,7 @@ const {
   getSessionEnvelope,
 } = require('./sessionManager');
 const { logBotActivity } = require('../utils/activityLogger');
+const { safeParseJSON } = require('../utils/jsonUtils');
 
 function cleanPhone(p) {
   if (!p) return '';
@@ -1410,6 +1411,9 @@ async function isGreeting(text) {
   if (/\b(?:inq-|po-|vis-|cmp-|deal-|₹|\d+\s*(?:mt|tons?|kg|pcs|sheet|coil|plate|beam)|rate|price|quote|order|visit|complaint|acquisition|delivery|payment|invoice|credit|bhosari|pune|mumbai)\b/i.test(clean)) {
     return false;
   }
+
+  // Control replies are already handled by the active catalog step.
+  if (/^(?:yes|no|cancel|y|n)$/i.test(clean)) return false;
 
   // 5. Intelligent Gemini Model Classifier for non-fixed / novel / multilingual greetings
   if (clean.length <= 60) {
