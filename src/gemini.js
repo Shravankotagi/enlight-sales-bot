@@ -350,6 +350,10 @@ async function extractFromText(text) {
   }
 }
 
+function isGeminiRequestTimeout(err) {
+  return err?.code === 'ECONNABORTED' || /timeout/i.test(String(err?.message || ''));
+}
+
 async function extractFromImageOrDoc(buffer, mimeType) {
   try {
     const axios = require('axios');
@@ -420,7 +424,7 @@ Return ONLY a valid JSON object. No markdown, no prose, no backticks.`,
                 response_mime_type: 'application/json',
               },
             },
-            { timeout: 35000 },
+            { timeout: 50000 },
           );
 
           const rawText =
@@ -439,6 +443,9 @@ Return ONLY a valid JSON object. No markdown, no prose, no backticks.`,
           console.warn(
             `Gemini vision extraction with model ${model} failed: ${err.message}`,
           );
+          if (isGeminiRequestTimeout(err)) {
+            throw err;
+          }
         }
       }
     }
