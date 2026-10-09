@@ -5100,6 +5100,12 @@ async function findMatchingInquiriesForPo(customerName, lineItems = [], senderPh
   };
 }
 
+function isPlaceholderDocumentCaption(caption) {
+  return /^(?:document received|image received|attached image|attached pdf document|photo uploaded)$/i.test(
+    String(caption || '').trim(),
+  );
+}
+
 /**
  * Processes an incoming Inquiry document (photo or PDF) inside an active LOG_INQUIRY flow session.
  */
@@ -5172,7 +5178,7 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
     }
   } catch (e) {}
 
-  if (caption && caption.length > 3 && !/^(?:attached image|photo uploaded)$/i.test(String(caption).trim())) {
+  if (caption && caption.length > 3 && !isPlaceholderDocumentCaption(caption)) {
     try {
       const captionExtracted = await extractFieldsWithLLM('LOG_INQUIRY', caption, draft);
       mergeDraft('LOG_INQUIRY', draft, captionExtracted, caption);
@@ -5328,7 +5334,7 @@ async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, captio
   draft.attachments = [...(Array.isArray(existingDraft.attachments) ? existingDraft.attachments : []), attachmentObj];
   if (officialCustomerName) draft._customer_verified = true;
 
-  if (caption && caption.length > 3) {
+  if (caption && caption.length > 3 && !isPlaceholderDocumentCaption(caption)) {
     try {
       const captionExtracted = await extractFieldsWithLLM('LOG_ORDER', caption, draft);
       mergeDraft('LOG_ORDER', draft, captionExtracted, caption);
