@@ -9,3 +9,6 @@ layout_dump.json
 .vscode/
 .idea/
 
+
+# Tests
+coverage/

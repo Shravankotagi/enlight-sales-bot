@@ -17092,6 +17092,8 @@ module.exports = {
   validateMandatoryFields,
   buildConfirmationSummary,
   buildDuplicateCustomerResponse,
+  checkCompanyWideCustomerRegistration,
+  isDiscardOrCancelIntent,
   executeAction,
   handleCatalogFlow,
   isOperationalQuery,
