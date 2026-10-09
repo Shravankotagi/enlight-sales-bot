@@ -78,6 +78,12 @@ Standard Indian Steel ERP tables have columns like:
 
 2. Quantity & Unit of Measure (UOM):
    - Extract numeric quantity strictly from "Quantity" column (e.g., "60.000 M.T" → quantity: 60.0).
+   - If the document is a CUTTING LIST / FABRICATION / REQUIREMENT SHEET having both piece quantity ("QTY", "PCS", "NOS") AND weight columns ("TOTAL WT", "TOTAL WEIGHT", "WEIGHT (KG)", "WT (KG)"):
+     * The commercial quantity is the TOTAL WEIGHT from the "TOTAL WT" column (in KG)!
+     * Set quantity: <total weight value>, unit: "KG", pieces: <piece count>, total_weight_kg: <total weight value>.
+     * Example: QTY = 2, TOTAL WT = 39897.63 → quantity: 39897.63, unit: "KG", pieces: 2, total_weight_kg: 39897.63.
+   - If NO unit is explicitly mentioned or extracted, the DEFAULT unit is STRICTLY "KG" (standard Indian steel RFQs/inquiries practice).
+   - Only set "Nos" or "MT" if explicitly stated in the document or UOM column!
    - Extract unit strictly from the "Quantity" unit suffix or the "per" / "UOM" column:
      * "M.T", "M.T.", "MT", "Ton", "Tons", "Tonne", "Tonnes", "MTS" → unit: "MT"
      * "Kg", "KG", "KGS", "Kilograms" → unit: "KG"
@@ -116,7 +122,9 @@ Extract the following into ONLY a JSON object (no prose, no markdown, no backtic
       "dimensions": "",
       "hsn_code": "",
       "quantity": 0,
-      "unit": "MT|KG|PCS|Nos|Sheets",
+      "unit": "KG|MT|PCS|Nos|Sheets",
+      "total_weight_kg": 0,
+      "pieces": 0,
       "rate": 0,
       "amount": 0,
       "due_on": null,
@@ -240,10 +248,34 @@ function postProcessExtraction(parsed) {
 
   if (Array.isArray(parsed.line_items) && parsed.line_items.length > 0) {
     parsed.line_items.forEach((item) => {
-      const qty = Number(item.quantity || 0);
+      let qty = Number(item.quantity || 0);
       let rate = Number(item.rate || 0);
       let amount = Number(item.amount || 0);
-      let rawUnit = String(item.unit || 'MT').trim();
+      let rawUnit = String(item.unit || 'KG').trim();
+      const totalWeightKg = Number(item.total_weight_kg || 0);
+
+      // If document is a cutting sheet / BOM with piece counts AND total weight in kg,
+      // commercial quantity should be the total weight in KG
+      if (totalWeightKg > 0) {
+        if (
+          !item.unit ||
+          ['NOS', 'NO', 'PCS', 'PC', 'PIECES', 'NUMBERS'].includes(
+            String(item.unit).toUpperCase(),
+          ) ||
+          (qty > 0 && qty < totalWeightKg / 10)
+        ) {
+          if (!item.pieces && qty > 0 && qty < totalWeightKg) {
+            item.pieces = qty;
+          }
+          qty = totalWeightKg;
+          item.quantity = totalWeightKg;
+          rawUnit = 'KG';
+        }
+      }
+
+      if (!rawUnit) {
+        rawUnit = 'KG';
+      }
 
       // Normalize unit strings
       const uUpper = rawUnit.toUpperCase();
@@ -253,6 +285,8 @@ function postProcessExtraction(parsed) {
         item.unit = 'KG';
       } else if (['NOS', 'NO', 'NO.', 'NUMBER', 'NUMBERS', 'PCS', 'PC', 'PIECE', 'PIECES', 'SHEET', 'SHEETS', 'PLATE', 'PLATES', 'BUNDLE', 'BUNDLES'].includes(uUpper)) {
         item.unit = 'Nos';
+      } else {
+        item.unit = 'KG';
       }
 
       // Safeguard: Protect against OCR hallucinating product category ('Plates', 'Sheets', 'Coils') as unit

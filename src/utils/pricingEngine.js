@@ -59,7 +59,7 @@ function isDimensionCompatible(requestedText, skuText) {
  * Normalizes unit string to standard casing and symbol.
  */
 function normalizeUnit(rawUnit) {
-  if (!rawUnit || typeof rawUnit !== 'string') return 'MT';
+  if (!rawUnit || typeof rawUnit !== 'string') return 'KG';
   const u = rawUnit.trim().toUpperCase();
   if (['KG', 'KGS', 'KILOGRAM', 'KILOGRAMS'].includes(u)) return 'KG';
   if (['MT', 'TON', 'TONS', 'TONNE', 'TONNES', 'METRIC TON', 'METRIC TONS', 'MTS', 'T'].includes(u)) return 'MT';
@@ -74,13 +74,29 @@ function normalizeUnit(rawUnit) {
 function convertLineItemToMt(item) {
   if (!item) return 0;
   const qty = Number(item.quantity ?? item.quantity_mt ?? item.quantityTons ?? item.qty ?? 0);
-  const rawUnit = (item.unit || 'MT').trim();
+  const rawUnit = (item.unit || 'KG').trim();
   const normUnit = normalizeUnit(rawUnit);
 
   if (!qty || qty <= 0) return 0;
 
+  const sizeText = [
+    item.dimensions,
+    item.spec,
+    item.specification,
+    item.sku_text,
+    item.description,
+    item.product,
+    item.product_name,
+    item.name,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const hasExplicitSize = /\d/.test(sizeText);
+  const canUseStoredWeight = normUnit === 'MT' || normUnit === 'KG' || hasExplicitSize;
+
   // Priority 0: Stored normalized weight from database or Gemini unit converter
   if (
+    canUseStoredWeight &&
     item.weight_mt !== undefined &&
     item.weight_mt !== null &&
     !isNaN(Number(item.weight_mt)) &&
@@ -395,16 +411,7 @@ function convertLineItemToMt(item) {
     normUnit === 'Sheets' ||
     normUnit === 'Plates';
 
-  if (isSheetOrPlate) {
-    if (!thickness) {
-      const isPlate =
-        combinedText.includes('plate') || normUnit === 'Plates';
-      thickness = isPlate ? 10 : 1.6; // 10mm nominal for plates, 1.6mm (16G) for sheets
-    }
-    if (!widthM || !lengthM) {
-      widthM = 1.25;
-      lengthM = 2.5;
-    }
+  if (isSheetOrPlate && thickness && widthM && lengthM) {
     const isChequered =
       combinedText.includes('chequered') || combinedText.includes('checker');
     const wtKgPerPc = isChequered
