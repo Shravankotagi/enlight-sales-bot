@@ -705,6 +705,15 @@ async function handleResumeMenuButton(text, senderPhone, canUpdateVisits) {
   };
 }
 
+function buildDuplicateCustomerResponse(message) {
+  return {
+    handled: true,
+    reply: message,
+    interactiveType: 'buttons',
+    interactiveButtons: DISCARD_DRAFT_BUTTONS,
+  };
+}
+
 function isDiscardOrCancelIntent(text) {
   if (!text || typeof text !== 'string') return false;
   const clean = text.toLowerCase().trim().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ');
@@ -14204,6 +14213,24 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
   }
 
+  // A duplicate customer registration blocks the current draft. The only
+  // supported action is discarding it; do not let arbitrary text resume or
+  // overwrite the draft with a different customer.
+  if (lastIntent.startsWith('catalog_duplicate_blocked|')) {
+    const parts = lastIntent.split('|');
+    const action = parts[1] || 'LOG_INQUIRY';
+    const draft = safeParseJSON(parts.slice(2).join('|'), {});
+    if (isDiscardOrCancelIntent(text)) {
+      recordInactiveDraft(senderPhone, action, draft, 'discarded');
+      await finalizeCurrentSession(senderPhone, `Discarded ${getActionFriendlyName(action)} flow`);
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return await handleResumeMenuButton(text, senderPhone, canUpdateVisits);
+    }
+
+    const blockedReply = `This draft is paused because the customer is already registered under another representative.\n\nPlease select *Discard Draft* to close this entry.`;
+    return buildDuplicateCustomerResponse(blockedReply);
+  }
+
   // ── 2b. GREETING CHECK ──────────────────────────────────────────────────────
   if (await isGreeting(text)) {
     const userMenu = getCatalogMenu(canUpdateVisits);
@@ -14520,24 +14547,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       // Immediate duplicate registration check across recurring_customers
       const regCheck = await checkCompanyWideCustomerRegistration(custDraft.company_name || unrecognizedName, senderPhone);
       if (regCheck && regCheck.isRegistered) {
-        const conflictReply = `${regCheck.conflictMessage}\n\n` +
-          `What would you like to do?\n` +
-          `• Reply with a different customer name to continue your ${getActionFriendlyName(originalAction)}.\n` +
-          `• Or reply *cancel* to discard this entry.`;
+        const conflictReply = regCheck.conflictMessage;
         await recordSessionMessage(senderPhone, 'assistant', conflictReply, {
           action_type: originalAction,
           customer_name: custDraft.company_name || unrecognizedName,
         });
         originalDraft.company_name = null;
-        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
-        return {
-          handled: true,
-          reply: conflictReply,
-          interactiveType: 'buttons',
-          interactiveButtons: [
-            { id: 'btn_confirm_cancel', title: 'Discard Draft' },
-          ],
-        };
+        await saveActiveSession(senderPhone, 'Customer', `catalog_duplicate_blocked|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return buildDuplicateCustomerResponse(conflictReply);
       }
 
       const custMissing = validateMandatoryFields('LOG_NEW_CUSTOMER', custDraft);
@@ -14546,17 +14563,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         // All customer mandatory fields already supplied (e.g. from field visit or direct input)
         const custActionRes = await executeAction('LOG_NEW_CUSTOMER', custDraft, senderPhone);
         if (isExecutionFailureReply(custActionRes) || (typeof custActionRes === 'string' && (custActionRes.includes('Customer Already') || custActionRes.includes('Failed to add customer')))) {
-          const conflictReply = `${custActionRes}\n\n` +
-            `What would you like to do?\n` +
-            `• Reply with a different customer name to continue your ${getActionFriendlyName(originalAction)}.\n` +
-            `• Or reply *cancel* to discard this entry.`;
+          const conflictReply = custActionRes;
           await recordSessionMessage(senderPhone, 'assistant', conflictReply, {
             action_type: originalAction,
             customer_name: custDraft.company_name,
           });
           originalDraft.company_name = null;
-          await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
-          return { handled: true, reply: conflictReply };
+          await saveActiveSession(senderPhone, 'Customer', `catalog_duplicate_blocked|${originalAction}|${JSON.stringify(originalDraft)}`);
+          return buildDuplicateCustomerResponse(conflictReply);
         }
 
         forwardCustomerDetailsToParentDraft(originalAction, originalDraft, custDraft);
@@ -14809,18 +14823,15 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (custMissing.length === 0) {
       const custActionRes = await executeAction('LOG_NEW_CUSTOMER', updatedCustDraft, senderPhone);
       if (isExecutionFailureReply(custActionRes) || (typeof custActionRes === 'string' && (custActionRes.includes('Customer Already') || custActionRes.includes('Failed to add customer')))) {
-        const conflictReply = `${custActionRes}\n\n` +
-          `What would you like to do?\n` +
-          `• Reply with a different customer name to continue your ${getActionFriendlyName(originalAction)}.\n` +
-          `• Or reply *cancel* to discard this entry.`;
+        const conflictReply = custActionRes;
         await recordSessionMessage(senderPhone, 'assistant', conflictReply, {
           action_type: originalAction,
           customer_name: updatedCustDraft.company_name,
         });
         const originalDraft = updatedCustDraft._parentDraft || {};
         originalDraft.company_name = null;
-        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
-        return { handled: true, reply: conflictReply };
+        await saveActiveSession(senderPhone, 'Customer', `catalog_duplicate_blocked|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return buildDuplicateCustomerResponse(conflictReply);
       }
 
       const originalDraft = updatedCustDraft._parentDraft || {};
@@ -16497,24 +16508,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (action === 'LOG_NEW_CUSTOMER' && updatedDraft.company_name) {
       const regCheck = await checkCompanyWideCustomerRegistration(updatedDraft.company_name, senderPhone);
       if (regCheck && regCheck.isRegistered) {
-        const conflictReply = `${regCheck.conflictMessage}\n\n` +
-          `What would you like to do?\n` +
-          `• Reply with a different customer name to continue adding a customer.\n` +
-          `• Or reply *cancel* to discard this entry.`;
+        const conflictReply = regCheck.conflictMessage;
         await recordSessionMessage(senderPhone, 'assistant', conflictReply, {
           action_type: action,
           customer_name: updatedDraft.company_name,
         });
         updatedDraft.company_name = null;
-        await saveActiveSession(senderPhone, 'Customer', `catalog_flow|LOG_NEW_CUSTOMER|${JSON.stringify(updatedDraft)}`);
-        return {
-          handled: true,
-          reply: conflictReply,
-          interactiveType: 'buttons',
-          interactiveButtons: [
-            { id: 'btn_confirm_cancel', title: 'Discard Draft' },
-          ],
-        };
+        await saveActiveSession(senderPhone, 'Customer', `catalog_duplicate_blocked|LOG_NEW_CUSTOMER|${JSON.stringify(updatedDraft)}`);
+        return buildDuplicateCustomerResponse(conflictReply);
       }
     }
 
@@ -17090,6 +17091,7 @@ module.exports = {
   isExplicitMenuSelection,
   validateMandatoryFields,
   buildConfirmationSummary,
+  buildDuplicateCustomerResponse,
   executeAction,
   handleCatalogFlow,
   isOperationalQuery,
