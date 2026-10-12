@@ -2,7 +2,7 @@ const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
 const { ENLIGHT_LOGO_BASE64 } = require('./logoBase64');
-const { calculateLineItem } = require('./pricingEngine');
+const { calculateLineItem, resolvePlaceOfSupply: resolvePlaceOfSupplyEngine } = require('./pricingEngine');
 
 function getCompanyLogoBuffer() {
   const possiblePaths = [
@@ -101,22 +101,13 @@ function formatIndianCurrency(num, includeDecimals = true) {
   return isNegative ? `-${result}` : result;
 }
 
-function resolvePlaceOfSupply(address = '') {
-  const lower = (address || '').toLowerCase();
-  if (lower.includes('maharashtra') || lower.includes('pune') || lower.includes('mumbai') || lower.includes('nashik') || lower.includes('kolhapur') || lower.includes('nagpur') || lower.includes('aurangabad')) {
-    return 'Maharashtra (27)';
-  }
-  if (lower.includes('gujarat') || lower.includes('ahmedabad') || lower.includes('surat')) return 'Gujarat (24)';
-  if (lower.includes('karnataka') || lower.includes('bangalore') || lower.includes('bengaluru')) return 'Karnataka (29)';
-  if (lower.includes('tamil nadu') || lower.includes('chennai')) return 'Tamil Nadu (33)';
-  if (lower.includes('delhi')) return 'Delhi (07)';
-  if (lower.includes('haryana') || lower.includes('gurgaon')) return 'Haryana (06)';
-  if (lower.includes('uttar pradesh') || lower.includes('noida')) return 'Uttar Pradesh (09)';
-  if (lower.includes('rajasthan') || lower.includes('jaipur')) return 'Rajasthan (08)';
-  if (lower.includes('madhya pradesh') || lower.includes('indore')) return 'Madhya Pradesh (23)';
-  if (lower.includes('west bengal') || lower.includes('kolkata')) return 'West Bengal (19)';
-  if (lower.includes('telangana') || lower.includes('hyderabad')) return 'Telangana (36)';
-  return 'Maharashtra (27)';
+function resolvePlaceOfSupply(address = '', details = {}) {
+  return resolvePlaceOfSupplyEngine({
+    deliveryLocation: address,
+    customerState: details?.placeOfSupply || details?.place_of_supply || details?.customerState || details?.customer_state,
+    customerGstin: details?.customerGstin || details?.customer_gst || details?.gstin,
+    customerAddress: details?.customerAddress || details?.address,
+  }).label;
 }
 
 function cleanAddressLines(raw, company) {
@@ -194,7 +185,14 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       const billToLines = cleanAddressLines(billToAddress, compName);
       const shipToLines = cleanAddressLines(shipToAddress, compName);
       const customerGstin = details.customerGstin || details.customer_gst || details.gstin || '';
-      const placeOfSupply = resolvePlaceOfSupply(rawAddress);
+      const posInfo = resolvePlaceOfSupplyEngine({
+        deliveryLocation: rawAddress,
+        customerState: details.placeOfSupply || details.place_of_supply || details.customerState || details.customer_state,
+        customerGstin,
+        customerAddress: billToAddress,
+      });
+      const placeOfSupply = posInfo.label;
+      const isInterState = posInfo.isInterState;
       const paymentTerms = details.paymentTerms || details.payment_terms || '30 Days Credit';
 
       // ================= PAGE 1 =================
@@ -300,15 +298,17 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       const effectiveSrc = validPricedSrc.length > 0 ? validPricedSrc : rawLineItems;
 
       const lineItems = effectiveSrc.map(item => {
-        const calc = calculateLineItem(item);
+        const calc = calculateLineItem(item, { isInterState });
         const qty = Number(calc.quantity || 0);
         const rate = Number(calc.rate || 0);
         const baseAmount = Number(calc.amount || (qty * rate));
-        const cgstRate = Number(calc.cgst_rate !== undefined ? calc.cgst_rate : 9);
-        const sgstRate = Number(calc.sgst_rate !== undefined ? calc.sgst_rate : 9);
-        const cgstAmount = calc.cgst_amount !== undefined ? Number(calc.cgst_amount) : Math.round(baseAmount * (cgstRate / 100) * 100) / 100;
-        const sgstAmount = calc.sgst_amount !== undefined ? Number(calc.sgst_amount) : Math.round(baseAmount * (sgstRate / 100) * 100) / 100;
-        const totalGst = calc.total_gst !== undefined ? Number(calc.total_gst) : Math.round((cgstAmount + sgstAmount) * 100) / 100;
+        const cgstRate = isInterState ? 0 : Number(calc.cgst_rate !== undefined ? calc.cgst_rate : 9);
+        const sgstRate = isInterState ? 0 : Number(calc.sgst_rate !== undefined ? calc.sgst_rate : 9);
+        const igstRate = isInterState ? Number(calc.igst_rate !== undefined ? calc.igst_rate : 18) : 0;
+        const cgstAmount = isInterState ? 0 : (calc.cgst_amount !== undefined ? Number(calc.cgst_amount) : Math.round(baseAmount * (cgstRate / 100) * 100) / 100);
+        const sgstAmount = isInterState ? 0 : (calc.sgst_amount !== undefined ? Number(calc.sgst_amount) : Math.round(baseAmount * (sgstRate / 100) * 100) / 100);
+        const igstAmount = isInterState ? (calc.igst_amount !== undefined && Number(calc.igst_amount) > 0 ? Number(calc.igst_amount) : Math.round(baseAmount * (igstRate / 100) * 100) / 100) : 0;
+        const totalGst = calc.total_gst !== undefined ? Number(calc.total_gst) : (isInterState ? igstAmount : Math.round((cgstAmount + sgstAmount) * 100) / 100);
         const finalAmount = calc.final_amount !== undefined ? Number(calc.final_amount) : Math.round((baseAmount + totalGst) * 100) / 100;
 
         return {
@@ -323,6 +323,9 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
           cgst_amount: cgstAmount,
           sgst_rate: sgstRate,
           sgst_amount: sgstAmount,
+          igst_rate: igstRate,
+          igst_amount: igstAmount,
+          is_inter_state: isInterState,
           total_gst: totalGst,
           final_amount: finalAmount,
         };
@@ -332,9 +335,10 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       const totalTonnageMt = lineItems.reduce((s, i) => s + (i.unit === 'MT' ? i.quantity : 0), 0);
       const formattedTonnage = totalTonnageMt > 0 ? `${formatIndianCurrency(totalTonnageMt, false)} MT` : `${lineItems.length} items`;
 
-      const cgstVal = lineItems.reduce((s, i) => s + (Number(i.cgst_amount) || 0), 0) || Math.round(computedSubtotal * 0.09 * 100) / 100;
-      const sgstVal = lineItems.reduce((s, i) => s + (Number(i.sgst_amount) || 0), 0) || Math.round(computedSubtotal * 0.09 * 100) / 100;
-      const exactTot = computedSubtotal + cgstVal + sgstVal;
+      const cgstVal = isInterState ? 0 : (lineItems.reduce((s, i) => s + (Number(i.cgst_amount) || 0), 0) || Math.round(computedSubtotal * 0.09 * 100) / 100);
+      const sgstVal = isInterState ? 0 : (lineItems.reduce((s, i) => s + (Number(i.sgst_amount) || 0), 0) || Math.round(computedSubtotal * 0.09 * 100) / 100);
+      const igstVal = isInterState ? (lineItems.reduce((s, i) => s + (Number(i.igst_amount) || 0), 0) || Math.round(computedSubtotal * 0.18 * 100) / 100) : 0;
+      const exactTot = computedSubtotal + cgstVal + sgstVal + igstVal;
       const grandTot = Math.round(exactTot);
       const roundingVal = Math.round((grandTot - exactTot) * 100) / 100;
 
@@ -346,8 +350,12 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
         doc.text('HSN/SAC', 240, headerY + 8, { width: 46, align: 'center', lineBreak: false });
         doc.text('Qty', 289, headerY + 8, { width: 48, align: 'right', lineBreak: false });
         doc.text('Rate', 340, headerY + 8, { width: 48, align: 'right', lineBreak: false });
-        doc.text('CGST (9%)', 392, headerY + 8, { width: 48, align: 'right', lineBreak: false });
-        doc.text('SGST (9%)', 444, headerY + 8, { width: 48, align: 'right', lineBreak: false });
+        if (isInterState) {
+          doc.text('IGST (18%)', 392, headerY + 8, { width: 100, align: 'right', lineBreak: false });
+        } else {
+          doc.text('CGST (9%)', 392, headerY + 8, { width: 48, align: 'right', lineBreak: false });
+          doc.text('SGST (9%)', 444, headerY + 8, { width: 48, align: 'right', lineBreak: false });
+        }
         doc.text('Amount', 496, headerY + 8, { width: 59.28, align: 'right', lineBreak: false });
         return headerY + 24;
       };
@@ -405,21 +413,31 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
           { width: 48, align: 'right' }
         );
 
-        // CGST (9%)
-        doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(
-          formatIndianCurrency(item.cgst_amount, true),
-          392,
-          rowY + 8,
-          { width: 48, align: 'right' }
-        );
+        if (isInterState) {
+          // IGST (18%)
+          doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(
+            formatIndianCurrency(item.igst_amount, true),
+            392,
+            rowY + 8,
+            { width: 100, align: 'right' }
+          );
+        } else {
+          // CGST (9%)
+          doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(
+            formatIndianCurrency(item.cgst_amount, true),
+            392,
+            rowY + 8,
+            { width: 48, align: 'right' }
+          );
 
-        // SGST (9%)
-        doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(
-          formatIndianCurrency(item.sgst_amount, true),
-          444,
-          rowY + 8,
-          { width: 48, align: 'right' }
-        );
+          // SGST (9%)
+          doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(
+            formatIndianCurrency(item.sgst_amount, true),
+            444,
+            rowY + 8,
+            { width: 48, align: 'right' }
+          );
+        }
 
         // Amount (Base + 18% GST)
         doc.fillColor('#0F172A').font(fontBold).fontSize(7.5).text(
@@ -462,33 +480,46 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
         align: 'right',
       });
 
-      // CGST9 (9%)
-      doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('CGST9 (9%)', sumX, summaryY + 14);
-      doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(formatIndianCurrency(cgstVal, true), sumX, summaryY + 14, {
-        width: sumW,
-        align: 'right',
-      });
+      let taxNextY = summaryY + 14;
+      if (isInterState) {
+        // IGST18 (18%)
+        doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('IGST18 (18%)', sumX, taxNextY);
+        doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(formatIndianCurrency(igstVal, true), sumX, taxNextY, {
+          width: sumW,
+          align: 'right',
+        });
+        taxNextY += 14;
+      } else {
+        // CGST9 (9%)
+        doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('CGST9 (9%)', sumX, taxNextY);
+        doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(formatIndianCurrency(cgstVal, true), sumX, taxNextY, {
+          width: sumW,
+          align: 'right',
+        });
+        taxNextY += 14;
 
-      // SGST9 (9%)
-      doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('SGST9 (9%)', sumX, summaryY + 28);
-      doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(formatIndianCurrency(sgstVal, true), sumX, summaryY + 28, {
-        width: sumW,
-        align: 'right',
-      });
+        // SGST9 (9%)
+        doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('SGST9 (9%)', sumX, taxNextY);
+        doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(formatIndianCurrency(sgstVal, true), sumX, taxNextY, {
+          width: sumW,
+          align: 'right',
+        });
+        taxNextY += 14;
+      }
 
       // Rounding
-      doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('Rounding', sumX, summaryY + 42);
-      doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(formatIndianCurrency(roundingVal, true), sumX, summaryY + 42, {
+      doc.fillColor('#475569').font(fontRegular).fontSize(8.5).text('Rounding', sumX, taxNextY);
+      doc.fillColor('#0F172A').font(fontRegular).fontSize(8.5).text(formatIndianCurrency(roundingVal, true), sumX, taxNextY, {
         width: sumW,
         align: 'right',
       });
 
       // Total
-      doc.fillColor('#0F172A').font(fontBold).fontSize(10).text('Total', sumX, summaryY + 58);
+      doc.fillColor('#0F172A').font(fontBold).fontSize(10).text('Total', sumX, taxNextY + 16);
       doc.fillColor('#0F172A').font(fontBold).fontSize(10.5).text(
         `Rs. ${formatIndianCurrency(grandTot, true)}`,
         sumX,
-        summaryY + 58,
+        taxNextY + 16,
         { width: sumW, align: 'right' }
       );
 
