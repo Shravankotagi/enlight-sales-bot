@@ -1,0 +1,65 @@
+{
+  "description": "Shared pricing/HSN parity fixture. An identical copy lives in em-os-bot/test/fixtures, em-os-backend/src/test-utils/fixtures and em-os-frontend/src/test/fixtures. Change all three together.",
+  "hsn": [
+    { "product": "HR Coil 2mm", "hsn": "72083940", "catalogName": "HR Coil" },
+    { "product": "HR Coil 3.5mm", "hsn": "72083840", "catalogName": "HR Coil" },
+    { "product": "HR Coil 6mm", "hsn": "72083740", "catalogName": "HR Coil" },
+    { "product": "HR Coil 12mm", "hsn": "72083740", "catalogName": "HR Coil" },
+    { "product": "HR Sheet 2 mm", "hsn": "72083930", "catalogName": "HR Sheet" },
+    { "product": "CR Sheet 0.8mm", "hsn": "72092720", "catalogName": "CR Sheet" },
+    { "product": "GI Sheet", "hsn": "72104900", "catalogName": "GP Sheet" },
+    { "product": "GP Sheet", "hsn": "72104900", "catalogName": "GP Sheet" },
+    { "product": "ms angle 50x50", "hsn": "72162100", "catalogName": "MS Angle" },
+    { "product": "TMT bar", "hsn": "72142090", "catalogName": "TMT Bar" },
+    { "product": "MS Channel 100", "hsn": "72163100", "catalogName": "MS Channel" },
+    { "product": "ISMB 200", "hsn": "72163200", "catalogName": "MS Beam" },
+    { "product": "Chequered Plate 5mm", "hsn": "72081000", "catalogName": "Chequered Sheet" },
+    { "product": "MS Plate 10mm", "hsn": null, "catalogName": null },
+    { "product": "random widget", "hsn": null, "catalogName": null }
+  ],
+  "units": [
+    { "input": "MT", "unit": "MT" },
+    { "input": "ton", "unit": "MT" },
+    { "input": "tonnes", "unit": "MT" },
+    { "input": "kg", "unit": "KG" },
+    { "input": "KGS", "unit": "KG" },
+    { "input": "Nos", "unit": "Nos" },
+    { "input": "", "unit": "KG" }
+  ],
+  "lineItems": [
+    { "input": { "product": "HR Coil", "quantity": 10, "unit": "MT", "rate": 55000 }, "quantity": 10, "unit": "MT", "rate": 55000, "amount": 550000 },
+    { "input": { "product": "TMT Bar", "quantity": 2.5, "unit": "ton", "rate": 52000 }, "quantity": 2.5, "unit": "MT", "rate": 52000, "amount": 130000 },
+    { "input": { "product": "GP Sheet", "quantity": 1, "unit": "MT", "rate": 0 }, "quantity": 1, "unit": "MT", "rate": 0, "amount": 0 }
+  ],
+  "pricingSummary": {
+    "input": [
+      { "product": "HR Coil", "quantity": 10, "unit": "MT", "rate": 55000 },
+      { "product": "TMT Bar", "quantity": 2.5, "unit": "ton", "rate": 52000 }
+    ],
+    "subtotal": 680000,
+    "gstAmount": 122400,
+    "grandTotal": 802400
+  },
+  "quotationBreakdown": [
+    { "baseAmount": 100000, "lineItems": null, "subtotal": 100000, "CGST": 9000, "SGST": 9000, "rounding": 0, "grandTotal": 118000 },
+    { "baseAmount": 649000, "lineItems": null, "subtotal": 649000, "CGST": 58410, "SGST": 58410, "rounding": 0, "grandTotal": 765820 },
+    { "baseAmount": 550000, "lineItems": [{ "amount": 550000, "cgst_amount": 49500, "sgst_amount": 49500 }], "subtotal": 550000, "CGST": 49500, "SGST": 49500, "rounding": 0, "grandTotal": 649000 },
+    { "baseAmount": 0, "lineItems": null, "subtotal": 0, "CGST": 0, "SGST": 0, "rounding": 0, "grandTotal": 0 },
+    { "baseAmount": 12345.67, "lineItems": null, "subtotal": 12345.67, "CGST": 1111.11, "SGST": 1111.11, "rounding": 0.11, "grandTotal": 14568 }
+  ],
+  "gst": { "baseAmount": 100000, "gst": 18000, "grandTotal": 118000 },
+  "knownDivergences": [
+    {
+      "id": "kg-rate-interpretation",
+      "summary": "A KG line with a small rate (e.g. 500 kg @ 60): the bot treats the rate as Rs/kg (amount 30000); backend and frontend treat it as Rs/MT (amount 30)."
+    },
+    {
+      "id": "pcs-unit-label",
+      "summary": "Unit 'pcs' normalizes to 'Nos' in the bot and to 'Pcs' in backend and frontend."
+    },
+    {
+      "id": "empty-product-hsn",
+      "summary": "An empty product name has no HSN in the bot but defaults to 72083840 in backend and frontend."
+    }
+  ]
+}
