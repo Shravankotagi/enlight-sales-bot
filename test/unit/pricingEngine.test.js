@@ -25,12 +25,12 @@ test('calculateLineItem splits GST equally into CGST and SGST', () => {
   assert.equal(r.final_amount, 649000);
 });
 
-test('calculateLineItem converts a per-kg rate on a KG line to Rs/MT', () => {
+test('calculateLineItem treats rate as Rs/MT on a KG line', () => {
   const r = pricing.calculateLineItem({ product: 'MS Angle', quantity: 500, unit: 'kg', rate: 60 });
   assert.equal(r.quantity, 0.5);
   assert.equal(r.unit, 'MT');
-  assert.equal(r.rate, 60000);
-  assert.equal(r.amount, 30000);
+  assert.equal(r.rate, 60);
+  assert.equal(r.amount, 30);
   assert.equal(r.original_quantity, 500);
   assert.equal(r.original_unit, 'KG');
 });
