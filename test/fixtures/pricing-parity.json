@@ -24,7 +24,7 @@
     { "input": "kg", "unit": "KG" },
     { "input": "KGS", "unit": "KG" },
     { "input": "Nos", "unit": "Nos" },
-    { "input": "", "unit": "MT" }
+    { "input": "", "unit": "KG" }
   ],
   "lineItems": [
     { "input": { "product": "HR Coil", "quantity": 10, "unit": "MT", "rate": 55000 }, "quantity": 10, "unit": "MT", "rate": 55000, "amount": 550000 },
