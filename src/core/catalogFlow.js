@@ -25,6 +25,9 @@ const {
   getAccessibleSalespersonPhonesForBot,
   expandPhoneVariants,
   isPhoneInScope,
+  getCustomProductsList,
+  getCachedCustomProducts,
+  createCustomProductRecord,
 } = require('../supabase');
 const {
   detectHsnCode,
@@ -203,6 +206,16 @@ const NON_EDITABLE_REPLY_BUTTONS = [
 const NEW_CUSTOMER_BUTTONS = [
   { id: 'btn_cust_yes', title: 'Yes, Add Customer' },
   { id: 'btn_cust_no', title: 'No / Cancel' },
+];
+
+const UNKNOWN_PRODUCT_BUTTONS = [
+  { id: 'btn_add_product', title: 'Add Product' },
+  { id: 'btn_confirm_cancel', title: 'Cancel' },
+];
+
+const ADD_PRODUCT_CONFIRM_BUTTONS = [
+  { id: 'btn_prod_save', title: 'Save Product' },
+  { id: 'btn_confirm_cancel', title: 'Cancel' },
 ];
 
 const RESUME_QUERY_BUTTONS = [
@@ -589,6 +602,8 @@ async function getLastInactiveDraft(senderPhone) {
 const STALE_CONFIRM_ACTIONS = new Set([
   'btn_confirm_yes',
   'btn_cust_yes',
+  'btn_add_product',
+  'btn_prod_save',
   'save / yes',
   'save/yes',
   'save yes',
@@ -3258,11 +3273,16 @@ function resolveNamedLineOrAsk(draft, intent, catalogName) {
 
 function startLineItemMutation(draft, intent) {
   const norm = normalizeProductToCatalog(intent.productName);
+  const isCustom = isCustomProductRecognized(intent.productName, draft);
   const catalogName = norm.isValid ? norm.catalogName : intent.productName;
-  if (!norm.isValid) {
+  if (!norm.isValid && !isCustom) {
     draft._line_mutation = { ...intent, productName: intent.productName, awaiting: 'catalog' };
     delete draft.line_item_updates;
-    return { reply: getUnknownProductClarificationMessage(intent.productName) };
+    return {
+      reply: getUnknownProductClarificationMessage(intent.productName),
+      interactiveType: 'buttons',
+      interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+    };
   }
   if (intent.kind === 'ambiguous') {
     draft._line_mutation = { ...intent, productName: catalogName, awaiting: 'choice' };
@@ -3308,11 +3328,19 @@ function resolveLineItemMutationTurn(text, draft, action) {
   if (hasCandidateList) return null;
 
   if (pending.awaiting === 'catalog') {
+    const clean = String(text || '').toLowerCase().replace(/[!.,?*]/g, '').trim();
+    if (clean === 'btn_add_product' || clean === 'add product' || clean === 'add new product') {
+      return null;
+    }
     const resolved = resolveClarifiedProduct(text, pending.productName);
     if (!resolved) {
       const again = classifyLineItemMutation(text);
       if (again) return startLineItemMutation(draft, again);
-      return { reply: getUnknownProductClarificationMessage(pending.productName) };
+      return {
+        reply: getUnknownProductClarificationMessage(pending.productName),
+        interactiveType: 'buttons',
+        interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+      };
     }
     const next = { ...pending, productName: resolved };
     if (next.kind === 'ambiguous') {
@@ -3869,8 +3897,9 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
             const parsedAmt = parseIndianAmount(item.amount);
             const amt = parsedAmt ? parsedAmt : (qty && rate ? qty * rate : (prevItem?.amount ? parseIndianAmount(prevItem.amount) || 0 : 0));
             const rawSku = item.sku_text || item.description || prevItem?.sku_text || prevItem?.description || '';
-            const itemDim = item.dimensions || item.spec || prevItem?.dimensions || prevItem?.spec || '';
-            const norm = normalizeProductToCatalog(rawSku, itemDim);
+            const rawDim = item.dimensions || item.spec || prevItem?.dimensions || prevItem?.spec || '';
+            const norm = normalizeProductToCatalog(rawSku, rawDim);
+            const itemDim = rawDim || norm.customDimensions || '';
             const canonicalSku = norm.isValid ? norm.catalogName : rawSku;
             const hsn = item.hsn_code || item.hsn_sac || (norm.isValid ? norm.hsnCode : (detectHsnCode(rawSku, itemDim) || detectHsnCode(item.description || '') || prevItem?.hsn_code || null));
             const grade = resolveCapturedSteelGrade({
@@ -5154,7 +5183,7 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
       sku_text: it.sku_text || it.product_name || it.description || 'Steel',
       dimensions: it.dimensions || null,
       grade: it.grade || null,
-      hsn_code: it.hsn_code || (typeof detectHsnCode === 'function' ? detectHsnCode(it.sku_text || it.description || '', it.dimensions) : '72083840'),
+      hsn_code: it.hsn_code || (typeof detectHsnCode === 'function' ? detectHsnCode(it.sku_text || it.description || '', it.dimensions) : '') || '',
       quantity: calc.quantity,
       unit: calc.unit || 'MT',
       rate: calc.rate ? Number(calc.rate) : null,
@@ -5213,6 +5242,19 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
     }
   }
 
+  // 1b. Validate products against catalog / custom products
+  const ocrProdCheck = validateDraftProducts('LOG_INQUIRY', draft);
+  if (!ocrProdCheck.isValid) {
+    await recordSessionMessage(senderPhone, 'assistant', ocrProdCheck.clarificationMessage, { action_type: 'LOG_INQUIRY' });
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_INQUIRY|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: ocrProdCheck.clarificationMessage,
+      interactiveType: 'buttons',
+      interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+    };
+  }
+
   // 2. Validate mandatory fields
   const missing = validateMandatoryFields('LOG_INQUIRY', draft);
   if (missing.length === 0) {
@@ -5238,6 +5280,19 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
 }
 
 async function finishUnlinkedOrderDraft(draft, senderPhone, notice) {
+  const prodCheck = validateDraftProducts('LOG_ORDER', draft);
+  if (!prodCheck.isValid) {
+    const fullReply = `${notice || ''}${prodCheck.reply}`;
+    await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'LOG_ORDER' });
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_ORDER|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: fullReply,
+      ...(prodCheck.canAddProduct
+        ? { interactiveType: 'buttons', interactiveButtons: UNKNOWN_PRODUCT_BUTTONS }
+        : {}),
+    };
+  }
   const missing = validateMandatoryFields('LOG_ORDER', draft);
   if (missing.length > 0) {
     const missingList = missing.map((m) => `• *${m}*`).join('\n');
@@ -5298,7 +5353,7 @@ async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, captio
       sku_text: it.sku_text || it.product_name || it.description || 'Steel',
       dimensions: it.dimensions || null,
       grade: it.grade || null,
-      hsn_code: it.hsn_code || (typeof detectHsnCode === 'function' ? detectHsnCode(it.sku_text || it.description || '', it.dimensions) : '72083840'),
+      hsn_code: it.hsn_code || (typeof detectHsnCode === 'function' ? detectHsnCode(it.sku_text || it.description || '', it.dimensions) : '') || '',
       quantity: calc.quantity,
       unit: calc.unit || 'MT',
       rate: calc.rate ? Number(calc.rate) : 0,
@@ -5742,6 +5797,220 @@ function resolveClarifiedProduct(userInput, invalidProduct) {
   return null;
 }
 
+function findMatchingCustomProduct(rawProduct, draft) {
+  const clean = String(rawProduct || '').trim().toLowerCase();
+  if (!clean) return null;
+
+  const verifiedList = Array.isArray(draft?._verified_custom_products)
+    ? draft._verified_custom_products
+    : [];
+  if (verifiedList.some((v) => String(v || '').trim().toLowerCase() === clean)) {
+    const cached = typeof getCachedCustomProducts === 'function' ? getCachedCustomProducts() : [];
+    const dbMatch = (cached || []).find(
+      (p) => String(p.product_name || '').trim().toLowerCase() === clean,
+    );
+    return dbMatch || { product_name: String(rawProduct).trim(), dimensions: '', hsn_code: '' };
+  }
+
+  const cached = typeof getCachedCustomProducts === 'function' ? getCachedCustomProducts() : [];
+  if (!Array.isArray(cached) || cached.length === 0) return null;
+
+  return (
+    cached.find((p) => String(p.product_name || '').trim().toLowerCase() === clean) || null
+  );
+}
+
+function isCustomProductRecognized(rawProduct, draft) {
+  return Boolean(findMatchingCustomProduct(rawProduct, draft));
+}
+
+function resolveProductHsnOrEmpty(skuText, dimensions, fallbackHsn, draft) {
+  if (fallbackHsn && String(fallbackHsn).trim()) {
+    return String(fallbackHsn).trim();
+  }
+  const detected =
+    typeof detectHsnCode === 'function' ? detectHsnCode(skuText || '', dimensions || '') : null;
+  if (detected) return detected;
+  const customMatch = findMatchingCustomProduct(skuText, draft);
+  if (customMatch && customMatch.hsn_code && String(customMatch.hsn_code).trim()) {
+    return String(customMatch.hsn_code).trim();
+  }
+  return '';
+}
+
+function extractPendingNewProductSeed(draft, invalidProductName) {
+  const fallbackName = String(invalidProductName || '').trim();
+  if (Array.isArray(draft?.line_items) && draft.line_items.length > 0) {
+    for (const item of draft.line_items) {
+      const pName = String(item.sku_text || item.description || '').trim();
+      const dim = String(item.dimensions || item.spec || '').trim();
+      if (pName) {
+        const norm = normalizeProductToCatalog(pName, dim);
+        if (!norm.isValid && !isCustomProductRecognized(pName, draft)) {
+          return {
+            original_name: pName,
+            product_name: pName,
+            dimensions: dim,
+            hsn_code: String(item.hsn_code || item.hsn_sac || '').trim(),
+          };
+        }
+      }
+    }
+  }
+  if (Array.isArray(draft?.line_item_updates) && draft.line_item_updates.length > 0) {
+    for (const item of draft.line_item_updates) {
+      const pName = String(item.sku_text || item.description || item.item_reference || '').trim();
+      const dim = String(item.dimensions || item.spec || '').trim();
+      if (pName && !isGenericLineUpdateRef(pName) && !/^(?:item\s*\d+|\d+|line\s*#?\d+)$/i.test(pName)) {
+        const norm = normalizeProductToCatalog(pName, dim);
+        if (!norm.isValid && !isCustomProductRecognized(pName, draft)) {
+          return {
+            original_name: pName,
+            product_name: pName,
+            dimensions: dim,
+            hsn_code: String(item.hsn_code || item.hsn_sac || '').trim(),
+          };
+        }
+      }
+    }
+  }
+  if (draft?._line_mutation?.awaiting === 'catalog' && draft._line_mutation.productName) {
+    const mutName = String(draft._line_mutation.productName).trim();
+    return {
+      original_name: mutName,
+      product_name: mutName,
+      dimensions: String(draft._line_mutation.spec || '').trim(),
+      hsn_code: '',
+    };
+  }
+  const resolvedName = fallbackName || String(draft?.product_description || '').trim();
+  return {
+    original_name: resolvedName,
+    product_name: resolvedName,
+    dimensions: '',
+    hsn_code: '',
+  };
+}
+
+function mergePartialAddProductInput(pendingProd, rawText) {
+  const next = {
+    original_name: String(pendingProd?.original_name || pendingProd?.product_name || '').trim(),
+    product_name: String(pendingProd?.product_name || '').trim(),
+    dimensions: String(pendingProd?.dimensions || '').trim(),
+    hsn_code: String(pendingProd?.hsn_code || '').trim(),
+  };
+  let remaining = String(rawText || '').trim();
+  if (!remaining) return next;
+
+  const hsnLabeled = remaining.match(
+    /\b(?:hsn\s*\/?\s*sac(?:\s*code)?|hsn(?:\s*code)?|sac(?:\s*code)?)\s*[:=-]?\s*([0-9]{4,8})\b/i,
+  );
+  if (hsnLabeled) {
+    next.hsn_code = hsnLabeled[1].trim();
+    remaining = remaining.replace(hsnLabeled[0], ' ');
+  }
+
+  const specLabeled = remaining.match(
+    /\b(?:specs?\s*\/?\s*dimensions?|specs?|dimensions?|size|thickness)\s*[:=-]\s*([^,\n|;]+)/i,
+  );
+  if (specLabeled) {
+    next.dimensions = specLabeled[1].trim();
+    remaining = remaining.replace(specLabeled[0], ' ');
+  }
+
+  const nameLabeled = remaining.match(
+    /\b(?:product\s*name|name|product)\s*[:=-]\s*([^,\n|;]+)/i,
+  );
+  if (nameLabeled) {
+    next.product_name = nameLabeled[1].trim();
+    remaining = remaining.replace(nameLabeled[0], ' ');
+  }
+
+  if (!hsnLabeled) {
+    const bareHsn = remaining.match(/(?:^|[\s,;|])([0-9]{4,8})(?=$|[\s,;|])/);
+    if (bareHsn) {
+      next.hsn_code = bareHsn[1].trim();
+      remaining = remaining.replace(bareHsn[1], ' ');
+    }
+  }
+
+  const segments = remaining
+    .split(/[,;|\n]+/)
+    .map((s) => s.replace(/^[\s:=-]+|[\s:=-]+$/g, '').trim())
+    .filter(Boolean);
+
+  const isDimensionLike = (str) =>
+    /(?:\d+(?:\.\d+)?\s*[xX*×]\s*\d+|\b\d+(?:\.\d+)?\s*(?:mm|cm|m|inch|in|ft|thk|gauge|swg|nb|od|sch|schedule|id|wt)\b|\b(?:is\s*\d+|grade\s*[a-z0-9-]+|astm\s*[a-z0-9-]+|fe\s*\d+)\b|^\d)/i.test(
+      str,
+    );
+
+  segments.forEach((seg, idx) => {
+    const inlineNameAndSpec = seg.match(
+      /^([A-Za-z][A-Za-z\s/-]{1,40}?)\s+(\d+(?:\.\d+)?\s*(?:[xX*×]\s*\d+(?:\.\d+)?(?:\s*[xX*×]\s*\d+(?:\.\d+)?)?|\s*(?:mm|cm|m|inch|in|ft|thk|gauge|swg|nb|od)\b).*)$/i,
+    );
+    if (inlineNameAndSpec && !specLabeled && !nameLabeled) {
+      next.product_name = inlineNameAndSpec[1].trim();
+      next.dimensions = inlineNameAndSpec[2].trim();
+      return;
+    }
+
+    if (isDimensionLike(seg)) {
+      if (!specLabeled) next.dimensions = seg;
+      return;
+    }
+
+    if (segments.length >= 2 && idx === 0 && !nameLabeled) {
+      next.product_name = seg;
+      return;
+    }
+    if (segments.length >= 2 && idx >= 1 && !specLabeled) {
+      next.dimensions = seg;
+      return;
+    }
+
+    if (!next.product_name) {
+      next.product_name = seg;
+    } else if (
+      /^(?:standard|custom|commercial|regular|normal|mill\s*edge|slit\s*edge|trimmed|untrimmed|any|na|n\/a)$/i.test(
+        seg,
+      )
+    ) {
+      next.dimensions = seg;
+    } else {
+      next.product_name = seg;
+    }
+  });
+
+  if (!next.original_name && next.product_name) {
+    next.original_name = next.product_name;
+  }
+  return next;
+}
+
+function buildAddProductPromptCard(pendingProd, prefixWarning = '') {
+  const pName = String(pendingProd?.product_name || '').trim() || '_Empty_';
+  const specs = String(pendingProd?.dimensions || '').trim() || '_Empty_';
+  const hsn = String(pendingProd?.hsn_code || '').trim() || '_Empty_';
+  const missing = [];
+  if (!String(pendingProd?.product_name || '').trim()) missing.push('Product Name *');
+  if (!String(pendingProd?.dimensions || '').trim()) missing.push('Specs / Dimensions *');
+  if (!String(pendingProd?.hsn_code || '').trim()) missing.push('HSN/SAC Code *');
+
+  const prefix = prefixWarning ? `${prefixWarning}\n\n` : '';
+  const guidance =
+    missing.length > 0
+      ? `👉 Please reply with the missing mandatory fields (${missing.join(', ')}) — you can send them together or one by one _(e.g. "Specs: 10mm, HSN: 72083700")_, then tap *Save Product*.`
+      : `👉 Tap *Save Product* to add this product and continue, or reply with *Product Name* / *Specs* / *HSN Code* to update before saving.`;
+
+  return (
+    `${prefix}📦 *Add New Product*\n\n` +
+    `- **Product Name *:** ${pName}\n` +
+    `- **Specs / Dimensions *:** ${specs}\n` +
+    `- **HSN/SAC Code *:** ${hsn}\n\n` +
+    guidance
+  );
+}
+
 function validateDraftProducts(action, draft) {
   if (!draft || !['LOG_INQUIRY', 'UPDATE_INQUIRY', 'LOG_ORDER', 'UPDATE_ORDER'].includes(action)) {
     return { isValid: true };
@@ -5756,7 +6025,7 @@ function validateDraftProducts(action, draft) {
       const dim = item.dimensions || item.spec || '';
       if (pName && pName.trim()) {
         const norm = normalizeProductToCatalog(pName, dim);
-        if (!norm.isValid) {
+        if (!norm.isValid && !isCustomProductRecognized(pName, draft)) {
           invalidProducts.push(pName.trim());
         }
       }
@@ -5770,7 +6039,7 @@ function validateDraftProducts(action, draft) {
       const dim = item.dimensions || item.spec || '';
       if (pName && pName.trim() && !isGenericLineUpdateRef(pName) && !/^(?:item\s*\d+|\d+|line\s*#?\d+)$/i.test(pName.trim())) {
         const norm = normalizeProductToCatalog(pName, dim);
-        if (!norm.isValid) {
+        if (!norm.isValid && !isCustomProductRecognized(pName, draft)) {
           invalidProducts.push(pName.trim());
         }
       }
@@ -5782,19 +6051,38 @@ function validateDraftProducts(action, draft) {
     const rawDesc = draft.product_description.trim();
     if (rawDesc.length > 0) {
       const norm = normalizeProductToCatalog(rawDesc);
-      if (!norm.isValid) {
+      if (!norm.isValid && !isCustomProductRecognized(rawDesc, draft)) {
         invalidProducts.push(rawDesc);
       }
     }
   }
 
+  // 4. Validate pending line mutation awaiting catalog clarification
+  if (draft._line_mutation?.awaiting === 'catalog' && draft._line_mutation.productName) {
+    const mutProd = String(draft._line_mutation.productName).trim();
+    if (mutProd && !isCustomProductRecognized(mutProd, draft)) {
+      invalidProducts.push(mutProd);
+    }
+  }
+
   if (invalidProducts.length > 0) {
-    const uniqueInvalid = Array.from(new Set(invalidProducts));
-    const clarificationMessage = getUnknownProductClarificationMessage(uniqueInvalid[0]);
+    const seen = new Set();
+    const uniqueInvalid = [];
+    for (const p of invalidProducts) {
+      const k = p.toLowerCase();
+      if (!seen.has(k)) {
+        seen.add(k);
+        uniqueInvalid.push(p);
+      }
+    }
+    const clarificationMessage = getUnknownProductClarificationMessage(uniqueInvalid);
     return {
       isValid: false,
       invalidProducts: uniqueInvalid,
       clarificationMessage,
+      reply: clarificationMessage,
+      canAddProduct: true,
+      interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
     };
   }
 
@@ -9748,7 +10036,7 @@ async function executeAction(action, draft, senderPhone) {
               const calc = calculateLineItem(it);
               const sText = it.sku_text || it.description || '';
               const sDim = it.dimensions || it.spec || '';
-              const hCode = it.hsn_code || it.hsn_sac || (typeof detectHsnCode === 'function' ? detectHsnCode(sText, sDim) : null) || (typeof detectHsnCode === 'function' ? detectHsnCode(it.description || '') : null) || '72083840';
+              const hCode = resolveProductHsnOrEmpty(sText || it.description || '', sDim, it.hsn_code || it.hsn_sac, draft);
               const itRate = calc.rate || globalRate || 0;
               const itQty = calc.quantity || 0;
               const itAmt = calc.amount || (itQty && itRate ? itQty * itRate : 0);
@@ -9779,8 +10067,8 @@ async function executeAction(action, draft, senderPhone) {
                 description: draft.product_description || 'Hot Rolled',
                 dimensions: '',
                 spec: '',
-                hsn_code: detectHsnCode(draft.product_description || '') || '72083840',
-                hsn_sac: detectHsnCode(draft.product_description || '') || '72083840',
+                hsn_code: resolveProductHsnOrEmpty(draft.product_description || '', '', '', draft),
+                hsn_sac: resolveProductHsnOrEmpty(draft.product_description || '', '', '', draft),
                 quantity: 0,
                 unit: 'MT',
                 rate: globalRate || null,
@@ -10417,8 +10705,8 @@ async function executeAction(action, draft, senderPhone) {
                   description: it.sku_text,
                   dimensions: it.dimensions,
                   spec: it.dimensions,
-                  hsn_code: it.hsn_code || detectHsnCode(it.sku_text, it.dimensions) || '72083840',
-                  hsn_sac: it.hsn_code || detectHsnCode(it.sku_text, it.dimensions) || '72083840',
+                  hsn_code: resolveProductHsnOrEmpty(it.sku_text, it.dimensions, it.hsn_code, draft),
+                  hsn_sac: resolveProductHsnOrEmpty(it.sku_text, it.dimensions, it.hsn_code, draft),
                   quantity: Number(it.quantity) || 0,
                   unit: it.unit || 'MT',
                   rate: Number(it.rate) || 0,
@@ -10616,7 +10904,7 @@ async function executeAction(action, draft, senderPhone) {
               const rate = calc.rate || 0;
               const amt = calc.amount || qty * rate;
               subtotal += amt;
-              const hCode = it.hsn_code || it.hsn_sac || (typeof detectHsnCode === 'function' ? detectHsnCode(sText, sDim) : null) || (typeof detectHsnCode === 'function' ? detectHsnCode(it.description || '') : null) || '72083840';
+              const hCode = resolveProductHsnOrEmpty(sText || it.description || '', sDim, it.hsn_code || it.hsn_sac, draft);
               return {
                 sku_text: sText,
                 description: it.description || sText,
@@ -11480,8 +11768,8 @@ async function executeAction(action, draft, senderPhone) {
                   description: it.sku_text,
                   dimensions: it.dimensions,
                   spec: it.dimensions,
-                  hsn_code: it.hsn_code || detectHsnCode(it.sku_text, it.dimensions) || '72083840',
-                  hsn_sac: it.hsn_code || detectHsnCode(it.sku_text, it.dimensions) || '72083840',
+                  hsn_code: resolveProductHsnOrEmpty(it.sku_text, it.dimensions, it.hsn_code, draft),
+                  hsn_sac: resolveProductHsnOrEmpty(it.sku_text, it.dimensions, it.hsn_code, draft),
                   quantity: Number(it.quantity) || 0,
                   unit: it.unit || 'MT',
                   rate: Number(it.rate) || 0,
@@ -13528,6 +13816,22 @@ function buildSelectedInquiryCardFromDraft(draft) {
 async function restoreInterruptedFlow(senderPhone, interruptedState, action, draft) {
   const actionName = getActionFriendlyName(action);
 
+  if (interruptedState === 'catalog_implicit_prod_add') {
+    const pendingProd = draft._pending_add_product || {
+      product_name: draft._unrecognized_product_input?.rawProduct || '',
+      dimensions: draft._unrecognized_product_input?.rawSpecs || '',
+      hsn_code: '',
+    };
+    const promptCard = buildAddProductPromptCard(pendingProd);
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_implicit_prod_add|${action}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: promptCard,
+      interactiveType: 'buttons',
+      interactiveButtons: ADD_PRODUCT_CONFIRM_BUTTONS,
+    };
+  }
+
   if (action === 'LOG_ORDER') {
     if (draft.inquiry_id || draft.deal_id || draft._inquiry_display_id) {
       const stageCheck = await validateOrderInquiryStage(draft, senderPhone);
@@ -13557,6 +13861,18 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
 
     if (!draft.po_date) {
       draft.po_date = formatDateDDMMYYYY(new Date());
+    }
+
+    const prodCheck = validateDraftProducts('LOG_ORDER', draft);
+    if (!prodCheck.isValid) {
+      await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_ORDER|${JSON.stringify(draft)}`);
+      return {
+        handled: true,
+        reply: prodCheck.reply,
+        ...(prodCheck.canAddProduct
+          ? { interactiveType: 'buttons', interactiveButtons: UNKNOWN_PRODUCT_BUTTONS }
+          : {}),
+      };
     }
 
     const missing = validateMandatoryFields('LOG_ORDER', draft);
@@ -13645,6 +13961,18 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
     return {
       handled: true,
       reply: card,
+    };
+  }
+
+  const prodCheck = validateDraftProducts(action, draft);
+  if (!prodCheck.isValid) {
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: prodCheck.reply,
+      ...(prodCheck.canAddProduct
+        ? { interactiveType: 'buttons', interactiveButtons: UNKNOWN_PRODUCT_BUTTONS }
+        : {}),
     };
   }
 
@@ -14079,6 +14407,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   const text = typeof rawText === 'string' ? rawText.trim() : '';
   if (!text && !options.imageBuffer) return { handled: false };
 
+  if (typeof getCustomProductsList === 'function') {
+    await getCustomProductsList().catch(() => {});
+  }
+
   const { photoDataUrl, gpsData, attachmentObj, incomingAttachments } = extractPhotoAndGps(rawText, options);
   const canUpdateVisits = await canUserUpdateVisits(senderPhone);
   const callerSourceChannel = options.source_channel || options.channel || null;
@@ -14315,6 +14647,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     !lastIntent.startsWith('catalog_resume_ask|') &&
     !lastIntent.startsWith('catalog_implicit_cust_ask|') &&
     !lastIntent.startsWith('catalog_implicit_cust_collect|') &&
+    !lastIntent.startsWith('catalog_implicit_prod_add|') &&
     !lastIntent.startsWith('catalog_update_select|')
   ) {
     const cleanInput = text.toLowerCase().replace(/[^a-z0-9\s_/]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -14336,7 +14669,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         'yes', 'y', '1', 'confirm', 'save', 'haan', 'ha', 'sahi hai', 'ok', 'sure', 'save / yes', 'save/yes', 'save yes',
         'edit', 'change', '2', 'edit details',
         'cancel', 'discard', 'no', 'n', '3', 'stop', 'exit', 'quit', 'nahi', 'wrong', 'galat',
-        'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel'
+        'btn_confirm_yes', 'btn_confirm_edit', 'btn_confirm_cancel',
+        'btn_add_product', 'add product', 'btn_prod_save', 'save product'
       ].includes(cleanInput);
     const isComplaintEvidenceUpload =
       currentAction === 'LOG_COMPLAINT' &&
@@ -14582,7 +14916,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
             customer_name: originalDraft.company_name,
           });
           await saveActiveSession(senderPhone, originalDraft.company_name || 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
-          return { handled: true, reply: resumeMsg };
+          return {
+            handled: true,
+            reply: resumeMsg,
+            interactiveType: 'buttons',
+            interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+          };
         }
 
         const parentMissing = validateMandatoryFields(originalAction, originalDraft);
@@ -14712,7 +15051,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           customer_name: originalDraft.company_name,
         });
         await saveActiveSession(senderPhone, originalDraft.company_name, `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
-        return { handled: true, reply: recheckProd.clarificationMessage };
+        return {
+          handled: true,
+          reply: recheckProd.clarificationMessage,
+          interactiveType: 'buttons',
+          interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+        };
       }
 
       const parentMissing = validateMandatoryFields(originalAction, originalDraft);
@@ -14844,7 +15188,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           customer_name: originalDraft.company_name,
         });
         await saveActiveSession(senderPhone, originalDraft.company_name || 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
-        return { handled: true, reply: resumeMsg };
+        return {
+          handled: true,
+          reply: resumeMsg,
+          interactiveType: 'buttons',
+          interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+        };
       }
       const parentMissing = validateMandatoryFields(originalAction, originalDraft);
 
@@ -14899,6 +15248,214 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       await saveActiveSession(senderPhone, updatedCustDraft.company_name, `catalog_implicit_cust_collect|${originalAction}|${JSON.stringify(updatedCustDraft)}`);
       return { handled: true, reply: askRemaining };
     }
+  }
+
+  // ── 3b-prod. HANDLE IMPLICIT PRODUCT ADDITION (catalog_implicit_prod_add|...) ──
+  if (lastIntent.startsWith('catalog_implicit_prod_add|')) {
+    const parts = lastIntent.split('|');
+    const originalAction = parts[1] || 'LOG_INQUIRY';
+    const draftJsonStr = parts.slice(2).join('|');
+    const draft = safeParseJSON(draftJsonStr, {});
+    if (callerSourceChannel && !draft.source_channel) {
+      draft.source_channel = callerSourceChannel;
+    }
+
+    await recordSessionMessage(senderPhone, 'user', text);
+    const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
+
+    if (cleanInput === 'btn_confirm_cancel' || isDiscardOrCancelIntent(cleanInput) || isDiscardOrCancelIntent(text)) {
+      const cancelReply = `❌ Discarded. Send 'Hi' to start again.`;
+      await recordSessionMessage(senderPhone, 'assistant', cancelReply);
+      recordInactiveDraft(senderPhone, originalAction, draft, 'discarded');
+      await finalizeCurrentSession(senderPhone, `Discarded product addition flow`);
+      await saveActiveSession(senderPhone, 'Unknown', 'general');
+      return { handled: true, reply: cancelReply };
+    }
+
+    const pendingProd = draft._pending_new_product || extractPendingNewProductSeed(draft);
+    const isSaveConfirm = [
+      'btn_prod_save', 'save product', 'save', 'yes', 'y', '1',
+      'confirm', 'haan', 'ha', 'sahi hai', 'ok', 'sure', 'save / yes', 'save/yes', 'save yes',
+    ].includes(cleanInput);
+
+    if (isSaveConfirm) {
+      const origName = String(pendingProd.original_name || pendingProd.product_name || '').trim();
+      const prodName = String(pendingProd.product_name || '').trim();
+      const prodSpecs = String(pendingProd.dimensions || '').trim();
+      const prodHsn = String(pendingProd.hsn_code || '').trim();
+
+      const missingProdFields = [];
+      if (!prodName) missingProdFields.push('Product Name *');
+      if (!prodSpecs) missingProdFields.push('Specs / Dimensions *');
+      if (!prodHsn) missingProdFields.push('HSN/SAC Code *');
+
+      if (missingProdFields.length > 0) {
+        draft._pending_new_product = pendingProd;
+        const blockMsg = buildAddProductPromptCard(
+          pendingProd,
+          `❌ *Cannot save product yet:* All 3 fields are mandatory. Please provide: *${missingProdFields.join(', ')}*.`,
+        );
+        await recordSessionMessage(senderPhone, 'assistant', blockMsg, {
+          action_type: originalAction,
+          customer_name: draft.company_name,
+        });
+        await saveActiveSession(
+          senderPhone,
+          draft.company_name || 'Customer',
+          `catalog_implicit_prod_add|${originalAction}|${JSON.stringify(draft)}`,
+        );
+        return {
+          handled: true,
+          reply: blockMsg,
+          interactiveType: 'buttons',
+          interactiveButtons: ADD_PRODUCT_CONFIRM_BUTTONS,
+        };
+      }
+
+      await createCustomProductRecord({
+        product_name: prodName,
+        dimensions: prodSpecs,
+        hsn_code: prodHsn,
+      });
+
+      draft._verified_custom_products = Array.isArray(draft._verified_custom_products)
+        ? draft._verified_custom_products
+        : [];
+      if (prodName && !draft._verified_custom_products.some((p) => String(p).toLowerCase() === prodName.toLowerCase())) {
+        draft._verified_custom_products.push(prodName);
+      }
+
+      if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
+        draft.line_items.forEach((it) => {
+          const itName = String(it.sku_text || it.description || '').trim();
+          const itLower = itName.toLowerCase();
+          if (
+            itLower === prodName.toLowerCase() ||
+            (origName && itLower === origName.toLowerCase())
+          ) {
+            it.sku_text = prodName;
+            it.description = prodName;
+            if (prodSpecs) {
+              it.dimensions = prodSpecs;
+              it.spec = prodSpecs;
+            }
+            it.hsn_code = prodHsn;
+            it.hsn_sac = prodHsn;
+            it.is_valid_catalog = true;
+          }
+        });
+      }
+      if (Array.isArray(draft.line_item_updates) && draft.line_item_updates.length > 0) {
+        draft.line_item_updates.forEach((it) => {
+          const itName = String(it.sku_text || it.description || it.item_reference || '').trim();
+          const itLower = itName.toLowerCase();
+          if (
+            itLower === prodName.toLowerCase() ||
+            (origName && itLower === origName.toLowerCase())
+          ) {
+            it.sku_text = prodName;
+            it.description = prodName;
+            if (prodSpecs) {
+              it.dimensions = prodSpecs;
+              it.spec = prodSpecs;
+            }
+            it.hsn_code = prodHsn;
+            it.hsn_sac = prodHsn;
+            it.is_valid_catalog = true;
+          }
+        });
+      }
+      if (draft.product_description && origName) {
+        const escapedOrig = origName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        draft.product_description = String(draft.product_description).replace(
+          new RegExp(escapedOrig, 'gi'),
+          prodName,
+        );
+      }
+      delete draft._pending_new_product;
+
+      if (draft._line_mutation?.awaiting === 'catalog') {
+        const mutRes = startLineItemMutation(draft, {
+          ...draft._line_mutation,
+          productName: prodName,
+          spec: prodSpecs || draft._line_mutation.spec,
+        });
+        if (mutRes?.reply) {
+          const resumeMsg = `✅ *Product "${prodName}" Added!*\n\n${mutRes.reply}`;
+          await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
+            action_type: originalAction,
+            customer_name: draft.company_name,
+          });
+          await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(draft)}`);
+          return {
+            handled: true,
+            reply: resumeMsg,
+            ...(mutRes.interactiveButtons ? { interactiveType: 'buttons', interactiveButtons: mutRes.interactiveButtons } : {}),
+          };
+        }
+      }
+
+      const nextProdCheck = validateDraftProducts(originalAction, draft);
+      if (!nextProdCheck.isValid) {
+        const resumeMsg = `✅ *Product "${prodName}" Added!*\n\n${nextProdCheck.clarificationMessage}`;
+        await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
+          action_type: originalAction,
+          customer_name: draft.company_name,
+        });
+        await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(draft)}`);
+        return {
+          handled: true,
+          reply: resumeMsg,
+          interactiveType: 'buttons',
+          interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+        };
+      }
+
+      const missing = validateMandatoryFields(originalAction, draft);
+      if (missing.length === 0) {
+        const lineChoice = await askLineItemChoiceIfNeeded(originalAction, draft, senderPhone);
+        if (lineChoice) return lineChoice;
+
+        const summary = buildConfirmationSummary(originalAction, draft);
+        const resumeMsg = `✅ *Product "${prodName}" Added!*\n\nNow continuing with your ${getActionFriendlyName(originalAction)}:\n\n${summary}`;
+        await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
+          action_type: originalAction,
+          customer_name: draft.company_name,
+        });
+        await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|${originalAction}|${JSON.stringify(draft)}`);
+        return {
+          handled: true,
+          reply: resumeMsg,
+          interactiveType: 'buttons',
+          interactiveButtons: CONFIRMATION_BUTTONS,
+        };
+      } else {
+        const missingList = missing.map((m) => `• *${m}*`).join('\n');
+        const resumeMsg = `✅ *Product "${prodName}" Added!*\n\nPlease provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
+        await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
+          action_type: originalAction,
+          customer_name: draft.company_name,
+        });
+        await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(draft)}`);
+        return { handled: true, reply: resumeMsg };
+      }
+    }
+
+    // User typed partial or complete Specs / HSN / Product Name before saving
+    const updatedPendingProd = mergePartialAddProductInput(pendingProd, text);
+    draft._pending_new_product = updatedPendingProd;
+    const cardMsg = buildAddProductPromptCard(updatedPendingProd);
+    await recordSessionMessage(senderPhone, 'assistant', cardMsg, {
+      action_type: originalAction,
+      customer_name: draft.company_name,
+    });
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_implicit_prod_add|${originalAction}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: cardMsg,
+      interactiveType: 'buttons',
+      interactiveButtons: ADD_PRODUCT_CONFIRM_BUTTONS,
+    };
   }
 
   // ── 3c. HANDLE CONFIRMATION STATE (catalog_confirm|...) ──────────────────────
@@ -14973,6 +15530,18 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           await saveActiveSession(senderPhone, 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
           return { handled: true, reply: custCheck.rejectionMessage };
         }
+      }
+
+      const prodCheckBeforeSave = validateDraftProducts(action, draft);
+      if (!prodCheckBeforeSave.isValid) {
+        await recordSessionMessage(senderPhone, 'assistant', prodCheckBeforeSave.clarificationMessage, { action_type: action });
+        await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
+        return {
+          handled: true,
+          reply: prodCheckBeforeSave.clarificationMessage,
+          interactiveType: 'buttons',
+          interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+        };
       }
 
       const lineChoiceBeforeSave = await askLineItemChoiceIfNeeded(action, draft, senderPhone);
@@ -15226,7 +15795,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (!confirmProdCheck.isValid) {
       await recordSessionMessage(senderPhone, 'assistant', confirmProdCheck.clarificationMessage, { action_type: action });
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
-      return { handled: true, reply: confirmProdCheck.clarificationMessage };
+      return {
+        handled: true,
+        reply: confirmProdCheck.clarificationMessage,
+        interactiveType: 'buttons',
+        interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+      };
     }
 
     const missing = validateMandatoryFields(action, updatedDraft);
@@ -15304,7 +15878,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         await recordSessionMessage(senderPhone, 'user', text);
         await recordSessionMessage(senderPhone, 'assistant', lineMutation.reply, { action_type: action });
         await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
-        return { handled: true, reply: lineMutation.reply };
+        return {
+          handled: true,
+          reply: lineMutation.reply,
+          ...(lineMutation.interactiveButtons ? { interactiveType: 'buttons', interactiveButtons: lineMutation.interactiveButtons } : {}),
+        };
       }
     }
 
@@ -15433,7 +16011,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (!editProdCheck.isValid) {
       await recordSessionMessage(senderPhone, 'assistant', editProdCheck.clarificationMessage, { action_type: action });
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
-      return { handled: true, reply: editProdCheck.clarificationMessage };
+      return {
+        handled: true,
+        reply: editProdCheck.clarificationMessage,
+        interactiveType: 'buttons',
+        interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+      };
     }
 
     const missing = validateMandatoryFields(action, updatedDraft);
@@ -15782,7 +16365,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         await recordSessionMessage(senderPhone, 'user', text);
         await recordSessionMessage(senderPhone, 'assistant', lineMutation.reply, { action_type: action });
         await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
-        return { handled: true, reply: lineMutation.reply };
+        return {
+          handled: true,
+          reply: lineMutation.reply,
+          ...(lineMutation.interactiveButtons ? { interactiveType: 'buttons', interactiveButtons: lineMutation.interactiveButtons } : {}),
+        };
       }
       if (existingDraft._skip_llm_extract) {
         await recordSessionMessage(senderPhone, 'user', text);
@@ -16178,7 +16765,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
             customer_name: existingDraft.company_name,
           });
           await saveActiveSession(senderPhone, existingDraft.company_name, `catalog_flow|${action}|${JSON.stringify(existingDraft)}`);
-          return { handled: true, reply: custProdCheck.clarificationMessage };
+          return {
+            handled: true,
+            reply: custProdCheck.clarificationMessage,
+            interactiveType: 'buttons',
+            interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+          };
         }
 
         const missing = validateMandatoryFields(action, existingDraft);
@@ -16249,25 +16841,73 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     // Check if user is clarifying an ambiguous/invalid product from prior prompt
     const existingProdCheck = validateDraftProducts(action, existingDraft);
+    const cleanFlowInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
+    if (
+      !existingProdCheck.isValid &&
+      (cleanFlowInput === 'btn_add_product' || cleanFlowInput === 'add product' || cleanFlowInput === 'add new product')
+    ) {
+      const pendingProd = extractPendingNewProductSeed(existingDraft, existingProdCheck.invalidProducts?.[0]);
+      existingDraft._pending_new_product = pendingProd;
+      const cardMsg = buildAddProductPromptCard(pendingProd);
+      await recordSessionMessage(senderPhone, 'assistant', cardMsg, {
+        action_type: action,
+        customer_name: existingDraft.company_name,
+      });
+      await saveActiveSession(senderPhone, existingDraft.company_name || 'Customer', `catalog_implicit_prod_add|${action}|${JSON.stringify(existingDraft)}`);
+      return {
+        handled: true,
+        reply: cardMsg,
+        interactiveType: 'buttons',
+        interactiveButtons: ADD_PRODUCT_CONFIRM_BUTTONS,
+      };
+    }
+
     let resolvedProd = null;
+    let resolvedInvalidSource = null;
     if (!existingProdCheck.isValid && existingProdCheck.invalidProducts.length > 0) {
-      for (const invProd of existingProdCheck.invalidProducts) {
-        const candidate = resolveClarifiedProduct(text, invProd);
+      const explicitTarget = existingProdCheck.invalidProducts.find((inv) =>
+        text.toLowerCase().includes(inv.toLowerCase()),
+      );
+      const targetOrder = explicitTarget
+        ? [explicitTarget, ...existingProdCheck.invalidProducts.filter((p) => p !== explicitTarget)]
+        : existingProdCheck.invalidProducts;
+
+      for (const invProd of targetOrder) {
+        const strippedText = explicitTarget
+          ? text.replace(new RegExp(invProd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ').trim()
+          : text;
+        const candidate =
+          resolveClarifiedProduct(strippedText || text, invProd) ||
+          resolveClarifiedProduct(text, invProd);
         if (candidate) {
           resolvedProd = candidate;
+          resolvedInvalidSource = invProd;
           break;
         }
       }
-      if (resolvedProd) {
+      if (resolvedProd && resolvedInvalidSource) {
+        const targetLower = resolvedInvalidSource.trim().toLowerCase();
+        const isSingleInvalid = existingProdCheck.invalidProducts.length === 1;
+        const resolvedHsn = detectHsnCode(resolvedProd, '') || '';
+
         if (Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0) {
           existingDraft.line_item_updates.forEach((it) => {
-            const pName = it.sku_text || it.description || it.item_reference || '';
+            const pName = String(it.sku_text || it.description || it.item_reference || '').trim();
             const itNorm = normalizeProductToCatalog(pName, it.dimensions || it.spec);
-            if (!itNorm.isValid || pName.toLowerCase().includes(existingProdCheck.invalidProducts[0].toLowerCase())) {
+            const matchesTarget =
+              pName.toLowerCase() === targetLower ||
+              pName.toLowerCase().includes(targetLower) ||
+              (isSingleInvalid && !itNorm.isValid);
+            if (matchesTarget) {
               it.sku_text = resolvedProd;
               it.description = resolvedProd;
               if (!isExplicitLineItemNumberRef(it)) {
                 it.item_reference = resolvedProd;
+              }
+              const itemHsn = detectHsnCode(resolvedProd, it.dimensions || it.spec) || resolvedHsn;
+              if (itemHsn) {
+                it.hsn_code = itemHsn;
+                it.hsn_sac = itemHsn;
               }
               it.is_valid_catalog = true;
             }
@@ -16275,26 +16915,46 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         }
         if (Array.isArray(existingDraft.line_items) && existingDraft.line_items.length > 0) {
           existingDraft.line_items.forEach((it) => {
-            const itNorm = normalizeProductToCatalog(it.sku_text, it.dimensions);
-            if (!itNorm.isValid || it.sku_text.toLowerCase().includes(existingProdCheck.invalidProducts[0].toLowerCase())) {
+            const pName = String(it.sku_text || it.description || '').trim();
+            const itNorm = normalizeProductToCatalog(pName, it.dimensions);
+            const matchesTarget =
+              pName.toLowerCase() === targetLower ||
+              pName.toLowerCase().includes(targetLower) ||
+              (isSingleInvalid && !itNorm.isValid);
+            if (matchesTarget) {
               it.sku_text = resolvedProd;
               it.description = resolvedProd;
+              const itemHsn = detectHsnCode(resolvedProd, it.dimensions) || resolvedHsn;
+              if (itemHsn) {
+                it.hsn_code = itemHsn;
+                it.hsn_sac = itemHsn;
+              }
               it.is_valid_catalog = true;
             }
           });
         }
         if (existingDraft.product_description) {
-          const invRegex = new RegExp(existingProdCheck.invalidProducts[0], 'gi');
+          const escapedTarget = resolvedInvalidSource.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const invRegex = new RegExp(escapedTarget, 'gi');
           existingDraft.product_description = existingDraft.product_description.replace(invRegex, resolvedProd);
         }
-        if (existingDraft.affected_product) {
+        if (existingDraft.affected_product && isSingleInvalid) {
           existingDraft.affected_product = resolvedProd;
         }
       }
     }
 
     // Extract fields from user message
-    const isPureCandidateSelection = (candidateResolved || inquiryCandidateResolved || orderCandidateResolved || complaintCandidateResolved || resolvedProd) && isPureOptionSelectorOnly(text);
+    const isPureProductClarification = Boolean(
+      resolvedProd &&
+        !/\b(?:\d+(?:\.\d+)?\s*(?:mt|ton|tonne|kg|pcs|nos)|rate|price|@|bhav|₹|rs\.?|delivery|payment|advance|credit)\b/i.test(
+          text,
+        ),
+    );
+    const isPureCandidateSelection =
+      ((candidateResolved || inquiryCandidateResolved || orderCandidateResolved || complaintCandidateResolved || resolvedProd) &&
+        isPureOptionSelectorOnly(text)) ||
+      isPureProductClarification;
     const isGenericMediaCaption = /^(?:image\s*received|document\s*received|photo\s*uploaded|evidence\s*(?:attachment|photo|photos|document)?\s*uploaded|uploaded\s*photo|attachment\s*uploaded)$/i.test(text.trim());
 
     const updatedDraft = (isPureCandidateSelection || isAttachmentNo || (incomingAttachments.length > 0 && isGenericMediaCaption) || existingDraft._skip_llm_extract)
@@ -16302,7 +16962,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       : await extractFieldsWithLLM(action, text, existingDraft);
     delete updatedDraft._skip_llm_extract;
 
-    if (resolvedProd && Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0) {
+    if (resolvedProd && resolvedInvalidSource && Array.isArray(existingDraft.line_item_updates) && existingDraft.line_item_updates.length > 0) {
+      const targetLower = resolvedInvalidSource.trim().toLowerCase();
+      const isSingleInvalid = existingProdCheck.invalidProducts.length === 1;
       const textHasNewSpec = Boolean(text.match(/\b(?:\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g)|\d+X\d+X\d+|\d+\s*x\s*\d+)\b/i));
       const textHasNewQty = Boolean(text.match(/\b\d+(?:\.\d+)?\s*(?:mt|ton|tonne|kg|pcs|nos)\b/i));
       const textHasNewRate = Boolean(text.match(/(?:rate|price|@|bhav)[\s:=-]*(?:to\s+|as\s+|is\s+|be\s+|ko\s+)?(?:₹|rs\.?)?\s*\d+/i) || text.match(/(?:₹|rs\.?)\s*\d+/i) || text.match(/\d+\s*(?:₹|rs\.?)/i));
@@ -16312,9 +16974,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       } else {
         updatedDraft.line_item_updates.forEach((it, idx) => {
           const prev = existingDraft.line_item_updates[idx] || existingDraft.line_item_updates[0] || {};
-          const pName = it.sku_text || it.description || it.item_reference || prev.sku_text || prev.description || '';
+          const pName = String(it.sku_text || it.description || it.item_reference || prev.sku_text || prev.description || '').trim();
           const itNorm = normalizeProductToCatalog(pName, it.dimensions || it.spec || prev.dimensions || prev.spec);
-          if (!itNorm.isValid || pName.toLowerCase().includes(existingProdCheck.invalidProducts[0].toLowerCase())) {
+          if (pName.toLowerCase() === targetLower || pName.toLowerCase().includes(targetLower) || (isSingleInvalid && !itNorm.isValid)) {
             it.sku_text = resolvedProd;
             it.description = resolvedProd;
             it.is_valid_catalog = true;
@@ -16332,7 +16994,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         });
       }
     }
-    if (resolvedProd && Array.isArray(existingDraft.line_items) && existingDraft.line_items.length > 0) {
+    if (resolvedProd && resolvedInvalidSource && Array.isArray(existingDraft.line_items) && existingDraft.line_items.length > 0) {
+      const targetLower = resolvedInvalidSource.trim().toLowerCase();
+      const isSingleInvalid = existingProdCheck.invalidProducts.length === 1;
       const textHasNewSpec = Boolean(text.match(/\b(?:\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g)|\d+X\d+X\d+|\d+\s*x\s*\d+)\b/i));
       const textHasNewQty = Boolean(text.match(/\b\d+(?:\.\d+)?\s*(?:mt|ton|tonne|kg|pcs|nos)\b/i));
       const textHasNewRate = Boolean(text.match(/(?:rate|price|@|bhav)[\s:=-]*(?:to\s+|as\s+|is\s+|be\s+|ko\s+)?(?:₹|rs\.?)?\s*\d+/i) || text.match(/(?:₹|rs\.?)\s*\d+/i) || text.match(/\d+\s*(?:₹|rs\.?)/i));
@@ -16342,8 +17006,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       } else {
         updatedDraft.line_items.forEach((it, idx) => {
           const prev = existingDraft.line_items[idx] || existingDraft.line_items[0] || {};
-          const itNorm = normalizeProductToCatalog(it.sku_text, it.dimensions || prev.dimensions);
-          if (!itNorm.isValid || it.sku_text.toLowerCase().includes(existingProdCheck.invalidProducts[0].toLowerCase())) {
+          const pName = String(it.sku_text || it.description || '').trim();
+          const itNorm = normalizeProductToCatalog(pName, it.dimensions || prev.dimensions);
+          if (pName.toLowerCase() === targetLower || pName.toLowerCase().includes(targetLower) || (isSingleInvalid && !itNorm.isValid)) {
             it.sku_text = resolvedProd;
             it.description = resolvedProd;
             it.is_valid_catalog = true;
@@ -16378,6 +17043,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       'complaint_date', 'raised_by', 'challan_no', 'customer_communication', 'resolution_notes', 'resolution_date', 'corrective_action',
       '_attachments_asked', '_attachments_completed',
       'rate', '_customer_verified', '_new_customer_created',
+      '_verified_custom_products', '_pending_new_product',
       'gps_photo_url', 'gps_latitude', 'gps_longitude', 'gps_accuracy', 'attachments'
     ];
     for (const key of preserveKeys) {
@@ -16523,7 +17189,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (!flowProdCheck.isValid) {
       await recordSessionMessage(senderPhone, 'assistant', flowProdCheck.clarificationMessage, { action_type: action });
       await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
-      return { handled: true, reply: flowProdCheck.clarificationMessage };
+      return {
+        handled: true,
+        reply: flowProdCheck.clarificationMessage,
+        interactiveType: 'buttons',
+        interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+      };
     }
 
     // 1. UPDATE_INQUIRY candidate check & ID verification
@@ -17131,6 +17802,8 @@ module.exports = {
   handleOrderDocumentOcr,
   CATALOG_MENU_SECTIONS,
   CONFIRMATION_BUTTONS,
+  UNKNOWN_PRODUCT_BUTTONS,
+  ADD_PRODUCT_CONFIRM_BUTTONS,
   extractPhotoAndGps,
   canUserUpdateVisits,
   getCatalogMenu,

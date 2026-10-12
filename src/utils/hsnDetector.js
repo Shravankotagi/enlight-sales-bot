@@ -240,8 +240,51 @@ function detectHsnCode(productName, dimensions) {
     return '72083840';
   }
 
+  const customMatch = findCachedCustomProduct(productName, dimensions);
+  if (customMatch && customMatch.hsn_code) {
+    return String(customMatch.hsn_code).trim();
+  }
+
   // Unknown product -> return null
   return null;
+}
+
+function findCachedCustomProduct(productName, dimensions = null) {
+  if (!productName) return null;
+  try {
+    const { getCachedCustomProducts } = require('../supabase');
+    const customList = typeof getCachedCustomProducts === 'function' ? getCachedCustomProducts() : [];
+    if (!Array.isArray(customList) || customList.length === 0) return null;
+    const pLower = String(productName || '').trim().toLowerCase();
+    const dLower = String(dimensions || '').trim().toLowerCase();
+    if (!pLower) return null;
+
+    if (dLower) {
+      const exactWithDim = customList.find(
+        (c) =>
+          String(c.product_name || '').trim().toLowerCase() === pLower &&
+          String(c.dimensions || '').trim().toLowerCase() === dLower,
+      );
+      if (exactWithDim) return exactWithDim;
+    }
+
+    const byName = customList.find(
+      (c) => String(c.product_name || '').trim().toLowerCase() === pLower,
+    );
+    if (byName) return byName;
+
+    const combined = `${pLower} ${dLower}`.trim();
+    return (
+      customList.find((c) => {
+        const cName = String(c.product_name || '').trim().toLowerCase();
+        if (!cName || cName.length < 2) return false;
+        const escaped = cName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return new RegExp(`(?:^|\\b)${escaped}(?:\\b|$)`, 'i').test(combined);
+      }) || null
+    );
+  } catch (_e) {
+    return null;
+  }
 }
 
 // Map short forms & full forms to official master product name and resolve HSN
@@ -397,6 +440,17 @@ function normalizeProductToCatalog(productName, dimensions = null) {
     return { isValid: true, catalogName: 'HR Coil', category: 'Flat Steel', hsnCode: code };
   }
 
+  const customMatch = findCachedCustomProduct(productName, dimensions);
+  if (customMatch) {
+    return {
+      isValid: true,
+      catalogName: String(customMatch.product_name || productName).trim(),
+      category: String(customMatch.category || 'Custom').trim() || 'Custom',
+      hsnCode: String(customMatch.hsn_code || '').trim() || null,
+      customDimensions: String(customMatch.dimensions || '').trim() || null,
+    };
+  }
+
   // Generic / Unrecognized (e.g. LW coil, Stainless Steel, MS Sheet, Titanium, Aluminum, etc.)
   return { isValid: false, catalogName: null, category: null, hsnCode: null };
 }
@@ -406,72 +460,10 @@ function isValidCatalogProduct(productName) {
 }
 
 function getUnknownProductClarificationMessage(invalidProductName) {
-  const pLower = String(invalidProductName || '').toLowerCase();
-
-  // Coil suggestions
-  if (pLower.includes('coil')) {
-    return `⚠️ Product "${invalidProductName}" is not present in our product list.\n\n` +
-      `Please confirm which coil product from our catalog you would like to log:\n` +
-      `1️⃣ *HR Coil* (1.60 mm – 10.00+ mm)\n` +
-      `2️⃣ *CR Coil* (0.30 mm – <3.00 mm)\n` +
-      `3️⃣ *HRPO Coil* (1.60 mm – 12.00 mm)\n` +
-      `4️⃣ *GP Coil* (0.30 mm – 3.00 mm)\n` +
-      `5️⃣ *Galvalume Coil* (0.30 mm – 3.00 mm)\n` +
-      `6️⃣ *Chequered Coil* (1.60 mm – 12.00 mm)\n\n` +
-      `Please reply with the confirmed product name (e.g. "HR Coil" or "CR Coil") or option number (1–6).`;
-  }
-
-  // Sheet suggestions
-  if (pLower.includes('ms sheet') || (pLower.includes('sheet') && !pLower.includes('hr') && !pLower.includes('cr') && !pLower.includes('gp') && !pLower.includes('galvalume') && !pLower.includes('chequered') && !pLower.includes('hrpo'))) {
-    return `⚠️ Product "${invalidProductName}" is not present in our product list.\n\n` +
-      `Please confirm which sheet product from our catalog you would like to log:\n` +
-      `1️⃣ *HR Sheet* (1.60 mm – <12.00 mm)\n` +
-      `2️⃣ *CR Sheet* (0.30 mm – <3.00 mm)\n` +
-      `3️⃣ *HRPO Sheet* (1.60 mm – 12.00 mm)\n` +
-      `4️⃣ *GP Sheet* (0.30 mm – 3.00 mm)\n` +
-      `5️⃣ *Galvalume Sheet* (0.30 mm – 3.00 mm)\n` +
-      `6️⃣ *Chequered Sheet* (1.60 mm – 12.00 mm)\n\n` +
-      `Please reply with the confirmed product name (e.g. "HR Sheet" or "CR Sheet") or option number (1–6).`;
-  }
-
-  // Plate suggestions
-  if (pLower.includes('ms plate') || (pLower.includes('plate') && !pLower.includes('hr') && !pLower.includes('chequered'))) {
-    return `⚠️ Product "${invalidProductName}" is not present in our product list.\n\n` +
-      `Please confirm which product from our catalog you would like to log:\n` +
-      `1️⃣ *HR Plate* (14.00 mm and above)\n` +
-      `2️⃣ *HR Sheet* (4.75 mm – <12.00 mm)\n` +
-      `3️⃣ *Chequered Sheet* (1.60 mm – 12.00 mm)\n\n` +
-      `Please reply with the confirmed product name (e.g. "HR Plate") or option number (1–3).`;
-  }
-
-  // Pipes & Tubes
-  if (pLower.includes('pipe') || pLower.includes('tube') || pLower.includes('tubing')) {
-    return `⚠️ Product "${invalidProductName}" is not present in our product list.\n\n` +
-      `Please confirm which pipe/tube product from our catalog you would like to log:\n` +
-      `1️⃣ *MS Round Pipe* (NB 15–400 mm)\n` +
-      `2️⃣ *MS Square Pipe* (Thickness 1–25 mm)\n` +
-      `3️⃣ *MS Rectangular Tube* (Thickness 1–25 mm)\n\n` +
-      `Please reply with the confirmed product name (e.g. "MS Square Pipe") or option number (1–3).`;
-  }
-
-  // Bars & Rods
-  if (pLower.includes('bar') || pLower.includes('rod') || pLower.includes('sariya')) {
-    return `⚠️ Product "${invalidProductName}" is not present in our product list.\n\n` +
-      `Please confirm which bar product from our catalog you would like to log:\n` +
-      `1️⃣ *MS Round Bar* (6 mm – 75 mm)\n` +
-      `2️⃣ *MS Flat Bar* (12×3 mm – 300×25 mm)\n` +
-      `3️⃣ *MS Square Bar* (6 mm – 100 mm)\n` +
-      `4️⃣ *TMT Bar* (8 mm – 40 mm)\n\n` +
-      `Please reply with the confirmed product name (e.g. "TMT Bar") or option number (1–4).`;
-  }
-
-  return `⚠️ Product "${invalidProductName}" is not present in our product list.\n\n` +
-    `Please verify against our standard product catalog:\n` +
-    `• *Flat Steel:* HR Coil, HR Sheet, HR Plate, HRPO Coil, HRPO Sheet, CR Coil, CR Sheet, GP Coil, GP Sheet, Galvalume Coil, Galvalume Sheet, Chequered Coil, Chequered Sheet\n` +
-    `• *Structural Steel:* MS Round Bar, MS Flat Bar, MS Square Bar, TMT Bar, MS Angle, MS Channel, MS Beam\n` +
-    `• *Pipes & Tubes:* MS Round Pipe, MS Square Pipe, MS Rectangular Tube\n` +
-    `• *Value Added:* Slotted Angle, Solar Mounting Structure, Cable Tray (Perforated/Ladder), GI Earthing Strip\n\n` +
-    `Please reply with the confirmed product name from the list.`;
+  const names = Array.isArray(invalidProductName)
+    ? invalidProductName.filter(Boolean).join(', ')
+    : String(invalidProductName || '').trim();
+  return `These products are not in our product list: ${names}. Select a product from the list below or click ‘Add Product’. [View product list](#view-product-list)`;
 }
 
 module.exports = {

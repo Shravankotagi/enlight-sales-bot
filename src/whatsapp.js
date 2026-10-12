@@ -45,8 +45,9 @@ function formatForWhatsApp(text) {
   // 7. Strip any remaining stray asterisks
   out = out.replace(/\*/g, '');
 
-  // 8. Clean citation tags [Source: Document]
+  // 8. Clean citation tags [Source: Document] and internal hash links [text](#...)
   out = out.replace(/\[Source:\s*([^\]]+)\]/g, '\n(Source: $1)');
+  out = out.replace(/\[([^\]]+)\]\(#[^)]*\)/g, '$1');
 
   // 9. Clean up multiple empty lines and trailing whitespace
   out = out.replace(/\n{3,}/g, '\n\n');
