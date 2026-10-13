@@ -2,7 +2,21 @@ const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
 const { ENLIGHT_LOGO_BASE64 } = require('./logoBase64');
-const { calculateLineItem, resolvePlaceOfSupply: resolvePlaceOfSupplyEngine } = require('./pricingEngine');
+const { calculateLineItem, convertLineItemToMt, resolvePlaceOfSupply: resolvePlaceOfSupplyEngine } = require('./pricingEngine');
+
+function quotationQtyMtLabel(item) {
+  const mt = Number(convertLineItemToMt(item));
+  if (!mt || isNaN(mt)) return '- MT';
+  const rounded = Math.round(mt * 1000) / 1000;
+  const formatted =
+    rounded < 0.01
+      ? rounded.toFixed(3)
+      : rounded.toLocaleString('en-IN', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 3,
+        });
+  return `${formatted} MT`;
+}
 
 function getCompanyLogoBuffer() {
   const possiblePaths = [
@@ -317,6 +331,9 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
           hsn_code: item.hsn_code || item.hsn || detectHsnCode(item.sku_text || item.description || '', item.dimensions),
           quantity: qty,
           unit: calc.unit || 'MT',
+          converted_mt: item.converted_mt,
+          weight_mt: item.weight_mt,
+          qty_mt_label: quotationQtyMtLabel(item),
           rate: rate,
           amount: baseAmount,
           cgst_rate: cgstRate,
@@ -399,7 +416,7 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
 
         // Qty
         doc.fillColor('#0F172A').font(fontRegular).fontSize(7.5).text(
-          `${formatIndianCurrency(item.quantity, false)} ${item.unit || 'MT'}`,
+          item.qty_mt_label,
           289,
           rowY + 8,
           { width: 48, align: 'right' }

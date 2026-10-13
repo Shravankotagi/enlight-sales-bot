@@ -17680,6 +17680,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     };
   }
 
+  // Check if this is a timeframe response or query continuation (e.g. 'this week', 'this month', 'today')
+  const isTimeframe = /^(?:today|yesterday|this week|last week|this month|last month|all time|last \d+ days?)$/i.test(text.trim());
+  if (isTimeframe) {
+    return { handled: false };
+  }
+
   const isDomainQuery = isSalesOsDomainQuery(text);
   const isQueryPattern = isOperationalQuery(text);
 
