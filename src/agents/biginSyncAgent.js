@@ -272,7 +272,7 @@ function buildVisitSummary(data, salespersonName) {
     materialRequirement ? `📦 Requirement: ${materialRequirement}` : '',
     followUpAction      ? `📌 Follow-up Action: ${followUpAction}` : '',
     '',
-    `Logged via Enlight Sales Bot - ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`,
+    `Logged via Enlight Sigma Bot - ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`,
   ].filter(l => l !== '').join('\n');
 }
 
@@ -302,7 +302,7 @@ function buildPaymentSummary(data, salespersonName) {
       ? '✅ FULLY SETTLED - No outstanding balance'
       : '',
     '',
-    `Logged via Enlight Sales Bot - ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`,
+    `Logged via Enlight Sigma Bot - ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`,
   ].filter(l => l !== '').join('\n');
 }
 
@@ -348,7 +348,7 @@ function buildCustomerSummary(data, salespersonName) {
     city ? `Location: ${city}` : '',
     gst ? `GST: ${gst}` : '',
     '',
-    'Customer onboarded via Enlight Sales Bot.',
+    'Customer onboarded via Enlight Sigma Bot.',
   ].filter(l => l !== '').join('\n');
 }
 

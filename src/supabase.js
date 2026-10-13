@@ -1260,7 +1260,7 @@ async function updateCustomerProfileRecord(
         (assignedRepName
           ? `💼 Assigned Salesperson: *${assignedRepName}*\n`
           : '') +
-        `\n_Updated live on Enlight Sales OS Dashboard!_ ✅`,
+        `\n_Updated live on Enlight Sigma Dashboard!_ ✅`,
     };
   } catch (err) {
     console.error('updateCustomerProfileRecord error:', err.message);

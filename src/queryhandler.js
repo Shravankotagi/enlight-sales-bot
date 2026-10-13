@@ -640,7 +640,7 @@ async function getSalesThisMonth(scopeOrPhone, text = '') {
       `\n📋 *Pipeline Activity:*\n` +
       `• Deals Created: ${totalCreatedDeals}\n` +
       `• Total Pipeline Value: ${formatINR(totalPipelineValue)}\n\n` +
-      `_Data from Enlight Sales OS_`
+      `_Data from Enlight Sigma_`
     );
   } catch (error) {
     console.error('getSalesThisMonth error:', error);
@@ -1107,7 +1107,7 @@ async function getInquiriesThisMonth(scopeOrPhone, text = '') {
         `• WhatsApp Entry: *${inqWord(channelBreakdown['WhatsApp Entry'])}*\n` +
         `• Dashboard Entry: *${inqWord(channelBreakdown['Dashboard Entry'])}*\n\n` +
         `💰 *Total: ${inqWord(totalCount)}*\n\n` +
-        `_Directly synced with Enlight Sales OS Inquiries_`
+        `_Directly synced with Enlight Sigma Inquiries_`
       );
     }
 
@@ -1180,7 +1180,7 @@ async function getInquiriesThisMonth(scopeOrPhone, text = '') {
       `📱 *Source Channel Breakdown:*\n` +
       `• WhatsApp Entry: *${channelBreakdown['WhatsApp Entry']}*\n` +
       `• Dashboard Entry: *${channelBreakdown['Dashboard Entry']}*\n\n` +
-      `_Directly synced with Enlight Sales OS Inquiries_`
+      `_Directly synced with Enlight Sigma Inquiries_`
     );
   } catch (error) {
     console.error('getInquiriesThisMonth error:', error);
@@ -1528,7 +1528,7 @@ async function getKRAStatus(scopeOrPhone, text = '') {
       `   Total Logged: *${complaints.length}* | Open: *${openComplaints.length}*\n\n` +
       `📍 *Customer Visits Card*\n` +
       `   Total Visits: *${totalVisits}* (Target: 10/wk)\n\n` +
-      `_Full live metrics verified with Enlight Sales OS Dashboard_`
+      `_Full live metrics verified with Enlight Sigma Dashboard_`
     );
   } catch (error) {
     console.error('getKRAStatus error:', error);
@@ -3438,7 +3438,7 @@ async function getFilteredOrders(scopeOrPhone, text = '') {
       return (
         `📋 *No Matching Orders Found*\n\n` +
         `No orders found matching your criteria${headerTag}.\n\n` +
-        `💡 *Tip*: Try broadening your search or check deal status on Enlight Sales OS.`
+        `💡 *Tip*: Try broadening your search or check deal status on Enlight Sigma.`
       );
     }
 
@@ -3554,7 +3554,7 @@ async function routeToHandler(category, text, scope, supabase, extra = {}) {
         process.env.DASHBOARD_URL ||
         process.env.FRONTEND_URL ||
         'https://app.enlightmetals.com';
-      return `🔗 *Enlight Sales OS Portal*\n\n👉 ${dashboardUrl}\n\nEnter your registered WhatsApp number to log in.`;
+      return `🔗 *Enlight Sigma Portal*\n\n👉 ${dashboardUrl}\n\nEnter your registered WhatsApp number to log in.`;
     }
     case 'order_list':
     case 'filtered_orders':
@@ -4182,7 +4182,7 @@ async function handleQuery(text, senderPhone) {
   ) {
     const dashboardUrl =
       process.env.DASHBOARD_URL || process.env.FRONTEND_URL || 'https://app.enlightmetals.com';
-    return `🔗 *Enlight Sales OS Portal*\n\n👉 ${dashboardUrl}\n\nEnter your registered WhatsApp number to log in.`;
+    return `🔗 *Enlight Sigma Portal*\n\n👉 ${dashboardUrl}\n\nEnter your registered WhatsApp number to log in.`;
   }
 
   // 6. Final fallback: route to conversational assistant
