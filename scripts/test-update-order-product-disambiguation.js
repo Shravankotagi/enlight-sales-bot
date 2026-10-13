@@ -35,10 +35,9 @@ async function run() {
   console.log('Bot Response 3:');
   console.log(res3.reply);
   assert(res3.handled, 'Disambiguation prompt should be handled');
-  assert(res3.reply.includes('not present in our product list') || res3.reply.includes('isn\'t in the catalog') || res3.reply.includes('Which one did you mean'), 'Should ask for disambiguation');
-  assert(res3.reply.includes('HR Plate'), 'Should list HR Plate as option');
-  assert(res3.reply.includes('HR Sheet'), 'Should list HR Sheet as option');
-  assert(res3.reply.includes('Chequered Sheet'), 'Should list Chequered Sheet as option');
+  assert(res3.reply.includes('not in our product list'), 'Should ask for disambiguation');
+  assert(res3.reply.includes('Add Product'), 'Should mention Add Product');
+  assert(res3.reply.includes('View product list'), 'Should include View product list link');
 
   console.log('\n--- Step 4: User replies with conversational resolution "same configuration for HR plate" ---');
   let res4 = await handleCatalogFlow('same configuration for HR plate', senderPhone);

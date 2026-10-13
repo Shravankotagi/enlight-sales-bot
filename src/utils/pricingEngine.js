@@ -59,18 +59,11 @@ function isDimensionCompatible(requestedText, skuText) {
  * Normalizes unit string to standard casing and symbol.
  */
 function normalizeUnit(rawUnit) {
-  if (!rawUnit || typeof rawUnit !== 'string') return 'MT';
+  if (!rawUnit || typeof rawUnit !== 'string') return 'KG';
   const u = rawUnit.trim().toUpperCase();
-  if (u === 'KG' || u === 'KGS' || u === 'KILOGRAM' || u === 'KILOGRAMS') return 'KG';
-  if (u === 'MT' || u === 'TON' || u === 'TONS' || u === 'TONNE' || u === 'TONNES' || u === 'METRIC TON' || u === 'METRIC TONS') return 'MT';
-  if (u === 'PCS' || u === 'PIECE' || u === 'PIECES') return 'Pcs';
-  if (u === 'SHEET' || u === 'SHEETS') return 'Sheets';
-  if (u === 'PLATE' || u === 'PLATES') return 'Plates';
-  if (u === 'COIL' || u === 'COILS') return 'Coils';
-  if (u === 'BAR' || u === 'BARS') return 'Bars';
-  if (u === 'NOS' || u === 'NUMBER' || u === 'NUMBERS') return 'Nos';
-  if (u === 'BUNDLE' || u === 'BUNDLES') return 'Bundles';
-  if (u === 'PIPE' || u === 'PIPES' || u === 'TUBE' || u === 'TUBES') return 'Pipes';
+  if (['KG', 'KGS', 'KILOGRAM', 'KILOGRAMS'].includes(u)) return 'KG';
+  if (['MT', 'TON', 'TONS', 'TONNE', 'TONNES', 'METRIC TON', 'METRIC TONS', 'MTS', 'T'].includes(u)) return 'MT';
+  if (['NOS', 'NO', 'NO.', 'NUMBER', 'NUMBERS', 'PCS', 'PC', 'PIECE', 'PIECES', 'SHEET', 'SHEETS', 'PLATE', 'PLATES', 'COIL', 'COILS', 'BUNDLE', 'BUNDLES', 'BAR', 'BARS', 'PIPE', 'PIPES', 'TUBE', 'TUBES'].includes(u)) return 'Nos';
   return rawUnit.trim();
 }
 
@@ -81,13 +74,29 @@ function normalizeUnit(rawUnit) {
 function convertLineItemToMt(item) {
   if (!item) return 0;
   const qty = Number(item.quantity ?? item.quantity_mt ?? item.quantityTons ?? item.qty ?? 0);
-  const rawUnit = (item.unit || 'MT').trim();
+  const rawUnit = (item.unit || 'KG').trim();
   const normUnit = normalizeUnit(rawUnit);
 
   if (!qty || qty <= 0) return 0;
 
+  const sizeText = [
+    item.dimensions,
+    item.spec,
+    item.specification,
+    item.sku_text,
+    item.description,
+    item.product,
+    item.product_name,
+    item.name,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const hasExplicitSize = /\d/.test(sizeText);
+  const canUseStoredWeight = normUnit === 'MT' || normUnit === 'KG' || hasExplicitSize;
+
   // Priority 0: Stored normalized weight from database or Gemini unit converter
   if (
+    canUseStoredWeight &&
     item.weight_mt !== undefined &&
     item.weight_mt !== null &&
     !isNaN(Number(item.weight_mt)) &&
@@ -118,43 +127,138 @@ function convertLineItemToMt(item) {
 
   // 3a. TMT Rebars: (Dia^2 / 162) * Len * Qty / 1000
   if (combinedText.includes('tmt') || combinedText.includes('rebar')) {
-    const diaMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm|dia|diameter)/);
-    if (diaMatch) {
-      const dia = parseFloat(diaMatch[1]);
-      const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
-      const len = lenMatch ? parseFloat(lenMatch[1]) : 12;
-      return (((dia * dia) / 162) * len * qty) / 1000;
-    }
+    const diaMatch =
+      combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm|dia|diameter)\b/) ||
+      combinedText.match(/\btmt\s*[-/]?\s*(\d{1,2})\b/) ||
+      combinedText.match(/\b(\d{1,2})\s*[-/]?\s*tmt\b/);
+    const dia = diaMatch ? parseFloat(diaMatch[1]) : 12; // Standard 12mm TMT fallback
+    const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
+    const len = lenMatch ? parseFloat(lenMatch[1]) : 12; // Standard 12m TMT
+    return Math.round(((((dia * dia) / 162) * len * qty) / 1000) * 1000) / 1000;
   }
 
   // 3b. Round Bars: (pi/4) * (Dia_cm^2) * Len_cm * 7.85 / 1000 * Qty / 1000
-  if (combinedText.includes('round bar') || combinedText.includes('bright bar')) {
-    const diaMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm|dia|diameter)/);
-    if (diaMatch) {
-      const dia = parseFloat(diaMatch[1]);
-      const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
-      const len = lenMatch ? parseFloat(lenMatch[1]) : 6;
-      const diaCm = dia / 10;
-      const lenCm = len * 100;
-      const wtKg = (Math.PI / 4) * (diaCm * diaCm) * lenCm * (7.85 / 1000) * qty;
-      return wtKg / 1000;
-    }
+  if (combinedText.includes('round bar') || combinedText.includes('bright bar') || (combinedText.includes('round') && !combinedText.includes('pipe') && !combinedText.includes('tube'))) {
+    const diaMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm|dia|diameter)\b/);
+    const dia = diaMatch ? parseFloat(diaMatch[1]) : 16; // Standard 16mm Round Bar fallback
+    const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
+    const len = lenMatch ? parseFloat(lenMatch[1]) : 6; // Standard 6m Round Bar
+    const diaCm = dia / 10;
+    const lenCm = len * 100;
+    const wtKg = (Math.PI / 4) * (diaCm * diaCm) * lenCm * (7.85 / 1000) * qty;
+    return Math.round((wtKg / 1000) * 1000) / 1000;
   }
 
-  // 3c. Angles: (A + B - t) * t * 0.00785 * Len * Qty / 1000
+  // 3c. Flat Bars & GI Earthing Strip: Width(mm) * Thickness(mm) * 0.00785 * Length(m) * Qty / 1000
+  if (
+    combinedText.includes('flat bar') ||
+    combinedText.includes('ms flat') ||
+    combinedText.includes('earthing strip') ||
+    (combinedText.includes('flat') && !combinedText.includes('sheet') && !combinedText.includes('plate'))
+  ) {
+    const flatMatch = combinedText.match(
+      /(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*×]\s*(\d+(?:\.\d+)?)/
+    );
+    let widthMm = 50;
+    let thkMm = 6;
+    if (flatMatch) {
+      const v1 = parseFloat(flatMatch[1]);
+      const v2 = parseFloat(flatMatch[2]);
+      widthMm = Math.max(v1, v2);
+      thkMm = Math.min(v1, v2);
+    }
+    const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
+    const lenM = lenMatch ? parseFloat(lenMatch[1]) : 6;
+    const galvanizeFactor = combinedText.includes('earthing') || combinedText.includes('gi') ? 1.05 : 1.0;
+    const wtKg = widthMm * thkMm * 0.00785 * lenM * galvanizeFactor * qty;
+    return Math.round((wtKg / 1000) * 1000) / 1000;
+  }
+
+  // 3d. Square Bars: Side(mm)^2 * 0.00785 * Length(m) * Qty / 1000
+  if (
+    combinedText.includes('square bar') ||
+    (combinedText.includes('square') && combinedText.includes('bar'))
+  ) {
+    const sqMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm)?/);
+    const sideMm = sqMatch ? parseFloat(sqMatch[1]) : 12; // Standard 12mm square bar fallback
+    const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
+    const lenM = lenMatch ? parseFloat(lenMatch[1]) : 6;
+    const wtKg = sideMm * sideMm * 0.00785 * lenM * qty;
+    return Math.round((wtKg / 1000) * 1000) / 1000;
+  }
+
+  // 3e. Angles: (A + B - t) * t * 0.00785 * Len * Qty / 1000
   if (combinedText.includes('angle') || combinedText.includes('isa')) {
-    const angleMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*]\s*(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*]\s*(\d+(?:\.\d+)?)/);
-    if (angleMatch) {
-      const a = parseFloat(angleMatch[1]);
-      const b = parseFloat(angleMatch[2]);
-      const t = parseFloat(angleMatch[3]);
-      const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
-      const len = lenMatch ? parseFloat(lenMatch[1]) : 6;
-      return ((a + b - t) * t * 0.00785 * len * qty) / 1000;
+    const angle3Match = combinedText.match(
+      /(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*×]\s*(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*×]\s*(\d+(?:\.\d+)?)/
+    );
+    const angle2Match = combinedText.match(
+      /(\d+(?:\.\d+)?)\s*(?:mm)?\s*[xX*×]\s*(\d+(?:\.\d+)?)/
+    );
+    let a = 50;
+    let b = 50;
+    let t = 5;
+    if (angle3Match) {
+      a = parseFloat(angle3Match[1]);
+      b = parseFloat(angle3Match[2]);
+      t = parseFloat(angle3Match[3]);
+    } else if (angle2Match) {
+      const v1 = parseFloat(angle2Match[1]);
+      const v2 = parseFloat(angle2Match[2]);
+      a = Math.max(v1, v2);
+      b = a;
+      t = Math.min(v1, v2);
     }
+    const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
+    const len = lenMatch ? parseFloat(lenMatch[1]) : 6;
+    return Math.round((((a + b - t) * t * 0.00785 * len * qty) / 1000) * 1000) / 1000;
   }
 
-  // 3d. MS Pipes & Tubes (Round Pipe, Square Pipe, Rectangular Tube):
+  // 3f. Channels (ISMC):
+  if (combinedText.includes('channel') || combinedText.includes('ismc')) {
+    const sizeMatch =
+      combinedText.match(/(?:ismc|channel)\s*(\d{2,3})/i) ||
+      combinedText.match(/(\d{2,3})\s*(?:mm)?\s*channel/i);
+    const size = sizeMatch ? parseInt(sizeMatch[1], 10) : 100;
+    const CHANNEL_WT = {
+      75: 7.14,
+      100: 9.56,
+      125: 13.1,
+      150: 16.8,
+      175: 19.6,
+      200: 22.3,
+      250: 30.4,
+    };
+    const wtPerMeter = CHANNEL_WT[size] || size * 0.0956;
+    const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
+    const len = lenMatch ? parseFloat(lenMatch[1]) : 6;
+    const wtKg = wtPerMeter * len * qty;
+    return Math.round((wtKg / 1000) * 1000) / 1000;
+  }
+
+  // 3g. Beams (ISMB / Joists):
+  if (combinedText.includes('beam') || combinedText.includes('ismb') || combinedText.includes('joist')) {
+    const sizeMatch =
+      combinedText.match(/(?:ismb|beam)\s*(\d{2,3})/i) ||
+      combinedText.match(/(\d{2,3})\s*(?:mm)?\s*beam/i);
+    const size = sizeMatch ? parseInt(sizeMatch[1], 10) : 150;
+    const BEAM_WT = {
+      100: 11.5,
+      125: 13.3,
+      150: 15.0,
+      175: 19.3,
+      200: 25.4,
+      250: 37.3,
+      300: 44.2,
+    };
+    const wtPerMeter = BEAM_WT[size] || size * 0.1;
+    const lenMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:m|meter|mtr)\b/);
+    const len = lenMatch ? parseFloat(lenMatch[1]) : 6;
+    const wtKg = wtPerMeter * len * qty;
+    return Math.round((wtKg / 1000) * 1000) / 1000;
+  }
+
+  // 3h. MS Pipes & Tubes (Round Pipe, Square Pipe, Rectangular Tube):
   const isPipe =
     combinedText.includes('pipe') ||
     combinedText.includes('tube') ||
@@ -194,19 +298,26 @@ function convertLineItemToMt(item) {
         const wtPerMeter = (side - t) * t * 0.0314;
         const wtKg = wtPerMeter * len * qty;
         return Math.round(((wtKg / 1000) * 1000)) / 1000;
+      } else {
+        // Square/Rect tube fallback: 50x50x2.5mm, 6m
+        const wtPerMeter = (50 - 2.5) * 2.5 * 0.0314;
+        const wtKg = wtPerMeter * len * qty;
+        return Math.round(((wtKg / 1000) * 1000)) / 1000;
       }
     } else {
       // Round pipe: (OD - t) * t * 0.02466 * len * qty / 1000
+      let od = 50;
+      let t = 2.5;
       if (dim2Match) {
-        const od = Math.max(parseFloat(dim2Match[1]), parseFloat(dim2Match[2]));
-        const t = Math.min(parseFloat(dim2Match[1]), parseFloat(dim2Match[2]));
-        const wtKg = (od - t) * t * 0.02466 * len * qty;
-        return Math.round(((wtKg / 1000) * 1000)) / 1000;
+        od = Math.max(parseFloat(dim2Match[1]), parseFloat(dim2Match[2]));
+        t = Math.min(parseFloat(dim2Match[1]), parseFloat(dim2Match[2]));
       }
+      const wtKg = (od - t) * t * 0.02466 * len * qty;
+      return Math.round(((wtKg / 1000) * 1000)) / 1000;
     }
   }
 
-  // 3e. Cable Trays (Perforated & Ladder): Girth(m) * Thk(mm) * 7.85 * Length(m) * Qty / 1000
+  // 3i. Cable Trays (Perforated & Ladder): Girth(m) * Thk(mm) * 7.85 * Length(m) * Qty / 1000
   if (combinedText.includes('cable tray')) {
     let widthMm = 300;
     const wMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm\s*width|mm\s*w\b|\bwidth\s*(\d+)|w\s*(\d+))/);
@@ -230,13 +341,23 @@ function convertLineItemToMt(item) {
     return Math.round(((wtPerPieceKg * qty) / 1000) * 1000) / 1000;
   }
 
-  // 3f. Slotted Angle:
+  // 3j. Slotted Angle:
   if (combinedText.includes('slotted angle')) {
     const wtPerPieceKg = 3.5; // standard 40x40x2mm 2.5m piece
     return Math.round(((wtPerPieceKg * qty) / 1000) * 1000) / 1000;
   }
 
-  // 3g. Sheets / Plates / Coils: Length(m) * Width(m) * Thickness(mm) * 7.85 * Qty / 1000
+  // 3k. Solar Mounting Structure / Purlins:
+  if (
+    combinedText.includes('solar') ||
+    combinedText.includes('purlin') ||
+    combinedText.includes('mounting structure')
+  ) {
+    const wtPerPieceKg = 17.5; // Standard 3.2m C/Z purlin piece
+    return Math.round(((wtPerPieceKg * qty) / 1000) * 1000) / 1000;
+  }
+
+  // 3l. Sheets / Plates / Coils: Length(m) * Width(m) * Thickness(mm) * 7.85 * Qty / 1000
   let thickness = null;
   const thkMatch = combinedText.match(/(\d+(?:\.\d+)?)\s*(?:mm\s*thk|mm\s*thickness|\bthk\b)/);
   if (thkMatch) {
@@ -280,21 +401,23 @@ function convertLineItemToMt(item) {
     combinedText.includes('sheet') ||
     combinedText.includes('plate') ||
     combinedText.includes('chequered') ||
+    combinedText.includes('checker') ||
     combinedText.includes('cr ') ||
     combinedText.includes('hr ') ||
     combinedText.includes('hrpo') ||
+    combinedText.includes('galvalume') ||
+    combinedText.includes('gp ') ||
+    combinedText.includes('gi ') ||
     normUnit === 'Sheets' ||
     normUnit === 'Plates';
 
-  if (thickness && widthM && lengthM && isSheetOrPlate) {
-    const wtKgPerPc = lengthM * widthM * thickness * 7.85;
-    return (wtKgPerPc * qty) / 1000;
-  }
-
-  if (thickness && isSheetOrPlate) {
-    // Default sheet size: 1.25m x 2.5m (1250 x 2500 mm)
-    const wtKgPerPc = 2.5 * 1.25 * thickness * 7.85;
-    return (wtKgPerPc * qty) / 1000;
+  if (isSheetOrPlate && thickness && widthM && lengthM) {
+    const isChequered =
+      combinedText.includes('chequered') || combinedText.includes('checker');
+    const wtKgPerPc = isChequered
+      ? lengthM * widthM * (thickness * 7.85 + 2.1)
+      : lengthM * widthM * thickness * 7.85;
+    return Math.round(((wtKgPerPc * qty) / 1000) * 1000) / 1000;
   }
 
   // If the unit is discrete and unconvertible, do NOT return qty as MT
@@ -312,48 +435,332 @@ function convertToMt(quantity, rawUnit) {
   return convertLineItemToMt({ quantity, unit: rawUnit });
 }
 
+const SELLER_GST_CONFIG = {
+  companyName: 'Enlight Metals Private Limited',
+  gstin: '27AAICE5263E1ZN',
+  stateName: 'Maharashtra',
+  stateCode: '27',
+  placeOfSupplyLabel: 'Maharashtra (27)',
+  gstRate: 18,
+};
+
+const INDIAN_GST_STATES = [
+  { code: '01', name: 'Jammu and Kashmir', keywords: ['jammu and kashmir', 'jammu & kashmir', 'j&k', 'jammu', 'srinagar', 'kathua', 'samba', 'bari brahmana', 'udhampur', 'anantnag', 'baramulla', 'pulwama'] },
+  { code: '02', name: 'Himachal Pradesh', keywords: ['himachal pradesh', 'himachal', 'baddi', 'parwanoo', 'nalagarh', 'barotiwala', 'kala amb', 'paonta sahib', 'shimla', 'solan', 'una', 'mandi', 'kullu', 'dharamshala', 'kangra'] },
+  { code: '03', name: 'Punjab', keywords: ['punjab', 'ludhiana', 'amritsar', 'jalandhar', 'patiala', 'bathinda', 'mohali', 'sas nagar', 'mandi gobindgarh', 'gobindgarh', 'khanna', 'phagwara', 'hoshiarpur', 'batala', 'pathankot', 'moga', 'rajpura', 'zirakpur', 'dera bassi', 'kapurthala', 'sangrur', 'barnala', 'firozpur', 'ferozepur'] },
+  { code: '04', name: 'Chandigarh', keywords: ['chandigarh'] },
+  { code: '05', name: 'Uttarakhand', keywords: ['uttarakhand', 'uttaranchal', 'dehradun', 'haridwar', 'roorkee', 'rudrapur', 'pantnagar', 'haldwani', 'kashipur', 'sitarganj', 'kichha', 'kotdwar', 'rishikesh', 'selaqui', 'bhagwanpur', 'nainital'] },
+  { code: '06', name: 'Haryana', keywords: ['haryana', 'gurugram', 'gurgaon', 'faridabad', 'manesar', 'panipat', 'sonipat', 'rohtak', 'hisar', 'karnal', 'ambala', 'yamunanagar', 'bhiwani', 'rewari', 'bawal', 'dharuhera', 'bahadurgarh', 'palwal', 'ballabhgarh', 'kundli', 'jhajjar', 'jind', 'kaithal', 'kurukshetra', 'sirsa', 'panchkula'] },
+  { code: '07', name: 'Delhi', keywords: ['new delhi', 'delhi', 'ncr delhi', 'okhla', 'bawana', 'naraina', 'mayapuri', 'wazirpur', 'patparganj', 'narela', 'mundka', 'dwarka', 'rohini'] },
+  { code: '08', name: 'Rajasthan', keywords: ['rajasthan', 'jaipur', 'jodhpur', 'udaipur', 'kota', 'bhiwadi', 'neemrana', 'alwar', 'ajmer', 'bikaner', 'bhilwara', 'sikar', 'pali', 'sri ganganagar', 'bharatpur', 'chittorgarh', 'kishangarh', 'beawar', 'hanumangarh', 'jhunjhunu', 'churu', 'nagaur', 'barmer', 'jaisalmer', 'khushkhera', 'tapukara', 'sitapura'] },
+  { code: '09', name: 'Uttar Pradesh', keywords: ['uttar pradesh', 'noida', 'greater noida', 'ghaziabad', 'kanpur', 'lucknow', 'agra', 'varanasi', 'meerut', 'prayagraj', 'allahabad', 'bareilly', 'aligarh', 'moradabad', 'saharanpur', 'gorakhpur', 'firozabad', 'jhansi', 'muzaffarnagar', 'mathura', 'dadri', 'sikandrabad', 'bulandshahr', 'hapur', 'modinagar', 'sahibabad', 'unnao', 'renukoot', 'sonbhadra', 'mirzapur'] },
+  { code: '10', name: 'Bihar', keywords: ['bihar', 'patna', 'gaya', 'bhagalpur', 'muzaffarpur', 'purnia', 'darbhanga', 'bihar sharif', 'arrah', 'begusarai', 'katihar', 'munger', 'chhapra', 'danapur', 'bettiah', 'saharsa', 'hajipur', 'sasaram', 'siwan', 'motihari', 'bihta', 'barauni'] },
+  { code: '11', name: 'Sikkim', keywords: ['sikkim', 'gangtok', 'rangpo', 'jorethang', 'namchi'] },
+  { code: '12', name: 'Arunachal Pradesh', keywords: ['arunachal pradesh', 'arunachal', 'itanagar', 'naharlagun', 'tawang', 'pasighat'] },
+  { code: '13', name: 'Nagaland', keywords: ['nagaland', 'dimapur', 'kohima', 'mokokchung'] },
+  { code: '14', name: 'Manipur', keywords: ['manipur', 'imphal', 'thoubal', 'churachandpur'] },
+  { code: '15', name: 'Mizoram', keywords: ['mizoram', 'aizawl', 'lunglei'] },
+  { code: '16', name: 'Tripura', keywords: ['tripura', 'agartala', 'udaipur tripura', 'dharmanagar'] },
+  { code: '17', name: 'Meghalaya', keywords: ['meghalaya', 'shillong', 'byrnihat', 'tura', 'jowai'] },
+  { code: '18', name: 'Assam', keywords: ['assam', 'guwahati', 'dibrugarh', 'silchar', 'jorhat', 'nagaon', 'tinsukia', 'tezpur', 'bongaigaon', 'duliajan', 'digboi', 'sibsagar', 'sivasagar', 'golaghat', 'dispur', 'amingaon'] },
+  { code: '19', name: 'West Bengal', keywords: ['west bengal', 'bengal', 'kolkata', 'calcutta', 'howrah', 'durgapur', 'asansol', 'siliguri', 'haldia', 'kharagpur', 'bardhaman', 'burdwan', 'malda', 'dankuni', 'hooghly', 'serampore', 'barrackpore', 'barasat', 'kalyani', 'bankura', 'purulia', 'medinipur', 'midnapore', 'jalpaiguri', 'uluberia', 'salt lake', 'rajarhat'] },
+  { code: '20', name: 'Jharkhand', keywords: ['jharkhand', 'jamshedpur', 'ranchi', 'dhanbad', 'bokaro', 'adityapur', 'hazaribagh', 'deoghar', 'giridih', 'ramgarh', 'medininagar', 'daltonganj', 'chaibasa', 'gamharia', 'seraikela', 'dumka', 'koderma', 'patratu', 'sindri', 'jharia'] },
+  { code: '21', name: 'Odisha', keywords: ['odisha', 'orissa', 'bhubaneswar', 'cuttack', 'rourkela', 'sambalpur', 'berhampur', 'brahmapur', 'angul', 'jharsuguda', 'balasore', 'baleswar', 'bhadrak', 'baripada', 'puri', 'jajpur', 'kalinganagar', 'paradeep', 'paradip', 'talcher', 'barbil', 'joda', 'keonjhar', 'kendujhar', 'sundargarh', 'rajgangpur', 'bargarh', 'rayagada', 'dhenkanal'] },
+  { code: '22', name: 'Chhattisgarh', keywords: ['chhattisgarh', 'chhatisgarh', 'raipur', 'bhilai', 'durg', 'bilaspur', 'korba', 'raigarh', 'jagdalpur', 'ambikapur', 'rajnandgaon', 'dhamtari', 'mahasamund', 'champa', 'janjgir', 'bhatapara', 'tilda', 'siltara', 'urla', 'kumhari'] },
+  { code: '23', name: 'Madhya Pradesh', keywords: ['madhya pradesh', 'indore', 'bhopal', 'pithampur', 'jabalpur', 'gwalior', 'ujjain', 'dewas', 'sagar', 'satna', 'ratlam', 'rewa', 'katni', 'singrauli', 'burhanpur', 'khandwa', 'bhind', 'chhindwara', 'guna', 'shivpuri', 'vidisha', 'chhatarpur', 'damoh', 'mandsaur', 'khargone', 'neemuch', 'sehore', 'mandideep', 'malanpur', 'banmore', 'hoshangabad', 'narmadapuram', 'itarsi', 'betul', 'morena', 'dhar'] },
+  { code: '24', name: 'Gujarat', keywords: ['gujarat', 'gujrat', 'ahmedabad', 'surat', 'vadodara', 'baroda', 'rajkot', 'vapi', 'ankleshwar', 'bharuch', 'valsad', 'gandhinagar', 'sanand', 'halol', 'kalol', 'mehsana', 'morbi', 'jamnagar', 'bhavnagar', 'junagadh', 'gandhidham', 'mundra', 'kutch', 'bhuj', 'anand', 'nadiad', 'navsari', 'dahej', 'hazira', 'changodar', 'vatva', 'naroda', 'odhav', 'kathwada', 'chatral', 'kadi', 'himatnagar', 'palanpur', 'patan', 'surendranagar', 'amreli', 'porbandar', 'godhra', 'dahod'] },
+  { code: '26', name: 'Dadra and Nagar Haveli and Daman and Diu', keywords: ['dadra and nagar haveli', 'daman and diu', 'silvassa', 'daman', 'diu', 'dadra'] },
+  { code: '27', name: 'Maharashtra', keywords: ['maharashtra', 'pune', 'mumbai', 'navi mumbai', 'thane', 'chakan', 'bhosari', 'pimpri', 'chinchwad', 'talawade', 'ranjangaon', 'shirwal', 'satara', 'kolhapur', 'sangli', 'solapur', 'nashik', 'nagpur', 'aurangabad', 'chhatrapati sambhajinagar', 'sambhajinagar', 'jalna', 'ahmednagar', 'ahilyanagar', 'tarapur', 'palghar', 'vasai', 'virar', 'bhiwandi', 'kalyan', 'dombivli', 'ambarnath', 'badlapur', 'taloja', 'panvel', 'raigad', 'roha', 'mahad', 'ratnagiri', 'sindhudurg', 'wardha', 'amravati', 'akola', 'jalgaon', 'dhule', 'nandurbar', 'latur', 'nanded', 'osmanabad', 'dharashiv', 'beed', 'parbhani', 'hingoli', 'buldhana', 'washim', 'yavatmal', 'chandrapur', 'gadchiroli', 'gondia', 'bhandara', 'vasuli', 'khed', 'kurkumbh', 'jejuri', 'baramati', 'supa', 'waluj', 'shendra', 'chikalthana', 'butibori', 'hingna', 'kupwad', 'miraj', 'ichalkaranji', 'kagal', 'shiroli', 'ambad', 'satpur', 'sinnar', 'iglaspur', 'murbad', 'shahapur', 'wada', 'boisar', 'khopoli', 'patalganga', 'mahape', 'rabale', 'ttc industrial', 'turbhe', 'pawane', 'shirvane', 'nerul', 'vashi', 'belapur', 'kharghar', 'kalamboli', 'taloja midc', 'alibuag', 'pen'] },
+  { code: '29', name: 'Karnataka', keywords: ['karnataka', 'bengaluru', 'bangalore', 'belagavi', 'belgaum', 'hubballi', 'hubli', 'dharwad', 'mysuru', 'mysore', 'mangaluru', 'mangalore', 'tumakuru', 'tumkur', 'peenya', 'bommasandra', 'jigani', 'bidadi', 'hoskote', 'dobbaspet', 'nelamangala', 'davanagere', 'ballari', 'bellary', 'hospet', 'hosapete', 'shivamogga', 'shimoga', 'kalaburagi', 'gulbarga', 'bidar', 'raichur', 'vijayapura', 'bijapur', 'bagalkot', 'gadag', 'haveri', 'udupi', 'chikkamagaluru', 'chikmagalur', 'hassan', 'mandya', 'kolar', 'chikkaballapur', 'ramanagara', 'chitradurga', 'koppal', 'yadgir'] },
+  { code: '30', name: 'Goa', keywords: ['goa', 'panaji', 'panjim', 'margao', 'madgaon', 'vasco', 'mapusa', 'ponda', 'verna', 'kundaim', 'cuncolim', 'bicholim', 'mormugao'] },
+  { code: '31', name: 'Lakshadweep', keywords: ['lakshadweep', 'kavaratti'] },
+  { code: '32', name: 'Kerala', keywords: ['kerala', 'kochi', 'cochin', 'ernakulam', 'thiruvananthapuram', 'trivandrum', 'kozhikode', 'calicut', 'thrissur', 'trichur', 'kollam', 'palakkad', 'alappuzha', 'alleppey', 'kannur', 'kottayam', 'malappuram', 'kasaragod', 'pathanamthitta', 'idukki', 'wayanad', 'kanjikode', 'kalamassery', 'aluva', 'angamaly', 'perumbavoor'] },
+  { code: '33', name: 'Tamil Nadu', keywords: ['tamil nadu', 'tamilnadu', 'chennai', 'madras', 'coimbatore', 'hosur', 'madurai', 'tiruchirappalli', 'trichy', 'salem', 'tiruppur', 'erode', 'vellore', 'thoothukudi', 'tuticorin', 'tirunelveli', 'ambattur', 'sriperumbudur', 'oragadam', 'chengalpattu', 'kanchipuram', 'thiruvallur', 'gumidipoondi', 'maraimalai', 'ranipet', 'ambur', 'krishnagiri', 'dharmapuri', 'namakkal', 'karur', 'dindigul', 'thanjavur', 'pudukkottai', 'sivakasi', 'virudhunagar', 'nagercoil', 'kanyakumari', 'cuddalore'] },
+  { code: '34', name: 'Puducherry', keywords: ['puducherry', 'pondicherry', 'karaikal', 'mahe', 'yanam'] },
+  { code: '35', name: 'Andaman and Nicobar Islands', keywords: ['andaman', 'nicobar', 'port blair'] },
+  { code: '36', name: 'Telangana', keywords: ['telangana', 'hyderabad', 'secunderabad', 'cyberabad', 'medchal', 'patancheru', 'jeedimetla', 'balanagar', 'cherlapally', 'nacharam', 'uppal', 'shamshabad', 'kukatpally', 'sangareddy', 'zaheerabad', 'warangal', 'kazipet', 'karimnagar', 'nizamabad', 'khammam', 'ramagundam', 'mahbubnagar', 'nalgonda', 'suryapet', 'adilabad', 'mancherial', 'siddipet', 'medak', 'kothagudem'] },
+  { code: '37', name: 'Andhra Pradesh', keywords: ['andhra pradesh', 'andhra', 'visakhapatnam', 'vizag', 'vijayawada', 'guntur', 'tirupati', 'nellore', 'sri city', 'sricity', 'kakinada', 'rajahmundry', 'eluru', 'ongole', 'kurnool', 'anantapur', 'kadapa', 'cuddapah', 'chittoor', 'vizianagaram', 'srikakulam', 'machilipatnam', 'bhimavaram', 'hindupur', 'nandyal', 'proddatur'] },
+  { code: '38', name: 'Ladakh', keywords: ['ladakh', 'leh', 'kargil'] },
+];
+
+const GST_STATE_BY_CODE = (() => {
+  const map = {};
+  for (const s of INDIAN_GST_STATES) {
+    map[s.code] = {
+      stateName: s.name,
+      stateCode: s.code,
+      code: s.code,
+      name: s.name,
+      label: `${s.name} (${s.code})`,
+    };
+  }
+  map['25'] = map['26'];
+  map['28'] = map['37'];
+  return map;
+})();
+
+function resolveStateFromGstin(gstin) {
+  if (!gstin || typeof gstin !== 'string') return null;
+  const cleaned = gstin.trim().toUpperCase().replace(/\s+/g, '');
+  const codeMatch = cleaned.match(/^(\d{2})/);
+  if (!codeMatch) return null;
+  const code = codeMatch[1];
+  return GST_STATE_BY_CODE[code] || null;
+}
+
+function resolveStateFromAddress(address) {
+  if (!address || typeof address !== 'string') return null;
+  const trimmed = address.trim();
+  if (!trimmed) return null;
+
+  const explicitCodeMatch = trimmed.match(/\((\d{2})\)/) || trimmed.match(/^(\d{2})$/);
+  if (explicitCodeMatch && GST_STATE_BY_CODE[explicitCodeMatch[1]]) {
+    return GST_STATE_BY_CODE[explicitCodeMatch[1]];
+  }
+
+  const gstinMatch = trimmed.toUpperCase().match(/\b(\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z])\b/);
+  if (gstinMatch) {
+    const fromGstin = resolveStateFromGstin(gstinMatch[1]);
+    if (fromGstin) return fromGstin;
+  }
+
+  const lower = trimmed.toLowerCase();
+
+  for (const s of INDIAN_GST_STATES) {
+    const stateLower = s.name.toLowerCase();
+    const stateRegex = new RegExp(`\\b${stateLower.replace(/\s+/g, '\\s+')}\\b`, 'i');
+    if (stateRegex.test(lower)) {
+      return GST_STATE_BY_CODE[s.code];
+    }
+  }
+
+  for (const s of INDIAN_GST_STATES) {
+    for (const kw of s.keywords) {
+      const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+      const kwRegex = new RegExp(`\\b${escaped}\\b`, 'i');
+      if (kwRegex.test(lower)) {
+        return GST_STATE_BY_CODE[s.code];
+      }
+    }
+  }
+
+  const pinMatch = lower.match(/\b([1-8]\d{5})\b/);
+  if (pinMatch) {
+    const pin = pinMatch[1];
+    const p2 = Number(pin.slice(0, 2));
+    const p3 = Number(pin.slice(0, 3));
+    if (p2 === 11) return GST_STATE_BY_CODE['07'];
+    if (p2 === 12 || p2 === 13) return GST_STATE_BY_CODE['06'];
+    if (p3 === 160) return GST_STATE_BY_CODE['04'];
+    if (p2 >= 14 && p2 <= 16) return GST_STATE_BY_CODE['03'];
+    if (p2 === 17) return GST_STATE_BY_CODE['02'];
+    if (p3 === 194) return GST_STATE_BY_CODE['38'];
+    if (p2 === 18 || p2 === 19) return GST_STATE_BY_CODE['01'];
+    if ((p3 >= 246 && p3 <= 249) || (p3 >= 262 && p3 <= 263)) return GST_STATE_BY_CODE['05'];
+    if (p2 >= 20 && p2 <= 28) return GST_STATE_BY_CODE['09'];
+    if (p2 >= 30 && p2 <= 34) return GST_STATE_BY_CODE['08'];
+    if (p3 === 396) return GST_STATE_BY_CODE['26'];
+    if (p2 >= 36 && p2 <= 39) return GST_STATE_BY_CODE['24'];
+    if (p3 === 403) return GST_STATE_BY_CODE['30'];
+    if (p2 >= 40 && p2 <= 44) return GST_STATE_BY_CODE['27'];
+    if (p2 >= 45 && p2 <= 48) return GST_STATE_BY_CODE['23'];
+    if (p2 === 49) return GST_STATE_BY_CODE['22'];
+    if (p2 === 50) return GST_STATE_BY_CODE['36'];
+    if (p2 >= 51 && p2 <= 53) return GST_STATE_BY_CODE['37'];
+    if (p2 >= 56 && p2 <= 59) return GST_STATE_BY_CODE['29'];
+    if (p3 === 605) return GST_STATE_BY_CODE['34'];
+    if (p2 >= 60 && p2 <= 64) return GST_STATE_BY_CODE['33'];
+    if (p3 === 682) return GST_STATE_BY_CODE['31'];
+    if (p2 >= 67 && p2 <= 69) return GST_STATE_BY_CODE['32'];
+    if (p3 === 744) return GST_STATE_BY_CODE['35'];
+    if (p3 === 737) return GST_STATE_BY_CODE['11'];
+    if (p2 >= 70 && p2 <= 74) return GST_STATE_BY_CODE['19'];
+    if (p2 >= 75 && p2 <= 77) return GST_STATE_BY_CODE['21'];
+    if (p3 === 790 || p3 === 791 || p3 === 792) return GST_STATE_BY_CODE['12'];
+    if (p3 === 793 || p3 === 794) return GST_STATE_BY_CODE['17'];
+    if (p3 === 795) return GST_STATE_BY_CODE['14'];
+    if (p3 === 796) return GST_STATE_BY_CODE['15'];
+    if (p3 === 797 || p3 === 798) return GST_STATE_BY_CODE['13'];
+    if (p3 === 799) return GST_STATE_BY_CODE['16'];
+    if (p2 === 78) return GST_STATE_BY_CODE['18'];
+    if (p3 >= 814 && p3 <= 835) return GST_STATE_BY_CODE['20'];
+    if (p2 >= 80 && p2 <= 85) return GST_STATE_BY_CODE['10'];
+  }
+
+  return null;
+}
+
+function resolveCustomerState(input) {
+  if (!input) return null;
+  if (typeof input === 'string') {
+    return resolveStateFromGstin(input) || resolveStateFromAddress(input);
+  }
+  const explicitState = input.customerState || input.state || input.placeOfSupply;
+  if (explicitState) {
+    const fromExplicit =
+      resolveStateFromAddress(explicitState) ||
+      resolveStateFromGstin(explicitState);
+    if (fromExplicit) return fromExplicit;
+  }
+  const gstinVal = input.customerGstin || input.gstin;
+  if (gstinVal) {
+    const fromGstin = resolveStateFromGstin(gstinVal);
+    if (fromGstin) return fromGstin;
+  }
+  const addrVal = input.customerAddress || input.address;
+  if (addrVal) {
+    const fromAddr = resolveStateFromAddress(addrVal);
+    if (fromAddr) return fromAddr;
+  }
+  return null;
+}
+
+function resolvePlaceOfSupply(input) {
+  let resolved = null;
+
+  if (typeof input === 'string') {
+    resolved = resolveStateFromAddress(input) || resolveStateFromGstin(input);
+  } else if (input && typeof input === 'object') {
+    const deliveryVal = input.deliveryAddress || input.deliveryLocation;
+    if (deliveryVal) {
+      resolved = resolveStateFromAddress(deliveryVal);
+    }
+    if (!resolved) {
+      resolved = resolveCustomerState({
+        customerState: input.customerState || input.state || input.placeOfSupply,
+        customerGstin: input.customerGstin || input.gstin,
+        customerAddress: input.customerAddress || input.address,
+      });
+    }
+  }
+
+  const finalState = resolved || {
+    stateName: SELLER_GST_CONFIG.stateName,
+    stateCode: SELLER_GST_CONFIG.stateCode,
+    code: SELLER_GST_CONFIG.stateCode,
+    name: SELLER_GST_CONFIG.stateName,
+    label: SELLER_GST_CONFIG.placeOfSupplyLabel,
+  };
+
+  const isInterState = finalState.stateCode !== SELLER_GST_CONFIG.stateCode;
+  return {
+    ...finalState,
+    isInterState,
+    taxType: isInterState ? 'INTER_STATE' : 'INTRA_STATE',
+  };
+}
+
 /**
  * Calculates line item financial values.
  *
  * @param {object} item - Line item with quantity, rate, etc.
+ * @param {object} [options] - Optional { isInterState }
  * @returns {object} Normalized line item with exact calculated amount
  */
-function calculateLineItem(item) {
-  if (!item) return { quantity: 0, rate: 0, amount: 0, unit: 'MT' };
-  const quantity = Number(item.quantity || item.quantity_mt || item.qty || 0) || 0;
-  let rawRate = Number(item.rate || item.rate_per_mt || item.price_per_mt || item.unitPrice || 0) || 0;
+function calculateLineItem(item, options) {
+  if (!item) return { quantity: 0, rate: 0, amount: 0, unit: 'MT', cgst_rate: 9, cgst_percent: 9, cgst_amount: 0, sgst_rate: 9, sgst_percent: 9, sgst_amount: 0, igst_rate: 0, igst_percent: 0, igst_amount: 0, is_inter_state: false, total_gst: 0, final_amount: 0, line_total: 0 };
+  const opts = options && typeof options === 'object' ? options : undefined;
+  const rawQuantity = Number(item.quantity ?? item.quantity_mt ?? item.qty ?? 0) || 0;
+  let rawRate = Number(item.rate ?? item.rate_per_mt ?? item.price_per_mt ?? item.unitPrice ?? 0) || 0;
   const unit = normalizeUnit(item.unit);
-
-  // If unit is MT/Ton and rate <= 250 (e.g. 52 or 54.5 representing Rs/Kg in Indian steel market), normalize to Rs/MT
-  let rate = rawRate;
-  if (['MT', 'TON', 'TONS'].includes(unit.toUpperCase()) && rawRate > 0 && rawRate <= 250) {
-    rate = rawRate * 1000;
-  }
 
   const conv = convertLineItemToMt(item);
   const effectiveMt = typeof conv === 'number' ? conv : (conv && conv.mt !== null && !isNaN(conv.mt) ? conv.mt : 0);
-  let amount = 0;
 
+  let quantity = rawQuantity;
+  let normalizedUnit = unit;
+  let rate = rawRate;
+
+  // 1. Convert to MT if convertible (KG or Nos with dimensions)
+  if (effectiveMt > 0) {
+    quantity = effectiveMt;
+    normalizedUnit = 'MT';
+  }
+
+  // 2. Base Amount calculation
+  let amount = 0;
   if (item.isManualAmount && item.amount !== undefined && Number(item.amount) > 0) {
     amount = Number(item.amount);
-  } else if (quantity > 0 && rate > 0) {
-    if (effectiveMt > 0) {
-      amount = Math.round(effectiveMt * rate * 100) / 100;
-    } else if (unit === 'KG') {
-      amount = Math.round((quantity / 1000) * rate * 100) / 100;
-    } else {
-      amount = Math.round(quantity * rate * 100) / 100;
-    }
   } else if (item.amount && Number(item.amount) > 0) {
     amount = Number(item.amount);
+  } else if (quantity > 0 && rate > 0) {
+    amount = Math.round(quantity * rate * 100) / 100;
   }
+
+  // If rate was missing/0, but amount and quantity exist, infer rate
+  if (rate === 0 && quantity > 0 && amount > 0) {
+    rate = Math.round((amount / quantity) * 100) / 100;
+  }
+
+  const isInterState =
+    opts?.isInterState !== undefined
+      ? Boolean(opts.isInterState)
+      : Boolean(item.is_inter_state) ||
+        ((Number(item.igst_rate) > 0 || Number(item.igst_amount) > 0) &&
+          !Number(item.cgst_amount) &&
+          !Number(item.sgst_amount));
+
+  if (isInterState) {
+    const igst_rate = Number(item.igst_rate !== undefined && Number(item.igst_rate) > 0 ? item.igst_rate : SELLER_GST_CONFIG.gstRate);
+    const igst_amount = item.igst_amount !== undefined && Number(item.igst_amount) > 0 ? Number(item.igst_amount) : Math.round(amount * (igst_rate / 100) * 100) / 100;
+    const total_gst = item.total_gst !== undefined && Number(item.total_gst) > 0 ? Number(item.total_gst) : igst_amount;
+    const final_amount = item.final_amount !== undefined && Number(item.final_amount) > 0
+      ? Number(item.final_amount)
+      : Math.round((amount + total_gst) * 100) / 100;
+
+    return {
+      ...item,
+      quantity,
+      unit: normalizedUnit,
+      rate,
+      amount,
+      cgst_rate: 0,
+      cgst_percent: 0,
+      cgst_amount: 0,
+      sgst_rate: 0,
+      sgst_percent: 0,
+      sgst_amount: 0,
+      igst_rate,
+      igst_percent: igst_rate,
+      igst_amount,
+      is_inter_state: true,
+      total_gst,
+      final_amount,
+      line_total: final_amount,
+      ...(unit !== normalizedUnit ? { original_quantity: rawQuantity, original_unit: unit } : {}),
+    };
+  }
+
+  // 3. Forward 18% GST (CGST 9% + SGST 9%)
+  const cgst_rate = Number(item.cgst_rate !== undefined && Number(item.cgst_rate) > 0 ? item.cgst_rate : 9);
+  const sgst_rate = Number(item.sgst_rate !== undefined && Number(item.sgst_rate) > 0 ? item.sgst_rate : 9);
+  const cgst_amount = item.cgst_amount !== undefined && Number(item.cgst_amount) > 0 ? Number(item.cgst_amount) : Math.round(amount * (cgst_rate / 100) * 100) / 100;
+  const sgst_amount = item.sgst_amount !== undefined && Number(item.sgst_amount) > 0 ? Number(item.sgst_amount) : Math.round(amount * (sgst_rate / 100) * 100) / 100;
+  const total_gst = item.total_gst !== undefined && Number(item.total_gst) > 0 ? Number(item.total_gst) : Math.round((cgst_amount + sgst_amount) * 100) / 100;
+  const final_amount = item.final_amount !== undefined && Number(item.final_amount) > 0
+    ? Number(item.final_amount)
+    : Math.round((amount + total_gst) * 100) / 100;
 
   return {
     ...item,
     quantity,
+    unit: normalizedUnit,
     rate,
     amount,
-    unit,
+    cgst_rate,
+    cgst_percent: cgst_rate,
+    cgst_amount,
+    sgst_rate,
+    sgst_percent: sgst_rate,
+    sgst_amount,
+    igst_rate: 0,
+    igst_percent: 0,
+    igst_amount: 0,
+    is_inter_state: false,
+    total_gst,
+    final_amount,
+    line_total: final_amount,
+    ...(unit !== normalizedUnit ? { original_quantity: rawQuantity, original_unit: unit } : {}),
   };
 }
 
@@ -361,11 +768,12 @@ function calculateLineItem(item) {
  * Calculates array of line items.
  *
  * @param {Array} lineItems - Array of raw line items
+ * @param {object} [options] - Optional { isInterState }
  * @returns {Array} Array of normalized line items with calculated amounts
  */
-function calculateLineItems(lineItems) {
+function calculateLineItems(lineItems, options) {
   if (!Array.isArray(lineItems)) return [];
-  return lineItems.map(calculateLineItem);
+  return lineItems.map((item) => calculateLineItem(item, options));
 }
 
 /**
@@ -628,11 +1036,65 @@ function formatIndianCurrency(num, includeDecimals = false) {
  * Rounding adjustment
  * Total = Sub Total + CGST + SGST + Rounding
  */
-function calculateQuotationBreakdown(baseAmount) {
+function calculateQuotationBreakdown(baseAmount, lineItems, options) {
   const subtotal = Math.max(0, Number(baseAmount) || 0);
-  const CGST = Math.round(subtotal * 0.09 * 100) / 100;
-  const SGST = Math.round(subtotal * 0.09 * 100) / 100;
-  const GST = Math.round(subtotal * 0.18 * 100) / 100;
+  const opts = options && typeof options === 'object' ? options : undefined;
+  const isInterState =
+    opts?.isInterState !== undefined
+      ? Boolean(opts.isInterState)
+      : Array.isArray(lineItems) &&
+        lineItems.length > 0 &&
+        lineItems.some((i) => Number(i?.igst_amount) > 0 || Number(i?.igst_rate) > 0) &&
+        lineItems.every((i) => !Number(i?.cgst_amount) && !Number(i?.sgst_amount));
+
+  let CGST = 0;
+  let SGST = 0;
+  let IGST = 0;
+
+  if (isInterState) {
+    IGST = Math.round(subtotal * 0.18 * 100) / 100;
+    if (Array.isArray(lineItems) && lineItems.length > 0) {
+      const sumIgst = lineItems.reduce((acc, item) => {
+        const amt = Number(item.amount) || 0;
+        const itemIgst =
+          item.igst_amount !== undefined && Number(item.igst_amount) > 0
+            ? Number(item.igst_amount)
+            : Math.round(amt * 0.18 * 100) / 100;
+        return acc + itemIgst;
+      }, 0);
+      if (sumIgst > 0) {
+        IGST = Math.round(sumIgst * 100) / 100;
+      }
+    }
+  } else {
+    CGST = Math.round(subtotal * 0.09 * 100) / 100;
+    SGST = Math.round(subtotal * 0.09 * 100) / 100;
+
+    if (Array.isArray(lineItems) && lineItems.length > 0) {
+      const sumCgst = lineItems.reduce((acc, item) => {
+        const amt = Number(item.amount) || 0;
+        const itemCgst =
+          item.cgst_amount !== undefined && Number(item.cgst_amount) > 0
+            ? Number(item.cgst_amount)
+            : Math.round(amt * 0.09 * 100) / 100;
+        return acc + itemCgst;
+      }, 0);
+      const sumSgst = lineItems.reduce((acc, item) => {
+        const amt = Number(item.amount) || 0;
+        const itemSgst =
+          item.sgst_amount !== undefined && Number(item.sgst_amount) > 0
+            ? Number(item.sgst_amount)
+            : Math.round(amt * 0.09 * 100) / 100;
+        return acc + itemSgst;
+      }, 0);
+      if (sumCgst > 0 || sumSgst > 0) {
+        CGST = Math.round(sumCgst * 100) / 100;
+        SGST = Math.round(sumSgst * 100) / 100;
+      }
+    }
+  }
+
+  const GST = Math.round((isInterState ? IGST : CGST + SGST) * 100) / 100;
   const exactTotal = subtotal + GST;
   const grandTotal = Math.round(exactTotal);
   const rounding = Math.round((grandTotal - exactTotal) * 100) / 100;
@@ -640,32 +1102,58 @@ function calculateQuotationBreakdown(baseAmount) {
   const hasGstDecimals = (GST % 1 !== 0);
   const hasCgstDecimals = (CGST % 1 !== 0);
   const hasSgstDecimals = (SGST % 1 !== 0);
+  const hasIgstDecimals = (IGST % 1 !== 0);
   const hasSubtotalDecimals = (subtotal % 1 !== 0);
 
   return {
     subtotal,
     CGST,
     SGST,
+    IGST,
     GST,
+    totalTax: GST,
+    isInterState,
+    taxType: isInterState ? 'INTER_STATE' : 'INTRA_STATE',
     rounding,
     grandTotal,
     formattedSubtotal: formatIndianCurrency(subtotal, hasSubtotalDecimals),
     formattedCGST: formatIndianCurrency(CGST, hasCgstDecimals),
     formattedSGST: formatIndianCurrency(SGST, hasSgstDecimals),
+    formattedIGST: formatIndianCurrency(IGST, hasIgstDecimals),
     formattedGST: formatIndianCurrency(GST, hasGstDecimals),
     formattedRounding: rounding !== 0 ? (rounding > 0 ? `+₹${formatIndianCurrency(rounding, true)}` : `-₹${formatIndianCurrency(Math.abs(rounding), true)}`) : '₹0',
     formattedGrandTotal: `₹${formatIndianCurrency(grandTotal, false)}`,
   };
 }
 
+/**
+ * Helper to format Indian currency values with or without decimals cleanly.
+ */
+function formatMoneyValue(num) {
+  if (num === null || num === undefined || isNaN(Number(num))) return '0';
+  const n = Number(num);
+  const hasDec = (n % 1 !== 0);
+  return n.toLocaleString('en-IN', {
+    minimumFractionDigits: hasDec ? 2 : 0,
+    maximumFractionDigits: 2,
+  });
+}
+
 module.exports = {
   DEFAULT_GST_RATE,
+  SELLER_GST_CONFIG,
+  INDIAN_GST_STATES,
+  resolveStateFromGstin,
+  resolveStateFromAddress,
+  resolveCustomerState,
+  resolvePlaceOfSupply,
   normalizeUnit,
   convertToMt,
   convertLineItemToMt,
   extractDimensions,
   isDimensionCompatible,
   formatIndianCurrency,
+  formatMoneyValue,
   calculateLineItem,
   calculateLineItems,
   calculateSubtotal,

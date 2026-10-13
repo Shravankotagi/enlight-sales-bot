@@ -1550,9 +1550,9 @@ async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
   const todayDateStr = new Date().toLocaleDateString('en-IN');
 
   const baseAmt = Number(deal.total_amount) || dealItems.reduce((s, i) => s + (Number(i.amount) || 0), 0);
-  const cgstAmt = Math.round(baseAmt * 0.09);
-  const sgstAmt = Math.round(baseAmt * 0.09);
-  const grandTotal = baseAmt + cgstAmt + sgstAmt;
+  const cgstAmt = dealItems.reduce((s, i) => s + (Number(i.cgst_amount) || Math.round((Number(i.amount) || 0) * 0.09 * 100) / 100), 0) || Math.round(baseAmt * 0.09 * 100) / 100;
+  const sgstAmt = dealItems.reduce((s, i) => s + (Number(i.sgst_amount) || Math.round((Number(i.amount) || 0) * 0.09 * 100) / 100), 0) || Math.round(baseAmt * 0.09 * 100) / 100;
+  const grandTotal = Math.round(baseAmt + cgstAmt + sgstAmt);
 
   let itemsSummary = '';
   if (dealItems.length > 0) {
@@ -1564,15 +1564,19 @@ async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
         const qtyStr = `${Number(item.quantity || 0).toLocaleString('en-IN')} ${unit}`;
         const rate = Number(item.rate || 0);
         const amt = Number(item.amount || (Number(item.quantity || 0) * Number(item.rate || 0)));
+        const itemCgst = item.cgst_amount !== undefined ? Number(item.cgst_amount) : Math.round(amt * 0.09 * 100) / 100;
+        const itemSgst = item.sgst_amount !== undefined ? Number(item.sgst_amount) : Math.round(amt * 0.09 * 100) / 100;
+        const itemFinal = item.final_amount !== undefined ? Number(item.final_amount) : Math.round((amt + itemCgst + itemSgst) * 100) / 100;
         if (rate > 0) {
-          const lineTotalStr = amt > 0 ? ` | Line Total: ₹${amt.toLocaleString('en-IN')}` : '';
+          const lineTotalStr = amt > 0 ? ` | Base: ₹${amt.toLocaleString('en-IN')} | Final (Incl. 18% GST): ₹${itemFinal.toLocaleString('en-IN')}` : '';
           return `  ${prefix}${item.sku_text || 'Material'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
         }
         return `  ${prefix}${item.sku_text || 'Material'}${spec} | ${qtyStr}`;
       })
       .join('\n');
   } else {
-    itemsSummary = `  1. Steel Material | 1 MT | ₹${Number(baseAmt).toLocaleString('en-IN')} /MT | Line Total: ₹${Number(baseAmt).toLocaleString('en-IN')}`;
+    const defaultFinal = Math.round(Number(baseAmt) * 1.18);
+    itemsSummary = `  1. Steel Material | 1 MT | ₹${Number(baseAmt).toLocaleString('en-IN')} /MT | Base: ₹${Number(baseAmt).toLocaleString('en-IN')} | Final (Incl. 18% GST): ₹${defaultFinal.toLocaleString('en-IN')}`;
   }
 
   const textContent = `Dear ${customerName},
@@ -3844,16 +3848,17 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
           if (fromToTargetIdx === -1) {
             const itemListStr = existingItems
               .map((it, idx) => {
+                const calc = calculateLineItem(it);
                 const prefix = existingItems.length > 1 ? `${idx + 1}. ` : '';
-                const spec = it.dimensions ? ` (${it.dimensions})` : '';
-                const qtyStr = `${Number(it.quantity).toLocaleString('en-IN')} ${it.unit || 'MT'}`;
-                const rate = Number(it.rate || it.rate_per_mt || 0);
-                const amt = Number(it.amount || 0) || (rate > 0 ? rate * Number(it.quantity || 0) : 0);
+                const spec = calc.dimensions ? ` (${calc.dimensions})` : '';
+                const qtyStr = `${Number(calc.quantity).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${calc.unit || 'MT'}`;
+                const rate = Number(calc.rate || 0);
+                const amt = Number(calc.final_amount || 0) || (calc.amount ? Math.round(Number(calc.amount) * 1.18 * 100) / 100 : 0);
                 if (rate > 0) {
                   const lineTotalStr = amt > 0 ? ` | Line Total: ₹${amt.toLocaleString('en-IN')}` : '';
-                  return `${prefix}${it.sku_text || 'Item'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${it.unit || 'MT'}${lineTotalStr}`;
+                  return `${prefix}${calc.sku_text || 'Item'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${calc.unit || 'MT'}${lineTotalStr}`;
                 }
-                return `${prefix}${it.sku_text || 'Item'}${spec} | ${qtyStr}`;
+                return `${prefix}${calc.sku_text || 'Item'}${spec} | ${qtyStr}`;
               })
               .join('\n');
             return `⚠️ Could not find any line item with quantity ${fromVal}${fromUnit ? ` ${fromUnit}` : ''} in Inquiry ${dealCode}.\n\nCurrent Line Items:\n${itemListStr}\n\nPlease specify which product you would like to update (e.g. "Change ${existingItems[0]?.sku_text || 'GP Sheet'} quantity to ${fromToNewQty} ${fromToNewUnit || 'MT'}").`;
@@ -3916,16 +3921,17 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
         ) {
           const itemListStr = existingItems
             .map((it, i) => {
+              const calc = calculateLineItem(it);
               const prefix = `${i + 1}. `;
-              const spec = it.dimensions ? ` (${it.dimensions})` : '';
-              const qtyStr = `${Number(it.quantity).toLocaleString('en-IN')} ${it.unit || 'MT'}`;
-              const rate = Number(it.rate || it.rate_per_mt || 0);
-              const amt = Number(it.amount || 0) || (rate > 0 ? rate * Number(it.quantity || 0) : 0);
+              const spec = calc.dimensions ? ` (${calc.dimensions})` : '';
+              const qtyStr = `${Number(calc.quantity).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${calc.unit || 'MT'}`;
+              const rate = Number(calc.rate || 0);
+              const amt = Number(calc.final_amount || 0) || (calc.amount ? Math.round(Number(calc.amount) * 1.18 * 100) / 100 : 0);
               if (rate > 0) {
                 const lineTotalStr = amt > 0 ? ` | Line Total: ₹${amt.toLocaleString('en-IN')}` : '';
-                return `${prefix}${it.sku_text || 'Item'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${it.unit || 'MT'}${lineTotalStr}`;
+                return `${prefix}${calc.sku_text || 'Item'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${calc.unit || 'MT'}${lineTotalStr}`;
               }
-              return `${prefix}${it.sku_text || 'Item'}${spec} | ${qtyStr}`;
+              return `${prefix}${calc.sku_text || 'Item'}${spec} | ${qtyStr}`;
             })
             .join('\n');
           return `⚠️ Inquiry ${dealCode} contains ${existingItems.length} line items. Please specify which product you would like to update:\n\n${itemListStr}\n\nExample: "Change ${existingItems[0]?.sku_text || 'Item 1'} quantity to ${explicitTargetQty || 45} MT"`;
@@ -4115,17 +4121,18 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
 
       // Build verified itemized breakdown for manager response
       const itemBreakdownLines = (updatedDealItems || []).map((item, idx) => {
+        const calc = calculateLineItem(item);
         const prefix = (updatedDealItems || []).length > 1 ? `${idx + 1}. ` : '';
-        const spec = item.dimensions ? ` (${item.dimensions})` : '';
-        const unit = item.unit || 'MT';
-        const qtyStr = `${Number(item.quantity || 0).toLocaleString('en-IN')} ${unit}`;
-        const rate = Number(item.rate || 0);
-        const amt = Number(item.amount || 0) || (rate > 0 ? rate * Number(item.quantity || 0) : 0);
+        const spec = calc.dimensions ? ` (${calc.dimensions})` : '';
+        const unit = calc.unit || 'MT';
+        const qtyStr = `${Number(calc.quantity || 0).toLocaleString('en-IN', { maximumFractionDigits: 3 })} ${unit}`;
+        const rate = Number(calc.rate || 0);
+        const amt = Number(calc.final_amount || 0) || (calc.amount ? Math.round(Number(calc.amount) * 1.18 * 100) / 100 : 0);
         if (rate > 0) {
           const lineTotalStr = amt > 0 ? ` | Line Total: ₹${amt.toLocaleString('en-IN')}` : '';
-          return `${prefix}${item.sku_text || 'Item'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
+          return `${prefix}${calc.sku_text || 'Item'}${spec} | ${qtyStr} | ₹${rate.toLocaleString('en-IN')} /${unit}${lineTotalStr}`;
         }
-        return `${prefix}${item.sku_text || 'Item'}${spec} | ${qtyStr}`;
+        return `${prefix}${calc.sku_text || 'Item'}${spec} | ${qtyStr}`;
       });
 
       const subtotalVal = (updatedDealItems || []).reduce((s, i) => s + (Number(i.amount) || 0), 0);

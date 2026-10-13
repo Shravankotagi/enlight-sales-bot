@@ -45,8 +45,9 @@ function formatForWhatsApp(text) {
   // 7. Strip any remaining stray asterisks
   out = out.replace(/\*/g, '');
 
-  // 8. Clean citation tags [Source: Document]
+  // 8. Clean citation tags [Source: Document] and internal hash links [text](#...)
   out = out.replace(/\[Source:\s*([^\]]+)\]/g, '\n(Source: $1)');
+  out = out.replace(/\[([^\]]+)\]\(#[^)]*\)/g, '$1');
 
   // 9. Clean up multiple empty lines and trailing whitespace
   out = out.replace(/\n{3,}/g, '\n\n');
@@ -373,6 +374,69 @@ async function downloadMedia(mediaId) {
   }
 }
 
+function typingIndicatorUrl(phoneNumberId) {
+  const configured = process.env.WHATSAPP_API_URL || 'https://graph.facebook.com/v18.0';
+  const versionMatch = String(configured).match(/\/v(\d+)\.\d+/);
+  const major = versionMatch ? Number(versionMatch[1]) : 18;
+  const base = major >= 22
+    ? String(configured).replace(/\/$/, '')
+    : 'https://graph.facebook.com/v22.0';
+  return `${base}/${phoneNumberId}/messages`;
+}
+
+/**
+ * Shows WhatsApp's typing bubble for an incoming message. The bubble clears
+ * when a reply is sent, or after about 25 seconds if no reply has gone out.
+ * Failures are ignored so message handling continues.
+ */
+async function showTypingIndicator(messageId) {
+  try {
+    const token = process.env.WHATSAPP_TOKEN;
+    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+    if (!token || !phoneNumberId || !messageId) return false;
+
+    await axios.post(
+      typingIndicatorUrl(phoneNumberId),
+      {
+        messaging_product: 'whatsapp',
+        status: 'read',
+        message_id: messageId,
+        typing_indicator: { type: 'text' },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 8000,
+        httpsAgent,
+      }
+    );
+    return true;
+  } catch (err) {
+    console.warn('[WhatsApp] Typing indicator notice:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Keeps the typing bubble visible until stop() is called. WhatsApp hides it
+ * after about 25 seconds, so it is sent again while processing continues.
+ */
+function keepTypingUntilReply(messageId) {
+  if (!messageId) return () => {};
+  let stopped = false;
+  const pulse = () => {
+    if (!stopped) showTypingIndicator(messageId).catch(() => {});
+  };
+  pulse();
+  const timer = setInterval(pulse, 20000);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
 /**
  * Marks a WhatsApp message as read via Meta Cloud API (displays blue ticks).
  * @param {string} messageId - The incoming WhatsApp message ID.
@@ -413,5 +477,7 @@ module.exports = {
   sendInteractiveList,
   downloadMedia,
   markMessageAsRead,
+  showTypingIndicator,
+  keepTypingUntilReply,
   formatForWhatsApp,
 };

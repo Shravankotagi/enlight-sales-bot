@@ -8,8 +8,10 @@
     "predev": "node -e \"if (!require('fs').existsSync('./node_modules/express')) { console.log('Dependencies missing. Installing...'); require('child_process').execSync('npm install', { stdio: 'inherit' }); }\"",
     "dev": "node --watch index.js",
     "dev:nodemon": "nodemon index.js",
-    "test": "node --test src/**/*.test.js",
-    "chat": "node scripts/chat_cli.js"
+    "test": "node --require ./test/setup.js --test --test-reporter=spec \"src/**/*.test.js\" \"test/**/*.test.js\"",
+    "chat": "node scripts/chat_cli.js",
+    "test:regression": "node --require ./test/setup.js --test --test-reporter=spec \"test/regression/**/*.test.js\"",
+    "test:coverage": "node --require ./test/setup.js --test --test-reporter=spec --experimental-test-coverage \"src/**/*.test.js\" \"test/**/*.test.js\""
   },
   "dependencies": {
     "@google/generative-ai": "^0.2.1",
@@ -25,5 +27,8 @@
     "pdfkit": "^0.20.2",
     "sharp": "^0.35.4",
     "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

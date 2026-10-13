@@ -7,6 +7,7 @@ const {
   sendInteractiveList,
   downloadMedia,
   markMessageAsRead,
+  keepTypingUntilReply,
 } = require('./whatsapp');
 const { compressImageBuffer } = require('./utils/imageCompressor');
 const { extractFromText, extractFromImage, classifyIntent } = require('./gemini');
@@ -209,6 +210,9 @@ router.post('/', async (req, res) => {
         } else {
           console.log(`No employee found for phone: ${senderPhone}`);
         }
+
+        const stopTyping = messageType === 'reaction' ? () => {} : keepTypingUntilReply(messageId);
+        try {
 
         let raw_text = "";
         let media_urls = [];
@@ -947,6 +951,9 @@ router.post('/', async (req, res) => {
 
         // Send WhatsApp reply
         await sendTextMessage(senderPhone, replyMessage);
+        } finally {
+          stopTyping();
+        }
 
       } else {
         console.log("No messages in changes (received status update).");

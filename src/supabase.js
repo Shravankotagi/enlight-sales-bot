@@ -1319,6 +1319,8 @@ async function getCustomerMissingInfoPrompt(customerName, senderPhone) {
   return '';
 }
 
+const _inMemorySessions = new Map();
+
 /**
  * Saves or updates the active customer context session for a salesperson.
  * Keeps conversation state persistent across messages.
@@ -1336,6 +1338,11 @@ async function saveActiveSession(senderPhone, customerName, intent = 'general') 
       last_intent: intent,
       updated_at: new Date().toISOString(),
     };
+
+    if (!supabaseUrl || !supabaseServiceRoleKey) {
+      _inMemorySessions.set(last10 || senderPhone, payload);
+      return true;
+    }
 
     const { data: updated } = await supabase
       .from('conversation_sessions')
@@ -1365,6 +1372,9 @@ async function getActiveSession(senderPhone) {
     if (!senderPhone) return null;
     const cleanPhone = String(senderPhone).replace(/\D/g, '');
     const last10 = cleanPhone.slice(-10);
+    if (!supabaseUrl || !supabaseServiceRoleKey) {
+      return _inMemorySessions.get(last10 || senderPhone)?.active_customer_name || null;
+    }
     const variants = Array.from(new Set([senderPhone, cleanPhone, last10, `91${last10}`, `+91${last10}`]));
 
     // 24 hours expiry
@@ -1401,6 +1411,9 @@ async function getFullActiveSession(senderPhone) {
     if (!senderPhone) return null;
     const cleanPhone = String(senderPhone).replace(/\D/g, '');
     const last10 = cleanPhone.slice(-10);
+    if (!supabaseUrl || !supabaseServiceRoleKey) {
+      return _inMemorySessions.get(last10 || senderPhone) || null;
+    }
     const variants = Array.from(new Set([senderPhone, cleanPhone, last10, `91${last10}`, `+91${last10}`]));
 
     // 24 hours expiry
@@ -1427,6 +1440,136 @@ async function getFullActiveSession(senderPhone) {
   return null;
 }
 
+let _customProductsCache = [];
+let _customProductsCacheLoadedAt = 0;
+
+function getCachedCustomProducts() {
+  if (supabaseUrl && supabaseServiceRoleKey && Date.now() - _customProductsCacheLoadedAt > 60_000) {
+    getCustomProductsList().catch(() => {});
+  }
+  return _customProductsCache;
+}
+
+async function getCustomProductsList(force = false) {
+  if (!supabaseUrl || !supabaseServiceRoleKey) return _customProductsCache;
+  if (!force && _customProductsCacheLoadedAt > 0 && Date.now() - _customProductsCacheLoadedAt < 5_000) {
+    return _customProductsCache;
+  }
+  try {
+    const { data, error } = await supabase
+      .from('products')
+      .select('id, category, product_name, dimensions, hsn_code')
+      .order('product_name', { ascending: true });
+    if (!error && Array.isArray(data)) {
+      _customProductsCache = data;
+      _customProductsCacheLoadedAt = Date.now();
+    }
+  } catch (err) {
+    console.error('getCustomProductsList catch:', err.message);
+  }
+  return _customProductsCache;
+}
+
+function upsertCustomProductInCache(row) {
+  if (!row || !row.product_name) return;
+  const pLower = String(row.product_name || '').trim().toLowerCase();
+  const dLower = String(row.dimensions || '').trim().toLowerCase();
+  const idx = _customProductsCache.findIndex(
+    (r) =>
+      String(r.product_name || '').trim().toLowerCase() === pLower &&
+      String(r.dimensions || '').trim().toLowerCase() === dLower,
+  );
+  if (idx >= 0) {
+    _customProductsCache[idx] = { ..._customProductsCache[idx], ...row };
+  } else {
+    _customProductsCache.push(row);
+  }
+}
+
+async function createCustomProductRecord({ product_name, dimensions, hsn_code }) {
+  const productName = String(product_name || '').trim();
+  const specs = String(dimensions || '').trim();
+  const hsnCode = String(hsn_code || '').trim();
+  if (!productName || !specs || !hsnCode) {
+    return {
+      success: false,
+      error: 'Product Name, Specs/Dimensions, and HSN/SAC Code are all required',
+    };
+  }
+  const optimisticRow = {
+    id: `local-${Date.now()}`,
+    category: 'Custom',
+    product_name: productName,
+    dimensions: specs,
+    hsn_code: hsnCode,
+  };
+  upsertCustomProductInCache(optimisticRow);
+
+  if (!supabaseUrl || !supabaseServiceRoleKey) {
+    return { success: true, data: optimisticRow };
+  }
+
+  try {
+    const { data: existingRows } = await supabase
+      .from('products')
+      .select('id, category, product_name, dimensions, hsn_code')
+      .ilike('product_name', productName);
+
+    const exactMatch = (existingRows || []).find(
+      (r) =>
+        String(r.product_name || '').trim().toLowerCase() === productName.toLowerCase() &&
+        String(r.dimensions || '').trim().toLowerCase() === specs.toLowerCase(),
+    );
+    if (exactMatch) {
+      if (hsnCode && exactMatch.hsn_code !== hsnCode) {
+        const { data: updated } = await supabase
+          .from('products')
+          .update({ hsn_code: hsnCode, updated_at: new Date().toISOString() })
+          .eq('id', exactMatch.id)
+          .select('id, category, product_name, dimensions, hsn_code')
+          .single();
+        if (updated) {
+          upsertCustomProductInCache(updated);
+          await getCustomProductsList(true);
+          return { success: true, data: updated };
+        }
+      }
+      upsertCustomProductInCache(exactMatch);
+      await getCustomProductsList(true);
+      return { success: true, data: exactMatch };
+    }
+
+    const { data, error } = await supabase
+      .from('products')
+      .insert([
+        {
+          category: 'Custom',
+          product_name: productName,
+          dimensions: specs,
+          hsn_code: hsnCode,
+        },
+      ])
+      .select('id, category, product_name, dimensions, hsn_code')
+      .single();
+
+    if (error) {
+      console.error('createCustomProductRecord error:', error.message);
+      return { success: false, error: error.message };
+    }
+    upsertCustomProductInCache(data);
+    await getCustomProductsList(true);
+    return { success: true, data };
+  } catch (err) {
+    console.error('createCustomProductRecord catch:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// Warm custom products cache on module load if Supabase is configured
+if (supabaseUrl && supabaseServiceRoleKey) {
+  getCustomProductsList().catch(() => {});
+}
+
 // Export default and named exports
 module.exports = {
   supabase,
@@ -1450,4 +1593,8 @@ module.exports = {
   getFullActiveSession,
   updateCustomerProfileRecord,
   normalizeCoreCompanyName,
+  getCustomProductsList,
+  getCachedCustomProducts,
+  createCustomProductRecord,
 };
+
