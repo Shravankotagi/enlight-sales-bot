@@ -749,6 +749,61 @@ function normalizeDealStage(rawStage) {
   return s.replace(/\s+/g, '_');
 }
 
+/**
+ * Resolves the canonical lifecycle stage of an inquiry with 100% frontend parity.
+ * Priority:
+ * 1. Active pipeline stage of the linked deal in deals table (source of truth).
+ * 2. Direct row.stage if set beyond new_inquiry.
+ * 3. Fallback based on row status, inquiry_type, raw_text and PO.
+ */
+function resolveInquiryEffectiveStage(row, linkedDeal) {
+  if (linkedDeal) {
+    const ds = (linkedDeal.stage || '').toLowerCase().trim();
+    if (['won', 'lost', 'negotiation', 'quoted', 'on_hold', 'qualified'].includes(ds)) {
+      if (ds === 'qualified') return 'quoted';
+      if (ds === 'hold') return 'on_hold';
+      return ds;
+    }
+  }
+
+  const directStage = row?.stage ? String(row.stage).toLowerCase().trim() : '';
+  if (directStage && ['won', 'lost', 'negotiation', 'quoted', 'on_hold', 'qualified'].includes(directStage)) {
+    if (directStage === 'qualified') return 'quoted';
+    if (directStage === 'hold') return 'on_hold';
+    return directStage;
+  }
+
+  const st = (row?.status || '').toLowerCase().trim();
+  const rawText = row?.raw_text || '';
+  const isPo =
+    row?.inquiry_type === 'purchase_order' ||
+    row?.source_channel === 'whatsapp_po' ||
+    rawText.includes('[PO Document Attached') ||
+    Boolean(row?.po_number) ||
+    Boolean(row?.po_confirmed_at);
+
+  if ((isPo && (st === 'confirmed' || st === 'won' || st === 'processed')) || st === 'won') {
+    return 'won';
+  }
+  if (st === 'negotiation') return 'negotiation';
+  if (st === 'on_hold' || st === 'hold') return 'on_hold';
+  if (st === 'lost') return 'lost';
+  if (
+    st === 'quoted' ||
+    st === 'quotation_sent' ||
+    row?.inquiry_type === 'quotation_sent' ||
+    st === 'confirmed' ||
+    st === 'saved' ||
+    st === 'processed'
+  ) {
+    return 'quoted';
+  }
+  if (st === 'review' || st === 'needs_review' || st === 'pending' || !st || st === 'new' || st === 'draft' || st === 'auto_created') {
+    return 'new_inquiry';
+  }
+  return normalizeDealStage(st) || 'new_inquiry';
+}
+
 // ─── 1. GET_INQUIRIES TOOL ──────────────────────────────────────────────────
 
 const inquiriesGlobalCache = new Map();
@@ -969,14 +1024,29 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
             ? 'whatsapp_text'
             : (rawSrc || 'whatsapp_text'))));
 
+    const effectiveStage = resolveInquiryEffectiveStage(row, linkedDeal);
+    const displayStage =
+      effectiveStage === 'quoted'
+        ? 'Quoted'
+        : effectiveStage === 'won'
+          ? 'Won'
+          : effectiveStage === 'negotiation'
+            ? 'Negotiation'
+            : effectiveStage === 'lost'
+              ? 'Lost'
+              : effectiveStage === 'on_hold'
+                ? 'On Hold'
+                : 'New Inquiry';
+
     return {
       inquiry_id: shortId,
       full_id: row.id,
       customer_name: custName,
       customer_phone: row.sender_phone || linkedDeal?.customer_phone || '',
       inquiry_type: row.inquiry_type || 'standard',
-      status: normalizeDealStage(row.status) || 'new_inquiry',
-      deal_stage: normalizeDealStage(linkedDeal?.stage) || 'no_deal_linked',
+      stage: effectiveStage,
+      status: displayStage,
+      deal_stage: linkedDeal?.stage ? normalizeDealStage(linkedDeal.stage) : (effectiveStage === 'won' ? 'won' : 'no_deal_linked'),
       raw_status: row.status || 'review',
       raw_deal_stage: linkedDeal?.stage || 'no_deal_linked',
       po_number: linkedDeal?.po_number || null,
@@ -1152,9 +1222,9 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     mode === 'won_metrics' ||
     mode === 'inquiry_conversion'
   ) {
-    const wonInqs = materialized.filter((m) => m.deal_stage === 'won' || m.status === 'won' || Boolean(m.po_number));
-    const lostInqs = materialized.filter((m) => m.deal_stage === 'lost' || m.status === 'lost');
-    const activeInqs = materialized.filter((m) => m.deal_stage !== 'won' && m.deal_stage !== 'lost' && !m.po_number);
+    const wonInqs = materialized.filter((m) => m.stage === 'won' || m.deal_stage === 'won' || Boolean(m.po_number));
+    const lostInqs = materialized.filter((m) => m.stage === 'lost' || m.deal_stage === 'lost');
+    const activeInqs = materialized.filter((m) => m.stage !== 'won' && m.stage !== 'lost' && !m.po_number);
 
     const totalWonDeals = allDeals.filter((d) => d.stage === 'won' || Boolean(d.po_number)).length;
     const conversionRate = materialized.length > 0 ? `${Math.round((wonInqs.length / materialized.length) * 1000) / 10}%` : '0%';
@@ -1186,7 +1256,7 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
     mode === 'rep_rankings'
   ) {
     if (isSalespersonRole(callerContext.role)) {
-      const wonCount = materialized.filter((m) => m.deal_stage === 'won' || m.status === 'won' || Boolean(m.po_number)).length;
+      const wonCount = materialized.filter((m) => m.stage === 'won' || m.deal_stage === 'won' || Boolean(m.po_number)).length;
       const totalCount = materialized.length;
       const rate = totalCount > 0 ? `${Math.round((wonCount / totalCount) * 1000) / 10}%` : '0%';
       return {
@@ -1438,23 +1508,19 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   if (rawStatus && rawStatus !== 'all') {
     const normStatus = normalizeDealStage(rawStatus);
     if (normStatus === 'won' || rawStatus === 'converted' || rawStatus === 'orders') {
-      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'won' || normalizeDealStage(m.status) === 'won' || Boolean(m.po_number));
+      filtered = filtered.filter((m) => m.stage === 'won');
     } else if (normStatus === 'lost' || rawStatus === 'not_converted') {
-      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'lost' || normalizeDealStage(m.status) === 'lost');
+      filtered = filtered.filter((m) => m.stage === 'lost');
     } else if (normStatus === 'on_hold') {
-      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'on_hold' || normalizeDealStage(m.status) === 'on_hold');
+      filtered = filtered.filter((m) => m.stage === 'on_hold');
     } else if (normStatus === 'negotiation') {
-      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'negotiation' || normalizeDealStage(m.status) === 'negotiation');
+      filtered = filtered.filter((m) => m.stage === 'negotiation');
     } else if (normStatus === 'quoted') {
-      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'quoted' || normalizeDealStage(m.status) === 'quoted');
+      filtered = filtered.filter((m) => m.stage === 'quoted');
     } else if (normStatus === 'new_inquiry' || rawStatus === 'pending' || rawStatus === 'review') {
-      filtered = filtered.filter((m) => normalizeDealStage(m.deal_stage) === 'new_inquiry' || normalizeDealStage(m.status) === 'new_inquiry' || m.status === 'review' || m.status === 'pending' || m.status === 'new' || m.status === 'draft');
+      filtered = filtered.filter((m) => m.stage === 'new_inquiry');
     } else {
-      filtered = filtered.filter((m) => {
-        const ds = normalizeDealStage(m.deal_stage);
-        const st = normalizeDealStage(m.status);
-        return ds === normStatus || st === normStatus || m.status?.toLowerCase() === rawStatus || m.deal_stage?.toLowerCase() === rawStatus;
-      });
+      filtered = filtered.filter((m) => m.stage === normStatus || m.status?.toLowerCase() === rawStatus);
     }
   }
   if (sourceTypeFilter === 'ocr_document' || sourceTypeFilter === 'document') {
@@ -1472,8 +1538,8 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
   const custFreq = {};
 
   filtered.forEach((m) => {
-    if (m.deal_stage === 'won' || m.status === 'won') wonCount++;
-    else if (m.deal_stage === 'lost') lostCount++;
+    if (m.stage === 'won' || m.deal_stage === 'won' || m.status === 'Won') wonCount++;
+    else if (m.stage === 'lost' || m.deal_stage === 'lost' || m.status === 'Lost') lostCount++;
     else pendingCount++;
     if (m.is_ocr_document) ocrCount++;
     totalTonnage += Number(m.estimated_tonnage_mt || 0);
