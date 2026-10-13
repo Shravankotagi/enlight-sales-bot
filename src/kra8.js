@@ -401,7 +401,7 @@ async function checkComplaints() {
           `⏰ Open for: *${hrsOpen}h* ${hrsOpen >= 48 ? '🚨 *(Escalated / Overdue)*' : '⏳ (Within 48h SLA)'}\n\n`;
       });
 
-      adminMsg += `📊 Full details and status updates are available on the Enlight Sales Dashboard.`;
+      adminMsg += `📊 Full details and status updates are available on the Enlight Sigma Dashboard.`;
 
       for (const admin of admins) {
         await sendTextMessage(admin.phone, adminMsg);
