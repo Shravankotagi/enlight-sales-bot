@@ -9,12 +9,16 @@
  */
 
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { isProcurementRole } = require('../utils/roles');
 
 /**
  * Derives allowed visibility roles based on caller context.
  */
 function getAllowedRoles(callerRole) {
   const r = String(callerRole || 'salesperson').toLowerCase();
+  if (isProcurementRole(r)) {
+    return ['all'];
+  }
   if (r.includes('admin')) {
     return ['all', 'salesperson', 'manager', 'manager_plus', 'admin', 'admin_only'];
   }

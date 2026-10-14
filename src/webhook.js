@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase, saveInquiry, saveDeal, getEmployeeByPhone } = require('./supabase');
+const { isProcurementRole } = require('./utils/roles');
 const {
   sendTextMessage,
   sendInteractiveButtons,
@@ -213,6 +214,15 @@ router.post('/', async (req, res) => {
 
         const stopTyping = messageType === 'reaction' ? () => {} : keepTypingUntilReply(messageId);
         try {
+        if (employeeRecord && isProcurementRole(employeeRecord.role)) {
+          if (messageType !== 'reaction') {
+            await sendTextMessage(
+              senderPhone,
+              'WhatsApp access for procurement roles is not enabled yet. Please use the Enlight Sigma dashboard Inquiries page.',
+            );
+          }
+          return;
+        }
 
         let raw_text = "";
         let media_urls = [];

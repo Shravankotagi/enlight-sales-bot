@@ -3,7 +3,8 @@ const crypto = require('crypto');
 const router = express.Router();
 const { handleCatalogFlow } = require('../core/catalogFlow');
 const { runOrchestrator } = require('../core/orchestrator');
-const { getFullActiveSession, saveActiveSession, supabase } = require('../supabase');
+const { getFullActiveSession, saveActiveSession, supabase, getEmployeeByPhone } = require('../supabase');
+const { isProcurementRole } = require('../utils/roles');
 const { handlePendingSessionState } = require('../core/pendingStateManager');
 const { clearActiveSession } = require('../core/sessionManager');
 
@@ -46,6 +47,15 @@ function verifyUserToken(token) {
   } catch (e) {
     return null;
   }
+}
+
+const PROCUREMENT_BOT_MESSAGE =
+  'WhatsApp access for procurement roles is not enabled yet. Please use the Enlight Sigma dashboard Inquiries page.';
+
+async function procurementBlocked(phone, tokenRole) {
+  if (isProcurementRole(tokenRole)) return true;
+  const employee = await getEmployeeByPhone(phone);
+  return Boolean(employee && isProcurementRole(employee.role));
 }
 
 /**
@@ -201,6 +211,13 @@ router.post('/reset', requireWebApiKey, async (req, res) => {
     }
     cleanPhone = cleanPhone.slice(-10);
 
+    if (await procurementBlocked(cleanPhone, userPayload?.role)) {
+      return res.status(403).json({
+        success: false,
+        error: PROCUREMENT_BOT_MESSAGE,
+      });
+    }
+
     await saveActiveSession(cleanPhone, 'Unknown', 'general');
     await clearActiveSession(cleanPhone);
 
@@ -235,6 +252,14 @@ router.post('/message', requireWebApiKey, async (req, res) => {
         success: false,
         error: 'Unauthorized: valid user token or account phone required',
         reply: 'Please sign in again to use the assistant.',
+      });
+    }
+
+    if (await procurementBlocked(cleanPhone, userPayload?.role)) {
+      return res.status(403).json({
+        success: false,
+        error: PROCUREMENT_BOT_MESSAGE,
+        reply: PROCUREMENT_BOT_MESSAGE,
       });
     }
 
