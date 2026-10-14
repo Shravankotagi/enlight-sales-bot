@@ -21,6 +21,7 @@
  */
 
 const { supabase, getEmployeeByPhone } = require('../supabase');
+const { isProcurementRole } = require('../utils/roles');
 const { convertLineItemToMt, calculateLineItem, formatMoneyValue } = require('../utils/pricingEngine');
 const { searchKnowledgeBase } = require('../services/kbRetrievalService');
 
@@ -61,7 +62,9 @@ async function resolveCallerContext(senderPhone) {
 
   if (employee) {
     const rawRole = (employee.role || '').toLowerCase();
-    if (rawRole.includes('admin')) {
+    if (isProcurementRole(rawRole)) {
+      role = rawRole;
+    } else if (rawRole.includes('admin')) {
       role = 'admin';
     } else if (rawRole.includes('manager')) {
       role = 'manager';
@@ -107,6 +110,7 @@ async function getSubordinateSalespersons(callerContext, supabaseAdmin = supabas
 
   const matched = (allActive || []).filter((emp) => {
     const r = (emp.role || '').toLowerCase();
+    if (isProcurementRole(r)) return false;
     if (r.includes('admin') || r.includes('manager')) return false;
     if (callerContext.userId && emp.manager_id === callerContext.userId) return true;
     if (

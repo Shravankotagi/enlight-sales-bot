@@ -182,7 +182,7 @@ async function processCustomerMessage(text, senderPhone) {
           return `✅ *Customer Linked Successfully!*\n\n` +
             `Company: *${payload.existingCustomerName}* is now linked to your customer portfolio.\n` +
             `Monthly Progress: *${currentCount} / 3 Onboarded*\n\n` +
-            `_Updated in Enlight Sales OS._ ✅`;
+            `_Updated in Enlight Sigma._ ✅`;
 
         } else if (isNo) {
           // User confirmed NO: Ask for the correct company name
@@ -275,7 +275,7 @@ async function processCustomerMessage(text, senderPhone) {
           (data.contact_person ? `Contact: *${data.contact_person}*\n` : '') +
           (data.phone ? `Phone: *${data.phone}*\n` : '') +
           (data.city ? `Location: *${data.city}*\n` : '') +
-          `\n_Profile updated in Enlight Sales OS._ ✅`;
+          `\n_Profile updated in Enlight Sigma._ ✅`;
       }
 
       // Case B: Customer is recorded under ANOTHER salesperson

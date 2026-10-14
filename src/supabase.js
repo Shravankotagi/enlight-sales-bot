@@ -1,4 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
+const { isProcurementRole } = require('./utils/roles');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceRoleKey =
@@ -142,7 +143,18 @@ async function getAccessibleSalespersonPhonesForBot(senderPhone) {
   }
 
   const role = (employee.role || 'salesperson').toLowerCase();
-  const isAdmin = role.includes('admin');
+  const isAdmin = role === 'admin' || (role.includes('admin') && !isProcurementRole(role));
+  // procurement_manager contains "manager"; it is not a sales manager.
+  if (isProcurementRole(role)) {
+    return {
+      role,
+      phones: [],
+      employee,
+      isManager: false,
+      isAdmin: false,
+      assignedSalespersons: [],
+    };
+  }
   const isManager = role.includes('manager') || role === 'sales_manager';
 
   if (isAdmin) {
@@ -165,6 +177,7 @@ async function getAccessibleSalespersonPhonesForBot(senderPhone) {
     const normPhone = normalizePhone(senderPhone);
     const assigned = (allActive || []).filter((emp) => {
       const empRole = (emp.role || '').toLowerCase();
+      if (isProcurementRole(empRole)) return false;
       if (empRole.includes('admin') || empRole.includes('manager'))
         return false;
       if (emp.manager_id && emp.manager_id === employee.id) return true;
@@ -190,10 +203,15 @@ async function getAccessibleSalespersonPhonesForBot(senderPhone) {
     };
   }
 
-  // Default Salesperson
+  // Default Salesperson: include phone variants for seamless matching
+  const p = employee.phone || senderPhone;
+  const p10 = p ? String(p).replace(/\D/g, '').slice(-10) : '';
+  const phoneVariants = Array.from(
+    new Set([p, p10, `91${p10}`, `+91${p10}`].filter(Boolean)),
+  );
   return {
     role: 'salesperson',
-    phones: [employee.phone || senderPhone],
+    phones: phoneVariants.length > 0 ? phoneVariants : [p],
     employee,
     isManager: false,
     isAdmin: false,
@@ -1260,7 +1278,7 @@ async function updateCustomerProfileRecord(
         (assignedRepName
           ? `💼 Assigned Salesperson: *${assignedRepName}*\n`
           : '') +
-        `\n_Updated live on Enlight Sales OS Dashboard!_ ✅`,
+        `\n_Updated live on Enlight Sigma Dashboard!_ ✅`,
     };
   } catch (err) {
     console.error('updateCustomerProfileRecord error:', err.message);
