@@ -190,10 +190,15 @@ async function getAccessibleSalespersonPhonesForBot(senderPhone) {
     };
   }
 
-  // Default Salesperson
+  // Default Salesperson: include phone variants for seamless matching
+  const p = employee.phone || senderPhone;
+  const p10 = p ? String(p).replace(/\D/g, '').slice(-10) : '';
+  const phoneVariants = Array.from(
+    new Set([p, p10, `91${p10}`, `+91${p10}`].filter(Boolean)),
+  );
   return {
     role: 'salesperson',
-    phones: [employee.phone || senderPhone],
+    phones: phoneVariants.length > 0 ? phoneVariants : [p],
     employee,
     isManager: false,
     isAdmin: false,
