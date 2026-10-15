@@ -81,8 +81,10 @@ function cityFromNominatim(body) {
   return (
     address.city ||
     address.town ||
-    address.village ||
+    address.city_district ||
     address.municipality ||
+    address.suburb ||
+    address.village ||
     address.county ||
     ''
   );
