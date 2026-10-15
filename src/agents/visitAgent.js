@@ -14,6 +14,15 @@
  */
 
 const { supabase } = require('../supabase');
+const {
+  promptsFromVisitState,
+  assertReadyToSave,
+  visitRowColumns,
+  requestVisitCode,
+  verifyVisitCode,
+  consumeVisitCode,
+  releaseVisitCode,
+} = require('../core/visitRequirements');
 const { syncActivity } = require('./biginSyncAgent');
 const { logBotActivity } = require('../utils/activityLogger');
 
@@ -98,6 +107,8 @@ Extract any provided or updated fields:
   "delivery_location": "<updated delivery location if provided, else null>",
   "preferred_make": "<updated preferred make if provided, else null>",
   "payment_terms": "<updated payment terms if provided, else null>",
+  "preferred_make_other": "<other brand text when preferred make is Others, else null>",
+  "follow_up_date": "<follow-up date if provided e.g. 20-10-2026, else null>",
   "is_unrelated_command": <true if the salesperson is ignoring this visit flow and giving an unrelated query or creating an unrelated deal/order for another company, else false>
 }
 
@@ -461,30 +472,7 @@ function buildMissingFieldsPrompt(visitState, missingFields) {
  * Validates required visit fields (Customer Name, Person Met, Contact Phone, City, Outcome, Remarks, Date)
  */
 function getMissingRequiredFields(visitState) {
-  const missing = [];
-  if (!visitState.person_met || visitState.person_met === 'Not provided') {
-    missing.push('Person Met (Name or designation of person met)');
-  }
-  if (!visitState.contact_no || visitState.contact_no === 'Not provided') {
-    missing.push('Contact Phone (Mobile number of person met)');
-  }
-  if (!visitState.city || visitState.city === 'Not provided') {
-    missing.push('City / Location (Location of visit or office)');
-  }
-  if (
-    !visitState.visit_outcome ||
-    !['positive', 'neutral', 'negative'].includes(
-      visitState.visit_outcome.toLowerCase(),
-    )
-  ) {
-    missing.push('Visit Outcome (Positive / Neutral / Negative)');
-  }
-  if (!visitState.remarks || visitState.remarks === 'Not provided') {
-    missing.push(
-      'Discussion Notes / Remarks (What was discussed during the meeting)',
-    );
-  }
-  return missing;
+  return promptsFromVisitState(visitState);
 }
 
 /**
@@ -612,6 +600,40 @@ async function saveCompletedVisit(visitState, senderPhone) {
   } catch (e) {}
 
   // Insert into customer_visits
+  const ready = assertReadyToSave({
+    company_name: customer_name,
+    person_met,
+    designation,
+    contact_phone: contact_no,
+    email,
+    city_location: city,
+    visit_date: visit_date_display,
+    customer_type,
+    visit_type,
+    visit_outcome,
+    customer_probability,
+    product_details,
+    monthly_consumption,
+    current_requirement,
+    next_purchase_expected,
+    delivery_location,
+    preferred_make,
+    preferred_make_other: visitState.preferred_make_other,
+    payment_terms,
+    followup_action: follow_up_action,
+    follow_up_date: visitState.follow_up_date,
+    meeting_remarks: remarks,
+    gps_photo_url: visitState.gps_photo_url,
+    gps_latitude: visitState.gps_latitude,
+    gps_longitude: visitState.gps_longitude,
+    verification_token: visitState.verification_token,
+  });
+  if (!ready.ok) {
+    return ready.message || buildMissingFieldsPrompt(visitState, ready.prompts);
+  }
+  const consumed = await consumeVisitCode(supabase, contact_no, visitState.verification_token);
+  if (!consumed.ok) return consumed.message;
+
   const visitInsertPayload = {
     customer_name: finalCustomerName,
     salesperson_phone: senderPhone,
@@ -635,23 +657,46 @@ async function saveCompletedVisit(visitState, senderPhone) {
     current_requirement: current_requirement || material_requirement || null,
     next_purchase_expected: next_purchase_expected || null,
     delivery_location: delivery_location || null,
-    preferred_make: preferred_make || null,
-    payment_terms: payment_terms || null,
-    gps_photo_url: visitState?.gps_photo_url || null,
-    gps_latitude: visitState?.gps_latitude ?? null,
-    gps_longitude: visitState?.gps_longitude ?? null,
-    gps_accuracy: visitState?.gps_accuracy ?? null,
     attachments: visitState?.attachments || null,
+    gps_accuracy: visitState?.gps_accuracy ?? null,
+    ...visitRowColumns({
+      company_name: customer_name,
+      person_met,
+      designation,
+      contact_phone: contact_no,
+      email,
+      city_location: city,
+      visit_date: visit_date_display,
+      customer_type,
+      visit_type,
+      visit_outcome,
+      customer_probability,
+      product_details,
+      monthly_consumption,
+      current_requirement,
+      next_purchase_expected,
+      delivery_location,
+      preferred_make,
+      preferred_make_other: visitState.preferred_make_other,
+      payment_terms,
+      followup_action: follow_up_action,
+      follow_up_date: visitState.follow_up_date || parsedFuDate,
+      meeting_remarks: remarks,
+      gps_photo_url: visitState.gps_photo_url,
+      gps_latitude: visitState.gps_latitude,
+      gps_longitude: visitState.gps_longitude,
+      verification_token: visitState.verification_token,
+    }),
   };
 
   const { error: visitErr } = await supabase.from('customer_visits').insert(visitInsertPayload);
   if (visitErr) {
-    console.error('[VisitAgent] customer_visits insert error, retrying base fallback:', visitErr.message);
-    delete visitInsertPayload.follow_up_action;
-    delete visitInsertPayload.follow_up_date;
-    delete visitInsertPayload.follow_up_status;
-    delete visitInsertPayload.employee_id;
-    await supabase.from('customer_visits').insert(visitInsertPayload);
+    await releaseVisitCode(supabase, consumed.id);
+    console.error('[VisitAgent] customer_visits insert error:', visitErr.message);
+    const reason = /column|schema cache/i.test(visitErr.message || '')
+      ? 'Visit verification columns are not applied yet. Ask an admin to apply the visit verification SQL.'
+      : 'The visit could not be saved.';
+    return reason;
   }
 
   // Update customer master profile in recurring_customers
@@ -963,6 +1008,20 @@ async function handlePendingVisitContinuation(text, senderPhone, storedState) {
     storedState.material_requirement = extracted.material_requirement;
   if (extracted.follow_up_action)
     storedState.follow_up_action = extracted.follow_up_action;
+  if (extracted.email) storedState.email = extracted.email;
+  if (extracted.designation) storedState.designation = extracted.designation;
+  if (extracted.customer_type) storedState.customer_type = extracted.customer_type;
+  if (extracted.visit_type) storedState.visit_type = extracted.visit_type;
+  if (extracted.customer_probability) storedState.customer_probability = extracted.customer_probability;
+  if (extracted.product_details) storedState.product_details = extracted.product_details;
+  if (extracted.monthly_consumption) storedState.monthly_consumption = extracted.monthly_consumption;
+  if (extracted.current_requirement) storedState.current_requirement = extracted.current_requirement;
+  if (extracted.next_purchase_expected) storedState.next_purchase_expected = extracted.next_purchase_expected;
+  if (extracted.delivery_location) storedState.delivery_location = extracted.delivery_location;
+  if (extracted.preferred_make) storedState.preferred_make = extracted.preferred_make;
+  if (extracted.preferred_make_other) storedState.preferred_make_other = extracted.preferred_make_other;
+  if (extracted.payment_terms) storedState.payment_terms = extracted.payment_terms;
+  if (extracted.follow_up_date) storedState.follow_up_date = extracted.follow_up_date;
 
   if (extracted.visit_date) {
     const resolved = resolveVisitDate(text, extracted.visit_date);
@@ -984,7 +1043,36 @@ async function handlePendingVisitContinuation(text, senderPhone, storedState) {
     return buildMissingFieldsPrompt(storedState, missingFields);
   }
 
-  // 6. All required fields are present -> Save completed visit!
+  if (!storedState.verification_token) {
+    const sent = await requestVisitCode(supabase, storedState.contact_no);
+    await saveActiveSession(
+      senderPhone,
+      storedState.customer_name,
+      `pending_visit_otp|${storedState.customer_name}|${JSON.stringify(storedState)}`,
+    );
+    return sent.message;
+  }
+
+  return await saveCompletedVisit(storedState, senderPhone);
+}
+
+async function handleVisitOtpReply(text, senderPhone, storedState) {
+  const { saveActiveSession } = require('../supabase');
+  const clean = String(text || '').trim();
+  if (/^(?:cancel|discard|abort|stop|exit)$/i.test(clean)) {
+    await saveActiveSession(senderPhone, 'Unknown', 'general');
+    return `Visit logging for ${storedState.customer_name} cancelled.`;
+  }
+  if (/^(?:resend|send again|new code)$/i.test(clean)) {
+    const sent = await requestVisitCode(supabase, storedState.contact_no);
+    return sent.message;
+  }
+  if (!/^\d{6}$/.test(clean)) {
+    return 'Reply with the 6-digit visit code, or say resend.';
+  }
+  const verified = await verifyVisitCode(supabase, storedState.contact_no, clean);
+  if (!verified.ok) return verified.message;
+  storedState.verification_token = verified.token;
   return await saveCompletedVisit(storedState, senderPhone);
 }
 
@@ -1736,6 +1824,16 @@ async function processVisitMessage(text, senderPhone) {
           sessionPayload,
         );
         if (reply) return reply;
+      }
+    }
+
+    if (activeSession?.last_intent?.startsWith('pending_visit_otp|')) {
+      const parts = activeSession.last_intent.split('|');
+      const payloadJson = parts.slice(2).join('|');
+      const { safeParseJSON } = require('../utils/jsonUtils');
+      const storedState = safeParseJSON(payloadJson, null);
+      if (storedState) {
+        return await handleVisitOtpReply(text, senderPhone, storedState);
       }
     }
 
