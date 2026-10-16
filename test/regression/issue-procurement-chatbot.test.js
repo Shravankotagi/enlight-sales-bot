@@ -21,6 +21,7 @@ const {
   prematureUpdateReply,
   orderRateReply,
   handleSalesPriceChat,
+  handleFullSalesPrice,
 } = require('../../src/core/salesPriceFlow');
 
 const person = {
@@ -391,15 +392,16 @@ test('a salesperson log keeps a typed price as a customer target and does not sa
       inquiries: [],
     },
   });
+  const draft = {
+    company_name: 'Secret Mills',
+    rate: '54000',
+    line_items: [{ sku_text: 'HR Coil', description: 'HR Coil', quantity: 10, unit: 'MT', rate: 54000 }],
+    payment_terms: '30 days',
+    delivery_location: 'Pune',
+    additional_notes: 'urgent',
+  };
   try {
-    const reply = await h.catalogFlow.executeAction('LOG_INQUIRY', {
-      company_name: 'Secret Mills',
-      rate: '54000',
-      line_items: [{ sku_text: 'HR Coil', description: 'HR Coil', quantity: 10, unit: 'MT', rate: 54000 }],
-      payment_terms: '30 days',
-      delivery_location: 'Pune',
-      additional_notes: 'urgent',
-    }, '9844444444');
+    const reply = await h.catalogFlow.executeAction('LOG_INQUIRY', draft, '9844444444');
     const saved = h.db.store.inquiries[0];
     const item = h.db.store.inquiry_items[0];
     assert.equal(saved.pricing_status, 'awaiting_price');
@@ -412,8 +414,324 @@ test('a salesperson log keeps a typed price as a customer target and does not sa
     assert.equal(item.rate, null);
     assert.equal(item.amount, null);
     assert.match(reply, /PR-10001/);
-    assert.match(reply, /base price is still waiting/);
+    assert.match(reply, /Price This Inquiry/);
+    assert.match(reply, /Procurement can see PR-10001/);
     assert.doesNotMatch(reply, /Quotation Total/);
+    assert.equal(draft.procurement_number, 'PR-10001');
+    const buttons = h.catalogFlow.getPostActivityButtons('LOG_INQUIRY', draft);
+    assert.deepEqual(buttons.map((button) => button.id), [
+      'btn_repeat_log_inquiry',
+      'btn_price_current|PR-10001',
+      'btn_post_menu',
+    ]);
+    assert.equal(buttons[1].title, 'Price This Inquiry');
+  } finally {
+    h.restore();
+  }
+});
+
+function fullPriceDeps(db, intents) {
+  return {
+    supabase: db.client,
+    saveActiveSession: async (_phone, _name, next) => { intents.push(next); },
+    getAccessibleSalespersonPhonesForBot: async () => ({ phones: ['9844444444'], isAdmin: true }),
+    expandPhoneVariants: (phones) => phones,
+  };
+}
+
+test('add price to inquiry lists only awaiting price and price ready', async () => {
+  const db = createSupabaseMock({
+    tables: {
+      inquiries: [
+        inquiry({ id: 'inq-a', procurement_number: 'PR-20001', pricing_status: 'awaiting_price', customer_name: 'Secret Mills', created_at: '2026-10-15T04:16:00.000Z', salesperson_phone: '9844444444' }),
+        inquiry({ id: 'inq-r', procurement_number: 'PR-20002', pricing_status: 'price_ready', customer_name: 'Bright Steel', created_at: '2026-10-16T07:09:00.000Z', salesperson_phone: '9844444444' }),
+        inquiry({ id: 'inq-u', procurement_number: 'PR-20003', pricing_status: 'unavailable', customer_name: 'Hidden', salesperson_phone: '9844444444' }),
+        inquiry({ id: 'inq-s', procurement_number: 'PR-20004', pricing_status: 'sales_priced', customer_name: 'Hidden', salesperson_phone: '9844444444' }),
+        inquiry({ id: 'inq-n', procurement_number: 'PR-20005', pricing_status: null, customer_name: 'Hidden', salesperson_phone: '9844444444' }),
+      ],
+    },
+  });
+  const intents = [];
+  const listed = await handleFullSalesPrice('menu_price', '9844444444', 'general', fullPriceDeps(db, intents));
+  assert.match(listed.reply, /PR-20002 · 16 Oct 2026, 12:39 pm · Bright Steel/);
+  assert.match(listed.reply, /PR-20001 · 15 Oct 2026, 9:46 am · Secret Mills/);
+  assert.match(listed.reply, /Awaiting price/);
+  assert.match(listed.reply, /Price ready/);
+  assert.doesNotMatch(listed.reply, /PR-20003/);
+  assert.doesNotMatch(listed.reply, /PR-20004/);
+  assert.doesNotMatch(listed.reply, /PR-20005/);
+  assert.equal(listed.interactiveList, undefined);
+  assert.equal(intents.at(-1), 'sales_full|list');
+});
+
+test('a short salesperson price asks for the missing fields and five numbers save the sales base', async () => {
+  const db = createSupabaseMock({
+    tables: {
+      inquiries: [inquiry({
+        id: 'inq-price',
+        procurement_number: 'PR-20010',
+        procurement_employee_id: 'proc-a',
+        pricing_status: 'price_ready',
+        customer_name: 'Secret Mills',
+        salesperson_phone: '9844444444',
+        ai_extraction_json: {
+          line_items: [{ line_key: 'hr', sku_text: 'HR Coil', quantity: 10, unit: 'MT' }],
+        },
+      })],
+      inquiry_line_pricing: [{
+        inquiry_id: 'inq-price',
+        line_key: 'hr',
+        sku_text: 'HR Coil',
+        quantity: 10,
+        unit: 'MT',
+        procurement_base_price_per_mt: 50000,
+        line_status: 'priced',
+      }],
+    },
+  });
+  const intents = ['general'];
+  const deps = fullPriceDeps(db, intents);
+  const opened = await handleFullSalesPrice('btn_price_current|PR-20010', '9844444444', intents.at(-1), deps);
+  assert.match(opened.reply, /base, transport, loading, credit, and margin/);
+  assert.doesNotMatch(opened.reply, /one base price per line/);
+  const partial = await handleFullSalesPrice('62000, 1000, 500', '9844444444', intents.at(-1), deps);
+  assert.match(partial.reply, /Credit and margin are still missing/);
+  assert.equal(db.calls.some((call) => call.op === 'upsert'), false);
+  assert.equal(db.store.inquiries[0].procurement_employee_id, 'proc-a');
+  const confirmed = await handleFullSalesPrice('blank, 1500', '9844444444', intents.at(-1), deps);
+  assert.match(confirmed.reply, /Save this price\?/);
+  assert.match(confirmed.reply, /65,000/);
+  assert.deepEqual(confirmed.interactiveButtons.map((button) => button.id), ['btn_price_save', 'btn_confirm_cancel']);
+  assert.equal(db.calls.some((call) => call.op === 'upsert'), false);
+  assert.equal(db.store.inquiries[0].pricing_status, 'price_ready');
+  const saved = await handleFullSalesPrice('btn_price_save', '9844444444', intents.at(-1), deps);
+  assert.match(saved.reply, /sales priced/);
+  assert.match(saved.reply, /65,000/);
+  assert.equal(db.store.inquiries[0].pricing_status, 'sales_priced');
+  assert.equal(db.store.inquiries[0].status, 'quoted');
+  assert.equal(db.store.inquiries[0].procurement_employee_id, 'proc-a');
+  const upsert = db.calls.find((call) => call.table === 'inquiry_line_pricing' && call.op === 'upsert');
+  assert.equal(upsert.payload[0].sales_base_price_per_mt, 62000);
+  assert.equal(upsert.payload[0].procurement_base_price_per_mt, 50000);
+  assert.equal(upsert.payload[0].credit_per_mt, 0);
+  assert.equal(upsert.payload[0].rate_per_mt, 65000);
+});
+
+test('base price labels finish the line and yes saves it', async () => {
+  function openPrice() {
+    const db = createSupabaseMock({
+      tables: {
+        inquiries: [inquiry({
+          id: 'inq-10230',
+          procurement_number: 'PR-10230',
+          pricing_status: 'awaiting_price',
+          salesperson_phone: '9844444444',
+          ai_extraction_json: {
+            line_items: [{ line_key: 'hr', sku_text: 'HR Coil', quantity: 30, unit: 'MT' }],
+          },
+        })],
+      },
+    });
+    const intents = ['general'];
+    const deps = fullPriceDeps(db, intents);
+    return { db, intents, deps };
+  }
+
+  const labeled = 'Base Price - 15000, transport - 1000, loading - 100, credit - 0, margin - 500';
+  const savedFlow = openPrice();
+  await handleFullSalesPrice('btn_price_current|PR-10230', '9844444444', savedFlow.intents.at(-1), savedFlow.deps);
+  const ignored = await handleFullSalesPrice('yes', '9844444444', savedFlow.intents.at(-1), savedFlow.deps);
+  assert.doesNotMatch(ignored.reply, /sales priced/);
+  assert.doesNotMatch(ignored.reply, /Save this price/);
+  assert.equal(savedFlow.db.calls.some((call) => call.op === 'upsert'), false);
+  const confirmed = await handleFullSalesPrice(labeled, '9844444444', savedFlow.intents.at(-1), savedFlow.deps);
+  assert.match(confirmed.reply, /Save this price\?/);
+  assert.match(confirmed.reply, /16,600/);
+  assert.doesNotMatch(confirmed.reply, /Base is still missing/);
+  assert.equal(savedFlow.db.calls.some((call) => call.op === 'upsert'), false);
+  const saved = await handleFullSalesPrice('yes', '9844444444', savedFlow.intents.at(-1), savedFlow.deps);
+  assert.match(saved.reply, /PR-10230 is sales priced/);
+  assert.match(saved.reply, /16,600/);
+  assert.doesNotMatch(saved.reply, /Save this price/);
+  assert.equal(savedFlow.db.store.inquiries[0].pricing_status, 'sales_priced');
+  assert.equal(savedFlow.db.store.inquiries[0].status, 'quoted');
+  const upsert = savedFlow.db.calls.find((call) => call.table === 'inquiry_line_pricing' && call.op === 'upsert');
+  assert.equal(upsert.payload[0].sales_base_price_per_mt, 15000);
+  assert.equal(upsert.payload[0].rate_per_mt, 16600);
+
+  const follow = openPrice();
+  await handleFullSalesPrice('btn_price_current|PR-10230', '9844444444', follow.intents.at(-1), follow.deps);
+  const missingBase = await handleFullSalesPrice(
+    'transport - 1000, loading - 100, credit - 0, margin - 500',
+    '9844444444',
+    follow.intents.at(-1),
+    follow.deps,
+  );
+  assert.match(missingBase.reply, /Base is still missing/);
+  const filled = await handleFullSalesPrice('Base - 15000', '9844444444', follow.intents.at(-1), follow.deps);
+  assert.match(filled.reply, /Save this price\?/);
+  assert.match(filled.reply, /16,600/);
+  assert.doesNotMatch(filled.reply, /still missing/);
+  assert.equal(follow.db.calls.some((call) => call.op === 'upsert'), false);
+
+  const comma = openPrice();
+  await handleFullSalesPrice('btn_price_current|PR-10230', '9844444444', comma.intents.at(-1), comma.deps);
+  await handleFullSalesPrice('Base Price - 15000', '9844444444', comma.intents.at(-1), comma.deps);
+  const spaced = await handleFullSalesPrice('15000, 1000, 100, 0 , 500', '9844444444', comma.intents.at(-1), comma.deps);
+  assert.match(spaced.reply, /Save this price\?/);
+  assert.match(spaced.reply, /16,600/);
+  assert.doesNotMatch(spaced.reply, /Send base, transport, loading, credit, and margin/);
+  assert.equal(comma.db.store.inquiries[0].pricing_status, 'awaiting_price');
+});
+
+test('a bare procurement number and a labeled price wait for save or cancel', async () => {
+  const h = loadCatalogFlow({
+    tables: {
+      inquiries: [inquiry({
+        id: 'inq-10228',
+        procurement_number: 'PR-10228',
+        pricing_status: 'price_ready',
+        salesperson_phone: '9844444444',
+        ai_extraction_json: {
+          line_items: [{ line_key: 'hr', sku_text: 'HR Coil', quantity: 30, unit: 'MT' }],
+        },
+      })],
+      inquiry_line_pricing: [{
+        inquiry_id: 'inq-10228',
+        line_key: 'hr',
+        sku_text: 'HR Coil',
+        quantity: 30,
+        unit: 'MT',
+        procurement_base_price_per_mt: 50000,
+        line_status: 'priced',
+      }],
+    },
+    scope: { isAdmin: true, isManager: false, phones: ['9844444444'] },
+  });
+  const phone = '9844444444';
+  const labeled = 'Base - 15000, transport - 500, loading - 500, credit - 0, margin - 500';
+  try {
+    await h.catalogFlow.handleCatalogFlow('Add Price to Inquiry', phone);
+    const opened = await h.catalogFlow.handleCatalogFlow('10228', phone);
+    assert.match(opened.reply, /PR-10228/);
+    assert.match(opened.reply, /base, transport, loading, credit, and margin/);
+    const spaced = await h.catalogFlow.handleCatalogFlow('PR 10228', phone);
+    assert.match(spaced.reply, /Reply with base, transport, loading, credit, and margin/);
+    const baseOnly = await h.catalogFlow.handleCatalogFlow('15000', phone);
+    assert.match(baseOnly.reply, /Transport, loading, credit and margin are still missing/);
+    const stillPrice = await h.catalogFlow.handleCatalogFlow('10228', phone);
+    assert.match(stillPrice.reply, /Loading, credit and margin are still missing/);
+    assert.doesNotMatch(stillPrice.reply, /Reply with base/);
+    const restarted = await h.catalogFlow.handleCatalogFlow('PR-10228', phone);
+    assert.match(restarted.reply, /Reply with base, transport, loading, credit, and margin/);
+    const namedGap = await h.catalogFlow.handleCatalogFlow('Base - 15000, margin - 500', phone);
+    assert.match(namedGap.reply, /Transport, loading and credit are still missing/);
+    assert.doesNotMatch(namedGap.reply, /Base must be a price/);
+    const confirmed = await h.catalogFlow.handleCatalogFlow(labeled, phone);
+    assert.match(confirmed.reply, /PR-10228/);
+    assert.match(confirmed.reply, /Save this price\?/);
+    assert.match(confirmed.reply, /16,500/);
+    assert.deepEqual(confirmed.interactiveButtons.map((button) => [button.id, button.title]), [
+      ['btn_price_save', 'Save'],
+      ['btn_confirm_cancel', 'Cancel'],
+    ]);
+    assert.equal(h.db.calls.some((call) => call.op === 'upsert'), false);
+    assert.equal(h.db.store.inquiries[0].pricing_status, 'price_ready');
+    const cancelled = await h.catalogFlow.handleCatalogFlow('btn_confirm_cancel', phone);
+    assert.match(cancelled.reply, /Activity cancelled/);
+    assert.equal(cancelled.interactiveType, 'list');
+    assert.equal(h.db.calls.some((call) => call.op === 'upsert'), false);
+    assert.equal(h.db.store.inquiries[0].pricing_status, 'price_ready');
+    await h.catalogFlow.handleCatalogFlow('Add Price to Inquiry', phone);
+    await h.catalogFlow.handleCatalogFlow('10228', phone);
+    await h.catalogFlow.handleCatalogFlow(labeled, phone);
+    const saved = await h.catalogFlow.handleCatalogFlow('Save', phone);
+    assert.match(saved.reply, /PR-10228 is sales priced/);
+    assert.match(saved.reply, /16,500/);
+    assert.equal(h.db.store.inquiries[0].pricing_status, 'sales_priced');
+    assert.equal(h.db.store.inquiries[0].status, 'quoted');
+    const upsert = h.db.calls.find((call) => call.table === 'inquiry_line_pricing' && call.op === 'upsert');
+    assert.equal(upsert.payload[0].sales_base_price_per_mt, 15000);
+    assert.equal(upsert.payload[0].procurement_base_price_per_mt, 50000);
+    assert.equal(upsert.payload[0].credit_per_mt, 0);
+    assert.equal(upsert.payload[0].margin_per_mt, 500);
+    assert.equal(upsert.payload[0].rate_per_mt, 16500);
+  } finally {
+    h.restore();
+  }
+});
+
+test('cancel leaves the salesperson price step and hi shows the menu', async () => {
+  const h = loadCatalogFlow({
+    tables: {
+      inquiries: [inquiry({
+        procurement_number: 'PR-20020',
+        pricing_status: 'awaiting_price',
+        salesperson_phone: '9844444444',
+        customer_name: 'Secret Mills',
+      })],
+    },
+    scope: { isAdmin: true, isManager: false, phones: ['9844444444'] },
+  });
+  try {
+    const listed = await h.catalogFlow.handleCatalogFlow('Add Price to Inquiry', '9844444444');
+    assert.match(listed.reply, /PR-20020/);
+    assert.equal(listed.interactiveType, undefined);
+    const menu = await h.catalogFlow.handleCatalogFlow('hi', '9844444444');
+    assert.equal(menu.interactiveType, 'list');
+    assert.ok(menu.interactiveList.sections[0].rows.some((row) => row.id === 'menu_price'));
+    h.setSession('9844444444', 'sales_full|list');
+    const cancelled = await h.catalogFlow.handleCatalogFlow('cancel', '9844444444');
+    assert.match(cancelled.reply, /Activity cancelled/);
+    assert.equal(cancelled.interactiveType, 'list');
+    const again = await h.catalogFlow.handleCatalogFlow('hi', '9844444444');
+    assert.equal(again.interactiveType, 'list');
+  } finally {
+    h.restore();
+  }
+});
+
+test('salesperson menu numbers put add price at 5', async () => {
+  const h = loadCatalogFlow({
+    tables: {
+      inquiries: [inquiry({
+        procurement_number: 'PR-20030',
+        pricing_status: 'awaiting_price',
+        salesperson_phone: '9844444444',
+        customer_name: 'Secret Mills',
+      })],
+    },
+    scope: { isAdmin: false, isManager: false, phones: ['9844444444'] },
+  });
+  try {
+    const titles = h.catalogFlow.getCatalogMenuSections(false)
+      .flatMap((section) => section.rows.map((row) => row.title));
+    assert.deepEqual(titles, [
+      '1. Log New Inquiry',
+      '2. Update Inquiry',
+      '3. Log New Order',
+      '4. Update Order',
+      '5. Add Price to Inquiry',
+      '6. Log Field Visit',
+      '7. New Acquisition',
+      '8. Log Complaint',
+      '9. Update Complaint',
+      '10. General Query',
+    ]);
+    const managerTitles = h.catalogFlow.getCatalogMenuSections(true)
+      .flatMap((section) => section.rows.map((row) => row.title));
+    assert.equal(managerTitles[4], '5. Add Price to Inquiry');
+    assert.equal(managerTitles[5], '6. Log Field Visit');
+    assert.equal(managerTitles[6], '7. Update Field Visit');
+    assert.equal(managerTitles.at(-1), '11. General Query');
+    assert.equal(h.catalogFlow.matchActionFromInput('5', false, false), null);
+    assert.equal(h.catalogFlow.matchActionFromInput('6', false, false), 'LOG_VISIT');
+    assert.equal(h.catalogFlow.matchActionFromInput('menu_5', false, false), 'LOG_VISIT');
+    assert.equal(h.catalogFlow.matchActionFromInput('10', false, false), 'GENERAL_QUERY');
+    assert.equal(h.catalogFlow.matchActionFromInput('11', false, true), 'GENERAL_QUERY');
+    assert.equal(h.catalogFlow.matchActionFromInput('7', false, true), 'UPDATE_VISIT');
+    const listed = await h.catalogFlow.handleCatalogFlow('5', '9844444444');
+    assert.match(listed.reply, /PR-20030/);
   } finally {
     h.restore();
   }
@@ -460,6 +778,7 @@ test('sales price uses base plus transport loading credit and margin', async () 
   assert.match(result.reply, /sales priced/);
   assert.match(result.reply, /65,200/);
   assert.equal(db.store.inquiries[0].pricing_status, 'sales_priced');
+  assert.equal(db.store.inquiries[0].status, 'quoted');
   const savedLine = db.calls.find((call) => call.table === 'inquiry_line_pricing' && call.op === 'upsert');
   assert.equal(savedLine.payload[0].rate_per_mt, 65200);
   assert.equal(savedLine.payload[0].credit_per_mt, 200);

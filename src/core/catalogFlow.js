@@ -35,7 +35,10 @@ const {
   prematureUpdateReply,
   orderRateReply,
   isSalesPriceText,
+  isFullPriceEntry,
+  isBareAddPriceChoice,
   handleSalesPriceChat,
+  handleFullSalesPrice,
 } = require('./salesPriceFlow');
 const {
   detectHsnCode,
@@ -187,14 +190,15 @@ What would you like to do today?
 2. **Update Inquiry**
 3. **Log New Order**
 4. **Update Order**
-5. **Log Customer Field Visit**
-6. **Update Field Visit**
-7. **New Customer Acquisition**
-8. **Log Customer Complaint**
-9. **Update Customer Complaint**
-10. **Other / General Query**
+5. **Add Price to Inquiry**
+6. **Log Customer Field Visit**
+7. **Update Field Visit**
+8. **New Customer Acquisition**
+9. **Log Customer Complaint**
+10. **Update Customer Complaint**
+11. **Other / General Query**
 
-Reply with a number (1–10) or type what you'd like to do.`;
+Reply with a number (1–11), or type what you'd like to do.`;
 
 const CONFIRMATION_BUTTONS = [
   { id: 'btn_confirm_yes', title: 'Save / Yes' },
@@ -300,7 +304,7 @@ function isComplaintAttachmentSkip(text, draft) {
     /^(?:btn_att_no|no|nah|none|no\s*photos?|no\s*evidence|skip|done|proceed|next|nahi)\b/i.test(clean);
 }
 
-function getPostActivityButtons(action) {
+function getPostActivityButtons(action, draft) {
   switch (action) {
     case 'LOG_COMPLAINT':
       return [
@@ -322,11 +326,14 @@ function getPostActivityButtons(action) {
         { id: 'btn_repeat_update_visit', title: 'Update Another Visit' },
         { id: 'btn_post_menu', title: 'Menu' },
       ];
-    case 'LOG_INQUIRY':
+    case 'LOG_INQUIRY': {
+      const number = draft?.procurement_number;
       return [
         { id: 'btn_repeat_log_inquiry', title: 'Log Another Inquiry' },
+        { id: number ? `btn_price_current|${number}` : 'btn_price_current', title: 'Price This Inquiry' },
         { id: 'btn_post_menu', title: 'Menu' },
       ];
+    }
     case 'UPDATE_INQUIRY':
       return [
         { id: 'btn_repeat_update_inquiry', title: 'Update Another Inq' },
@@ -1024,22 +1031,23 @@ const CATALOG_MENU_SECTIONS = [
       { id: 'menu_2', title: '2. Update Inquiry', description: 'Update rates, specs or stage' },
       { id: 'menu_3', title: '3. Log New Order', description: 'Record new confirmed PO' },
       { id: 'menu_4', title: '4. Update Order', description: 'Attach PO, update items' },
+      { id: 'menu_price', title: '5. Add Price to Inquiry', description: 'Awaiting or price ready' },
     ],
   },
   {
     title: 'Visits & Customers',
     rows: [
-      { id: 'menu_5', title: '5. Log Field Visit', description: 'Record client meeting' },
-      { id: 'menu_6', title: '6. Update Field Visit', description: 'Update meeting outcome' },
-      { id: 'menu_7', title: '7. New Acquisition', description: 'Add new customer profile' },
+      { id: 'menu_5', title: '6. Log Field Visit', description: 'Record client meeting' },
+      { id: 'menu_6', title: '7. Update Field Visit', description: 'Update meeting outcome' },
+      { id: 'menu_7', title: '8. New Acquisition', description: 'Add new customer profile' },
     ],
   },
   {
     title: 'Complaints & Queries',
     rows: [
-      { id: 'menu_8', title: '8. Log Complaint', description: 'Report quality or delay' },
-      { id: 'menu_9', title: '9. Update Complaint', description: 'Update resolution status' },
-      { id: 'menu_10', title: '10. General Query', description: 'Ask any data retrieval query' },
+      { id: 'menu_8', title: '9. Log Complaint', description: 'Report quality or delay' },
+      { id: 'menu_9', title: '10. Update Complaint', description: 'Update resolution status' },
+      { id: 'menu_10', title: '11. General Query', description: 'Ask any data retrieval query' },
     ],
   },
 ];
@@ -1068,13 +1076,14 @@ What would you like to do today?
 2. **Update Inquiry**
 3. **Log New Order**
 4. **Update Order**
-5. **Log Customer Field Visit**
-6. **New Customer Acquisition**
-7. **Log Customer Complaint**
-8. **Update Customer Complaint**
-9. **Other / General Query**
+5. **Add Price to Inquiry**
+6. **Log Customer Field Visit**
+7. **New Customer Acquisition**
+8. **Log Customer Complaint**
+9. **Update Customer Complaint**
+10. **Other / General Query**
 
-Reply with a number (1–9) or type what you'd like to do.`;
+Reply with a number (1–10), or type what you'd like to do.`;
 }
 
 function getCatalogMenuSections(isAuthorizedForVisits = true) {
@@ -1089,21 +1098,22 @@ function getCatalogMenuSections(isAuthorizedForVisits = true) {
         { id: 'menu_2', title: '2. Update Inquiry', description: 'Update specs or details' },
         { id: 'menu_3', title: '3. Log New Order', description: 'Record new confirmed PO' },
         { id: 'menu_4', title: '4. Update Order', description: 'Attach PO, update items' },
+        { id: 'menu_price', title: '5. Add Price to Inquiry', description: 'Awaiting or price ready' },
       ],
     },
     {
       title: 'Visits & Customers',
       rows: [
-        { id: 'menu_5', title: '5. Log Field Visit', description: 'Record client meeting' },
-        { id: 'menu_7', title: '6. New Acquisition', description: 'Add new customer profile' },
+        { id: 'menu_5', title: '6. Log Field Visit', description: 'Record client meeting' },
+        { id: 'menu_7', title: '7. New Acquisition', description: 'Add new customer profile' },
       ],
     },
     {
       title: 'Complaints & Queries',
       rows: [
-        { id: 'menu_8', title: '7. Log Complaint', description: 'Report quality or delay' },
-        { id: 'menu_9', title: '8. Update Complaint', description: 'Update resolution status' },
-        { id: 'menu_10', title: '9. General Query', description: 'Ask any data retrieval query' },
+        { id: 'menu_8', title: '8. Log Complaint', description: 'Report quality or delay' },
+        { id: 'menu_9', title: '9. Update Complaint', description: 'Update resolution status' },
+        { id: 'menu_10', title: '10. General Query', description: 'Ask any data retrieval query' },
       ],
     },
   ];
@@ -1515,7 +1525,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
     return 'UPDATE_ORDER';
   }
   if (
-    (!hasActiveSession && (clean === '5' || clean === '5.' || clean === 'option 5' || clean === 'choice 5')) ||
+    (!hasActiveSession && (clean === '6' || clean === '6.' || clean === 'option 6' || clean === 'choice 6')) ||
     clean === 'menu_5' ||
     stripped === 'log visit' || stripped === 'log customer field visit' || stripped === 'log customer visit' || stripped === 'log field visit' || stripped === 'field visit' || stripped === 'new visit' || stripped === 'record visit' || stripped === 'start_log_visit' ||
     clean === '5. log customer field visit' || clean === '5. log field visit' || clean === '5 log customer field visit' ||
@@ -1524,10 +1534,10 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
     return 'LOG_VISIT';
   }
 
-  // If user is a salesperson, option 6 in their menu is New Customer Acquisition
+  // If user is a salesperson, option 7 in their menu is New Customer Acquisition
   if (!isAuthorizedForVisits) {
     if (
-      (!hasActiveSession && (clean === '6' || clean === '6.' || clean === 'option 6' || clean === 'choice 6')) ||
+      (!hasActiveSession && (clean === '7' || clean === '7.' || clean === 'option 7' || clean === 'choice 7')) ||
       clean === 'menu_7' ||
       stripped === 'new acquisition' || stripped === 'new customer' || stripped === 'new customer acquisition' || stripped === 'customer acquisition' || stripped === 'add customer' || stripped === 'onboard customer' || stripped === 'log customer' || stripped === 'start_log_customer' ||
       clean === '6. new customer acquisition' || clean === '6. new acquisition' || clean === '6 new customer acquisition' ||
@@ -1537,7 +1547,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
       return 'LOG_NEW_CUSTOMER';
     }
     if (
-      (!hasActiveSession && (clean === '7' || clean === '7.' || clean === 'option 7' || clean === 'choice 7')) ||
+      (!hasActiveSession && (clean === '8' || clean === '8.' || clean === 'option 8' || clean === 'choice 8')) ||
       clean === 'menu_8' ||
       stripped === 'log complaint' || stripped === 'log customer complaint' || stripped === 'new complaint' || stripped === 'record complaint' || stripped === 'raise complaint' || stripped === 'start_log_complaint' ||
       clean === '7. log customer complaint' || clean === '7. log complaint' || clean === '7 log customer complaint' ||
@@ -1547,7 +1557,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
       return 'LOG_COMPLAINT';
     }
     if (
-      (!hasActiveSession && (clean === '8' || clean === '8.' || clean === 'option 8' || clean === 'choice 8')) ||
+      (!hasActiveSession && (clean === '9' || clean === '9.' || clean === 'option 9' || clean === 'choice 9')) ||
       clean === 'menu_9' ||
       stripped === 'update complaint' || stripped === 'update customer complaint' || stripped === 'complaint update' || stripped === 'resolve complaint' || stripped === 'close complaint' || stripped === 'edit complaint' || stripped === 'start_update_complaint' ||
       clean === '8. update customer complaint' || clean === '8. update complaint' || clean === '8 update customer complaint' ||
@@ -1557,7 +1567,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
       return 'UPDATE_COMPLAINT';
     }
     if (
-      (!hasActiveSession && (clean === '9' || clean === '9.' || clean === 'option 9' || clean === 'choice 9')) ||
+      (!hasActiveSession && (clean === '10' || clean === '10.' || clean === 'option 10' || clean === 'choice 10')) ||
       clean === 'menu_10' ||
       stripped === 'other' || stripped === 'general query' || stripped === 'other query' || stripped === 'general_query' || stripped === 'other / general query' || stripped === 'search query' ||
       clean === '9. other / general query' || clean === '9. other' || clean === '9. general query' || clean === '9 general query' ||
@@ -1570,7 +1580,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
 
   // Explicit Update Visit keywords (always detected so unauthorized users hit the access denied gate)
   if (
-    (isAuthorizedForVisits && !hasActiveSession && (clean === '6' || clean === '6.' || clean === 'option 6' || clean === 'choice 6')) ||
+    (isAuthorizedForVisits && !hasActiveSession && (clean === '7' || clean === '7.' || clean === 'option 7' || clean === 'choice 7')) ||
     clean === 'menu_6' ||
     stripped === 'update visit' || stripped === 'update field visit' || stripped === 'update customer visit' || stripped === 'visit update' || stripped === 'field visit update' || stripped === 'edit visit' || stripped === 'modify visit' || stripped === 'start_update_visit' ||
     clean === '6. update field visit' || clean === '6. update visit' || clean === '6 update field visit' ||
@@ -1580,7 +1590,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
   }
 
   if (
-    (!hasActiveSession && (clean === '7' || clean === '7.' || clean === 'option 7' || clean === 'choice 7')) ||
+    (!hasActiveSession && (clean === '8' || clean === '8.' || clean === 'option 8' || clean === 'choice 8')) ||
     clean === 'menu_7' ||
     stripped === 'new acquisition' || stripped === 'new customer' || stripped === 'new customer acquisition' || stripped === 'customer acquisition' || stripped === 'add customer' || stripped === 'onboard customer' || stripped === 'log customer' || stripped === 'start_log_customer' ||
     clean === '7. new customer acquisition' || clean === '7. new acquisition' || clean === '7 new customer acquisition' ||
@@ -1589,7 +1599,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
     return 'LOG_NEW_CUSTOMER';
   }
   if (
-    (!hasActiveSession && (clean === '8' || clean === '8.' || clean === 'option 8' || clean === 'choice 8')) ||
+    (!hasActiveSession && (clean === '9' || clean === '9.' || clean === 'option 9' || clean === 'choice 9')) ||
     clean === 'menu_8' ||
     stripped === 'log complaint' || stripped === 'log customer complaint' || stripped === 'new complaint' || stripped === 'record complaint' || stripped === 'raise complaint' || stripped === 'start_log_complaint' ||
     clean === '8. log customer complaint' || clean === '8. log complaint' || clean === '8 log customer complaint' ||
@@ -1598,7 +1608,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
     return 'LOG_COMPLAINT';
   }
   if (
-    (!hasActiveSession && (clean === '9' || clean === '9.' || clean === 'option 9' || clean === 'choice 9')) ||
+    (!hasActiveSession && (clean === '10' || clean === '10.' || clean === 'option 10' || clean === 'choice 10')) ||
     clean === 'menu_9' ||
     stripped === 'update complaint' || stripped === 'update customer complaint' || stripped === 'complaint update' || stripped === 'resolve complaint' || stripped === 'close complaint' || stripped === 'edit complaint' || stripped === 'start_update_complaint' ||
     clean === '9. update customer complaint' || clean === '9. update complaint' || clean === '9 update customer complaint' ||
@@ -1607,10 +1617,11 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
     return 'UPDATE_COMPLAINT';
   }
   if (
-    (!hasActiveSession && (clean === '10' || clean === '10.' || clean === 'option 10' || clean === 'choice 10')) ||
+    (!hasActiveSession && (clean === '11' || clean === '11.' || clean === 'option 11' || clean === 'choice 11')) ||
     clean === 'menu_10' ||
     stripped === 'other' || stripped === 'general query' || stripped === 'other query' || stripped === 'general_query' || stripped === 'other / general query' || stripped === 'search query' ||
     clean === '10. other / general query' || clean === '10. other' || clean === '10. general query' ||
+    clean === '11. other / general query' || clean === '11. other' || clean === '11. general query' || clean === '11 general query' ||
     fullClean.includes('general search or intelligence')
   ) {
     return 'GENERAL_QUERY';
@@ -1632,7 +1643,7 @@ function isExplicitMenuSelection(text, hasActiveSession = false, isAuthorizedFor
 
   // 2. Exact catalog list titles / descriptions
   if (
-    /^(?:1|2|3|4|5|6|7|8|9|10)[\.\)\s\-]+(?:log|update|record|new|onboard)?\s*(?:new\s*)?(?:inquiry|order|visit|field visit|customer visit|complaint|customer complaint|customer|acquisition|customer acquisition|general query|other query|other)\b/i.test(clean) ||
+    /^(?:11|10|[1-9])[\.\)\s\-]+(?:log|update|record|new|onboard)?\s*(?:new\s*)?(?:inquiry|order|visit|field visit|customer visit|complaint|customer complaint|customer|acquisition|customer acquisition|general query|other query|other)\b/i.test(clean) ||
     fullClean.includes('capture customer requirements') ||
     fullClean.includes('update specs or details') || fullClean.includes('update rates, specs or stage') ||
     fullClean.includes('record new confirmed po') ||
@@ -1668,8 +1679,8 @@ function isExplicitMenuSelection(text, hasActiveSession = false, isAuthorizedFor
     return matchedAction;
   }
 
-  // 5. If NOT in an active session (idle/general), single digits 1-10 are catalog selections
-  if (!hasActiveSession && /^(?:[1-9]|10)\.?$/i.test(clean)) {
+  // 5. If NOT in an active session (idle/general), single digits 1-11 are catalog selections
+  if (!hasActiveSession && /^(?:11|10|[1-9])\.?$/i.test(clean)) {
     return matchActionFromInput(text, false, isAuthorizedForVisits);
   }
 
@@ -1680,7 +1691,7 @@ const BARE_NUMBER_FIELD_INPUT_REPLY = `Please describe what you'd like to update
 const BARE_NUMBER_NO_SESSION_REPLY = `Please send 'Hi' or 'Menu' to get started.`;
 
 function isBareCatalogNumber(text) {
-  return typeof text === 'string' && /^\s*(?:option\s*|choice\s*)?(?:[1-9]|10)\s*[.)]?\s*$/i.test(text);
+  return typeof text === 'string' && /^\s*(?:option\s*|choice\s*)?(?:11|10|[1-9])\s*[.)]?\s*$/i.test(text);
 }
 
 // True when the latest bot message in the current session is a catalog menu / numbered start prompt.
@@ -10280,6 +10291,7 @@ async function executeAction(action, draft, senderPhone) {
           productSummaryLines = `• *Product:* ${draft.product_description || 'Steel Material'}\n`;
         }
         const procurementLabel = inqRow.procurement_number || procurementStamp.procurement_number;
+        draft.procurement_number = procurementLabel;
 
         return `🎉 *Inquiry Successfully Created!*\n\n` +
           `• *Inquiry ID:* ${inquiryCode}\n` +
@@ -10290,7 +10302,7 @@ async function executeAction(action, draft, senderPhone) {
           (draft.payment_terms ? `• *Payment Terms:* ${draft.payment_terms}\n` : '') +
           (draft.delivery_location ? `• *Delivery Location:* ${draft.delivery_location}\n` : '') +
           (notesWithTarget ? `• *Notes:* ${notesWithTarget}\n` : '') +
-          `\nThe base price is still waiting with procurement. Reply *Price this inquiry* after it is ready. ✅`;
+          `\nProcurement can see ${procurementLabel}. Choose *Price This Inquiry* to enter the base, transport, loading, credit, and margin. ✅`;
       }
 
       case 'UPDATE_INQUIRY': {
@@ -14451,6 +14463,35 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (priced?.handled) return priced;
   }
 
+  const inFullPrice = String(lastIntent || '').startsWith('sales_full|');
+  const fullPriceLeave = text.trim().toLowerCase();
+  if (inFullPrice && /^(menu|hi|hello|hey|start|btn_post_menu)$/i.test(fullPriceLeave)) {
+    await saveActiveSession(senderPhone, 'Unknown', 'general');
+    lastIntent = 'general';
+  } else if (inFullPrice && isDiscardOrCancelIntent(text)) {
+    await saveActiveSession(senderPhone, 'Unknown', 'general');
+    const userMenu = getCatalogMenu(canUpdateVisits);
+    const userSections = getCatalogMenuSections(canUpdateVisits);
+    return {
+      handled: true,
+      reply: `Activity cancelled.\n\n${userMenu}`,
+      interactiveType: 'list',
+      interactiveList: {
+        bodyText: 'Here is the menu to start a new activity:',
+        buttonText: 'Choose Action',
+        sections: userSections,
+      },
+    };
+  } else if (isFullPriceEntry(text) || inFullPrice || (!hasActiveCatalogSession && isBareAddPriceChoice(text))) {
+    const quoted = await handleFullSalesPrice(text, senderPhone, lastIntent, {
+      supabase,
+      saveActiveSession,
+      getAccessibleSalespersonPhonesForBot,
+      expandPhoneVariants,
+    });
+    if (quoted?.handled) return quoted;
+  }
+
   if (options.imageBuffer && (
     lastIntent.startsWith('catalog_flow|LOG_INQUIRY') ||
     lastIntent.startsWith('catalog_editing|LOG_INQUIRY') ||
@@ -15649,7 +15690,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         handled: true,
         reply,
         interactiveType: 'buttons',
-        interactiveButtons: getPostActivityButtons(action),
+        interactiveButtons: getPostActivityButtons(action, draft),
       };
     }
 
