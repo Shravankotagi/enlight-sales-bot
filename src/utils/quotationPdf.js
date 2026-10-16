@@ -365,7 +365,7 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
         doc.text('#', 40, headerY + 8, { width: 18, align: 'center', lineBreak: false });
         doc.text('Item & Description', 62, headerY + 8, { width: 175, lineBreak: false });
         doc.text('HSN/SAC', 240, headerY + 8, { width: 46, align: 'center', lineBreak: false });
-        doc.text('Qty', 289, headerY + 8, { width: 48, align: 'right', lineBreak: false });
+        doc.text('Qty', 289, headerY + 8, { width: 48, align: 'center', lineBreak: false });
         doc.text('Rate', 340, headerY + 8, { width: 48, align: 'right', lineBreak: false });
         if (isInterState) {
           doc.text('IGST (18%)', 392, headerY + 8, { width: 100, align: 'right', lineBreak: false });
@@ -373,7 +373,7 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
           doc.text('CGST (9%)', 392, headerY + 8, { width: 48, align: 'right', lineBreak: false });
           doc.text('SGST (9%)', 444, headerY + 8, { width: 48, align: 'right', lineBreak: false });
         }
-        doc.text('Amount', 496, headerY + 8, { width: 59.28, align: 'right', lineBreak: false });
+        doc.text('Amount', 496, headerY + 8, { width: 51.28, align: 'right', lineBreak: false });
         return headerY + 24;
       };
 
@@ -419,7 +419,7 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
           item.qty_mt_label,
           289,
           rowY + 8,
-          { width: 48, align: 'right' }
+          { width: 48, align: 'center' }
         );
 
         // Rate
@@ -461,7 +461,7 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
           formatIndianCurrency(item.final_amount, true),
           496,
           rowY + 8,
-          { width: 59.28, align: 'right' }
+          { width: 51.28, align: 'right' }
         );
 
         // Divider
