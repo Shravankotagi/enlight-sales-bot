@@ -28,7 +28,15 @@ const {
   getCustomProductsList,
   getCachedCustomProducts,
   createCustomProductRecord,
+  procurementStampForSalesperson,
 } = require('../supabase');
+const {
+  customerTargetNote,
+  prematureUpdateReply,
+  orderRateReply,
+  isSalesPriceText,
+  handleSalesPriceChat,
+} = require('./salesPriceFlow');
 const {
   detectHsnCode,
   normalizeProductToCatalog,
@@ -1078,7 +1086,7 @@ function getCatalogMenuSections(isAuthorizedForVisits = true) {
       title: 'Inquiries & Orders',
       rows: [
         { id: 'menu_1', title: '1. Log New Inquiry', description: 'Capture customer requirements' },
-        { id: 'menu_2', title: '2. Update Inquiry', description: 'Update rates, specs or stage' },
+        { id: 'menu_2', title: '2. Update Inquiry', description: 'Update specs or details' },
         { id: 'menu_3', title: '3. Log New Order', description: 'Record new confirmed PO' },
         { id: 'menu_4', title: '4. Update Order', description: 'Attach PO, update items' },
       ],
@@ -1110,11 +1118,12 @@ Please provide the following details:
 
 - **Customer / Company:** *
 - **Product Description / Quantity:** *
-- **Rate:** (optional)
 - **Preferred Make:** (optional)
 - **Payment Terms:** *
 - **Delivery Location:** *
 - **Additional Notes:** (optional)
+
+A price typed here is kept as a customer target. It is not the sell rate. Procurement adds the base price first.
 
 You can reply in any format — just include the field names or values in order.`,
 
@@ -1126,15 +1135,15 @@ Which fields do you want to update? Mention the field name and new value.
 
 **Updatable Fields:**
 - Product Description / Quantity / Specification (e.g. 8mm, 78 MT)
-- Rate
 - Preferred Make
 - Payment Terms
 - Delivery Location
 - Additional Notes
-- Status (Open / Quoted / Won / Lost / On Hold)
+
+Quoted, Won, and Lost stay closed until the sales price is saved. Reply *Price this inquiry* after the base price is ready. If every line is unavailable, send the decline from the dashboard.
 
 Example:
-"INQ-2026-0042, update rate to 54000, payment terms to 45 days credit, status to Quoted"`,
+"INQ-2026-0042, payment terms to 45 days credit, delivery to Chakan"`,
 
   LOG_ORDER: `🛒 **Record New Order**
 
@@ -1483,7 +1492,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
     clean === 'menu_2' ||
     stripped === 'update inquiry' || stripped === 'update inq' || stripped === 'update an inquiry' || stripped === 'update the inquiry' || stripped === 'inquiry update' || stripped === 'inq update' || stripped === 'edit inquiry' || stripped === 'edit inq' || stripped === 'modify inquiry' || stripped === 'start_update_inquiry' ||
     clean === '2. update inquiry' || clean === '2 update inquiry' ||
-    fullClean.includes('update rates, specs or stage')
+    fullClean.includes('update specs or details') || fullClean.includes('update rates, specs or stage')
   ) {
     return 'UPDATE_INQUIRY';
   }
@@ -1625,7 +1634,7 @@ function isExplicitMenuSelection(text, hasActiveSession = false, isAuthorizedFor
   if (
     /^(?:1|2|3|4|5|6|7|8|9|10)[\.\)\s\-]+(?:log|update|record|new|onboard)?\s*(?:new\s*)?(?:inquiry|order|visit|field visit|customer visit|complaint|customer complaint|customer|acquisition|customer acquisition|general query|other query|other)\b/i.test(clean) ||
     fullClean.includes('capture customer requirements') ||
-    fullClean.includes('update rates, specs or stage') ||
+    fullClean.includes('update specs or details') || fullClean.includes('update rates, specs or stage') ||
     fullClean.includes('record new confirmed po') ||
     fullClean.includes('attach po, update items') ||
     fullClean.includes('record client meeting') ||
@@ -6646,7 +6655,7 @@ function formatSelectedInquiryPrompt(matchedRecord, itemsListText) {
     `• *Additional Notes:* ${formatAttributeValue(matchedRecord.additional_notes)}\n\n` +
     `*Current Line Items:*\n\n${itemsListText}` +
     quoteTotalBlock + `\n\n` +
-    `Want to update Stage (Negotiation, Won, Lost, On Hold), Rate, Quantity or other details?`;
+    `You can update quantity, specs, payment terms, or delivery. Reply *Price this inquiry* after the base price is ready. Quoted, Won, and Lost stay closed until that sales price is saved.`;
 }
 
 /**
@@ -8767,7 +8776,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         `• *Additional Notes:* ${formatAttributeValue(single.additional_notes)}\n\n` +
         `*Current Line Items:*\n\n${itemsListText}` +
         quoteTotalBlock + `\n\n` +
-        `Want to update Stage (Negotiation, Won, Lost, On Hold), Rate, Quantity or other details?`;
+        `You can update quantity, specs, payment terms, or delivery. Reply *Price this inquiry* after the base price is ready. Quoted, Won, and Lost stay closed until that sales price is saved.`;
 
       return {
         handled: true,
@@ -9439,29 +9448,24 @@ function buildConfirmationSummary(action, draft) {
 
   switch (action) {
     case 'LOG_INQUIRY': {
+      const displayItems = (draft.line_items || []).map((item) => ({ ...item, rate: null, amount: null }));
+      const target = customerTargetNote({ ...draft, additional_notes: '' });
       summary += `• *Customer / Company:* ${draft.company_name || '-'}\n`;
-      if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
-        if (draft.line_items.length === 1) {
-          summary += `• *Product:* ${formatDetailedInquiryItemsList(draft.line_items)}\n`;
+      if (displayItems.length > 0) {
+        if (displayItems.length === 1) {
+          summary += `• *Product:* ${formatDetailedInquiryItemsList(displayItems)}\n`;
         } else {
-          summary += `• *Line Items:*\n${formatDetailedInquiryItemsList(draft.line_items).split('\n').map(l => `  ${l}`).join('\n')}\n`;
+          summary += `• *Line Items:*\n${formatDetailedInquiryItemsList(displayItems).split('\n').map(l => `  ${l}`).join('\n')}\n`;
         }
       } else {
-        const rateStr = draft.rate ? ` | ₹${(parseIndianAmount(draft.rate) ?? 0).toLocaleString('en-IN')} /MT` : '';
-        summary += `• *Product:* ${draft.product_description || '-'}${rateStr}\n`;
+        summary += `• *Product:* ${draft.product_description || '-'}\n`;
       }
       summary += `• *Preferred Make:* ${draft.preferred_make || '-'}\n`;
       summary += `• *Payment Terms:* ${draft.payment_terms || '-'}\n`;
       summary += `• *Delivery Location:* ${draft.delivery_location || '-'}\n`;
       summary += `• *Additional Notes:* ${draft.additional_notes || '-'}\n`;
-      if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
-        const totalAmt = draft.line_items.reduce((sum, it) => sum + (Number(it.amount) || ((Number(it.quantity) || 0) * (Number(it.rate) || 0)) || 0), 0);
-        if (totalAmt > 0) {
-          const gstAmt = Math.round(totalAmt * 0.18);
-          const grandTot = totalAmt + gstAmt;
-          summary += `• *Quotation Total:* ₹${Number(totalAmt).toLocaleString('en-IN')} + 18% GST (₹${Number(gstAmt).toLocaleString('en-IN')}) = *₹${Number(grandTot).toLocaleString('en-IN')}*\n`;
-        }
-      }
+      if (target) summary += `• *${target}*\n`;
+      summary += `• *Pricing:* Base price is still waiting with procurement.\n`;
       break;
     }
 
@@ -10028,19 +10032,16 @@ async function executeAction(action, draft, senderPhone) {
           city: draft.delivery_location || null,
         });
 
-        let totalAmount = 0;
-        const globalRate = parseIndianAmount(draft.rate) || 0;
+        const totalAmount = 0;
+        const notesWithTarget = customerTargetNote(draft);
 
         const structuredLineItems = (Array.isArray(draft.line_items) && draft.line_items.length > 0)
           ? draft.line_items.map((it) => {
-              const calc = calculateLineItem(it);
+              const calc = calculateLineItem({ ...it, rate: null, amount: null });
               const sText = it.sku_text || it.description || '';
               const sDim = it.dimensions || it.spec || '';
               const hCode = resolveProductHsnOrEmpty(sText || it.description || '', sDim, it.hsn_code || it.hsn_sac, draft);
-              const itRate = calc.rate || globalRate || 0;
-              const itQty = calc.quantity || 0;
-              const itAmt = calc.amount || (itQty && itRate ? itQty * itRate : 0);
-              totalAmount += itAmt;
+              const itQty = calc.quantity || Number(it.quantity) || 0;
               return {
                 sku_text: sText,
                 description: it.description || sText,
@@ -10050,15 +10051,9 @@ async function executeAction(action, draft, senderPhone) {
                 hsn_code: hCode,
                 hsn_sac: hCode,
                 quantity: itQty,
-                unit: calc.unit || 'MT',
-                rate: itRate || null,
-                amount: itAmt || null,
-                cgst_rate: calc.cgst_rate || 9,
-                cgst_amount: calc.cgst_amount || Math.round(itAmt * 0.09 * 100) / 100,
-                sgst_rate: calc.sgst_rate || 9,
-                sgst_amount: calc.sgst_amount || Math.round(itAmt * 0.09 * 100) / 100,
-                total_gst: calc.total_gst || Math.round(itAmt * 0.18 * 100) / 100,
-                final_amount: calc.final_amount || Math.round(itAmt * 1.18 * 100) / 100,
+                unit: calc.unit || it.unit || 'MT',
+                rate: null,
+                amount: null,
               };
             })
           : [
@@ -10071,7 +10066,7 @@ async function executeAction(action, draft, senderPhone) {
                 hsn_sac: resolveProductHsnOrEmpty(draft.product_description || '', '', '', draft),
                 quantity: 0,
                 unit: 'MT',
-                rate: globalRate || null,
+                rate: null,
                 amount: null,
               }
             ];
@@ -10089,11 +10084,11 @@ async function executeAction(action, draft, senderPhone) {
           delivery_address: draft.delivery_location || null,
           payment_terms: draft.payment_terms || null,
           preferred_make: draft.preferred_make || null,
-          additional_notes: draft.additional_notes || null,
-          rate: globalRate || (structuredLineItems[0]?.rate ?? null),
-          unitPrice: globalRate || (structuredLineItems[0]?.rate ?? null),
-          total_amount: totalAmount || null,
-          totalAmount: totalAmount || null,
+          additional_notes: notesWithTarget || null,
+          rate: null,
+          unitPrice: null,
+          total_amount: null,
+          totalAmount: null,
           po_number: draft.po_number || null,
           reference_po_number: draft.reference_po_number || null,
           generated_po_number: draft.generated_po_number || null,
@@ -10109,15 +10104,14 @@ async function executeAction(action, draft, senderPhone) {
 
         let humanRawText = `Customer: ${companyName}\n`;
         if (structuredLineItems.length > 0 && structuredLineItems[0].quantity > 0) {
-          humanRawText += `Products:\n` + structuredLineItems.map((it, i) => `${i + 1}. ${it.description || it.sku_text} - ${it.quantity} ${it.unit}${it.rate ? ` @ ₹${it.rate}/${it.unit}` : ''}`).join('\n') + `\n`;
+          humanRawText += `Products:\n` + structuredLineItems.map((it, i) => `${i + 1}. ${it.description || it.sku_text} - ${it.quantity} ${it.unit}`).join('\n') + `\n`;
         } else if (draft.product_description) {
           humanRawText += `Product: ${draft.product_description}\n`;
-          if (globalRate) humanRawText += `Rate: ₹${globalRate}/MT\n`;
         }
         if (draft.preferred_make) humanRawText += `Preferred Make: ${draft.preferred_make}\n`;
         if (draft.payment_terms) humanRawText += `Payment Terms: ${draft.payment_terms}\n`;
         if (draft.delivery_location) humanRawText += `Delivery Location: ${draft.delivery_location}\n`;
-        if (draft.additional_notes) humanRawText += `Notes: ${draft.additional_notes}\n`;
+        if (notesWithTarget) humanRawText += `Notes: ${notesWithTarget}\n`;
         const inquirySourceMediaUrls = Array.isArray(draft.attachments)
           ? draft.attachments
             .map(a => a?.url || a?.file_url)
@@ -10125,9 +10119,8 @@ async function executeAction(action, draft, senderPhone) {
           : [];
 
         // 1. Insert into inquiries (primary canonical table with pipeline fields)
-        const { data: inqRow, error: inqErr } = await supabase
-          .from('inquiries')
-          .insert({
+        const procurementStamp = await procurementStampForSalesperson(senderPhone);
+        const inquiryInsert = {
             source_channel: draft.source_channel || 'WhatsApp',
             sender_name: companyName,
             customer_name: companyName,
@@ -10139,14 +10132,28 @@ async function executeAction(action, draft, senderPhone) {
             stage: 'new_inquiry',
             delivery_location: draft.delivery_location || null,
             payment_terms: draft.payment_terms || null,
-            total_amount: totalAmount || null,
+            total_amount: null,
+            pricing_status: procurementStamp.pricing_status,
+            procurement_number: procurementStamp.procurement_number,
+            procurement_employee_id: procurementStamp.procurement_employee_id,
+            procurement_assigned_at: procurementStamp.procurement_assigned_at,
             ai_extraction_json: structuredAiJson,
             overall_confidence: 0.95,
             inquiry_type: 'inquiry',
             created_at: new Date().toISOString(),
-          })
+          };
+        let { data: inqRow, error: inqErr } = await supabase
+          .from('inquiries')
+          .insert(inquiryInsert)
           .select()
           .single();
+        if (inqErr && /procurement_number|pricing_status|procurement_employee_id|procurement_assigned_at/i.test(inqErr.message || '')) {
+          delete inquiryInsert.pricing_status;
+          delete inquiryInsert.procurement_number;
+          delete inquiryInsert.procurement_employee_id;
+          delete inquiryInsert.procurement_assigned_at;
+          ({ data: inqRow, error: inqErr } = await supabase.from('inquiries').insert(inquiryInsert).select().single());
+        }
 
         if (inqErr || !inqRow) {
           console.error('[CatalogFlow] Inquiry insert error:', inqErr);
@@ -10170,8 +10177,8 @@ async function executeAction(action, draft, senderPhone) {
             grade: it.grade || null,
             quantity: Number(it.quantity) || null,
             unit: it.unit || 'MT',
-            rate: Number(it.rate) || null,
-            amount: Number(it.amount) || null,
+            rate: null,
+            amount: null,
             confidence: 0.95,
             created_at: new Date().toISOString(),
           }));
@@ -10204,7 +10211,7 @@ async function executeAction(action, draft, senderPhone) {
             customer_address: draft.delivery_location || null,
             delivery_location: draft.delivery_location || null,
             payment_terms: draft.payment_terms || null,
-            total_amount: totalAmount || null,
+            total_amount: null,
             inquiry_type: 'inquiry',
             status: 'auto_created',
             salesperson_phone: senderPhone,
@@ -10221,8 +10228,8 @@ async function executeAction(action, draft, senderPhone) {
             grade: it.grade || null,
             quantity: Number(it.quantity) || null,
             unit: it.unit || 'MT',
-            rate: Number(it.rate) || null,
-            amount: Number(it.amount) || null,
+            rate: null,
+            amount: null,
             confidence: 0.95,
             created_at: new Date().toISOString(),
           }));
@@ -10261,35 +10268,29 @@ async function executeAction(action, draft, senderPhone) {
           console.warn('[CatalogFlow] Activity log notice for LOG_INQUIRY:', actErr?.message);
         }
 
+        const displayItems = structuredLineItems.map((item) => ({ ...item, rate: null, amount: null }));
         let productSummaryLines = '';
-        if (structuredLineItems.length > 0) {
-          if (structuredLineItems.length === 1) {
-            productSummaryLines = `• *Product:* ${formatDetailedInquiryItemsList(structuredLineItems)}\n`;
+        if (displayItems.length > 0) {
+          if (displayItems.length === 1) {
+            productSummaryLines = `• *Product:* ${formatDetailedInquiryItemsList(displayItems)}\n`;
           } else {
-            productSummaryLines = `• *Line Items:*\n${formatDetailedInquiryItemsList(structuredLineItems).split('\n').map(l => `  ${l}`).join('\n')}\n`;
+            productSummaryLines = `• *Line Items:*\n${formatDetailedInquiryItemsList(displayItems).split('\n').map(l => `  ${l}`).join('\n')}\n`;
           }
         } else {
-          const rateStr = globalRate ? ` | ₹${Number(globalRate).toLocaleString('en-IN')} /MT` : '';
-          productSummaryLines = `• *Product:* ${draft.product_description || 'Steel Material'}${rateStr}\n`;
+          productSummaryLines = `• *Product:* ${draft.product_description || 'Steel Material'}\n`;
         }
-
-        let quoteTotalLines = '';
-        if (totalAmount > 0) {
-          const gstAmt = Math.round(totalAmount * 0.18);
-          const grandTot = totalAmount + gstAmt;
-          quoteTotalLines = `• *Quotation Total:* ₹${Number(totalAmount).toLocaleString('en-IN')} + 18% GST (₹${Number(gstAmt).toLocaleString('en-IN')}) = *₹${Number(grandTot).toLocaleString('en-IN')}*\n`;
-        }
+        const procurementLabel = inqRow.procurement_number || procurementStamp.procurement_number;
 
         return `🎉 *Inquiry Successfully Created!*\n\n` +
           `• *Inquiry ID:* ${inquiryCode}\n` +
+          `• *Procurement number:* ${procurementLabel}\n` +
           `• *Customer / Company:* ${companyName}\n` +
           productSummaryLines +
           (draft.preferred_make ? `• *Preferred Make:* ${draft.preferred_make}\n` : '') +
           (draft.payment_terms ? `• *Payment Terms:* ${draft.payment_terms}\n` : '') +
           (draft.delivery_location ? `• *Delivery Location:* ${draft.delivery_location}\n` : '') +
-          (draft.additional_notes ? `• *Additional Notes:* ${draft.additional_notes}\n` : '') +
-          quoteTotalLines +
-          `\nLogged to Sales Pipeline & Inquiries! ✅`;
+          (notesWithTarget ? `• *Notes:* ${notesWithTarget}\n` : '') +
+          `\nThe base price is still waiting with procurement. Reply *Price this inquiry* after it is ready. ✅`;
       }
 
       case 'UPDATE_INQUIRY': {
@@ -10499,13 +10500,13 @@ async function executeAction(action, draft, senderPhone) {
         let targetInqId = deal.inquiry_id || deal.id;
         let inqRow = null;
         if (targetInqId) {
-          const { data: directInq, error: fetchInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status').eq('id', targetInqId).single();
+          const { data: directInq, error: fetchInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status, pricing_status').eq('id', targetInqId).single();
           if (!fetchInqErr && directInq) {
             inqRow = directInq;
           }
         }
         if (!inqRow && cleanId) {
-          const { data: matchedInqs } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status').order('created_at', { ascending: false }).limit(500);
+          const { data: matchedInqs } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status, pricing_status').order('created_at', { ascending: false }).limit(500);
           if (matchedInqs) {
             inqRow = matchedInqs.find(i => (i.id || '').replace(/-/g, '').toUpperCase().startsWith(cleanId) || (i.id || '').replace(/-/g, '').toUpperCase().includes(cleanId)) || null;
             if (inqRow) {
@@ -10517,6 +10518,14 @@ async function executeAction(action, draft, senderPhone) {
             }
           }
         }
+
+        const hasSellRate = Boolean(updates.rate) || (Array.isArray(draft.line_item_updates) && draft.line_item_updates.some((item) => item && item.rate != null && String(item.rate).trim() !== ''));
+        const blockedUpdate = prematureUpdateReply({
+          pricingStatus: inqRow?.pricing_status,
+          stage: dealUpdates.stage,
+          hasRate: hasSellRate,
+        });
+        if (blockedUpdate) return blockedUpdate;
 
         let itemsUpdated = false;
         let totalAmount = 0;
@@ -10879,6 +10888,12 @@ async function executeAction(action, draft, senderPhone) {
       }
 
       case 'LOG_ORDER': {
+        const linkedInquiryId = String(draft.inquiry_id || '').trim();
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(linkedInquiryId)) {
+          const { data: pricedInquiry } = await supabase.from('inquiries').select('pricing_status').eq('id', linkedInquiryId).maybeSingle();
+          const orderBlock = orderRateReply(pricedInquiry?.pricing_status);
+          if (orderBlock) return orderBlock;
+        }
         const companyName = (draft.company_name || 'Customer').trim();
         const poResolution = await resolveFinalPo({
           poNumber: draft.po_number,
@@ -14425,6 +14440,16 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   }
 
   const hasActiveCatalogSession = lastIntent.startsWith('catalog_');
+
+  if (isSalesPriceText(text) || (lastIntent.startsWith('sales_price|') && !hasActiveCatalogSession)) {
+    const priced = await handleSalesPriceChat(text, senderPhone, lastIntent, {
+      supabase,
+      saveActiveSession,
+      getAccessibleSalespersonPhonesForBot,
+      expandPhoneVariants,
+    });
+    if (priced?.handled) return priced;
+  }
 
   if (options.imageBuffer && (
     lastIntent.startsWith('catalog_flow|LOG_INQUIRY') ||

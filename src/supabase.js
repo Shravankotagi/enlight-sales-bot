@@ -50,6 +50,30 @@ function nextProcurementNumberFromRows(rows) {
   return `PR-${String(max + 1).padStart(5, '0')}`;
 }
 
+async function procurementStampForSalesperson(salespersonPhone) {
+  const stamp = {
+    pricing_status: 'awaiting_price',
+    procurement_number: nextProcurementNumberFromRows([]),
+    procurement_employee_id: null,
+    procurement_assigned_at: null,
+  };
+  try {
+    const { data: employees } = await supabase
+      .from('employees')
+      .select('id, phone, role, is_active, assigned_procurement_employee_id');
+    const ownerId = procurementOwnerFromEmployees(employees, salespersonPhone);
+    if (ownerId) {
+      stamp.procurement_employee_id = ownerId;
+      stamp.procurement_assigned_at = new Date().toISOString();
+    }
+  } catch (routeErr) {}
+  try {
+    const { data: existingNumbers } = await supabase.from('inquiries').select('procurement_number');
+    stamp.procurement_number = nextProcurementNumberFromRows(existingNumbers);
+  } catch (numberErr) {}
+  return stamp;
+}
+
 function procurementOwnerFromEmployees(employees, salespersonPhone) {
   const target = normalizePhone(salespersonPhone);
   if (target.length !== 10) return null;
@@ -1669,5 +1693,6 @@ module.exports = {
   createCustomProductRecord,
   nextProcurementNumberFromRows,
   procurementOwnerFromEmployees,
+  procurementStampForSalesperson,
 };
 

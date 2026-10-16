@@ -7,13 +7,17 @@ const {
   procurementOwnerFromEmployees,
 } = require('../supabase');
 
-test('new bot inquiries start awaiting a price and procurement stays blocked', () => {
+test('new bot inquiries start awaiting a price and procurement reaches the assistant', () => {
   const supabase = fs.readFileSync(path.join(__dirname, '../supabase.js'), 'utf8');
   const webhook = fs.readFileSync(path.join(__dirname, '../webhook.js'), 'utf8');
+  const webChat = fs.readFileSync(path.join(__dirname, '../api/webChat.js'), 'utf8');
   assert.match(supabase, /pricing_status:\s*'awaiting_price'/);
   assert.match(supabase, /procurement_number/);
   assert.match(supabase, /assigned_procurement_employee_id/);
-  assert.match(webhook, /isProcurementRole\(employeeRecord\.role\)/);
+  assert.match(webhook, /handleProcurementChat/);
+  assert.doesNotMatch(webhook, /not enabled yet/);
+  assert.match(webChat, /handleProcurementChat/);
+  assert.doesNotMatch(webChat, /procurementBlocked/);
 });
 
 test('bot procurement number is independent of the inquiry id and follows the salesperson route', () => {
