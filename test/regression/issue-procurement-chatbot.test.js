@@ -84,6 +84,7 @@ function chat(caller, rows, intent, extraTables) {
   if (intent) sessions.set(caller.phone, { last_intent: intent, customer_name: caller.name });
   return {
     db,
+    sessions,
     handle(text) {
       return handleProcurementChat(text, caller.phone, {
         supabase: db.client,
@@ -122,16 +123,82 @@ test('log a base price lists seven procurement numbers and points to the inquiri
   assert.match(eight.reply, /PR-10002/);
   assert.doesNotMatch(eight.reply, /PR-10001/);
   assert.match(eight.reply, /View the rest in the Inquiries tab/);
+  assert.match(eight.reply, /PR-10008 · 8 Oct 2026, 5:30 am/);
   assert.doesNotMatch(eight.reply, /Secret Mills/);
-  assert.equal(eight.interactiveList.sections[0].rows.length, 7);
-  assert.equal(eight.interactiveList.sections[0].rows[0].id, 'PR-10008');
+  assert.equal(eight.interactiveList, undefined);
 
   const threeRows = rows.slice(0, 3);
   const three = await chat(person, threeRows).handle('log a base price');
   assert.match(three.reply, /PR-10001/);
   assert.match(three.reply, /PR-10003/);
   assert.doesNotMatch(three.reply, /Inquiries tab/);
-  assert.equal(three.interactiveList.sections[0].rows.length, 3);
+  assert.equal(three.interactiveList, undefined);
+  const copied = three.reply.split('\n').find((line) => line.startsWith('PR-10003'));
+  const fromLine = await chat(person, threeRows).handle(copied);
+  assert.match(fromLine.reply, /PR-10003/);
+  assert.match(fromLine.reply, /one base price per line/);
+});
+
+test('a blank pricing status is not awaiting a price', async () => {
+  const rows = [
+    inquiry({ id: 'inq-blank', procurement_number: 'PR-10050', procurement_employee_id: 'proc-a', pricing_status: null }),
+    inquiry({ id: 'inq-ready', procurement_number: 'PR-10051', procurement_employee_id: 'proc-a', pricing_status: 'awaiting_price' }),
+  ];
+  const pending = await chat(person, rows).handle('pending prices');
+  assert.match(pending.reply, /PR-10051/);
+  assert.doesNotMatch(pending.reply, /PR-10050/);
+  const base = await chat(person, rows).handle('proc_3');
+  assert.match(base.reply, /PR-10051/);
+  assert.doesNotMatch(base.reply, /PR-10050/);
+});
+
+test('cancel ends the procurement step and hi shows the menu', async () => {
+  const { handle } = chat(person, [inquiry({ procurement_employee_id: 'proc-a' })], 'procurement|base|PR-10041');
+  const cancelled = await handle('cancel');
+  assert.match(cancelled.reply, /Activity cancelled/);
+  assert.equal(cancelled.interactiveType, 'list');
+  const menu = await handle('hi');
+  const ids = menu.interactiveList.sections[0].rows.map((row) => row.id);
+  assert.deepEqual(ids, ['proc_1', 'proc_2', 'proc_3']);
+});
+
+test('asking for details returns the inquiry and does not open base pricing', async () => {
+  const rows = [inquiry({
+    id: 'inq-details',
+    procurement_number: 'PR-10226',
+    procurement_employee_id: 'proc-a',
+    pricing_status: 'unavailable',
+    delivery_location: 'Mumbai, Maharashtra',
+    created_at: '2026-10-15T04:16:00.000Z',
+    customer_name: 'Secret Mills',
+    ai_extraction_json: {
+      customer_name: 'Secret Mills',
+      line_items: [
+        { line_key: 'hr', sku_text: 'HR Coil', quantity: 10, unit: 'MT' },
+        { line_key: 'cr', sku_text: 'CR Coil', quantity: 20, unit: 'MT' },
+        { line_key: 'tmt', sku_text: 'TMT Bar', quantity: 20, unit: 'MT' },
+      ],
+    },
+  })];
+  const pricing = [
+    { inquiry_id: 'inq-details', line_key: 'hr', line_status: 'cannot_price', procurement_line_note: 'not in stock', procurement_base_price_per_mt: null },
+    { inquiry_id: 'inq-details', line_key: 'cr', line_status: 'priced', procurement_base_price_per_mt: 62000 },
+    { inquiry_id: 'inq-details', line_key: 'tmt', line_status: 'needs_price' },
+  ];
+  const opened = chat(person, rows, 'procurement|menu', { inquiry_line_pricing: pricing });
+  const details = await opened.handle('give me the details for this inquiry PR-10226');
+  assert.match(details.reply, /PR-10226 · 15 Oct 2026, 9:46 am/);
+  assert.match(details.reply, /Ravi · Mumbai, Maharashtra · Unavailable/);
+  assert.match(details.reply, /1\. HR Coil 10 MT — Unavailable: not in stock/);
+  assert.match(details.reply, /2\. CR Coil 20 MT — ₹62000\/MT/);
+  assert.match(details.reply, /3\. TMT Bar 20 MT — Awaiting price/);
+  assert.doesNotMatch(details.reply, /one base price per line/);
+  assert.doesNotMatch(details.reply, /Secret Mills/);
+  assert.equal(String(opened.sessions.get(person.phone)?.last_intent || '').startsWith('procurement|base|'), false);
+
+  const priced = await opened.handle('PR-10226');
+  assert.match(priced.reply, /one base price per line/);
+  assert.match(opened.sessions.get(person.phone).last_intent, /^procurement\|base\|PR-10226$/);
 });
 
 test('a procurement person can ask how many inquiries a salesperson has left to price', async () => {

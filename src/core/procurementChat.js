@@ -156,10 +156,31 @@ function productSummary(inquiry) {
   return `${first.sku_text || 'Material'} ${qty}${more}`.trim();
 }
 
+function formatInquiryWhen(value) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).formatToParts(date);
+  const read = (type) => parts.find((part) => part.type === type)?.value || '';
+  return `${read('day')} ${read('month')} ${read('year')}, ${read('hour')}:${read('minute')} ${read('dayPeriod').toLowerCase()}`;
+}
+
+function isAwaitingPrice(row) {
+  return row?.pricing_status === 'awaiting_price';
+}
+
 function formatInquiryLine(inquiry, salespersonName) {
   const number = inquiry?.procurement_number || 'No procurement number';
+  const when = formatInquiryWhen(inquiry?.created_at);
   const place = inquiry?.delivery_location || 'Delivery not set';
-  return `${number} · ${salespersonName || 'Salesperson'} · ${productSummary(inquiry)} · ${place} · ${statusLabel(inquiry?.pricing_status)}`;
+  return `${number} · ${when ? `${when} · ` : ''}${salespersonName || 'Salesperson'} · ${productSummary(inquiry)} · ${place} · ${statusLabel(inquiry?.pricing_status)}`;
 }
 
 function menuRows(isManager) {
@@ -201,42 +222,41 @@ function normalizeMenuChoice(text) {
   return null;
 }
 
-function clipText(text, max) {
-  const value = String(text || '').replace(/\s+/g, ' ').trim();
-  if (value.length <= max) return value;
-  return `${value.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
-}
-
 function byNewest(rows) {
   return [...(rows || [])].sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
 }
 
 function basePriceListResult(rows, employees) {
-  const waiting = byNewest(rows).filter((row) => (row.pricing_status || 'awaiting_price') === 'awaiting_price');
+  const waiting = byNewest(rows).filter(isAwaitingPrice);
   const shown = waiting.slice(0, 7);
   if (!shown.length) {
     return { handled: true, reply: 'None are waiting for a base price.' };
   }
-  const lines = shown.map((row) => `${row.procurement_number} · ${salespersonName(row, employees)} · ${productSummary(row)}`);
-  let reply = `Copy a procurement number and send it.\n\n${lines.join('\n')}`;
+  const lines = shown.map((row) => formatInquiryLine(row, salespersonName(row, employees)));
+  let reply = `Copy a procurement number, or the whole line, and send it.\n\n${lines.join('\n')}`;
   if (waiting.length > 7) reply += '\n\nView the rest in the Inquiries tab.';
-  return {
-    handled: true,
-    reply,
-    interactiveType: 'list',
-    interactiveList: {
-      bodyText: reply,
-      buttonText: 'Choose inquiry',
-      sections: [{
-        title: 'Awaiting price',
-        rows: shown.map((row) => ({
-          id: String(row.procurement_number),
-          title: clipText(row.procurement_number, 24),
-          description: clipText(`${salespersonName(row, employees)} · ${productSummary(row)}`, 72),
-        })),
-      }],
-    },
-  };
+  return { handled: true, reply };
+}
+
+function isProcurementCancel(text) {
+  const { isDiscardOrCancelIntent } = require('./catalogFlow');
+  return isDiscardOrCancelIntent(text);
+}
+
+function isDetailsRequest(text) {
+  const value = String(text || '');
+  return /\b(details?|information)\b/i.test(value) && /PR-\d+/i.test(value);
+}
+
+function linePriceDetail(line, saved) {
+  const label = `${line.sku_text} ${line.quantity || ''} ${line.unit || 'MT'}`.replace(/\s+/g, ' ').trim();
+  const price = Number(saved?.procurement_base_price_per_mt);
+  if (saved && Number.isFinite(price) && price > 0) return `${label} — ₹${price}/MT`;
+  const note = String(saved?.procurement_line_note || '').trim();
+  if (saved && (saved.line_status === 'cannot_price' || note)) {
+    return note ? `${label} — Unavailable: ${note}` : `${label} — Unavailable`;
+  }
+  return `${label} — Awaiting price`;
 }
 
 function questionKind(text) {
@@ -277,8 +297,8 @@ function answerSalespersonQuestion(text, rows, employees, scope) {
   const phone = normalizePhone(person.phone);
   const mine = visibleInquiries(rows, scope).filter((row) => normalizePhone(row.salesperson_phone) === phone);
   const count = mine.filter((row) => {
-    const status = row.pricing_status || 'awaiting_price';
-    return kind === 'awaiting_price' ? status === 'awaiting_price' : status === kind;
+    if (kind === 'awaiting_price') return isAwaitingPrice(row);
+    return row.pricing_status === kind;
   }).length;
   const noun = count === 1 ? 'inquiry' : 'inquiries';
   const detail = kind === 'price_ready' ? 'price ready' : kind === 'unavailable' ? 'unavailable' : 'left to price';
@@ -350,6 +370,16 @@ async function handleProcurementChat(text, phone, deps) {
 
   if (!clean || /^(menu|hi|hello|hey|start)$/i.test(clean)) return showMenu();
 
+  if (isProcurementCancel(clean)) {
+    const menu = await showMenu();
+    return { ...menu, reply: `Activity cancelled.\n\n${menu.reply}` };
+  }
+
+  if (isDetailsRequest(clean)) {
+    const number = clean.toUpperCase().match(/PR-\d+/)[0];
+    return inquiryDetailsReply(number, scope, employees || [], deps);
+  }
+
   const choice = normalizeMenuChoice(clean);
   if (intent.startsWith('procurement|base|') && !choice) {
     const number = intent.slice('procurement|base|'.length);
@@ -371,7 +401,7 @@ async function handleProcurementChat(text, phone, deps) {
 
   if (choice === 'pending') {
     const rows = visibleInquiries(await loadInquiries(supabase), scope).filter(
-      (row) => (row.pricing_status || 'awaiting_price') === 'awaiting_price',
+      isAwaitingPrice,
     );
     return { handled: true, reply: listReply('*Pending prices*', rows, employees || []) };
   }
@@ -418,6 +448,28 @@ async function loadInquiries(supabase) {
     .order('created_at', { ascending: false })
     .limit(500);
   return data || [];
+}
+
+async function inquiryDetailsReply(number, scope, employees, deps) {
+  const rows = visibleInquiries(await loadInquiries(deps.supabase), scope);
+  const inquiry = rows.find((row) => String(row.procurement_number || '').toUpperCase() === number.toUpperCase());
+  if (!inquiry) {
+    return { handled: true, reply: `${number} is not in your inquiries.` };
+  }
+  const { data: savedRows } = await deps.supabase
+    .from('inquiry_line_pricing')
+    .select('*')
+    .eq('inquiry_id', inquiry.id);
+  const saved = savedRows || [];
+  const lines = sourceLines(inquiry);
+  const when = formatInquiryWhen(inquiry.created_at);
+  const header = `${inquiry.procurement_number}${when ? ` · ${when}` : ''}`;
+  const summary = `${salespersonName(inquiry, employees)} · ${inquiry.delivery_location || 'Delivery not set'} · ${statusLabel(inquiry.pricing_status)}`;
+  const listed = lines.map((line, index) => {
+    const match = saved.find((row) => row.line_key === line.line_key);
+    return `${index + 1}. ${linePriceDetail(line, match)}`;
+  });
+  return { handled: true, reply: `${header}\n${summary}\n${listed.join('\n')}` };
 }
 
 async function beginBasePrice(number, phone, employee, scope, employees, deps) {
