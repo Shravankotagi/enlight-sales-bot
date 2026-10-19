@@ -90,6 +90,53 @@ function cityFromNominatim(body) {
   );
 }
 
+function firstText(values) {
+  return values.map(text).find(Boolean) || '';
+}
+
+function addressFromNominatim(body) {
+  const address = body?.address || {};
+  const building = firstText([
+    body?.namedetails?.name,
+    body?.name,
+    address.building,
+    address.house_name,
+    address.amenity,
+    address.shop,
+    address.office,
+    address.tourism,
+  ]);
+  const street = firstText([
+    address.road,
+    address.pedestrian,
+    address.footway,
+    address.street,
+    address.residential,
+  ]);
+  const locality = firstText([
+    address.city,
+    address.town,
+    address.city_district,
+    address.municipality,
+    address.village,
+    address.county,
+  ]);
+  const parts = [
+    building,
+    address.house_number,
+    street,
+    address.suburb || address.neighbourhood,
+    locality,
+    address.state,
+    address.postcode,
+  ]
+    .map(text)
+    .filter(Boolean);
+  const composed = [...new Set(parts)].join(', ');
+  if (building || street) return composed;
+  return text(body?.display_name) || composed;
+}
+
 function readDraft(draft) {
   const source = draft || {};
   const brands = (Array.isArray(source.preferred_make)
@@ -412,7 +459,7 @@ async function fillVisitCity(draft) {
   if (view.city || view.latitude == null || view.longitude == null) return draft;
   try {
     const response = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${view.latitude}&lon=${view.longitude}`,
+      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&namedetails=1&zoom=18&lat=${view.latitude}&lon=${view.longitude}`,
       {
         headers: {
           Accept: 'application/json',
@@ -421,10 +468,11 @@ async function fillVisitCity(draft) {
       },
     );
     if (!response.ok) return draft;
-    const city = cityFromNominatim(await response.json());
-    if (city) {
-      draft.city_location = city;
-      draft.city = city;
+    const body = await response.json();
+    const location = addressFromNominatim(body) || text(cityFromNominatim(body));
+    if (location) {
+      draft.city_location = location;
+      draft.city = location;
     }
   } catch {
     // A typed city remains available when the lookup fails.
@@ -492,6 +540,7 @@ module.exports = {
   consumeVisitCode,
   releaseVisitCode,
   fillVisitCity,
+  addressFromNominatim,
   attachVisitMedia,
   promptsFromVisitState,
   hashVisitSecret,
