@@ -382,20 +382,36 @@ function visitRowColumns(draft) {
   };
 }
 
-function visitCodeMessage(otp) {
-  return [
-    'Enlight Metals – Customer Visits',
-    '',
-    `Your visit verification code is: *${otp}*`,
-    '',
-    'This code expires in 5 minutes. Do not share it with anyone.',
-  ].join('\n');
+function visitOtpTemplatePayload(phone, otp, templateName) {
+  return {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: phone,
+    type: 'template',
+    template: {
+      name: templateName,
+      language: { code: 'en' },
+      components: [
+        {
+          type: 'body',
+          parameters: [{ type: 'text', text: otp }],
+        },
+        {
+          type: 'button',
+          sub_type: 'url',
+          index: '0',
+          parameters: [{ type: 'text', text: otp }],
+        },
+      ],
+    },
+  };
 }
 
-async function defaultSendVisitCode(to, body) {
+async function defaultSendVisitCode(to, payload) {
   const token = process.env.WHATSAPP_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  if (!token || !phoneNumberId) {
+  const templateName = text(process.env.WHATSAPP_VISIT_OTP_TEMPLATE);
+  if (!token || !phoneNumberId || !templateName) {
     const error = new Error('WhatsApp is not configured for visit codes.');
     error.code = 'WHATSAPP_NOT_CONFIGURED';
     throw error;
@@ -403,13 +419,7 @@ async function defaultSendVisitCode(to, body) {
   const axios = require('axios');
   await axios.post(
     `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
-    {
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to,
-      type: 'text',
-      text: { body },
-    },
+    payload,
     {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -459,7 +469,10 @@ async function requestVisitCode(supabase, rawPhone, send = defaultSendVisitCode)
   });
   if (error) return { ok: false, message: 'Unable to send the visit code right now.' };
   try {
-    await send(`91${phone}`, visitCodeMessage(otp));
+    await send(
+      `91${phone}`,
+      visitOtpTemplatePayload(`91${phone}`, otp, text(process.env.WHATSAPP_VISIT_OTP_TEMPLATE)),
+    );
   } catch (err) {
     await patchVisitCode(supabase, id, {
       consumed_at: now.toISOString(),
@@ -617,6 +630,7 @@ module.exports = {
   fillVisitCity,
   addressFromNominatim,
   addressFromGoogleGeocode,
+  visitOtpTemplatePayload,
   attachVisitMedia,
   promptsFromVisitState,
   hashVisitSecret,
