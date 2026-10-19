@@ -90,21 +90,41 @@ function cityFromNominatim(body) {
   );
 }
 
+function firstText(values) {
+  return values.map(text).find(Boolean) || '';
+}
+
 function addressFromNominatim(body) {
-  const display = text(body?.display_name);
-  if (display) return display;
   const address = body?.address || {};
-  const locality =
-    address.city ||
-    address.town ||
-    address.city_district ||
-    address.municipality ||
-    address.village ||
-    address.county ||
-    '';
-  const parts = [
-    address.house_number,
+  const building = firstText([
+    body?.namedetails?.name,
+    body?.name,
+    address.building,
+    address.house_name,
+    address.amenity,
+    address.shop,
+    address.office,
+    address.tourism,
+  ]);
+  const street = firstText([
     address.road,
+    address.pedestrian,
+    address.footway,
+    address.street,
+    address.residential,
+  ]);
+  const locality = firstText([
+    address.city,
+    address.town,
+    address.city_district,
+    address.municipality,
+    address.village,
+    address.county,
+  ]);
+  const parts = [
+    building,
+    address.house_number,
+    street,
     address.suburb || address.neighbourhood,
     locality,
     address.state,
@@ -112,7 +132,9 @@ function addressFromNominatim(body) {
   ]
     .map(text)
     .filter(Boolean);
-  return [...new Set(parts)].join(', ');
+  const composed = [...new Set(parts)].join(', ');
+  if (building || street) return composed;
+  return text(body?.display_name) || composed;
 }
 
 function readDraft(draft) {
@@ -437,7 +459,7 @@ async function fillVisitCity(draft) {
   if (view.city || view.latitude == null || view.longitude == null) return draft;
   try {
     const response = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${view.latitude}&lon=${view.longitude}`,
+      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&namedetails=1&zoom=18&lat=${view.latitude}&lon=${view.longitude}`,
       {
         headers: {
           Accept: 'application/json',

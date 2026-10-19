@@ -137,6 +137,28 @@ test('reads a full address from a reverse-geocode response', () => {
     '12, MG Road, Camp, Pune, Maharashtra, 411001',
   );
   assert.equal(addressFromNominatim({ address: {} }), '');
+  assert.equal(
+    addressFromNominatim({
+      display_name: 'Pune, Maharashtra, India',
+      name: 'Phoenix Marketcity',
+      address: {
+        building: 'Phoenix Marketcity',
+        road: 'Nagar Road',
+        city: 'Pune',
+        state: 'Maharashtra',
+      },
+    }),
+    'Phoenix Marketcity, Nagar Road, Pune, Maharashtra',
+  );
+  assert.equal(
+    addressFromNominatim({
+      address: {
+        pedestrian: 'Laxmi Road',
+        city: 'Pune',
+      },
+    }),
+    'Laxmi Road, Pune',
+  );
 });
 
 test('a day-first follow-up date is stored as a calendar date', () => {
