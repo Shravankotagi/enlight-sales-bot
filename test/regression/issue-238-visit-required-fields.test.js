@@ -9,6 +9,7 @@ const {
   requestVisitCode,
   verifyVisitCode,
   addressFromNominatim,
+  addressFromGoogleGeocode,
 } = require('../../src/core/visitRequirements');
 
 function completeDraft(overrides = {}) {
@@ -158,6 +159,74 @@ test('reads a full address from a reverse-geocode response', () => {
       },
     }),
     'Laxmi Road, Pune',
+  );
+});
+
+test('reads a building and street from a Google geocode response', () => {
+  const girgaon = {
+    results: [
+      {
+        formatted_address:
+          'Girgaon, D Ward, Mumbai Zone 1, Mumbai City District, Maharashtra, 400004, India',
+        types: ['neighborhood', 'political'],
+        address_components: [
+          { long_name: 'Girgaon', types: ['neighborhood', 'political'] },
+          { long_name: 'Mumbai', types: ['locality', 'political'] },
+        ],
+      },
+      {
+        formatted_address:
+          'Girgaon Court, 12, Girgaon Road, Girgaon, Mumbai, Maharashtra 400004, India',
+        types: ['premise', 'street_address'],
+        geometry: { location_type: 'ROOFTOP' },
+        address_components: [
+          { long_name: 'Girgaon Court', types: ['premise'] },
+          { long_name: '12', types: ['street_number'] },
+          { long_name: 'Girgaon Road', types: ['route'] },
+          { long_name: 'Girgaon', types: ['sublocality_level_1', 'sublocality'] },
+          { long_name: 'Mumbai', types: ['locality', 'political'] },
+          { long_name: 'Maharashtra', types: ['administrative_area_level_1', 'political'] },
+          { long_name: '400004', types: ['postal_code'] },
+        ],
+      },
+    ],
+  };
+  assert.equal(
+    addressFromGoogleGeocode(girgaon),
+    'Girgaon Court, 12 Girgaon Road, Girgaon, Mumbai, Maharashtra, 400004',
+  );
+  assert.equal(
+    addressFromGoogleGeocode({
+      results: [
+        {
+          formatted_address: 'Girgaon Road, Girgaon, Mumbai, Maharashtra 400004, India',
+          types: ['route'],
+          address_components: [
+            { long_name: 'Girgaon Road', types: ['route'] },
+            { long_name: 'Girgaon', types: ['neighborhood'] },
+            { long_name: 'Mumbai', types: ['locality'] },
+            { long_name: 'Maharashtra', types: ['administrative_area_level_1'] },
+            { long_name: '400004', types: ['postal_code'] },
+          ],
+        },
+      ],
+    }),
+    'Girgaon Road, Girgaon, Mumbai, Maharashtra, 400004',
+  );
+  assert.equal(
+    addressFromGoogleGeocode({
+      results: [
+        {
+          formatted_address: 'Mumbai, Maharashtra, India',
+          types: ['locality', 'political'],
+          address_components: [
+            { long_name: 'Mumbai', types: ['locality'] },
+            { long_name: 'Maharashtra', types: ['administrative_area_level_1'] },
+          ],
+        },
+      ],
+    }),
+    'Mumbai, Maharashtra, India',
   );
 });
 

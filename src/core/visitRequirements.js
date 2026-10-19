@@ -137,6 +137,83 @@ function addressFromNominatim(body) {
   return text(body?.display_name) || composed;
 }
 
+function googleComponent(result, type) {
+  const match = (result?.address_components || []).find(
+    (part) => Array.isArray(part?.types) && part.types.includes(type),
+  );
+  return text(match?.long_name);
+}
+
+function googleResultRank(result) {
+  const types = Array.isArray(result?.types) ? result.types : [];
+  const has = (type) => types.includes(type);
+  let rank = 0;
+  if (has('premise') || has('subpremise') || has('street_address')) rank = 3;
+  else if (has('establishment') || has('point_of_interest')) rank = 2;
+  else if (has('route')) rank = 1;
+  else if (googleComponent(result, 'premise') || googleComponent(result, 'subpremise')) rank = 3;
+  else if (googleComponent(result, 'route')) rank = 1;
+  if (result?.geometry?.location_type === 'ROOFTOP') rank += 0.5;
+  return rank;
+}
+
+function selectGoogleGeocodeResult(body) {
+  const results = Array.isArray(body?.results) ? body.results : [];
+  let best = null;
+  let bestRank = -1;
+  for (const result of results) {
+    const rank = googleResultRank(result);
+    if (rank > bestRank) {
+      best = result;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
+function addressFromGoogleGeocode(body) {
+  const result = selectGoogleGeocodeResult(body);
+  if (!result) return '';
+  const types = Array.isArray(result.types) ? result.types : [];
+  const formatted = text(result.formatted_address);
+  const premise = googleComponent(result, 'premise') || googleComponent(result, 'subpremise');
+  const streetNumber = googleComponent(result, 'street_number');
+  const route = googleComponent(result, 'route');
+  const firstSegment = formatted.split(',')[0]?.trim() || '';
+  const isPlace = types.includes('establishment') || types.includes('point_of_interest');
+  const building =
+    premise ||
+    (isPlace && firstSegment && firstSegment !== route && firstSegment !== streetNumber
+      ? firstSegment
+      : '');
+  const street = [streetNumber, route].filter(Boolean).join(' ');
+  if (!building && !street) return formatted;
+  const area =
+    googleComponent(result, 'sublocality_level_1') ||
+    googleComponent(result, 'sublocality') ||
+    googleComponent(result, 'neighborhood');
+  const parts = [
+    building,
+    street,
+    area,
+    googleComponent(result, 'locality'),
+    googleComponent(result, 'administrative_area_level_1'),
+    googleComponent(result, 'postal_code'),
+  ]
+    .map(text)
+    .filter(Boolean);
+  const unique = parts.filter(
+    (part, index) => parts.findIndex((item) => item.toLowerCase() === part.toLowerCase()) === index,
+  );
+  return unique.join(', ') || formatted;
+}
+
+function cityFromGoogleGeocode(body) {
+  const result = selectGoogleGeocodeResult(body);
+  if (!result) return '';
+  return googleComponent(result, 'locality');
+}
+
 function readDraft(draft) {
   const source = draft || {};
   const brands = (Array.isArray(source.preferred_make)
@@ -457,19 +534,17 @@ async function releaseVisitCode(supabase, id) {
 async function fillVisitCity(draft) {
   const view = readDraft(draft);
   if (view.city || view.latitude == null || view.longitude == null) return draft;
+  const key = process.env.GOOGLE_MAPS_API_KEY;
+  if (!key) return draft;
   try {
     const response = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&namedetails=1&zoom=18&lat=${view.latitude}&lon=${view.longitude}`,
-      {
-        headers: {
-          Accept: 'application/json',
-          'User-Agent': 'EnlightMetalsOS/1.0 (customer-visit)',
-        },
-      },
+      `https://maps.googleapis.com/maps/api/geocode/json?latlng=${encodeURIComponent(`${view.latitude},${view.longitude}`)}&key=${encodeURIComponent(key)}`,
+      { headers: { Accept: 'application/json' } },
     );
     if (!response.ok) return draft;
     const body = await response.json();
-    const location = addressFromNominatim(body) || text(cityFromNominatim(body));
+    if (body?.status !== 'OK') return draft;
+    const location = addressFromGoogleGeocode(body) || cityFromGoogleGeocode(body);
     if (location) {
       draft.city_location = location;
       draft.city = location;
@@ -541,6 +616,7 @@ module.exports = {
   releaseVisitCode,
   fillVisitCity,
   addressFromNominatim,
+  addressFromGoogleGeocode,
   attachVisitMedia,
   promptsFromVisitState,
   hashVisitSecret,
