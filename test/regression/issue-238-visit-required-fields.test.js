@@ -8,6 +8,7 @@ const {
   visitRowColumns,
   requestVisitCode,
   verifyVisitCode,
+  addressFromNominatim,
 } = require('../../src/core/visitRequirements');
 
 function completeDraft(overrides = {}) {
@@ -112,6 +113,30 @@ test('a visit is not inserted until the fields, photo, and correct code are pres
   assert.equal(visits[0].follow_up_date, '2026-10-20');
   assert.equal(readyForCode.follow_up_date, '20-10-2026');
   assert.equal(visits.length, 1);
+});
+
+test('reads a full address from a reverse-geocode response', () => {
+  assert.equal(
+    addressFromNominatim({
+      display_name: '12, MG Road, Camp, Pune, Maharashtra, 411001, India',
+      address: { city: 'Pune' },
+    }),
+    '12, MG Road, Camp, Pune, Maharashtra, 411001, India',
+  );
+  assert.equal(
+    addressFromNominatim({
+      address: {
+        house_number: '12',
+        road: 'MG Road',
+        suburb: 'Camp',
+        city: 'Pune',
+        state: 'Maharashtra',
+        postcode: '411001',
+      },
+    }),
+    '12, MG Road, Camp, Pune, Maharashtra, 411001',
+  );
+  assert.equal(addressFromNominatim({ address: {} }), '');
 });
 
 test('a day-first follow-up date is stored as a calendar date', () => {

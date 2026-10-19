@@ -90,6 +90,31 @@ function cityFromNominatim(body) {
   );
 }
 
+function addressFromNominatim(body) {
+  const display = text(body?.display_name);
+  if (display) return display;
+  const address = body?.address || {};
+  const locality =
+    address.city ||
+    address.town ||
+    address.city_district ||
+    address.municipality ||
+    address.village ||
+    address.county ||
+    '';
+  const parts = [
+    address.house_number,
+    address.road,
+    address.suburb || address.neighbourhood,
+    locality,
+    address.state,
+    address.postcode,
+  ]
+    .map(text)
+    .filter(Boolean);
+  return [...new Set(parts)].join(', ');
+}
+
 function readDraft(draft) {
   const source = draft || {};
   const brands = (Array.isArray(source.preferred_make)
@@ -421,10 +446,11 @@ async function fillVisitCity(draft) {
       },
     );
     if (!response.ok) return draft;
-    const city = cityFromNominatim(await response.json());
-    if (city) {
-      draft.city_location = city;
-      draft.city = city;
+    const body = await response.json();
+    const location = addressFromNominatim(body) || text(cityFromNominatim(body));
+    if (location) {
+      draft.city_location = location;
+      draft.city = location;
     }
   } catch {
     // A typed city remains available when the lookup fails.
@@ -492,6 +518,7 @@ module.exports = {
   consumeVisitCode,
   releaseVisitCode,
   fillVisitCity,
+  addressFromNominatim,
   attachVisitMedia,
   promptsFromVisitState,
   hashVisitSecret,
