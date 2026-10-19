@@ -1039,9 +1039,8 @@ const CATALOG_MENU_SECTIONS = [
 async function canUserUpdateVisits(senderPhone) {
   if (!senderPhone) return true;
   try {
-    const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
-    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
-    return Boolean(scope.isAdmin || scope.isManager);
+    const { can } = require('../utils/permissions');
+    return can(senderPhone, 'visits.update');
   } catch (err) {
     console.error('Error checking visit update permissions:', err?.message);
     return false;
@@ -17391,6 +17390,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   // ── 6. DIRECT ACTION ROUTING (Menu Selection 1-10 or Action Keywords) ────────
   const matchedAction = matchActionFromInput(text, false, canUpdateVisits);
   if (matchedAction) {
+    const { denialReply } = require('../utils/permissions');
+    const denied = await denialReply(senderPhone, matchedAction);
+    if (denied) {
+      await recordSessionMessage(senderPhone, 'assistant', denied, { action_type: 'ACCESS_DENIED' });
+      return { handled: true, reply: denied };
+    }
     await recordSessionMessage(senderPhone, 'user', text);
     if (matchedAction === 'GENERAL_QUERY') {
       const genReply = `🔍 *SalesOS Search & Intelligence*\n\nAsk any question about your inquiries, quotations, customer profiles, site visits, or complaints!\n\n_Example: "What was the last rate quoted to Horizon Sheet Metal?" or "Show pending complaints"_`;
