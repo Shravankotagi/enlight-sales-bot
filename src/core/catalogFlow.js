@@ -30,6 +30,17 @@ const {
   createCustomProductRecord,
 } = require('../supabase');
 const {
+  nextVisitPrompts,
+  assertReadyToSave,
+  visitRowColumns,
+  requestVisitCode,
+  verifyVisitCode,
+  consumeVisitCode,
+  releaseVisitCode,
+  fillVisitCity,
+  attachVisitMedia,
+} = require('./visitRequirements');
+const {
   detectHsnCode,
   normalizeProductToCatalog,
   isValidCatalogProduct,
@@ -1109,6 +1120,7 @@ const MODULE_PROMPTS = {
 Please provide the following details:
 
 - **Customer / Company:** *
+- **Email ID:** (optional)
 - **Product Description / Quantity:** *
 - **Rate:** (optional)
 - **Preferred Make:** (optional)
@@ -1130,6 +1142,7 @@ Which fields do you want to update? Mention the field name and new value.
 - Preferred Make
 - Payment Terms
 - Delivery Location
+- Email ID
 - Additional Notes
 - Status (Open / Quoted / Won / Lost / On Hold)
 
@@ -1168,21 +1181,11 @@ Which field would you like to update? (Rate, Quantity, PO Number, PO Date, Deliv
 
   LOG_VISIT: `**Log Customer Field Visit**
 
-Please provide the following details:
+Reply with all of these together. I will ask again only for anything still missing.
 
-- **Customer / Company:** *
-- **Person Met:** *
-- **Contact Phone:** *
-- **City / Location:** *
-- **Visit Date:** *
-- **Visit Outcome:** * (Positive / Negative / Neutral / Follow-up Required)
-- **Follow-up Action:** (optional)
-- **Meeting Remarks:** *
+${nextVisitPrompts({}).map((item) => `- **${item}**`).join('\n')}
 
-**Optional Extended Fields:**
-- Email, Designation, Customer Type (OEM / Fabricator / EPC / Manufacturer / Trader)
-- Visit Type (First Visit / Follow-up 1-3 / Regular Visit), Probability (Hot / Warm / Cold)
-- Product Details, Monthly Consumption, Current Requirement, Preferred Make, Payment Terms, Delivery Location`,
+After these details are complete, a code is sent to the customer.`,
 
   UPDATE_VISIT: `**Update Field Visit**
 
@@ -1981,6 +1984,7 @@ LOG_INQUIRY:
 {
   "action": "LOG_INQUIRY",
   "company_name": "<Customer / Company Name, else null>",
+  "email": "<Customer email address if mentioned, else null>",
   "contact_person": "<Customer Contact Person / Name if mentioned e.g. 'Sheetal Kumari', else null>",
   "contact_phone": "<10-digit mobile number if mentioned, else null>",
   "product_description": "<Summary of all products/quantities, else null>",
@@ -2006,6 +2010,7 @@ LOG_INQUIRY:
   "entries": [
     {
       "company_name": "<Company Name>",
+      "email": "<Email or null>",
       "contact_person": "<Contact Person or null>",
       "contact_phone": "<Phone or null>",
       "product_description": "<Product description>",
@@ -2030,6 +2035,7 @@ UPDATE_INQUIRY:
     "preferred_make": "<if user requested update, else null>",
     "payment_terms": "<if user requested update, else null>",
     "delivery_location": "<if user requested update, else null>",
+    "email": "<Customer email if update requested, else null>",
     "additional_notes": "<Exact literal text provided by user if update requested. NEVER summarize, rephrase, or alter user notes, else null>",
     "stage": "<Open | Quoted | Negotiation | Won | Lost | On Hold if mentioned, else null>",
     "status": "<Open | Quoted | Negotiation | Won | Lost | On Hold if mentioned, else null>"
@@ -2129,7 +2135,7 @@ LOG_VISIT:
   "contact_phone": "<10-digit phone number if provided, else null>",
   "city_location": "<City or location of visit, else null>",
   "visit_date": "<Visit date in DD-MM-YYYY format e.g. 10-09-2026, else null>",
-  "visit_outcome": "<Positive | Negative | Neutral | Follow-up Required, else null>",
+  "visit_outcome": "<Positive | Negative | Neutral, else null>",
   "followup_action": "<specific follow up action if mentioned, else null>",
   "meeting_remarks": "<meeting remarks & requirements discussed, else null>",
   "email": "<email address if mentioned, else null>",
@@ -2151,7 +2157,7 @@ LOG_VISIT:
       "contact_phone": "<Phone, else null>",
       "city_location": "<City / Location, else null>",
       "visit_date": "<Visit date in DD-MM-YYYY format, else null>",
-      "visit_outcome": "<Positive | Negative | Neutral | Follow-up Required, else null>",
+      "visit_outcome": "<Positive | Negative | Neutral, else null>",
       "followup_action": "<Follow-up action, else null>",
       "meeting_remarks": "<Meeting remarks, else null>"
     }
@@ -2167,7 +2173,7 @@ UPDATE_VISIT:
     "person_met": "<Person met if updated, else null>",
     "contact_phone": "<Contact phone if updated, else null>",
     "city_location": "<City / Location if updated, else null>",
-    "visit_outcome": "<Positive | Negative | Neutral | Follow-up Required if updated, else null>",
+    "visit_outcome": "<Positive | Negative | Neutral if updated, else null>",
     "visit_date": "<New visit date ONLY IF the user explicitly asked to change/update the visit date, else null>",
     "followup_action": "<Follow-up action if updated, else null>",
     "meeting_remarks": "<Meeting remarks if updated, else null>",
@@ -2496,9 +2502,9 @@ function detectTotalValueUpdateAttempt(text, extractedData) {
 function getAllowedFieldsListForAction(action) {
   switch (action) {
     case 'LOG_INQUIRY':
-      return `- *Rate / Target Price*\n- *Quantity & Unit (e.g. 25 MT)*\n- *Product Specifications / Dimensions*\n- *Payment Terms (e.g. 30 Days Credit)*\n- *Delivery Location*\n- *Preferred Make (e.g. JSW, SAIL)*\n- *Additional Notes*`;
+      return `- *Rate / Target Price*\n- *Quantity & Unit (e.g. 25 MT)*\n- *Product Specifications / Dimensions*\n- *Payment Terms (e.g. 30 Days Credit)*\n- *Delivery Location*\n- *Email ID*\n- *Preferred Make (e.g. JSW, SAIL)*\n- *Additional Notes*`;
     case 'UPDATE_INQUIRY':
-      return `- *Rate / Target Price*\n- *Quantity & Product Specifications / Dimensions (e.g. 8mm, 78 MT)*\n- *Payment Terms (e.g. 30 Days)*\n- *Delivery Location*\n- *Preferred Make*\n- *Additional Notes*`;
+      return `- *Rate / Target Price*\n- *Quantity & Product Specifications / Dimensions (e.g. 8mm, 78 MT)*\n- *Payment Terms (e.g. 30 Days)*\n- *Delivery Location*\n- *Email ID*\n- *Preferred Make*\n- *Additional Notes*`;
     case 'LOG_ORDER':
       return `- *PO Number (e.g. PO-2026-001)*\n- *PO Date*\n- *Delivery Location*\n- *Payment Terms*\n- *Product Rates & Quantities*`;
     case 'UPDATE_ORDER':
@@ -2524,7 +2530,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
   if (!clean) return { isNonEditable: false };
 
   // Fast bypass: If user is explicitly targeting an editable field (notes, remarks, rate, qty, payment terms, delivery location, etc.)
-  const isExplicitEditableField = /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|resolution\s*notes?|comments?|description|rate|price|target\s*price|bhav|quantity|qty|payment\s*terms?|delivery\s*location|location|city|person\s*met|contact\s*person|contact\s*phone|phone|mobile|visit\s*date|po\s*number|po\s*no|po\s*date|status|stage|preferred\s*make|make)\s*(?:to|as|is|:|=|\s+-)\s*/i.test(clean);
+  const isExplicitEditableField = /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|resolution\s*notes?|comments?|description|rate|price|target\s*price|bhav|quantity|qty|payment\s*terms?|delivery\s*location|location|city|person\s*met|contact\s*person|contact\s*phone|phone|mobile|email(?:\s*id)?|visit\s*date|po\s*number|po\s*no|po\s*date|status|stage|preferred\s*make|make)\s*(?:to|as|is|:|=|\s+-)\s*/i.test(clean);
   if (isExplicitEditableField) {
     return { isNonEditable: false };
   }
@@ -4123,6 +4129,22 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     }
   }
 
+  if (action === 'LOG_INQUIRY' && !merged.email) {
+    const emailMatch = String(userInput || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    if (emailMatch) merged.email = emailMatch[0].toLowerCase();
+  }
+  if (action === 'UPDATE_INQUIRY' && !merged.updates?.email && /\bemail\b/i.test(String(userInput || ''))) {
+    const emailMatch = String(userInput || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    if (emailMatch) {
+      merged.updates = merged.updates || {};
+      merged.updates.email = emailMatch[0].toLowerCase();
+    }
+  }
+  if (action === 'UPDATE_INQUIRY' && merged.email && !merged.updates?.email) {
+    merged.updates = merged.updates || {};
+    merged.updates.email = String(merged.email).trim().toLowerCase();
+  }
+
   // Fallback contact_person and mobile_number for LOG_NEW_CUSTOMER / LOG_VISIT / UPDATE_VISIT / LOG_INQUIRY / LOG_ORDER
   if (['LOG_NEW_CUSTOMER', 'LOG_VISIT', 'UPDATE_VISIT', 'LOG_INQUIRY', 'LOG_ORDER'].includes(action)) {
     if (!merged.mobile_number && !merged.contact_phone) {
@@ -4733,25 +4755,16 @@ function validateMandatoryFields(action, draft) {
     }
 
     case 'LOG_VISIT':
-      if (!draft.meeting_remarks && (draft.followup_action || draft.notes || draft.additional_notes)) {
-        draft.meeting_remarks = draft.followup_action || draft.notes || draft.additional_notes;
+      if (!draft.meeting_remarks && (draft.notes || draft.additional_notes)) {
+        draft.meeting_remarks = draft.notes || draft.additional_notes;
       }
       if (!draft.contact_phone && (draft.mobile_number || draft.phone)) {
         draft.contact_phone = draft.mobile_number || draft.phone;
       }
-      if (!draft.city_location && (draft.delivery_location || draft.location || draft.address)) {
-        draft.city_location = draft.delivery_location || draft.location || draft.address;
-      }
       if (!draft.person_met && draft.contact_person) {
         draft.person_met = draft.contact_person;
       }
-      if (!draft.company_name) missing.push('Customer / Company Name');
-      if (!draft.person_met) missing.push('Person Met');
-      if (!draft.contact_phone) missing.push('Contact Phone');
-      if (!draft.city_location) missing.push('City / Location');
-      if (!draft.visit_date) missing.push('Visit Date (e.g. 10-09-2026)');
-      if (!draft.visit_outcome) missing.push('Visit Outcome (Positive / Negative / Neutral / Follow-up Required)');
-      if (!draft.meeting_remarks) missing.push('Meeting Remarks & Requirements');
+      missing.push(...nextVisitPrompts(draft));
       break;
 
     case 'UPDATE_VISIT': {
@@ -5199,6 +5212,7 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
 
   const draft = {
     company_name: finalCustomerName,
+    email: (extraction.customer && extraction.customer.email) || extraction.customer_email || null,
     delivery_location: extraction.delivery_location || null,
     payment_terms: extraction.payment_terms || null,
     line_items: lineItems,
@@ -6475,6 +6489,18 @@ function formatStageLabel(st) {
   if (s.includes('negot')) return 'Negotiation';
   if (s.includes('hold')) return 'On Hold';
   return 'New Inquiry';
+}
+
+function activityStageName(st) {
+  const s = String(st || '').toLowerCase().trim();
+  if (!s) return '';
+  if (s === 'won' || s === 'closed won') return 'Closed Won';
+  if (s === 'lost' || s === 'closed lost') return 'Closed Lost';
+  if (['quoted', 'quotation_sent', 'qualified', 'saved', 'confirmed', 'processed', 'price quote'].includes(s)) return 'Price Quote';
+  if (s.includes('negot')) return 'Negotiation';
+  if (s === 'on_hold' || s === 'hold' || s === 'on hold') return 'On Hold';
+  if (['new_inquiry', 'new', 'review', 'needs_review', 'pending', 'received', 'new inquiry'].includes(s)) return 'New Inquiry';
+  return '';
 }
 
 function formatDetailedInquiryItemsList(items, { includeHsn = false } = {}) {
@@ -9440,6 +9466,7 @@ function buildConfirmationSummary(action, draft) {
   switch (action) {
     case 'LOG_INQUIRY': {
       summary += `• *Customer / Company:* ${draft.company_name || '-'}\n`;
+      summary += `• *Email ID:* ${draft.email || '-'}\n`;
       if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
         if (draft.line_items.length === 1) {
           summary += `• *Product:* ${formatDetailedInquiryItemsList(draft.line_items)}\n`;
@@ -9720,7 +9747,9 @@ function buildConfirmationSummary(action, draft) {
       if (draft.next_purchase_expected) summary += `• *Next Purchase Expected:* ${draft.next_purchase_expected}\n`;
       if (draft.delivery_location) summary += `• *Delivery Location:* ${draft.delivery_location}\n`;
       if (draft.preferred_make) summary += `• *Preferred Make:* ${draft.preferred_make}\n`;
+      if (draft.preferred_make_other) summary += `• *Other Brand:* ${draft.preferred_make_other}\n`;
       if (draft.payment_terms) summary += `• *Payment Terms:* ${draft.payment_terms}\n`;
+      if (draft.follow_up_date) summary += `• *Follow-up Date:* ${draft.follow_up_date}\n`;
       if (Array.isArray(draft.attachments) && draft.attachments.length > 0) {
         const photoCount = draft.attachments.length;
         summary += `• *Photos Attached:* ${photoCount} ${photoCount === 1 ? 'geotagged site photo' : 'geotagged site photos'}\n`;
@@ -10080,11 +10109,14 @@ async function executeAction(action, draft, senderPhone) {
           customer: {
             name: companyName,
             phone: null,
+            email: draft.email || null,
             address: draft.delivery_location || null,
             match_status: 'matched',
           },
           customer_name: companyName,
           companyName: companyName,
+          customer_email: draft.email || null,
+          customerEmail: draft.email || null,
           delivery_location: draft.delivery_location || null,
           delivery_address: draft.delivery_location || null,
           payment_terms: draft.payment_terms || null,
@@ -10115,6 +10147,7 @@ async function executeAction(action, draft, senderPhone) {
           if (globalRate) humanRawText += `Rate: ₹${globalRate}/MT\n`;
         }
         if (draft.preferred_make) humanRawText += `Preferred Make: ${draft.preferred_make}\n`;
+        if (draft.email) humanRawText += `Email: ${draft.email}\n`;
         if (draft.payment_terms) humanRawText += `Payment Terms: ${draft.payment_terms}\n`;
         if (draft.delivery_location) humanRawText += `Delivery Location: ${draft.delivery_location}\n`;
         if (draft.additional_notes) humanRawText += `Notes: ${draft.additional_notes}\n`;
@@ -10684,6 +10717,11 @@ async function executeAction(action, draft, senderPhone) {
               aiJson.payment_terms = updates.payment_terms;
               aiJson.paymentTerms = updates.payment_terms;
             }
+            if (updates.email) {
+              aiJson.customer_email = updates.email;
+              aiJson.customerEmail = updates.email;
+              if (aiJson.customer) aiJson.customer.email = updates.email;
+            }
             if (updates.delivery_location) {
               aiJson.delivery_location = updates.delivery_location;
               aiJson.deliveryLocation = updates.delivery_location;
@@ -10832,11 +10870,11 @@ async function executeAction(action, draft, senderPhone) {
         const effectivePreferredMake = draft.updates?.preferred_make || draft.preferred_make || deal.preferred_make || inqRow?.ai_extraction_json?.preferred_make || null;
         const effectiveAdditionalNotes = draft.updates?.additional_notes || draft.additional_notes || deal.additional_notes || inqRow?.ai_extraction_json?.additional_notes || null;
 
-        // Log to activity_logs
+        const loggedStage = activityStageName(updates.stage);
         try {
           logBotActivity({
             salesperson_phone: senderPhone,
-            description: `Inquiry ${displayInqId} updated for ${displayCustName}${updates.stage ? ` (Stage: ${updates.stage})` : ''}`,
+            description: `Inquiry ${displayInqId} details updated for ${displayCustName}${loggedStage ? ` (Stage: ${loggedStage})` : ''}`,
             module: 'Inquiries',
             customer_name: displayCustName,
             entity_id: canonicalTargetId,
@@ -11928,59 +11966,38 @@ async function executeAction(action, draft, senderPhone) {
         } catch (e) {}
 
         // 1. Insert into customer_visits
+        const ready = assertReadyToSave(draft);
+        if (!ready.ok) {
+          return ready.message || `Please provide the remaining details:\n\n${ready.prompts.map((item) => `• *${item}*`).join('\n')}`;
+        }
+        const consumed = await consumeVisitCode(supabase, draft.contact_phone, draft.verification_token);
+        if (!consumed.ok) return consumed.message;
+
+        const verifiedColumns = visitRowColumns(draft);
         const visitPayload = {
           salesperson_phone: senderPhone,
           customer_name: companyName,
           customer_address: draft.city_location || null,
           person_met: draft.person_met || null,
           contact_no: draft.contact_phone || null,
-          outcome: draft.visit_outcome || null,
           remarks: formattedRemarks,
           visited_at: visitDateIso,
           employee_id: employeeId,
-          follow_up_action: draft.followup_action || null,
-          follow_up_date: parsedFollowUpDate || null,
           follow_up_status: draft.followup_action ? 'pending' : null,
-          email: draft.email || null,
-          designation: draft.designation || null,
-          customer_type: draft.customer_type || null,
-          visit_type: draft.visit_type || null,
-          customer_probability: draft.customer_probability || null,
-          product_details: draft.product_details || null,
-          monthly_consumption: draft.monthly_consumption || null,
-          current_requirement: draft.current_requirement || null,
-          next_purchase_expected: draft.next_purchase_expected || null,
-          delivery_location: draft.delivery_location || null,
-          preferred_make: draft.preferred_make || null,
-          payment_terms: draft.payment_terms || null,
-          gps_photo_url: draft.gps_photo_url || (Array.isArray(draft.attachments) && draft.attachments[0]?.url) || null,
-          gps_latitude: typeof draft.gps_latitude === 'number' ? draft.gps_latitude : null,
-          gps_longitude: typeof draft.gps_longitude === 'number' ? draft.gps_longitude : null,
           gps_accuracy: typeof draft.gps_accuracy === 'number' ? draft.gps_accuracy : null,
           attachments: Array.isArray(draft.attachments) && draft.attachments.length > 0 ? draft.attachments : null,
+          ...verifiedColumns,
+          follow_up_date: verifiedColumns.follow_up_date || parsedFollowUpDate || null,
         };
 
         const { error: visErr } = await supabase.from('customer_visits').insert(visitPayload);
         if (visErr) {
-          console.error('[CatalogFlow] Visit insert error with dedicated columns, retrying fallback:', visErr.message);
-          delete visitPayload.follow_up_action;
-          delete visitPayload.follow_up_date;
-          delete visitPayload.follow_up_status;
-          delete visitPayload.employee_id;
-          const { error: fbVisErr } = await supabase.from('customer_visits').insert(visitPayload);
-          if (fbVisErr) {
-            console.error('[CatalogFlow] Visit fallback insert error, retrying without attachments/gps:', fbVisErr.message);
-            delete visitPayload.gps_photo_url;
-            delete visitPayload.gps_latitude;
-            delete visitPayload.gps_longitude;
-            delete visitPayload.gps_accuracy;
-            delete visitPayload.attachments;
-            const { error: thirdErr } = await supabase.from('customer_visits').insert(visitPayload);
-            if (thirdErr) {
-              console.error('[CatalogFlow] Visit third fallback insert error:', thirdErr.message);
-              return `*Failed to log field visit for ${companyName}.*\n\nReason: ${thirdErr.message || 'Database write error'}. Please try again.`;
-            }
-          }
+          await releaseVisitCode(supabase, consumed.id);
+          console.error('[CatalogFlow] Visit insert error:', visErr.message);
+          const reason = /column|schema cache/i.test(visErr.message || '')
+            ? 'Visit verification columns are not applied yet. Ask an admin to apply the visit verification SQL.'
+            : (visErr.message || 'Database write error');
+          return `*Failed to log field visit for ${companyName}.*\n\nReason: ${reason}. Please try again.`;
         }
 
         // 2. Log KRA 9 (Site Visit)
@@ -14403,6 +14420,63 @@ function detectOutOfScopeActionAttempt(currentAction, text) {
  * { handled: true, reply: "..." } if intercepted and handled by catalog state machine
  * { handled: false } if message should proceed to general LangGraph Orchestrator
  */
+async function beginVisitPhoneCode(draft, senderPhone) {
+  let sent;
+  try {
+    sent = await requestVisitCode(supabase, draft.contact_phone || draft.contact_no);
+  } catch {
+    return { handled: true, reply: 'Unable to send the visit code right now.' };
+  }
+  if (!sent.ok) return { handled: true, reply: sent.message };
+  await saveActiveSession(
+    senderPhone,
+    draft.company_name || 'Customer',
+    `catalog_visit_otp|LOG_VISIT|${JSON.stringify(draft)}`,
+  );
+  return { handled: true, reply: sent.message };
+}
+
+async function handleCatalogVisitOtp(text, senderPhone, lastIntent) {
+  const draft = safeParseJSON(lastIntent.split('|').slice(2).join('|'), {});
+  const clean = String(text || '').trim();
+  if (/^(?:cancel|discard|abort|stop|exit)$/i.test(clean)) {
+    await saveActiveSession(senderPhone, 'Unknown', 'general');
+    return { handled: true, reply: `Visit logging for ${draft.company_name || 'the customer'} cancelled.` };
+  }
+  if (/^(?:resend|send again|new code)$/i.test(clean)) {
+    return beginVisitPhoneCode(draft, senderPhone);
+  }
+  if (!/^\d{6}$/.test(clean)) {
+    return { handled: true, reply: 'Reply with the 6-digit visit code, or say resend.' };
+  }
+  await recordSessionMessage(senderPhone, 'user', 'Visit code entered', { action_type: 'LOG_VISIT' });
+  const verified = await verifyVisitCode(supabase, draft.contact_phone || draft.contact_no, clean);
+  if (!verified.ok) return { handled: true, reply: verified.message };
+  draft.verification_token = verified.token;
+  const reply = await executeAction('LOG_VISIT', draft, senderPhone);
+  if (isExecutionFailureReply(reply)) {
+    await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_visit_otp|LOG_VISIT|${JSON.stringify(draft)}`);
+    return { handled: true, reply };
+  }
+  await recordSessionMessage(senderPhone, 'assistant', reply, {
+    action_type: 'LOG_VISIT',
+    customer_name: draft.company_name,
+  });
+  recordInactiveDraft(senderPhone, 'LOG_VISIT', draft, 'saved');
+  await finalizeCurrentSession(senderPhone, null, {
+    action_type: 'LOG_VISIT',
+    customer_name: draft.company_name,
+    extracted_data: draft,
+  });
+  await saveActiveSession(senderPhone, 'Unknown', 'general');
+  return {
+    handled: true,
+    reply,
+    interactiveType: 'buttons',
+    interactiveButtons: getPostActivityButtons('LOG_VISIT'),
+  };
+}
+
 async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   const text = typeof rawText === 'string' ? rawText.trim() : '';
   if (!text && !options.imageBuffer) return { handled: false };
@@ -14418,6 +14492,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   // ── 1. FETCH ACTIVE SESSION STATE ──────────────────────────────────────────
   const activeSession = await getFullActiveSession(senderPhone);
   let lastIntent = activeSession ? (activeSession.last_intent || '') : '';
+
+  if (lastIntent.startsWith('catalog_visit_otp|')) {
+    return await handleCatalogVisitOtp(text, senderPhone, lastIntent);
+  }
 
   // If currently in a dedicated webhook rejection/payment/unit flow, do not intercept
   if (lastIntent.startsWith('pending_')) {
@@ -15547,6 +15625,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       const lineChoiceBeforeSave = await askLineItemChoiceIfNeeded(action, draft, senderPhone);
       if (lineChoiceBeforeSave) return lineChoiceBeforeSave;
 
+      if (action === 'LOG_VISIT' && !draft.verification_token) {
+        await fillVisitCity(draft);
+        const ready = assertReadyToSave({ ...draft, verification_token: 'pending' });
+        if (!ready.ok) {
+          const ask = `Please provide the remaining details:\n\n${ready.prompts.map((item) => `• *${item}*`).join('\n')}`;
+          await recordSessionMessage(senderPhone, 'assistant', ask, { action_type: action });
+          await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_VISIT|${JSON.stringify(draft)}`);
+          return { handled: true, reply: ask };
+        }
+        const codeReply = await beginVisitPhoneCode(draft, senderPhone);
+        await recordSessionMessage(senderPhone, 'assistant', codeReply.reply, { action_type: action });
+        return codeReply;
+      }
+
       const reply = await executeAction(action, draft, senderPhone);
 
       if (isExecutionFailureReply(reply)) {
@@ -15717,20 +15809,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const updatedDraft = await extractFieldsWithLLM(action, text, draft);
 
     if (action === 'LOG_VISIT') {
-      if (attachmentObj) {
-        const prevAtts = Array.isArray(updatedDraft.attachments) ? updatedDraft.attachments : (Array.isArray(draft.attachments) ? draft.attachments : []);
-        if (!prevAtts.some(a => a && a.url === attachmentObj.url)) {
-          updatedDraft.attachments = [...prevAtts, attachmentObj];
-        }
-        if (!updatedDraft.gps_photo_url && !draft.gps_photo_url) {
-          updatedDraft.gps_photo_url = attachmentObj.url;
-        }
-      }
-      if (gpsData && (updatedDraft.gps_latitude === undefined || updatedDraft.gps_latitude === null)) {
-        updatedDraft.gps_latitude = gpsData.latitude;
-        updatedDraft.gps_longitude = gpsData.longitude;
-        updatedDraft.gps_accuracy = gpsData.accuracy;
-      }
+      attachVisitMedia(updatedDraft, attachmentObj, gpsData);
+      await fillVisitCity(updatedDraft);
     } else if (action === 'UPDATE_VISIT') {
       if (attachmentObj) {
         updatedDraft.updates = updatedDraft.updates || {};
@@ -15923,20 +16003,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     if (action === 'LOG_VISIT') {
-      if (attachmentObj) {
-        const prevAtts = Array.isArray(updatedDraft.attachments) ? updatedDraft.attachments : (Array.isArray(draft.attachments) ? draft.attachments : []);
-        if (!prevAtts.some(a => a && a.url === attachmentObj.url)) {
-          updatedDraft.attachments = [...prevAtts, attachmentObj];
-        }
-        if (!updatedDraft.gps_photo_url && !draft.gps_photo_url) {
-          updatedDraft.gps_photo_url = attachmentObj.url;
-        }
-      }
-      if (gpsData && (updatedDraft.gps_latitude === undefined || updatedDraft.gps_latitude === null)) {
-        updatedDraft.gps_latitude = gpsData.latitude;
-        updatedDraft.gps_longitude = gpsData.longitude;
-        updatedDraft.gps_accuracy = gpsData.accuracy;
-      }
+      attachVisitMedia(updatedDraft, attachmentObj, gpsData);
+      await fillVisitCity(updatedDraft);
     } else if (action === 'UPDATE_VISIT') {
       if (attachmentObj) {
         updatedDraft.updates = updatedDraft.updates || {};
