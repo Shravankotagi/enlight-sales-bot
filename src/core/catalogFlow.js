@@ -1114,6 +1114,142 @@ function getCatalogMenuSections(isAuthorizedForVisits = true) {
 
 // ── MODULE COLLECTION PROMPTS ────────────────────────────────────────────────
 
+const INQUIRY_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60 Days', 'LC', 'BG', 'PDC'];
+const INQUIRY_PREFERRED_MAKES = ['TATA', 'JSW', 'AM/NS India', 'SAIL', 'NMDC', 'Apollo', 'Others'];
+
+function normInquiryOpt(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function inquiryOptDistance(a, b) {
+  const dp = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+function inquiryWordClose(a, b) {
+  if (a === b) return true;
+  if (/^\d+$/.test(a) || /^\d+$/.test(b)) return false;
+  if (!a || !b || Math.abs(a.length - b.length) > 2) return false;
+  if (Math.min(a.length, b.length) / Math.max(a.length, b.length) < 0.7) return false;
+  const limit = Math.max(a.length, b.length) >= 6 ? 2 : 1;
+  return inquiryOptDistance(a, b) <= limit;
+}
+
+function matchInquiryOption(raw, options) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const n = normInquiryOpt(text);
+  if (!n) return '';
+  const exact = options.find((opt) => normInquiryOpt(opt) === n);
+  if (exact) return exact;
+  if (n === 'amns' || n === 'amnsindia') {
+    const amns = options.find((opt) => opt === 'AM/NS India');
+    if (amns) return amns;
+  }
+  const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const hits = new Set();
+  for (const opt of options) {
+    const optWords = opt.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    if (!optWords.length || words.length < optWords.length) continue;
+    for (let i = 0; i + optWords.length <= words.length; i++) {
+      if (optWords.every((word, idx) => inquiryWordClose(words[i + idx], word))) hits.add(opt);
+    }
+  }
+  if (hits.size === 1) return [...hits][0];
+  if (hits.size > 1) return null;
+  if (words.length <= 3) {
+    const joined = words.join('');
+    let best = null;
+    let bestDist = 99;
+    for (const opt of options) {
+      const no = normInquiryOpt(opt);
+      if (no.length <= 3) continue;
+      if (Math.abs(no.length - joined.length) > 2) continue;
+      if (Math.min(no.length, joined.length) / Math.max(no.length, joined.length) < 0.7) continue;
+      const dist = inquiryOptDistance(joined, no);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = opt;
+      }
+    }
+    const limit = joined.length >= 6 ? 2 : 1;
+    if (best && bestDist > 0 && bestDist <= limit) return best;
+  }
+  return null;
+}
+
+function pickInquiryOptionFromReply(text, options) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  const labeled = raw.match(/(?:payment\s*terms?|preferred\s*(?:brand|make))\s*[:=-]?\s*([^\n,;.]+)/i);
+  if (labeled) {
+    const labeledHit = matchInquiryOption(labeled[1], options);
+    if (labeledHit) return labeledHit;
+  }
+  if (raw.split(/\s+/).length <= 3) {
+    const hit = matchInquiryOption(raw, options);
+    return hit || '';
+  }
+  return '';
+}
+
+function applyInquiryChoices(action, merged, userInput) {
+  if (action !== 'LOG_INQUIRY' && action !== 'UPDATE_INQUIRY') return;
+  const notices = [];
+  const take = (value, options, label) => {
+    if (value == null || String(value).trim() === '') return undefined;
+    const matched = matchInquiryOption(value, options);
+    if (matched) return matched;
+    notices.push(`${label} must be one of: ${options.join(', ')}`);
+    return null;
+  };
+  const payment = take(
+    action === 'UPDATE_INQUIRY' ? (merged.updates && merged.updates.payment_terms) || merged.payment_terms : merged.payment_terms,
+    INQUIRY_PAYMENT_TERMS,
+    'Payment Terms',
+  );
+  const make = take(
+    action === 'UPDATE_INQUIRY' ? (merged.updates && merged.updates.preferred_make) || merged.preferred_make : merged.preferred_make,
+    INQUIRY_PREFERRED_MAKES,
+    'Preferred Brand',
+  );
+  if (action === 'LOG_INQUIRY') {
+    if (payment !== undefined) merged.payment_terms = payment;
+    else if (!merged.payment_terms) {
+      const fromText = pickInquiryOptionFromReply(userInput, INQUIRY_PAYMENT_TERMS);
+      if (fromText) merged.payment_terms = fromText;
+    }
+    if (make !== undefined) merged.preferred_make = make;
+    else if (!merged.preferred_make) {
+      const fromText = pickInquiryOptionFromReply(userInput, INQUIRY_PREFERRED_MAKES);
+      if (fromText) merged.preferred_make = fromText;
+    }
+  } else {
+    merged.updates = merged.updates || {};
+    if (payment !== undefined) {
+      if (payment) merged.updates.payment_terms = payment;
+      else delete merged.updates.payment_terms;
+      merged.payment_terms = payment;
+    }
+    if (make !== undefined) {
+      if (make) merged.updates.preferred_make = make;
+      else delete merged.updates.preferred_make;
+      merged.preferred_make = make;
+    }
+  }
+  if (notices.length) merged._inquiry_option_notice = notices.join('\n');
+  else delete merged._inquiry_option_notice;
+}
+
 const MODULE_PROMPTS = {
   LOG_INQUIRY: `📋 **Log New Inquiry**
 
@@ -1123,8 +1259,8 @@ Please provide the following details:
 - **Email ID:** (optional)
 - **Product Description / Quantity:** *
 - **Rate:** (optional)
-- **Preferred Make:** (optional)
-- **Payment Terms:** *
+- **Preferred Brand:** (optional) TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others
+- **Payment Terms:** * Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC
 - **Delivery Location:** *
 - **Additional Notes:** (optional)
 
@@ -1139,8 +1275,8 @@ Which fields do you want to update? Mention the field name and new value.
 **Updatable Fields:**
 - Product Description / Quantity / Specification (e.g. 8mm, 78 MT)
 - Rate
-- Preferred Make
-- Payment Terms
+- Preferred Brand (TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others)
+- Payment Terms (Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC)
 - Delivery Location
 - Email ID
 - Additional Notes
@@ -1989,8 +2125,8 @@ LOG_INQUIRY:
   "contact_phone": "<10-digit mobile number if mentioned, else null>",
   "product_description": "<Summary of all products/quantities, else null>",
   "rate": <numeric target rate/price per unit if mentioned, else null>,
-  "preferred_make": "<JSW, SAIL, Tata, any, etc. if mentioned, else null>",
-  "payment_terms": "<e.g. 30 Days Credit, 100% Advance, else null>",
+  "preferred_make": "<one of TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others, else null>",
+  "payment_terms": "<one of Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC, else null>",
   "delivery_location": "<e.g. Chakan Pune, Taloja, Aurangabad, else null>",
   "additional_notes": "<Exact literal text provided by user. NEVER summarize, rephrase, or alter user notes, else null>",
   "line_items": [
@@ -2032,8 +2168,8 @@ UPDATE_INQUIRY:
   "updates": {
     "product_description": "<if user requested general product text update, else null>",
     "rate": <numeric rate ONLY if a single overall rate was specified without mentioning product names, else null>,
-    "preferred_make": "<if user requested update, else null>",
-    "payment_terms": "<if user requested update, else null>",
+    "preferred_make": "<one of TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others if update requested, else null>",
+    "payment_terms": "<one of Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC if update requested, else null>",
     "delivery_location": "<if user requested update, else null>",
     "email": "<Customer email if update requested, else null>",
     "additional_notes": "<Exact literal text provided by user if update requested. NEVER summarize, rephrase, or alter user notes, else null>",
@@ -2502,9 +2638,9 @@ function detectTotalValueUpdateAttempt(text, extractedData) {
 function getAllowedFieldsListForAction(action) {
   switch (action) {
     case 'LOG_INQUIRY':
-      return `- *Rate / Target Price*\n- *Quantity & Unit (e.g. 25 MT)*\n- *Product Specifications / Dimensions*\n- *Payment Terms (e.g. 30 Days Credit)*\n- *Delivery Location*\n- *Email ID*\n- *Preferred Make (e.g. JSW, SAIL)*\n- *Additional Notes*`;
+      return `- *Rate / Target Price*\n- *Quantity & Unit (e.g. 25 MT)*\n- *Product Specifications / Dimensions*\n- *Payment Terms:* ${INQUIRY_PAYMENT_TERMS.join(', ')}\n- *Delivery Location*\n- *Email ID*\n- *Preferred Brand:* ${INQUIRY_PREFERRED_MAKES.join(', ')}\n- *Additional Notes*`;
     case 'UPDATE_INQUIRY':
-      return `- *Rate / Target Price*\n- *Quantity & Product Specifications / Dimensions (e.g. 8mm, 78 MT)*\n- *Payment Terms (e.g. 30 Days)*\n- *Delivery Location*\n- *Email ID*\n- *Preferred Make*\n- *Additional Notes*`;
+      return `- *Rate / Target Price*\n- *Quantity & Product Specifications / Dimensions (e.g. 8mm, 78 MT)*\n- *Payment Terms:* ${INQUIRY_PAYMENT_TERMS.join(', ')}\n- *Delivery Location*\n- *Email ID*\n- *Preferred Brand:* ${INQUIRY_PREFERRED_MAKES.join(', ')}\n- *Additional Notes*`;
     case 'LOG_ORDER':
       return `- *PO Number (e.g. PO-2026-001)*\n- *PO Date*\n- *Delivery Location*\n- *Payment Terms*\n- *Product Rates & Quantities*`;
     case 'UPDATE_ORDER':
@@ -4122,7 +4258,7 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   }
 
   // Fallback payment_terms extraction for LOG_INQUIRY / LOG_ORDER / UPDATE_INQUIRY / UPDATE_ORDER
-  if (!merged.payment_terms && ['LOG_INQUIRY', 'LOG_ORDER', 'UPDATE_INQUIRY', 'UPDATE_ORDER'].includes(action)) {
+  if (!merged.payment_terms && ['LOG_ORDER', 'UPDATE_ORDER'].includes(action)) {
     const payMatch = userInput.match(/\b(\d+\s*days?(?:\s*(?:credit|terms?|net|advance))?|100%\s*advance|advance|immediate|pdc|lc|cad|credit|online|rtgs|neft|against\s+delivery|cash\s+on\s+delivery|cod)\b/i);
     if (payMatch) {
       merged.payment_terms = payMatch[0].trim();
@@ -4593,6 +4729,8 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
       merged.meeting_remarks = verbatimNotes;
     }
   }
+
+  applyInquiryChoices(action, merged, userInput);
 
   return merged;
 }
@@ -5214,7 +5352,8 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
     company_name: finalCustomerName,
     email: (extraction.customer && extraction.customer.email) || extraction.customer_email || null,
     delivery_location: extraction.delivery_location || null,
-    payment_terms: extraction.payment_terms || null,
+    payment_terms: matchInquiryOption(extraction.payment_terms, INQUIRY_PAYMENT_TERMS) || null,
+    preferred_make: matchInquiryOption(extraction.preferred_make || extraction.make, INQUIRY_PREFERRED_MAKES) || null,
     line_items: lineItems,
     attachments: [attachmentObj],
     _customer_verified: Boolean(officialCustomerName),
@@ -13994,19 +14133,21 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
   }
 
   const missing = validateMandatoryFields(action, draft);
+  const optionNotice = draft._inquiry_option_notice ? `${draft._inquiry_option_notice}\n\n` : '';
+  delete draft._inquiry_option_notice;
   if (missing.length === 0) {
     const summary = buildConfirmationSummary(action, draft);
     await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(draft)}`);
     return {
       handled: true,
-      reply: summary,
+      reply: `${optionNotice}${summary}`,
       interactiveType: 'buttons',
       interactiveButtons: CONFIRMATION_BUTTONS,
     };
   } else {
     const missingList = missing.map((m) => `• *${m}*`).join('\n');
     const indexTag = draft._totalCount > 1 ? ` (${draft._currentIndex || 1} of ${draft._totalCount}: ${draft.company_name || 'Item'})` : '';
-    const askMissing = `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
+    const askMissing = `${optionNotice}Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
     await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
     return {
       handled: true,
@@ -17908,6 +18049,7 @@ module.exports = {
   handleStaleDraftButton,
   handleResumeMenuButton,
   getAllowedFieldsListForAction,
+  matchInquiryOption,
   getEditPromptForAction,
   scoreLineItemAgainstUpdate,
   matchLineItemUpdate,
