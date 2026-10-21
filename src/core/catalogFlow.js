@@ -219,6 +219,11 @@ const NEW_CUSTOMER_BUTTONS = [
   { id: 'btn_cust_no', title: 'No / Cancel' },
 ];
 
+const CUST_MATCH_BUTTONS = [
+  { id: 'btn_confirm_yes', title: 'Yes' },
+  { id: 'btn_confirm_cancel', title: 'Cancel' },
+];
+
 const UNKNOWN_PRODUCT_BUTTONS = [
   { id: 'btn_add_product', title: 'Add Product' },
   { id: 'btn_confirm_cancel', title: 'Cancel' },
@@ -5063,6 +5068,99 @@ async function checkCompanyWideCustomerRegistration(companyName, senderPhone) {
 
 // ── VERIFY DRAFT CUSTOMER (ROLE & ACCOUNT SCOPED) ───────────────────────────
 
+function calculateCustomerMatchPercentage(inputName, candidateName) {
+  const rawInput = String(inputName || '').trim().toLowerCase();
+  const rawCand = String(candidateName || '').trim().toLowerCase();
+  if (!rawInput || !rawCand) return 0;
+  if (rawInput === rawCand) return 100;
+
+  const maxRawLen = Math.max(rawInput.length, rawCand.length);
+  const rawScore = maxRawLen === 0 ? 100 : Math.round((1 - inquiryOptDistance(rawInput, rawCand) / maxRawLen) * 100);
+
+  const cleanInput = cleanLegalSuffixes(rawInput);
+  const cleanCand = cleanLegalSuffixes(rawCand);
+  if (cleanInput && cleanCand) {
+    if (cleanInput === cleanCand) return 100;
+    const maxCleanLen = Math.max(cleanInput.length, cleanCand.length);
+    const cleanScore = maxCleanLen === 0 ? 100 : Math.round((1 - inquiryOptDistance(cleanInput, cleanCand) / maxCleanLen) * 100);
+    return Math.max(rawScore, cleanScore);
+  }
+
+  return rawScore;
+}
+
+async function getMatchingAssignedCustomers(inputName, senderPhone, officialName) {
+  const assignedList = await getAssignedCustomersList(senderPhone);
+  const assignedNames = (assignedList || []).map(c => c.customer_name).filter(Boolean);
+  if (!assignedNames.length) {
+    return officialName ? [officialName] : [];
+  }
+
+  const uniqueNames = Array.from(new Set(assignedNames));
+  const rawInput = String(inputName || '').trim().toLowerCase();
+  const cleanInput = cleanLegalSuffixes(rawInput);
+  const inputTokens = cleanInput.split(' ').filter(t => t.length >= 2);
+
+  const scored = [];
+  for (const name of uniqueNames) {
+    const rawCand = name.trim().toLowerCase();
+    const cleanCand = cleanLegalSuffixes(rawCand);
+    const candTokens = cleanCand.split(' ').filter(t => t.length >= 2);
+
+    let score = calculateCustomerMatchPercentage(inputName, name);
+
+    const startsWithInput = rawCand.startsWith(rawInput) || cleanCand.startsWith(cleanInput);
+    const containsInput = rawCand.includes(rawInput) || cleanCand.includes(cleanInput);
+    const tokenMatch = inputTokens.length > 0 && inputTokens.every(it => candTokens.some(ct => ct.startsWith(it) || it.startsWith(ct)));
+
+    if (name.toLowerCase().trim() === (officialName || '').toLowerCase().trim()) {
+      score = Math.max(score, 60);
+    }
+    if (startsWithInput) score += 30;
+    else if (containsInput) score += 20;
+    if (tokenMatch) score += 15;
+
+    if (name.toLowerCase().trim() === (officialName || '').toLowerCase().trim() || startsWithInput || containsInput || tokenMatch || score >= 35) {
+      scored.push({ name, score });
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+
+  const results = [];
+  if (officialName) {
+    results.push(officialName);
+  }
+  for (const item of scored) {
+    if (!results.some(r => r.toLowerCase().trim() === item.name.toLowerCase().trim())) {
+      results.push(item.name);
+    }
+    if (results.length >= 3) break;
+  }
+
+  return results.slice(0, 3);
+}
+
+function buildCustomerMatchValidationMessage(rawInput, fetchedName, candidates) {
+  let msg = `Do you want to continue with the fetched customer name: *${fetchedName}*?\n\n`;
+  if (candidates && candidates.length > 0) {
+    msg += `Matching accounts from your assigned list:\n`;
+    candidates.forEach((cand, idx) => {
+      msg += `  ${idx + 1}. *${cand}*\n`;
+    });
+    msg += `\n`;
+  }
+  msg += `👉 Tap *Yes* to continue with *${fetchedName}*`;
+  if (candidates && candidates.length > 1) {
+    msg += `, or reply with *1*, *2*${candidates.length > 2 ? ', or *3*' : ''} to choose a customer.`;
+  } else if (candidates && candidates.length === 1) {
+    msg += `, or reply with *1*.`;
+  } else {
+    msg += `.`;
+  }
+  return msg;
+}
+
 async function verifyDraftCustomer(action, draft, senderPhone) {
   if (!draft || !draft.company_name) return { isValid: true };
   if (draft._customer_verified === true || draft._new_customer_created === true) {
@@ -5087,9 +5185,24 @@ async function verifyDraftCustomer(action, draft, senderPhone) {
   // Attempt verification against assigned accounts / scope
   const officialName = await verifyAndGetCustomerName(rawName, senderPhone);
   if (officialName) {
-    draft.company_name = officialName;
-    draft._customer_verified = true;
-    return { isValid: true, officialName };
+    const matchPct = calculateCustomerMatchPercentage(rawName, officialName);
+    if (matchPct >= 70) {
+      draft.company_name = officialName;
+      draft._customer_verified = true;
+      return { isValid: true, officialName };
+    }
+
+    const candidates = await getMatchingAssignedCustomers(rawName, senderPhone, officialName);
+    const prompt = buildCustomerMatchValidationMessage(rawName, officialName, candidates);
+    return {
+      isValid: false,
+      isLowMatchCustomer: true,
+      fetchedName: officialName,
+      rawName: rawName,
+      matchPercentage: matchPct,
+      candidates,
+      prompt,
+    };
   }
 
   // Unrecognized customer -> Prompt for implicit new customer confirmation
@@ -5379,19 +5492,35 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
   // 1. Verify customer
   if (draft.company_name && !draft._customer_verified) {
     const custVerification = await verifyDraftCustomer('LOG_INQUIRY', draft, senderPhone);
-    if (custVerification.isUnrecognizedCustomer) {
-      await recordSessionMessage(senderPhone, 'assistant', custVerification.prompt, { action_type: 'LOG_INQUIRY' });
-      await saveActiveSession(
-        senderPhone,
-        draft.company_name || 'Customer',
-        `catalog_implicit_cust_ask|LOG_INQUIRY|${custVerification.unverifiedName}|${JSON.stringify(draft)}`
-      );
-      return {
-        handled: true,
-        reply: custVerification.prompt,
-        interactiveType: 'buttons',
-        interactiveButtons: NEW_CUSTOMER_BUTTONS,
-      };
+    if (!custVerification.isValid) {
+      if (custVerification.isLowMatchCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custVerification.prompt, { action_type: 'LOG_INQUIRY' });
+        await saveActiveSession(
+          senderPhone,
+          custVerification.fetchedName,
+          `catalog_cust_match_confirm|LOG_INQUIRY|${custVerification.fetchedName}|${JSON.stringify(custVerification.candidates)}|${JSON.stringify(draft)}`
+        );
+        return {
+          handled: true,
+          reply: custVerification.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: CUST_MATCH_BUTTONS,
+        };
+      }
+      if (custVerification.isUnrecognizedCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custVerification.prompt, { action_type: 'LOG_INQUIRY' });
+        await saveActiveSession(
+          senderPhone,
+          draft.company_name || 'Customer',
+          `catalog_implicit_cust_ask|LOG_INQUIRY|${custVerification.unverifiedName}|${JSON.stringify(draft)}`
+        );
+        return {
+          handled: true,
+          reply: custVerification.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: NEW_CUSTOMER_BUTTONS,
+        };
+      }
     }
   }
 
@@ -14083,6 +14212,19 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
     };
   }
 
+  if (interruptedState === 'catalog_cust_match_confirm') {
+    const fetchedName = draft.company_name || 'Customer';
+    const candidates = await getMatchingAssignedCustomers(fetchedName, senderPhone, fetchedName);
+    const askPrompt = buildCustomerMatchValidationMessage(fetchedName, fetchedName, candidates);
+    await saveActiveSession(senderPhone, fetchedName, `catalog_cust_match_confirm|${action}|${fetchedName}|${JSON.stringify(candidates)}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: askPrompt,
+      interactiveType: 'buttons',
+      interactiveButtons: CUST_MATCH_BUTTONS,
+    };
+  }
+
   if (interruptedState === 'catalog_implicit_cust_ask') {
     const askPrompt = `Is *${draft.company_name || 'this customer'}* a new customer you would like to onboard now?`;
     await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_implicit_cust_ask|${action}|${draft.company_name || 'Customer'}|${JSON.stringify(draft)}`);
@@ -14864,6 +15006,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   if (
     hasActiveCatalogSession &&
     !lastIntent.startsWith('catalog_resume_ask|') &&
+    !lastIntent.startsWith('catalog_cust_match_confirm|') &&
     !lastIntent.startsWith('catalog_implicit_cust_ask|') &&
     !lastIntent.startsWith('catalog_implicit_cust_collect|') &&
     !lastIntent.startsWith('catalog_implicit_prod_add|') &&
@@ -15031,6 +15174,136 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       return await handleUpdateSelectionState(text, senderPhone, action, draft);
     }
     lastIntent = `${interruptedState}|${action}|${draftJsonStr}`;
+  }
+
+  // ── 3a-0. HANDLE CUSTOMER LOW-MATCH VALIDATION ASK (catalog_cust_match_confirm|...) ──
+  if (lastIntent.startsWith('catalog_cust_match_confirm|')) {
+    const parts = lastIntent.split('|');
+    const originalAction = parts[1];
+    const fetchedName = parts[2];
+    const candidates = safeParseJSON(parts[3], []);
+    const originalDraftJsonStr = parts.slice(4).join('|');
+    const originalDraft = safeParseJSON(originalDraftJsonStr, {});
+    if (callerSourceChannel && !originalDraft.source_channel) {
+      originalDraft.source_channel = callerSourceChannel;
+    }
+
+    const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
+
+    // Check mid-flow interruptions
+    const { isExplicitComplaintResolution } = require('../kra8');
+    if (isExplicitComplaintResolution(text) && originalAction !== 'UPDATE_COMPLAINT' && originalAction !== 'LOG_COMPLAINT') {
+      return await handleMidFlowComplaintResolution(text, senderPhone, 'catalog_cust_match_confirm', originalAction, originalDraft);
+    }
+    if (isStageUpdatePrompt(text)) {
+      return await handleMidFlowStageUpdate(text, senderPhone, 'catalog_cust_match_confirm', originalAction, originalDraft);
+    }
+    if (await isMidFlowReadQuery(text)) {
+      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_cust_match_confirm', originalAction, originalDraft);
+    }
+
+    // Cancel / Discard
+    if (
+      isDiscardOrCancelIntent(text) ||
+      cleanInput === 'btn_confirm_cancel' ||
+      cleanInput === 'btn_cust_no' ||
+      cleanInput === 'cancel' ||
+      cleanInput === 'discard' ||
+      cleanInput === 'stop' ||
+      cleanInput === 'exit'
+    ) {
+      await clearActiveSession(senderPhone);
+      await recordSessionMessage(senderPhone, 'assistant', 'Draft cancelled.', { action_type: originalAction });
+      return { handled: true, reply: 'Activity cancelled. What would you like to do next?' };
+    }
+
+    let chosenCustomer = null;
+
+    const isYes =
+      cleanInput === 'btn_confirm_yes' ||
+      cleanInput === 'btn_cust_yes' ||
+      cleanInput === 'yes' ||
+      cleanInput === 'y' ||
+      cleanInput === 'confirm' ||
+      cleanInput === 'haan' ||
+      cleanInput === 'ha' ||
+      cleanInput === 'ok' ||
+      cleanInput === 'sure' ||
+      cleanInput === 'sahi hai';
+
+    if (isYes) {
+      chosenCustomer = fetchedName;
+    } else {
+      const numMatch = cleanInput.match(/^[#*]?\s*([1-3])\s*[.)]?$/);
+      if (numMatch) {
+        const idx = parseInt(numMatch[1], 10) - 1;
+        if (idx >= 0 && idx < candidates.length) {
+          chosenCustomer = candidates[idx];
+        }
+      }
+    }
+
+    if (!chosenCustomer) {
+      const recheckedName = await verifyAndGetCustomerName(text, senderPhone);
+      if (recheckedName) {
+        chosenCustomer = recheckedName;
+      }
+    }
+
+    if (chosenCustomer) {
+      originalDraft.company_name = chosenCustomer;
+      originalDraft._customer_verified = true;
+
+      const custProdCheck = validateDraftProducts(originalAction, originalDraft);
+      if (!custProdCheck.isValid) {
+        await recordSessionMessage(senderPhone, 'assistant', custProdCheck.clarificationMessage, {
+          action_type: originalAction,
+          customer_name: originalDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, originalDraft.company_name || 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return {
+          handled: true,
+          reply: custProdCheck.clarificationMessage,
+          interactiveType: 'buttons',
+          interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+        };
+      }
+
+      const parentMissing = validateMandatoryFields(originalAction, originalDraft);
+      if (parentMissing.length === 0) {
+        const lineChoice = await askLineItemChoiceIfNeeded(originalAction, originalDraft, senderPhone);
+        if (lineChoice) return lineChoice;
+        const summary = buildConfirmationSummary(originalAction, originalDraft);
+        await recordSessionMessage(senderPhone, 'assistant', summary, {
+          action_type: originalAction,
+          customer_name: originalDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, originalDraft.company_name, `catalog_confirm|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return {
+          handled: true,
+          reply: summary,
+          interactiveType: 'buttons',
+          interactiveButtons: CONFIRMATION_BUTTONS,
+        };
+      } else {
+        const missingList = parentMissing.map((m) => `• *${m}*`).join('\n');
+        const askMsg = `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
+        await recordSessionMessage(senderPhone, 'assistant', askMsg, {
+          action_type: originalAction,
+          customer_name: originalDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, originalDraft.company_name, `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return { handled: true, reply: askMsg };
+      }
+    }
+
+    const rePrompt = buildCustomerMatchValidationMessage(text, fetchedName, candidates);
+    return {
+      handled: true,
+      reply: rePrompt,
+      interactiveType: 'buttons',
+      interactiveButtons: CUST_MATCH_BUTTONS,
+    };
   }
 
   // ── 3a. HANDLE IMPLICIT CUSTOMER CONFIRMATION ASK (catalog_implicit_cust_ask|...) ──
@@ -15734,6 +16007,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       // Verify customer before final execution
       const custCheck = await verifyDraftCustomer(action, draft, senderPhone);
       if (!custCheck.isValid) {
+        if (custCheck.isLowMatchCustomer) {
+          await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+          await saveActiveSession(
+            senderPhone,
+            custCheck.fetchedName,
+            `catalog_cust_match_confirm|${action}|${custCheck.fetchedName}|${JSON.stringify(custCheck.candidates)}|${JSON.stringify(draft)}`
+          );
+          return {
+            handled: true,
+            reply: custCheck.prompt,
+            interactiveType: 'buttons',
+            interactiveButtons: CUST_MATCH_BUTTONS,
+          };
+        }
         if (custCheck.isUnrecognizedCustomer) {
           await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
           await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(draft)}`);
@@ -15995,6 +16282,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
+      if (custCheck.isLowMatchCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await saveActiveSession(
+          senderPhone,
+          custCheck.fetchedName,
+          `catalog_cust_match_confirm|${action}|${custCheck.fetchedName}|${JSON.stringify(custCheck.candidates)}|${JSON.stringify(updatedDraft)}`
+        );
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: CUST_MATCH_BUTTONS,
+        };
+      }
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
@@ -16189,6 +16490,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
+      if (custCheck.isLowMatchCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await saveActiveSession(
+          senderPhone,
+          custCheck.fetchedName,
+          `catalog_cust_match_confirm|${action}|${custCheck.fetchedName}|${JSON.stringify(custCheck.candidates)}|${JSON.stringify(updatedDraft)}`
+        );
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: CUST_MATCH_BUTTONS,
+        };
+      }
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
@@ -17357,6 +17672,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
+      if (custCheck.isLowMatchCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await saveActiveSession(
+          senderPhone,
+          custCheck.fetchedName,
+          `catalog_cust_match_confirm|${action}|${custCheck.fetchedName}|${JSON.stringify(custCheck.candidates)}|${JSON.stringify(updatedDraft)}`
+        );
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: CUST_MATCH_BUTTONS,
+        };
+      }
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
@@ -17816,6 +18145,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     const custCheck = await verifyDraftCustomer('LOG_VISIT', updatedDraft, senderPhone);
     if (!custCheck.isValid) {
+      if (custCheck.isLowMatchCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: 'LOG_VISIT' });
+        await saveActiveSession(
+          senderPhone,
+          custCheck.fetchedName,
+          `catalog_cust_match_confirm|LOG_VISIT|${custCheck.fetchedName}|${JSON.stringify(custCheck.candidates)}|${JSON.stringify(updatedDraft)}`
+        );
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: CUST_MATCH_BUTTONS,
+        };
+      }
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: 'LOG_VISIT' });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|LOG_VISIT|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
@@ -18061,4 +18404,8 @@ module.exports = {
   isPureOptionSelectorOnly,
   isNumericOptionSelector,
   extractThicknessTransition,
+  calculateCustomerMatchPercentage,
+  getMatchingAssignedCustomers,
+  buildCustomerMatchValidationMessage,
+  CUST_MATCH_BUTTONS,
 };
