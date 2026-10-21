@@ -2,7 +2,7 @@ const crypto = require('crypto');
 
 const VISIT_BRANDS = ['TATA', 'JSW', 'AM/NS India', 'SAIL', 'NMDC', 'Apollo', 'Others'];
 const VISIT_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60 Days', 'LC', 'BG', 'PDC'];
-const VISIT_CUSTOMER_TYPES = ['OEM', 'Fabricator', 'EPC', 'Manufacturer', 'Trader'];
+const VISIT_CUSTOMER_TYPES = ['OEM', 'Fabricator', 'EPC', 'Manufacturer', 'Trader', 'Other'];
 const VISIT_TYPES = ['First Visit', 'Follow-up 1', 'Follow-up 2', 'Follow-up 3', 'Regular Visit'];
 const VISIT_OUTCOMES = ['Positive', 'Neutral', 'Negative'];
 const VISIT_PROBABILITIES = ['Hot', 'Warm', 'Cold'];
@@ -248,6 +248,7 @@ function readDraft(draft) {
     delivery: text(source.delivery_location),
     brands: uniqueBrands,
     brandOther: text(source.preferred_make_other),
+    customerTypeOther: text(source.customer_type_other),
     payment: canonicalPayment(source.payment_terms),
     followAction: action,
     followDate: followDate || (dateInAction ? dateInAction[1] : ''),
@@ -273,6 +274,7 @@ function writeDraft(draft, view) {
   if (view.probability) draft.customer_probability = view.probability;
   if (view.brands.length) draft.preferred_make = view.brands.join(', ');
   if (view.brandOther) draft.preferred_make_other = view.brandOther;
+  if (view.customerTypeOther) draft.customer_type_other = view.customerTypeOther;
   if (view.payment) draft.payment_terms = view.payment;
   if (view.followDate) draft.follow_up_date = view.followDate;
   if (view.city) {
@@ -301,6 +303,7 @@ function nextVisitPrompts(draft) {
     !view.email && 'Email',
     !view.visitDate && 'Visit Date (e.g. 10-09-2026)',
     !view.customerType && `Customer Type: ${VISIT_CUSTOMER_TYPES.join(', ')}`,
+    view.customerType === 'Other' && !view.customerTypeOther && 'Other customer type',
     !view.visitType && `Visit Type: ${VISIT_TYPES.join(', ')}`,
     !view.outcome && `Visit Outcome: ${VISIT_OUTCOMES.join(', ')}`,
     !view.probability && `Customer Probability: ${VISIT_PROBABILITIES.join(', ')}`,
@@ -368,6 +371,7 @@ function visitRowColumns(draft) {
     delivery_location: view.delivery,
     preferred_make: view.brands.join(', '),
     preferred_make_other: view.brands.includes('Others') ? view.brandOther : null,
+    customer_type_other: view.customerType === 'Other' ? view.customerTypeOther : null,
     payment_terms: view.payment,
     follow_up_action: view.followAction,
     follow_up_date: followUpDateForRow(view.followDate),
@@ -606,6 +610,7 @@ function promptsFromVisitState(state) {
     delivery_location: state.delivery_location,
     preferred_make: state.preferred_make,
     preferred_make_other: state.preferred_make_other,
+    customer_type_other: state.customer_type_other,
     payment_terms: state.payment_terms,
     followup_action: state.follow_up_action,
     follow_up_date: state.follow_up_date,

@@ -2135,7 +2135,8 @@ LOG_VISIT:
   "meeting_remarks": "<meeting remarks & requirements discussed, else null>",
   "email": "<email address if mentioned, else null>",
   "designation": "<job title / designation if mentioned, else null>",
-  "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader if mentioned, else null>",
+  "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader | Other if mentioned, else null>",
+  "customer_type_other": "<the customer type text when customer type is Other, else null>",
   "visit_type": "<First Visit | Follow-up 1 | Follow-up 2 | Follow-up 3 | Regular Visit if mentioned, else null>",
   "customer_probability": "<Hot | Warm | Cold if mentioned, else null>",
   "product_details": "<detailed product specifications or grades discussed, else null>",
@@ -2175,7 +2176,8 @@ UPDATE_VISIT:
     "status": "<Completed | Follow-up Pending | Cancelled if updated, else null>",
     "email": "<Email if updated, else null>",
     "designation": "<Designation if updated, else null>",
-    "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader if updated, else null>",
+    "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader | Other if updated, else null>",
+    "customer_type_other": "<the customer type text when customer type is Other, else null>",
     "visit_type": "<First Visit | Follow-up 1-3 | Regular Visit if updated, else null>",
     "customer_probability": "<Hot | Warm | Cold if updated, else null>",
     "product_details": "<Product Details if updated, else null>",
@@ -4477,6 +4479,7 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.email && !merged.updates.email) merged.updates.email = newExtracted.email;
     if (newExtracted.designation && !merged.updates.designation) merged.updates.designation = newExtracted.designation;
     if (newExtracted.customer_type && !merged.updates.customer_type) merged.updates.customer_type = newExtracted.customer_type;
+    if (newExtracted.customer_type_other && !merged.updates.customer_type_other) merged.updates.customer_type_other = newExtracted.customer_type_other;
     if (newExtracted.visit_type && !merged.updates.visit_type) merged.updates.visit_type = newExtracted.visit_type;
     if (newExtracted.customer_probability && !merged.updates.customer_probability) merged.updates.customer_probability = newExtracted.customer_probability;
     if (newExtracted.product_details && !merged.updates.product_details) merged.updates.product_details = newExtracted.product_details;
@@ -9703,7 +9706,12 @@ function buildConfirmationSummary(action, draft) {
       summary += `• *Meeting Remarks:* ${draft.meeting_remarks || '-'}\n`;
       if (draft.designation) summary += `• *Designation:* ${draft.designation}\n`;
       if (draft.email) summary += `• *Email:* ${draft.email}\n`;
-      if (draft.customer_type) summary += `• *Customer Type:* ${draft.customer_type}\n`;
+      if (draft.customer_type) {
+        const customerTypeLabel = draft.customer_type === 'Other' && draft.customer_type_other
+          ? draft.customer_type_other
+          : draft.customer_type;
+        summary += `• *Customer Type:* ${customerTypeLabel}\n`;
+      }
       if (draft.visit_type) summary += `• *Visit Type:* ${draft.visit_type}\n`;
       if (draft.customer_probability) summary += `• *Customer Probability:* ${draft.customer_probability}\n`;
       if (draft.product_details) summary += `• *Product Details:* ${draft.product_details}\n`;
@@ -11996,7 +12004,12 @@ async function executeAction(action, draft, senderPhone) {
         let extDetails = '';
         if (draft.designation) extDetails += `• *Designation:* ${draft.designation}\n`;
         if (draft.email) extDetails += `• *Email:* ${draft.email}\n`;
-        if (draft.customer_type) extDetails += `• *Customer Type:* ${draft.customer_type}\n`;
+        if (draft.customer_type) {
+          const customerTypeLabel = draft.customer_type === 'Other' && draft.customer_type_other
+            ? draft.customer_type_other
+            : draft.customer_type;
+          extDetails += `• *Customer Type:* ${customerTypeLabel}\n`;
+        }
         if (draft.visit_type) extDetails += `• *Visit Type:* ${draft.visit_type}\n`;
         if (draft.customer_probability) extDetails += `• *Customer Probability:* ${draft.customer_probability}\n`;
         if (draft.monthly_consumption) extDetails += `• *Monthly Consumption:* ${draft.monthly_consumption}\n`;
@@ -12174,6 +12187,13 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.email) visitUpdates.email = updates.email;
         if (updates.designation) visitUpdates.designation = updates.designation;
         if (updates.customer_type) visitUpdates.customer_type = updates.customer_type;
+        if (updates.customer_type === 'Other') {
+          visitUpdates.customer_type_other = updates.customer_type_other || null;
+        } else if (updates.customer_type) {
+          visitUpdates.customer_type_other = null;
+        } else if (updates.customer_type_other) {
+          visitUpdates.customer_type_other = updates.customer_type_other;
+        }
         if (updates.visit_type) visitUpdates.visit_type = updates.visit_type;
         if (updates.customer_probability) visitUpdates.customer_probability = updates.customer_probability;
         if (updates.product_details) visitUpdates.product_details = updates.product_details;
