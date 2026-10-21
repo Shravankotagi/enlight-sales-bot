@@ -231,6 +231,11 @@ const NEW_CUSTOMER_BUTTONS = [
   { id: 'btn_cust_no', title: 'No / Cancel' },
 ];
 
+const CUST_MATCH_BUTTONS = [
+  { id: 'btn_confirm_yes', title: 'Yes' },
+  { id: 'btn_confirm_cancel', title: 'Cancel' },
+];
+
 const UNKNOWN_PRODUCT_BUTTONS = [
   { id: 'btn_add_product', title: 'Add Product' },
   { id: 'btn_confirm_cancel', title: 'Cancel' },
@@ -1131,6 +1136,142 @@ function getCatalogMenuSections(isAuthorizedForVisits = true) {
 
 // ── MODULE COLLECTION PROMPTS ────────────────────────────────────────────────
 
+const INQUIRY_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60 Days', 'LC', 'BG', 'PDC'];
+const INQUIRY_PREFERRED_MAKES = ['TATA', 'JSW', 'AM/NS India', 'SAIL', 'NMDC', 'Apollo', 'Others'];
+
+function normInquiryOpt(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function inquiryOptDistance(a, b) {
+  const dp = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+function inquiryWordClose(a, b) {
+  if (a === b) return true;
+  if (/^\d+$/.test(a) || /^\d+$/.test(b)) return false;
+  if (!a || !b || Math.abs(a.length - b.length) > 2) return false;
+  if (Math.min(a.length, b.length) / Math.max(a.length, b.length) < 0.7) return false;
+  const limit = Math.max(a.length, b.length) >= 6 ? 2 : 1;
+  return inquiryOptDistance(a, b) <= limit;
+}
+
+function matchInquiryOption(raw, options) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const n = normInquiryOpt(text);
+  if (!n) return '';
+  const exact = options.find((opt) => normInquiryOpt(opt) === n);
+  if (exact) return exact;
+  if (n === 'amns' || n === 'amnsindia') {
+    const amns = options.find((opt) => opt === 'AM/NS India');
+    if (amns) return amns;
+  }
+  const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const hits = new Set();
+  for (const opt of options) {
+    const optWords = opt.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    if (!optWords.length || words.length < optWords.length) continue;
+    for (let i = 0; i + optWords.length <= words.length; i++) {
+      if (optWords.every((word, idx) => inquiryWordClose(words[i + idx], word))) hits.add(opt);
+    }
+  }
+  if (hits.size === 1) return [...hits][0];
+  if (hits.size > 1) return null;
+  if (words.length <= 3) {
+    const joined = words.join('');
+    let best = null;
+    let bestDist = 99;
+    for (const opt of options) {
+      const no = normInquiryOpt(opt);
+      if (no.length <= 3) continue;
+      if (Math.abs(no.length - joined.length) > 2) continue;
+      if (Math.min(no.length, joined.length) / Math.max(no.length, joined.length) < 0.7) continue;
+      const dist = inquiryOptDistance(joined, no);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = opt;
+      }
+    }
+    const limit = joined.length >= 6 ? 2 : 1;
+    if (best && bestDist > 0 && bestDist <= limit) return best;
+  }
+  return null;
+}
+
+function pickInquiryOptionFromReply(text, options) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  const labeled = raw.match(/(?:payment\s*terms?|preferred\s*(?:brand|make))\s*[:=-]?\s*([^\n,;.]+)/i);
+  if (labeled) {
+    const labeledHit = matchInquiryOption(labeled[1], options);
+    if (labeledHit) return labeledHit;
+  }
+  if (raw.split(/\s+/).length <= 3) {
+    const hit = matchInquiryOption(raw, options);
+    return hit || '';
+  }
+  return '';
+}
+
+function applyInquiryChoices(action, merged, userInput) {
+  if (action !== 'LOG_INQUIRY' && action !== 'UPDATE_INQUIRY') return;
+  const notices = [];
+  const take = (value, options, label) => {
+    if (value == null || String(value).trim() === '') return undefined;
+    const matched = matchInquiryOption(value, options);
+    if (matched) return matched;
+    notices.push(`${label} must be one of: ${options.join(', ')}`);
+    return null;
+  };
+  const payment = take(
+    action === 'UPDATE_INQUIRY' ? (merged.updates && merged.updates.payment_terms) || merged.payment_terms : merged.payment_terms,
+    INQUIRY_PAYMENT_TERMS,
+    'Payment Terms',
+  );
+  const make = take(
+    action === 'UPDATE_INQUIRY' ? (merged.updates && merged.updates.preferred_make) || merged.preferred_make : merged.preferred_make,
+    INQUIRY_PREFERRED_MAKES,
+    'Preferred Brand',
+  );
+  if (action === 'LOG_INQUIRY') {
+    if (payment !== undefined) merged.payment_terms = payment;
+    else if (!merged.payment_terms) {
+      const fromText = pickInquiryOptionFromReply(userInput, INQUIRY_PAYMENT_TERMS);
+      if (fromText) merged.payment_terms = fromText;
+    }
+    if (make !== undefined) merged.preferred_make = make;
+    else if (!merged.preferred_make) {
+      const fromText = pickInquiryOptionFromReply(userInput, INQUIRY_PREFERRED_MAKES);
+      if (fromText) merged.preferred_make = fromText;
+    }
+  } else {
+    merged.updates = merged.updates || {};
+    if (payment !== undefined) {
+      if (payment) merged.updates.payment_terms = payment;
+      else delete merged.updates.payment_terms;
+      merged.payment_terms = payment;
+    }
+    if (make !== undefined) {
+      if (make) merged.updates.preferred_make = make;
+      else delete merged.updates.preferred_make;
+      merged.preferred_make = make;
+    }
+  }
+  if (notices.length) merged._inquiry_option_notice = notices.join('\n');
+  else delete merged._inquiry_option_notice;
+}
+
 const MODULE_PROMPTS = {
   LOG_INQUIRY: `📋 **Log New Inquiry**
 
@@ -1139,8 +1280,9 @@ Please provide the following details:
 - **Customer / Company:** *
 - **Email ID:** (optional)
 - **Product Description / Quantity:** *
-- **Preferred Make:** (optional)
-- **Payment Terms:** *
+- **Rate:** (optional)
+- **Preferred Brand:** (optional) TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others
+- **Payment Terms:** * Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC
 - **Delivery Location:** *
 - **Additional Notes:** (optional)
 
@@ -1156,8 +1298,9 @@ Which fields do you want to update? Mention the field name and new value.
 
 **Updatable Fields:**
 - Product Description / Quantity / Specification (e.g. 8mm, 78 MT)
-- Preferred Make
-- Payment Terms
+- Rate
+- Preferred Brand (TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others)
+- Payment Terms (Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC)
 - Delivery Location
 - Email ID
 - Additional Notes
@@ -2008,8 +2151,8 @@ LOG_INQUIRY:
   "contact_phone": "<10-digit mobile number if mentioned, else null>",
   "product_description": "<Summary of all products/quantities, else null>",
   "rate": <numeric target rate/price per unit if mentioned, else null>,
-  "preferred_make": "<JSW, SAIL, Tata, any, etc. if mentioned, else null>",
-  "payment_terms": "<e.g. 30 Days Credit, 100% Advance, else null>",
+  "preferred_make": "<one of TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others, else null>",
+  "payment_terms": "<one of Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC, else null>",
   "delivery_location": "<e.g. Chakan Pune, Taloja, Aurangabad, else null>",
   "additional_notes": "<Exact literal text provided by user. NEVER summarize, rephrase, or alter user notes, else null>",
   "line_items": [
@@ -2051,8 +2194,8 @@ UPDATE_INQUIRY:
   "updates": {
     "product_description": "<if user requested general product text update, else null>",
     "rate": <numeric rate ONLY if a single overall rate was specified without mentioning product names, else null>,
-    "preferred_make": "<if user requested update, else null>",
-    "payment_terms": "<if user requested update, else null>",
+    "preferred_make": "<one of TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others if update requested, else null>",
+    "payment_terms": "<one of Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC if update requested, else null>",
     "delivery_location": "<if user requested update, else null>",
     "email": "<Customer email if update requested, else null>",
     "additional_notes": "<Exact literal text provided by user if update requested. NEVER summarize, rephrase, or alter user notes, else null>",
@@ -2521,9 +2664,9 @@ function detectTotalValueUpdateAttempt(text, extractedData) {
 function getAllowedFieldsListForAction(action) {
   switch (action) {
     case 'LOG_INQUIRY':
-      return `- *Rate / Target Price*\n- *Quantity & Unit (e.g. 25 MT)*\n- *Product Specifications / Dimensions*\n- *Payment Terms (e.g. 30 Days Credit)*\n- *Delivery Location*\n- *Email ID*\n- *Preferred Make (e.g. JSW, SAIL)*\n- *Additional Notes*`;
+      return `- *Rate / Target Price*\n- *Quantity & Unit (e.g. 25 MT)*\n- *Product Specifications / Dimensions*\n- *Payment Terms:* ${INQUIRY_PAYMENT_TERMS.join(', ')}\n- *Delivery Location*\n- *Email ID*\n- *Preferred Brand:* ${INQUIRY_PREFERRED_MAKES.join(', ')}\n- *Additional Notes*`;
     case 'UPDATE_INQUIRY':
-      return `- *Rate / Target Price*\n- *Quantity & Product Specifications / Dimensions (e.g. 8mm, 78 MT)*\n- *Payment Terms (e.g. 30 Days)*\n- *Delivery Location*\n- *Email ID*\n- *Preferred Make*\n- *Additional Notes*`;
+      return `- *Rate / Target Price*\n- *Quantity & Product Specifications / Dimensions (e.g. 8mm, 78 MT)*\n- *Payment Terms:* ${INQUIRY_PAYMENT_TERMS.join(', ')}\n- *Delivery Location*\n- *Email ID*\n- *Preferred Brand:* ${INQUIRY_PREFERRED_MAKES.join(', ')}\n- *Additional Notes*`;
     case 'LOG_ORDER':
       return `- *PO Number (e.g. PO-2026-001)*\n- *PO Date*\n- *Delivery Location*\n- *Payment Terms*\n- *Product Rates & Quantities*`;
     case 'UPDATE_ORDER':
@@ -4141,7 +4284,7 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
   }
 
   // Fallback payment_terms extraction for LOG_INQUIRY / LOG_ORDER / UPDATE_INQUIRY / UPDATE_ORDER
-  if (!merged.payment_terms && ['LOG_INQUIRY', 'LOG_ORDER', 'UPDATE_INQUIRY', 'UPDATE_ORDER'].includes(action)) {
+  if (!merged.payment_terms && ['LOG_ORDER', 'UPDATE_ORDER'].includes(action)) {
     const payMatch = userInput.match(/\b(\d+\s*days?(?:\s*(?:credit|terms?|net|advance))?|100%\s*advance|advance|immediate|pdc|lc|cad|credit|online|rtgs|neft|against\s+delivery|cash\s+on\s+delivery|cod)\b/i);
     if (payMatch) {
       merged.payment_terms = payMatch[0].trim();
@@ -4613,6 +4756,8 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     }
   }
 
+  applyInquiryChoices(action, merged, userInput);
+
   return merged;
 }
 
@@ -4944,6 +5089,99 @@ async function checkCompanyWideCustomerRegistration(companyName, senderPhone) {
 
 // ── VERIFY DRAFT CUSTOMER (ROLE & ACCOUNT SCOPED) ───────────────────────────
 
+function calculateCustomerMatchPercentage(inputName, candidateName) {
+  const rawInput = String(inputName || '').trim().toLowerCase();
+  const rawCand = String(candidateName || '').trim().toLowerCase();
+  if (!rawInput || !rawCand) return 0;
+  if (rawInput === rawCand) return 100;
+
+  const maxRawLen = Math.max(rawInput.length, rawCand.length);
+  const rawScore = maxRawLen === 0 ? 100 : Math.round((1 - inquiryOptDistance(rawInput, rawCand) / maxRawLen) * 100);
+
+  const cleanInput = cleanLegalSuffixes(rawInput);
+  const cleanCand = cleanLegalSuffixes(rawCand);
+  if (cleanInput && cleanCand) {
+    if (cleanInput === cleanCand) return 100;
+    const maxCleanLen = Math.max(cleanInput.length, cleanCand.length);
+    const cleanScore = maxCleanLen === 0 ? 100 : Math.round((1 - inquiryOptDistance(cleanInput, cleanCand) / maxCleanLen) * 100);
+    return Math.max(rawScore, cleanScore);
+  }
+
+  return rawScore;
+}
+
+async function getMatchingAssignedCustomers(inputName, senderPhone, officialName) {
+  const assignedList = await getAssignedCustomersList(senderPhone);
+  const assignedNames = (assignedList || []).map(c => c.customer_name).filter(Boolean);
+  if (!assignedNames.length) {
+    return officialName ? [officialName] : [];
+  }
+
+  const uniqueNames = Array.from(new Set(assignedNames));
+  const rawInput = String(inputName || '').trim().toLowerCase();
+  const cleanInput = cleanLegalSuffixes(rawInput);
+  const inputTokens = cleanInput.split(' ').filter(t => t.length >= 2);
+
+  const scored = [];
+  for (const name of uniqueNames) {
+    const rawCand = name.trim().toLowerCase();
+    const cleanCand = cleanLegalSuffixes(rawCand);
+    const candTokens = cleanCand.split(' ').filter(t => t.length >= 2);
+
+    let score = calculateCustomerMatchPercentage(inputName, name);
+
+    const startsWithInput = rawCand.startsWith(rawInput) || cleanCand.startsWith(cleanInput);
+    const containsInput = rawCand.includes(rawInput) || cleanCand.includes(cleanInput);
+    const tokenMatch = inputTokens.length > 0 && inputTokens.every(it => candTokens.some(ct => ct.startsWith(it) || it.startsWith(ct)));
+
+    if (name.toLowerCase().trim() === (officialName || '').toLowerCase().trim()) {
+      score = Math.max(score, 60);
+    }
+    if (startsWithInput) score += 30;
+    else if (containsInput) score += 20;
+    if (tokenMatch) score += 15;
+
+    if (name.toLowerCase().trim() === (officialName || '').toLowerCase().trim() || startsWithInput || containsInput || tokenMatch || score >= 35) {
+      scored.push({ name, score });
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+
+  const results = [];
+  if (officialName) {
+    results.push(officialName);
+  }
+  for (const item of scored) {
+    if (!results.some(r => r.toLowerCase().trim() === item.name.toLowerCase().trim())) {
+      results.push(item.name);
+    }
+    if (results.length >= 3) break;
+  }
+
+  return results.slice(0, 3);
+}
+
+function buildCustomerMatchValidationMessage(rawInput, fetchedName, candidates) {
+  let msg = `Do you want to continue with the fetched customer name: *${fetchedName}*?\n\n`;
+  if (candidates && candidates.length > 0) {
+    msg += `Matching accounts from your assigned list:\n`;
+    candidates.forEach((cand, idx) => {
+      msg += `  ${idx + 1}. *${cand}*\n`;
+    });
+    msg += `\n`;
+  }
+  msg += `👉 Tap *Yes* to continue with *${fetchedName}*`;
+  if (candidates && candidates.length > 1) {
+    msg += `, or reply with *1*, *2*${candidates.length > 2 ? ', or *3*' : ''} to choose a customer.`;
+  } else if (candidates && candidates.length === 1) {
+    msg += `, or reply with *1*.`;
+  } else {
+    msg += `.`;
+  }
+  return msg;
+}
+
 async function verifyDraftCustomer(action, draft, senderPhone) {
   if (!draft || !draft.company_name) return { isValid: true };
   if (draft._customer_verified === true || draft._new_customer_created === true) {
@@ -4968,9 +5206,24 @@ async function verifyDraftCustomer(action, draft, senderPhone) {
   // Attempt verification against assigned accounts / scope
   const officialName = await verifyAndGetCustomerName(rawName, senderPhone);
   if (officialName) {
-    draft.company_name = officialName;
-    draft._customer_verified = true;
-    return { isValid: true, officialName };
+    const matchPct = calculateCustomerMatchPercentage(rawName, officialName);
+    if (matchPct >= 70) {
+      draft.company_name = officialName;
+      draft._customer_verified = true;
+      return { isValid: true, officialName };
+    }
+
+    const candidates = await getMatchingAssignedCustomers(rawName, senderPhone, officialName);
+    const prompt = buildCustomerMatchValidationMessage(rawName, officialName, candidates);
+    return {
+      isValid: false,
+      isLowMatchCustomer: true,
+      fetchedName: officialName,
+      rawName: rawName,
+      matchPercentage: matchPct,
+      candidates,
+      prompt,
+    };
   }
 
   // Unrecognized customer -> Prompt for implicit new customer confirmation
@@ -5233,7 +5486,8 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
     company_name: finalCustomerName,
     email: (extraction.customer && extraction.customer.email) || extraction.customer_email || null,
     delivery_location: extraction.delivery_location || null,
-    payment_terms: extraction.payment_terms || null,
+    payment_terms: matchInquiryOption(extraction.payment_terms, INQUIRY_PAYMENT_TERMS) || null,
+    preferred_make: matchInquiryOption(extraction.preferred_make || extraction.make, INQUIRY_PREFERRED_MAKES) || null,
     line_items: lineItems,
     attachments: [attachmentObj],
     _customer_verified: Boolean(officialCustomerName),
@@ -5259,19 +5513,35 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
   // 1. Verify customer
   if (draft.company_name && !draft._customer_verified) {
     const custVerification = await verifyDraftCustomer('LOG_INQUIRY', draft, senderPhone);
-    if (custVerification.isUnrecognizedCustomer) {
-      await recordSessionMessage(senderPhone, 'assistant', custVerification.prompt, { action_type: 'LOG_INQUIRY' });
-      await saveActiveSession(
-        senderPhone,
-        draft.company_name || 'Customer',
-        `catalog_implicit_cust_ask|LOG_INQUIRY|${custVerification.unverifiedName}|${JSON.stringify(draft)}`
-      );
-      return {
-        handled: true,
-        reply: custVerification.prompt,
-        interactiveType: 'buttons',
-        interactiveButtons: NEW_CUSTOMER_BUTTONS,
-      };
+    if (!custVerification.isValid) {
+      if (custVerification.isLowMatchCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custVerification.prompt, { action_type: 'LOG_INQUIRY' });
+        await saveActiveSession(
+          senderPhone,
+          custVerification.fetchedName,
+          `catalog_cust_match_confirm|LOG_INQUIRY|${custVerification.fetchedName}|${JSON.stringify(custVerification.candidates)}|${JSON.stringify(draft)}`
+        );
+        return {
+          handled: true,
+          reply: custVerification.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: CUST_MATCH_BUTTONS,
+        };
+      }
+      if (custVerification.isUnrecognizedCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custVerification.prompt, { action_type: 'LOG_INQUIRY' });
+        await saveActiveSession(
+          senderPhone,
+          draft.company_name || 'Customer',
+          `catalog_implicit_cust_ask|LOG_INQUIRY|${custVerification.unverifiedName}|${JSON.stringify(draft)}`
+        );
+        return {
+          handled: true,
+          reply: custVerification.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: NEW_CUSTOMER_BUTTONS,
+        };
+      }
     }
   }
 
@@ -13970,6 +14240,19 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
     };
   }
 
+  if (interruptedState === 'catalog_cust_match_confirm') {
+    const fetchedName = draft.company_name || 'Customer';
+    const candidates = await getMatchingAssignedCustomers(fetchedName, senderPhone, fetchedName);
+    const askPrompt = buildCustomerMatchValidationMessage(fetchedName, fetchedName, candidates);
+    await saveActiveSession(senderPhone, fetchedName, `catalog_cust_match_confirm|${action}|${fetchedName}|${JSON.stringify(candidates)}|${JSON.stringify(draft)}`);
+    return {
+      handled: true,
+      reply: askPrompt,
+      interactiveType: 'buttons',
+      interactiveButtons: CUST_MATCH_BUTTONS,
+    };
+  }
+
   if (interruptedState === 'catalog_implicit_cust_ask') {
     const askPrompt = `Is *${draft.company_name || 'this customer'}* a new customer you would like to onboard now?`;
     await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_implicit_cust_ask|${action}|${draft.company_name || 'Customer'}|${JSON.stringify(draft)}`);
@@ -14020,19 +14303,21 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
   }
 
   const missing = validateMandatoryFields(action, draft);
+  const optionNotice = draft._inquiry_option_notice ? `${draft._inquiry_option_notice}\n\n` : '';
+  delete draft._inquiry_option_notice;
   if (missing.length === 0) {
     const summary = buildConfirmationSummary(action, draft);
     await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_confirm|${action}|${JSON.stringify(draft)}`);
     return {
       handled: true,
-      reply: summary,
+      reply: `${optionNotice}${summary}`,
       interactiveType: 'buttons',
       interactiveButtons: CONFIRMATION_BUTTONS,
     };
   } else {
     const missingList = missing.map((m) => `• *${m}*`).join('\n');
     const indexTag = draft._totalCount > 1 ? ` (${draft._currentIndex || 1} of ${draft._totalCount}: ${draft.company_name || 'Item'})` : '';
-    const askMissing = `Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
+    const askMissing = `${optionNotice}Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
     await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
     return {
       handled: true,
@@ -14788,6 +15073,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   if (
     hasActiveCatalogSession &&
     !lastIntent.startsWith('catalog_resume_ask|') &&
+    !lastIntent.startsWith('catalog_cust_match_confirm|') &&
     !lastIntent.startsWith('catalog_implicit_cust_ask|') &&
     !lastIntent.startsWith('catalog_implicit_cust_collect|') &&
     !lastIntent.startsWith('catalog_implicit_prod_add|') &&
@@ -14955,6 +15241,136 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       return await handleUpdateSelectionState(text, senderPhone, action, draft);
     }
     lastIntent = `${interruptedState}|${action}|${draftJsonStr}`;
+  }
+
+  // ── 3a-0. HANDLE CUSTOMER LOW-MATCH VALIDATION ASK (catalog_cust_match_confirm|...) ──
+  if (lastIntent.startsWith('catalog_cust_match_confirm|')) {
+    const parts = lastIntent.split('|');
+    const originalAction = parts[1];
+    const fetchedName = parts[2];
+    const candidates = safeParseJSON(parts[3], []);
+    const originalDraftJsonStr = parts.slice(4).join('|');
+    const originalDraft = safeParseJSON(originalDraftJsonStr, {});
+    if (callerSourceChannel && !originalDraft.source_channel) {
+      originalDraft.source_channel = callerSourceChannel;
+    }
+
+    const cleanInput = text.toLowerCase().replace(/[!.,?*]/g, '').trim();
+
+    // Check mid-flow interruptions
+    const { isExplicitComplaintResolution } = require('../kra8');
+    if (isExplicitComplaintResolution(text) && originalAction !== 'UPDATE_COMPLAINT' && originalAction !== 'LOG_COMPLAINT') {
+      return await handleMidFlowComplaintResolution(text, senderPhone, 'catalog_cust_match_confirm', originalAction, originalDraft);
+    }
+    if (isStageUpdatePrompt(text)) {
+      return await handleMidFlowStageUpdate(text, senderPhone, 'catalog_cust_match_confirm', originalAction, originalDraft);
+    }
+    if (await isMidFlowReadQuery(text)) {
+      return await handleMidFlowRetrievalQuery(text, senderPhone, 'catalog_cust_match_confirm', originalAction, originalDraft);
+    }
+
+    // Cancel / Discard
+    if (
+      isDiscardOrCancelIntent(text) ||
+      cleanInput === 'btn_confirm_cancel' ||
+      cleanInput === 'btn_cust_no' ||
+      cleanInput === 'cancel' ||
+      cleanInput === 'discard' ||
+      cleanInput === 'stop' ||
+      cleanInput === 'exit'
+    ) {
+      await clearActiveSession(senderPhone);
+      await recordSessionMessage(senderPhone, 'assistant', 'Draft cancelled.', { action_type: originalAction });
+      return { handled: true, reply: 'Activity cancelled. What would you like to do next?' };
+    }
+
+    let chosenCustomer = null;
+
+    const isYes =
+      cleanInput === 'btn_confirm_yes' ||
+      cleanInput === 'btn_cust_yes' ||
+      cleanInput === 'yes' ||
+      cleanInput === 'y' ||
+      cleanInput === 'confirm' ||
+      cleanInput === 'haan' ||
+      cleanInput === 'ha' ||
+      cleanInput === 'ok' ||
+      cleanInput === 'sure' ||
+      cleanInput === 'sahi hai';
+
+    if (isYes) {
+      chosenCustomer = fetchedName;
+    } else {
+      const numMatch = cleanInput.match(/^[#*]?\s*([1-3])\s*[.)]?$/);
+      if (numMatch) {
+        const idx = parseInt(numMatch[1], 10) - 1;
+        if (idx >= 0 && idx < candidates.length) {
+          chosenCustomer = candidates[idx];
+        }
+      }
+    }
+
+    if (!chosenCustomer) {
+      const recheckedName = await verifyAndGetCustomerName(text, senderPhone);
+      if (recheckedName) {
+        chosenCustomer = recheckedName;
+      }
+    }
+
+    if (chosenCustomer) {
+      originalDraft.company_name = chosenCustomer;
+      originalDraft._customer_verified = true;
+
+      const custProdCheck = validateDraftProducts(originalAction, originalDraft);
+      if (!custProdCheck.isValid) {
+        await recordSessionMessage(senderPhone, 'assistant', custProdCheck.clarificationMessage, {
+          action_type: originalAction,
+          customer_name: originalDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, originalDraft.company_name || 'Customer', `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return {
+          handled: true,
+          reply: custProdCheck.clarificationMessage,
+          interactiveType: 'buttons',
+          interactiveButtons: UNKNOWN_PRODUCT_BUTTONS,
+        };
+      }
+
+      const parentMissing = validateMandatoryFields(originalAction, originalDraft);
+      if (parentMissing.length === 0) {
+        const lineChoice = await askLineItemChoiceIfNeeded(originalAction, originalDraft, senderPhone);
+        if (lineChoice) return lineChoice;
+        const summary = buildConfirmationSummary(originalAction, originalDraft);
+        await recordSessionMessage(senderPhone, 'assistant', summary, {
+          action_type: originalAction,
+          customer_name: originalDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, originalDraft.company_name, `catalog_confirm|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return {
+          handled: true,
+          reply: summary,
+          interactiveType: 'buttons',
+          interactiveButtons: CONFIRMATION_BUTTONS,
+        };
+      } else {
+        const missingList = parentMissing.map((m) => `• *${m}*`).join('\n');
+        const askMsg = `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
+        await recordSessionMessage(senderPhone, 'assistant', askMsg, {
+          action_type: originalAction,
+          customer_name: originalDraft.company_name,
+        });
+        await saveActiveSession(senderPhone, originalDraft.company_name, `catalog_flow|${originalAction}|${JSON.stringify(originalDraft)}`);
+        return { handled: true, reply: askMsg };
+      }
+    }
+
+    const rePrompt = buildCustomerMatchValidationMessage(text, fetchedName, candidates);
+    return {
+      handled: true,
+      reply: rePrompt,
+      interactiveType: 'buttons',
+      interactiveButtons: CUST_MATCH_BUTTONS,
+    };
   }
 
   // ── 3a. HANDLE IMPLICIT CUSTOMER CONFIRMATION ASK (catalog_implicit_cust_ask|...) ──
@@ -15658,6 +16074,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       // Verify customer before final execution
       const custCheck = await verifyDraftCustomer(action, draft, senderPhone);
       if (!custCheck.isValid) {
+        if (custCheck.isLowMatchCustomer) {
+          await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+          await saveActiveSession(
+            senderPhone,
+            custCheck.fetchedName,
+            `catalog_cust_match_confirm|${action}|${custCheck.fetchedName}|${JSON.stringify(custCheck.candidates)}|${JSON.stringify(draft)}`
+          );
+          return {
+            handled: true,
+            reply: custCheck.prompt,
+            interactiveType: 'buttons',
+            interactiveButtons: CUST_MATCH_BUTTONS,
+          };
+        }
         if (custCheck.isUnrecognizedCustomer) {
           await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
           await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(draft)}`);
@@ -15919,6 +16349,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
+      if (custCheck.isLowMatchCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await saveActiveSession(
+          senderPhone,
+          custCheck.fetchedName,
+          `catalog_cust_match_confirm|${action}|${custCheck.fetchedName}|${JSON.stringify(custCheck.candidates)}|${JSON.stringify(updatedDraft)}`
+        );
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: CUST_MATCH_BUTTONS,
+        };
+      }
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
@@ -16113,6 +16557,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
+      if (custCheck.isLowMatchCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await saveActiveSession(
+          senderPhone,
+          custCheck.fetchedName,
+          `catalog_cust_match_confirm|${action}|${custCheck.fetchedName}|${JSON.stringify(custCheck.candidates)}|${JSON.stringify(updatedDraft)}`
+        );
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: CUST_MATCH_BUTTONS,
+        };
+      }
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
@@ -17281,6 +17739,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
+      if (custCheck.isLowMatchCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await saveActiveSession(
+          senderPhone,
+          custCheck.fetchedName,
+          `catalog_cust_match_confirm|${action}|${custCheck.fetchedName}|${JSON.stringify(custCheck.candidates)}|${JSON.stringify(updatedDraft)}`
+        );
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: CUST_MATCH_BUTTONS,
+        };
+      }
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|${action}|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
@@ -17746,6 +18218,20 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     const custCheck = await verifyDraftCustomer('LOG_VISIT', updatedDraft, senderPhone);
     if (!custCheck.isValid) {
+      if (custCheck.isLowMatchCustomer) {
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: 'LOG_VISIT' });
+        await saveActiveSession(
+          senderPhone,
+          custCheck.fetchedName,
+          `catalog_cust_match_confirm|LOG_VISIT|${custCheck.fetchedName}|${JSON.stringify(custCheck.candidates)}|${JSON.stringify(updatedDraft)}`
+        );
+        return {
+          handled: true,
+          reply: custCheck.prompt,
+          interactiveType: 'buttons',
+          interactiveButtons: CUST_MATCH_BUTTONS,
+        };
+      }
       if (custCheck.isUnrecognizedCustomer) {
         await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: 'LOG_VISIT' });
         await saveActiveSession(senderPhone, custCheck.unverifiedName, `catalog_implicit_cust_ask|LOG_VISIT|${custCheck.unverifiedName}|${JSON.stringify(updatedDraft)}`);
@@ -17979,6 +18465,7 @@ module.exports = {
   handleStaleDraftButton,
   handleResumeMenuButton,
   getAllowedFieldsListForAction,
+  matchInquiryOption,
   getEditPromptForAction,
   scoreLineItemAgainstUpdate,
   matchLineItemUpdate,
@@ -17990,4 +18477,8 @@ module.exports = {
   isPureOptionSelectorOnly,
   isNumericOptionSelector,
   extractThicknessTransition,
+  calculateCustomerMatchPercentage,
+  getMatchingAssignedCustomers,
+  buildCustomerMatchValidationMessage,
+  CUST_MATCH_BUTTONS,
 };
