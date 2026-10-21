@@ -39,6 +39,7 @@ const {
   releaseVisitCode,
   fillVisitCity,
   attachVisitMedia,
+  visitPhotoAccepted,
 } = require('./visitRequirements');
 const {
   detectHsnCode,
@@ -137,6 +138,8 @@ function extractPhotoAndGps(rawText, options = {}) {
       name: options.name || options.fileName || `attachment-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
       url: photoDataUrl,
       type: mimeType,
+      photoSource: options.photoSource || '',
+      messageType: options.messageType || (isPdf ? 'document' : ''),
       uploaded_at: new Date().toISOString(),
       ...(gpsData ? { gps: gpsData } : {}),
     };
@@ -12223,18 +12226,22 @@ async function executeAction(action, draft, senderPhone) {
 
         const existingUrls = new Set(existingAttachments.map(a => a && a.url).filter(Boolean));
         const distinctNew = newAttachmentsToAdd.filter(a => a && a.url && !existingUrls.has(a.url));
-
-        if (distinctNew.length > 0) {
-          visitUpdates.attachments = [...existingAttachments, ...distinctNew];
-          // Never replace previously added pic: only populate gps_photo_url if not set
-          if (!targetVisit.gps_photo_url) {
-            visitUpdates.gps_photo_url = distinctNew[0].url;
-          }
-        }
-
         const updLat = updates.gps_latitude ?? draft.gps_latitude;
         const updLng = updates.gps_longitude ?? draft.gps_longitude;
         const updAcc = updates.gps_accuracy ?? draft.gps_accuracy;
+
+        if (distinctNew.length > 0) {
+          visitUpdates.attachments = [...existingAttachments, ...distinctNew];
+          // Never replace previously added pic: only a camera photo with coordinates fills it.
+          if (!targetVisit.gps_photo_url) {
+            const photo = distinctNew.find((item) => visitPhotoAccepted(
+              { gps_latitude: targetVisit.gps_latitude ?? updLat, gps_longitude: targetVisit.gps_longitude ?? updLng },
+              item,
+              typeof updLat === 'number' ? { latitude: updLat, longitude: updLng } : null,
+            ));
+            if (photo) visitUpdates.gps_photo_url = photo.url;
+          }
+        }
         if (typeof updLat === 'number' && typeof updLng === 'number') {
           if (!targetVisit.gps_latitude || !targetVisit.gps_longitude) {
             visitUpdates.gps_latitude = updLat;
@@ -17108,7 +17115,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         if (!prevAtts.some(a => a && a.url === attachmentObj.url)) {
           updatedDraft.attachments = [...prevAtts, attachmentObj];
         }
-        if (!updatedDraft.gps_photo_url && !existingDraft.gps_photo_url) {
+        const photoDraft = updatedDraft.gps_latitude != null ? updatedDraft : existingDraft;
+        if (
+          !updatedDraft.gps_photo_url &&
+          !existingDraft.gps_photo_url &&
+          visitPhotoAccepted(photoDraft, attachmentObj, gpsData)
+        ) {
           updatedDraft.gps_photo_url = attachmentObj.url;
         }
       }
@@ -17612,8 +17624,6 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   if (isColdVisitIntent) {
     const initialVisitDraft = {
       action: 'LOG_VISIT',
-      ...(photoDataUrl ? { gps_photo_url: photoDataUrl } : {}),
-      ...(attachmentObj ? { attachments: [attachmentObj] } : {}),
       ...(gpsData ? {
         gps_latitude: gpsData.latitude,
         gps_longitude: gpsData.longitude,
@@ -17624,17 +17634,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     await recordSessionMessage(senderPhone, 'user', text);
     const updatedDraft = await extractFieldsWithLLM('LOG_VISIT', text, initialVisitDraft);
 
-    if (photoDataUrl && !updatedDraft.gps_photo_url) updatedDraft.gps_photo_url = photoDataUrl;
-    if (attachmentObj) {
-      if (!Array.isArray(updatedDraft.attachments) || updatedDraft.attachments.length === 0) {
-        updatedDraft.attachments = [attachmentObj];
-      }
-    }
-    if (gpsData && (updatedDraft.gps_latitude === undefined || updatedDraft.gps_latitude === null)) {
-      updatedDraft.gps_latitude = gpsData.latitude;
-      updatedDraft.gps_longitude = gpsData.longitude;
-      updatedDraft.gps_accuracy = gpsData.accuracy;
-    }
+    attachVisitMedia(updatedDraft, attachmentObj, gpsData);
+    await fillVisitCity(updatedDraft);
 
     const nonEditableColdLog = detectNonEditableFieldAttempt('LOG_VISIT', text, updatedDraft);
     if (nonEditableColdLog.isNonEditable) {

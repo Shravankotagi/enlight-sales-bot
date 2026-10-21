@@ -226,9 +226,10 @@ function readDraft(draft) {
   const email = text(source.email).toLowerCase();
   const latitude = finiteNumber(source.gps_latitude ?? source.visit_latitude);
   const longitude = finiteNumber(source.gps_longitude ?? source.visit_longitude);
-  const followDate = text(source.follow_up_date || source.followup_date);
   const action = text(source.followup_action || source.follow_up_action);
-  const dateInAction = action.match(/\b(\d{1,2}-\d{1,2}-\d{4})\b/);
+  const followFromField = storedOrRelativeVisitDate(source.follow_up_date || source.followup_date);
+  const followDate = followFromField || resolveRelativeVisitDate(action) || text(source.follow_up_date || source.followup_date);
+  const nextPurchase = storedOrRelativeVisitDate(source.next_purchase_expected) || text(source.next_purchase_expected);
   return {
     company: text(source.company_name || source.customer_name),
     person: text(source.person_met),
@@ -244,14 +245,14 @@ function readDraft(draft) {
     product: text(source.product_details),
     consumption: text(source.monthly_consumption),
     requirement: text(source.current_requirement),
-    nextPurchase: text(source.next_purchase_expected),
+    nextPurchase,
     delivery: text(source.delivery_location),
     brands: uniqueBrands,
     brandOther: text(source.preferred_make_other),
     customerTypeOther: text(source.customer_type_other),
     payment: canonicalPayment(source.payment_terms),
     followAction: action,
-    followDate: followDate || (dateInAction ? dateInAction[1] : ''),
+    followDate,
     remarks: text(source.meeting_remarks || source.remarks),
     photo: text(source.gps_photo_url),
     latitude,
@@ -276,6 +277,7 @@ function writeDraft(draft, view) {
   if (view.brandOther) draft.preferred_make_other = view.brandOther;
   if (view.customerTypeOther) draft.customer_type_other = view.customerTypeOther;
   if (view.payment) draft.payment_terms = view.payment;
+  if (view.nextPurchase) draft.next_purchase_expected = view.nextPurchase;
   if (view.followDate) draft.follow_up_date = view.followDate;
   if (view.city) {
     draft.city_location = view.city;
@@ -324,6 +326,80 @@ function isVisitDateOnOrAfterToday(value) {
   return Boolean(day) && day >= visitCalendarToday();
 }
 
+function formatUtcDay(date) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+}
+
+function shiftCalendarDay(isoDay, days) {
+  const [year, month, day] = isoDay.split('-').map(Number);
+  return formatUtcDay(new Date(Date.UTC(year, month - 1, day + days)));
+}
+
+function addCalendarMonths(isoDay, months) {
+  const [year, month, day] = isoDay.split('-').map(Number);
+  return formatUtcDay(new Date(Date.UTC(year, month - 1 + months, day)));
+}
+
+const VISIT_WORD_NUMBERS = {
+  a: 1,
+  an: 1,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+};
+
+function visitQuantity(value) {
+  const raw = String(value || '').toLowerCase();
+  if (VISIT_WORD_NUMBERS[raw]) return VISIT_WORD_NUMBERS[raw];
+  const number = Number(raw);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function resolveRelativeVisitDate(value, now = new Date()) {
+  const explicit = visitCalendarDay(value);
+  if (explicit) return explicit;
+  const raw = text(value).toLowerCase();
+  if (!raw) return '';
+  const today = visitCalendarToday(now);
+  if (/\b(?:tomorrow|kal)\b/.test(raw)) return shiftCalendarDay(today, 1);
+  if (/\b(?:today|aaj)\b/.test(raw)) return today;
+  if (
+    /\bnext\s+week\b/.test(raw) ||
+    /\b(?:in|after|within)\s+(?:a|an|one)\s+weeks?\b/.test(raw) ||
+    /\b(?:a|one)\s+weeks?\s+later\b/.test(raw)
+  ) {
+    return shiftCalendarDay(today, 7);
+  }
+  if (
+    /\b(?:after|in|within)\s+(?:a|an|one)\s+months?\b/.test(raw) ||
+    /\b(?:a|one)\s+months?\s+later\b/.test(raw) ||
+    /\bnext\s+month\b/.test(raw)
+  ) {
+    return addCalendarMonths(today, 1);
+  }
+  const amount = '(?:\\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
+  const days = raw.match(new RegExp(`\\b(?:in|after|within)\\s+(${amount})\\s+days?\\b`));
+  if (days) return shiftCalendarDay(today, visitQuantity(days[1]));
+  const weeks = raw.match(new RegExp(`\\b(?:in|after|within)\\s+(${amount})\\s+weeks?\\b`));
+  if (weeks) return shiftCalendarDay(today, visitQuantity(weeks[1]) * 7);
+  const months = raw.match(new RegExp(`\\b(?:in|after|within)\\s+(${amount})\\s+months?\\b`));
+  if (months) return addCalendarMonths(today, visitQuantity(months[1]));
+  return '';
+}
+
+function storedOrRelativeVisitDate(value) {
+  return visitCalendarDay(value) || resolveRelativeVisitDate(value);
+}
+
 function nextVisitPrompts(draft) {
   const view = readDraft(draft);
   writeDraft(draft, view);
@@ -348,10 +424,13 @@ function nextVisitPrompts(draft) {
     view.brands.includes('Others') && !view.brandOther && 'Other brand',
     !view.payment && `Payment Terms: ${VISIT_PAYMENT_TERMS.join(', ')}`,
     !view.followAction && 'Follow-up Action',
-    !isVisitDateOnOrAfterToday(view.followDate) && 'Follow-up Date (e.g. 20-10-2026) (today or later)',
+    !isVisitDateOnOrAfterToday(view.followDate) && 'Follow-up Date (today or later, e.g. tomorrow or DD-MM-YYYY)',
     !view.remarks && 'Meeting Remarks',
-    !view.photo && 'Visit photo from the camera',
+    !view.photo && !visitImageWaitingForPin(draft, view) && 'Visit photo from the camera',
   ].filter(Boolean);
+  if (visitImageWaitingForPin(draft, view)) {
+    prompts.unshift('Share a location pin first, then send the visit photo from the camera.');
+  }
   if (!view.city && view.latitude != null) {
     prompts.push('City could not be read from the location. Type the city.');
   } else if (!view.city) {
@@ -604,20 +683,58 @@ async function fillVisitCity(draft) {
   return draft;
 }
 
+function visitAttachmentKind(attachment) {
+  const type = String(attachment?.type || '').toLowerCase();
+  const source = String(attachment?.photoSource || '');
+  const messageType = String(attachment?.messageType || '');
+  if (source === 'upload' || messageType === 'document' || type.includes('pdf') || type === 'document') {
+    return 'document';
+  }
+  if (source === 'camera') return 'camera';
+  if (messageType === 'image' || type === 'image' || type.startsWith('image/')) return 'image';
+  return 'other';
+}
+
+function visitPhotoAccepted(draft, attachment, gps) {
+  if (!attachment || !attachment.url) return false;
+  const kind = visitAttachmentKind(attachment);
+  if (kind !== 'camera' && kind !== 'image') return false;
+  const incoming = Boolean(
+    gps && finiteNumber(gps.latitude) != null && finiteNumber(gps.longitude) != null,
+  );
+  if (kind === 'camera') return incoming;
+  return incoming || finiteNumber(draft?.gps_latitude) != null;
+}
+
+function visitImageWaitingForPin(draft, view) {
+  if (!view || view.photo || view.latitude != null) return false;
+  return Array.isArray(draft?.attachments) && draft.attachments.some((item) => {
+    const kind = visitAttachmentKind(item);
+    return kind === 'image' || kind === 'camera';
+  });
+}
+
 function attachVisitMedia(draft, attachment, gps) {
   if (!draft) return draft;
   if (attachment && attachment.url) {
-    const isPdf = String(attachment.type || '').includes('pdf');
     const previous = Array.isArray(draft.attachments) ? draft.attachments : [];
     if (!previous.some((item) => item && item.url === attachment.url)) {
       draft.attachments = [...previous, attachment];
     }
-    if (!isPdf && !draft.gps_photo_url) draft.gps_photo_url = attachment.url;
+    if (visitPhotoAccepted(draft, attachment, gps) && !draft.gps_photo_url) {
+      draft.gps_photo_url = attachment.url;
+    }
   }
-  if (gps && finiteNumber(gps.latitude) != null && finiteNumber(gps.longitude) != null && draft.gps_latitude == null) {
+  if (
+    gps &&
+    finiteNumber(gps.latitude) != null &&
+    finiteNumber(gps.longitude) != null &&
+    draft.gps_latitude == null
+  ) {
     draft.gps_latitude = gps.latitude;
     draft.gps_longitude = gps.longitude;
     draft.gps_accuracy = gps.accuracy ?? null;
+    draft.location_source = 'gps';
   }
   return draft;
 }
@@ -669,6 +786,7 @@ module.exports = {
   addressFromGoogleGeocode,
   visitOtpTemplatePayload,
   attachVisitMedia,
+  visitPhotoAccepted,
   promptsFromVisitState,
   hashVisitSecret,
 };

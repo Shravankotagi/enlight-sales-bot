@@ -67,7 +67,7 @@ test('a past next purchase or follow-up is still missing', () => {
     next_purchase_expected: today.iso,
     follow_up_date: yesterday.iso,
   }));
-  assert.ok(pastFollowUp.includes('Follow-up Date (e.g. 20-10-2026) (today or later)'));
+  assert.ok(pastFollowUp.includes('Follow-up Date (today or later, e.g. tomorrow or DD-MM-YYYY)'));
   assert.equal(pastFollowUp.some((item) => item.includes('Next Purchase')), false);
 });
 
