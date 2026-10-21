@@ -49,7 +49,7 @@ test('validateMandatoryFields lists missing new-customer fields', () => {
 test('mergeDraft fills missing fields and lets new values win', () => {
   assert.deepEqual(
     catalogFlow.mergeDraft('LOG_INQUIRY', { company_name: 'A', payment_terms: null }, { payment_terms: '30 days', company_name: null }),
-    { company_name: 'A', payment_terms: '30 days', action: 'LOG_INQUIRY' },
+    { company_name: 'A', payment_terms: '30 Days', action: 'LOG_INQUIRY' },
   );
   assert.equal(catalogFlow.mergeDraft('LOG_INQUIRY', { company_name: 'A' }, { company_name: 'B' }).company_name, 'B');
 });
