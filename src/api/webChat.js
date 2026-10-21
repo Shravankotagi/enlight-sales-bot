@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { handleCatalogFlow } = require('../core/catalogFlow');
+const { handleProcurementChat } = require('../core/procurementChat');
 const { runOrchestrator } = require('../core/orchestrator');
 const { getFullActiveSession, saveActiveSession, supabase, getEmployeeByPhone } = require('../supabase');
 const { isProcurementRole } = require('../utils/roles');
@@ -47,15 +48,6 @@ function verifyUserToken(token) {
   } catch (e) {
     return null;
   }
-}
-
-const PROCUREMENT_BOT_MESSAGE =
-  'WhatsApp access for procurement roles is not enabled yet. Please use the Enlight Sigma dashboard Inquiries page.';
-
-async function procurementBlocked(phone, tokenRole) {
-  if (isProcurementRole(tokenRole)) return true;
-  const employee = await getEmployeeByPhone(phone);
-  return Boolean(employee && isProcurementRole(employee.role));
 }
 
 /**
@@ -211,13 +203,6 @@ router.post('/reset', requireWebApiKey, async (req, res) => {
     }
     cleanPhone = cleanPhone.slice(-10);
 
-    if (await procurementBlocked(cleanPhone, userPayload?.role)) {
-      return res.status(403).json({
-        success: false,
-        error: PROCUREMENT_BOT_MESSAGE,
-      });
-    }
-
     await saveActiveSession(cleanPhone, 'Unknown', 'general');
     await clearActiveSession(cleanPhone);
 
@@ -255,14 +240,6 @@ router.post('/message', requireWebApiKey, async (req, res) => {
       });
     }
 
-    if (await procurementBlocked(cleanPhone, userPayload?.role)) {
-      return res.status(403).json({
-        success: false,
-        error: PROCUREMENT_BOT_MESSAGE,
-        reply: PROCUREMENT_BOT_MESSAGE,
-      });
-    }
-
     // Optional reset if starting fresh conversation
     if (resetSession === true) {
       await saveActiveSession(cleanPhone, 'Unknown', 'general');
@@ -292,6 +269,25 @@ router.post('/message', requireWebApiKey, async (req, res) => {
     }
 
     console.log(`[WebChat] Processing message from ${empName} (${cleanPhone}): "${augmentedText.slice(0, 80)}" (image: ${Boolean(imageBuffer)}, gps: ${Boolean(gps)})`);
+
+    const employee = await getEmployeeByPhone(cleanPhone);
+    if (employee && isProcurementRole(employee.role)) {
+      const procurementDeps = { getEmployeeByPhone, getFullActiveSession, saveActiveSession, supabase };
+      const procurementResult = imageBuffer
+        ? await handleProcurementChat('menu', cleanPhone, procurementDeps)
+        : await handleProcurementChat(rawText || 'menu', cleanPhone, procurementDeps);
+      const prefix = imageBuffer ? 'Photos are not used for base prices.\n\n' : '';
+      const interactiveType = procurementResult.interactiveType || 'text';
+      return res.json({
+        success: true,
+        reply: formatForWeb(`${prefix}${procurementResult.reply || 'Reply 1, 2, or 3.'}`.trim()),
+        type: interactiveType,
+        interactiveType,
+        interactiveButtons: procurementResult.interactiveButtons || null,
+        interactiveList: procurementResult.interactiveList || null,
+        data: procurementResult.interactiveButtons || procurementResult.interactiveList || null,
+      });
+    }
 
     // Reuse the same document OCR handlers used by WhatsApp for PDFs uploaded
     // during the guided inquiry/order logging flows.
