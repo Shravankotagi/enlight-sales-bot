@@ -1120,6 +1120,7 @@ const MODULE_PROMPTS = {
 Please provide the following details:
 
 - **Customer / Company:** *
+- **Email ID:** (optional)
 - **Product Description / Quantity:** *
 - **Rate:** (optional)
 - **Preferred Make:** (optional)
@@ -1141,6 +1142,7 @@ Which fields do you want to update? Mention the field name and new value.
 - Preferred Make
 - Payment Terms
 - Delivery Location
+- Email ID
 - Additional Notes
 - Status (Open / Quoted / Won / Lost / On Hold)
 
@@ -1982,6 +1984,7 @@ LOG_INQUIRY:
 {
   "action": "LOG_INQUIRY",
   "company_name": "<Customer / Company Name, else null>",
+  "email": "<Customer email address if mentioned, else null>",
   "contact_person": "<Customer Contact Person / Name if mentioned e.g. 'Sheetal Kumari', else null>",
   "contact_phone": "<10-digit mobile number if mentioned, else null>",
   "product_description": "<Summary of all products/quantities, else null>",
@@ -2007,6 +2010,7 @@ LOG_INQUIRY:
   "entries": [
     {
       "company_name": "<Company Name>",
+      "email": "<Email or null>",
       "contact_person": "<Contact Person or null>",
       "contact_phone": "<Phone or null>",
       "product_description": "<Product description>",
@@ -2031,6 +2035,7 @@ UPDATE_INQUIRY:
     "preferred_make": "<if user requested update, else null>",
     "payment_terms": "<if user requested update, else null>",
     "delivery_location": "<if user requested update, else null>",
+    "email": "<Customer email if update requested, else null>",
     "additional_notes": "<Exact literal text provided by user if update requested. NEVER summarize, rephrase, or alter user notes, else null>",
     "stage": "<Open | Quoted | Negotiation | Won | Lost | On Hold if mentioned, else null>",
     "status": "<Open | Quoted | Negotiation | Won | Lost | On Hold if mentioned, else null>"
@@ -2497,9 +2502,9 @@ function detectTotalValueUpdateAttempt(text, extractedData) {
 function getAllowedFieldsListForAction(action) {
   switch (action) {
     case 'LOG_INQUIRY':
-      return `- *Rate / Target Price*\n- *Quantity & Unit (e.g. 25 MT)*\n- *Product Specifications / Dimensions*\n- *Payment Terms (e.g. 30 Days Credit)*\n- *Delivery Location*\n- *Preferred Make (e.g. JSW, SAIL)*\n- *Additional Notes*`;
+      return `- *Rate / Target Price*\n- *Quantity & Unit (e.g. 25 MT)*\n- *Product Specifications / Dimensions*\n- *Payment Terms (e.g. 30 Days Credit)*\n- *Delivery Location*\n- *Email ID*\n- *Preferred Make (e.g. JSW, SAIL)*\n- *Additional Notes*`;
     case 'UPDATE_INQUIRY':
-      return `- *Rate / Target Price*\n- *Quantity & Product Specifications / Dimensions (e.g. 8mm, 78 MT)*\n- *Payment Terms (e.g. 30 Days)*\n- *Delivery Location*\n- *Preferred Make*\n- *Additional Notes*`;
+      return `- *Rate / Target Price*\n- *Quantity & Product Specifications / Dimensions (e.g. 8mm, 78 MT)*\n- *Payment Terms (e.g. 30 Days)*\n- *Delivery Location*\n- *Email ID*\n- *Preferred Make*\n- *Additional Notes*`;
     case 'LOG_ORDER':
       return `- *PO Number (e.g. PO-2026-001)*\n- *PO Date*\n- *Delivery Location*\n- *Payment Terms*\n- *Product Rates & Quantities*`;
     case 'UPDATE_ORDER':
@@ -2525,7 +2530,7 @@ function detectNonEditableFieldAttempt(action, text, draft = {}) {
   if (!clean) return { isNonEditable: false };
 
   // Fast bypass: If user is explicitly targeting an editable field (notes, remarks, rate, qty, payment terms, delivery location, etc.)
-  const isExplicitEditableField = /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|resolution\s*notes?|comments?|description|rate|price|target\s*price|bhav|quantity|qty|payment\s*terms?|delivery\s*location|location|city|person\s*met|contact\s*person|contact\s*phone|phone|mobile|visit\s*date|po\s*number|po\s*no|po\s*date|status|stage|preferred\s*make|make)\s*(?:to|as|is|:|=|\s+-)\s*/i.test(clean);
+  const isExplicitEditableField = /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|resolution\s*notes?|comments?|description|rate|price|target\s*price|bhav|quantity|qty|payment\s*terms?|delivery\s*location|location|city|person\s*met|contact\s*person|contact\s*phone|phone|mobile|email(?:\s*id)?|visit\s*date|po\s*number|po\s*no|po\s*date|status|stage|preferred\s*make|make)\s*(?:to|as|is|:|=|\s+-)\s*/i.test(clean);
   if (isExplicitEditableField) {
     return { isNonEditable: false };
   }
@@ -4124,6 +4129,22 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     }
   }
 
+  if (action === 'LOG_INQUIRY' && !merged.email) {
+    const emailMatch = String(userInput || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    if (emailMatch) merged.email = emailMatch[0].toLowerCase();
+  }
+  if (action === 'UPDATE_INQUIRY' && !merged.updates?.email && /\bemail\b/i.test(String(userInput || ''))) {
+    const emailMatch = String(userInput || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    if (emailMatch) {
+      merged.updates = merged.updates || {};
+      merged.updates.email = emailMatch[0].toLowerCase();
+    }
+  }
+  if (action === 'UPDATE_INQUIRY' && merged.email && !merged.updates?.email) {
+    merged.updates = merged.updates || {};
+    merged.updates.email = String(merged.email).trim().toLowerCase();
+  }
+
   // Fallback contact_person and mobile_number for LOG_NEW_CUSTOMER / LOG_VISIT / UPDATE_VISIT / LOG_INQUIRY / LOG_ORDER
   if (['LOG_NEW_CUSTOMER', 'LOG_VISIT', 'UPDATE_VISIT', 'LOG_INQUIRY', 'LOG_ORDER'].includes(action)) {
     if (!merged.mobile_number && !merged.contact_phone) {
@@ -5191,6 +5212,7 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
 
   const draft = {
     company_name: finalCustomerName,
+    email: (extraction.customer && extraction.customer.email) || extraction.customer_email || null,
     delivery_location: extraction.delivery_location || null,
     payment_terms: extraction.payment_terms || null,
     line_items: lineItems,
@@ -6467,6 +6489,18 @@ function formatStageLabel(st) {
   if (s.includes('negot')) return 'Negotiation';
   if (s.includes('hold')) return 'On Hold';
   return 'New Inquiry';
+}
+
+function activityStageName(st) {
+  const s = String(st || '').toLowerCase().trim();
+  if (!s) return '';
+  if (s === 'won' || s === 'closed won') return 'Closed Won';
+  if (s === 'lost' || s === 'closed lost') return 'Closed Lost';
+  if (['quoted', 'quotation_sent', 'qualified', 'saved', 'confirmed', 'processed', 'price quote'].includes(s)) return 'Price Quote';
+  if (s.includes('negot')) return 'Negotiation';
+  if (s === 'on_hold' || s === 'hold' || s === 'on hold') return 'On Hold';
+  if (['new_inquiry', 'new', 'review', 'needs_review', 'pending', 'received', 'new inquiry'].includes(s)) return 'New Inquiry';
+  return '';
 }
 
 function formatDetailedInquiryItemsList(items, { includeHsn = false } = {}) {
@@ -9432,6 +9466,7 @@ function buildConfirmationSummary(action, draft) {
   switch (action) {
     case 'LOG_INQUIRY': {
       summary += `• *Customer / Company:* ${draft.company_name || '-'}\n`;
+      summary += `• *Email ID:* ${draft.email || '-'}\n`;
       if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
         if (draft.line_items.length === 1) {
           summary += `• *Product:* ${formatDetailedInquiryItemsList(draft.line_items)}\n`;
@@ -10074,11 +10109,14 @@ async function executeAction(action, draft, senderPhone) {
           customer: {
             name: companyName,
             phone: null,
+            email: draft.email || null,
             address: draft.delivery_location || null,
             match_status: 'matched',
           },
           customer_name: companyName,
           companyName: companyName,
+          customer_email: draft.email || null,
+          customerEmail: draft.email || null,
           delivery_location: draft.delivery_location || null,
           delivery_address: draft.delivery_location || null,
           payment_terms: draft.payment_terms || null,
@@ -10109,6 +10147,7 @@ async function executeAction(action, draft, senderPhone) {
           if (globalRate) humanRawText += `Rate: ₹${globalRate}/MT\n`;
         }
         if (draft.preferred_make) humanRawText += `Preferred Make: ${draft.preferred_make}\n`;
+        if (draft.email) humanRawText += `Email: ${draft.email}\n`;
         if (draft.payment_terms) humanRawText += `Payment Terms: ${draft.payment_terms}\n`;
         if (draft.delivery_location) humanRawText += `Delivery Location: ${draft.delivery_location}\n`;
         if (draft.additional_notes) humanRawText += `Notes: ${draft.additional_notes}\n`;
@@ -10678,6 +10717,11 @@ async function executeAction(action, draft, senderPhone) {
               aiJson.payment_terms = updates.payment_terms;
               aiJson.paymentTerms = updates.payment_terms;
             }
+            if (updates.email) {
+              aiJson.customer_email = updates.email;
+              aiJson.customerEmail = updates.email;
+              if (aiJson.customer) aiJson.customer.email = updates.email;
+            }
             if (updates.delivery_location) {
               aiJson.delivery_location = updates.delivery_location;
               aiJson.deliveryLocation = updates.delivery_location;
@@ -10826,11 +10870,11 @@ async function executeAction(action, draft, senderPhone) {
         const effectivePreferredMake = draft.updates?.preferred_make || draft.preferred_make || deal.preferred_make || inqRow?.ai_extraction_json?.preferred_make || null;
         const effectiveAdditionalNotes = draft.updates?.additional_notes || draft.additional_notes || deal.additional_notes || inqRow?.ai_extraction_json?.additional_notes || null;
 
-        // Log to activity_logs
+        const loggedStage = activityStageName(updates.stage);
         try {
           logBotActivity({
             salesperson_phone: senderPhone,
-            description: `Inquiry ${displayInqId} updated for ${displayCustName}${updates.stage ? ` (Stage: ${updates.stage})` : ''}`,
+            description: `Inquiry ${displayInqId} details updated for ${displayCustName}${loggedStage ? ` (Stage: ${loggedStage})` : ''}`,
             module: 'Inquiries',
             customer_name: displayCustName,
             entity_id: canonicalTargetId,
