@@ -292,6 +292,38 @@ function writeDraft(draft, view) {
   }
 }
 
+function visitCalendarToday(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const year = parts.find((part) => part.type === 'year')?.value || '';
+  const month = parts.find((part) => part.type === 'month')?.value || '';
+  const day = parts.find((part) => part.type === 'day')?.value || '';
+  return `${year}-${month}-${day}`;
+}
+
+function visitCalendarDay(value) {
+  const normalized = followUpDateForRow(value);
+  const match = String(normalized).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return '';
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const check = new Date(Date.UTC(year, month - 1, day));
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) {
+    return '';
+  }
+  return `${match[1]}-${match[2]}-${match[3]}`;
+}
+
+function isVisitDateOnOrAfterToday(value) {
+  const day = visitCalendarDay(value);
+  return Boolean(day) && day >= visitCalendarToday();
+}
+
 function nextVisitPrompts(draft) {
   const view = readDraft(draft);
   writeDraft(draft, view);
@@ -310,13 +342,13 @@ function nextVisitPrompts(draft) {
     !view.product && 'Product Details',
     !view.consumption && 'Monthly Consumption',
     !view.requirement && 'Current Requirement',
-    !view.nextPurchase && 'Next Purchase Expected',
+    !isVisitDateOnOrAfterToday(view.nextPurchase) && 'Next Purchase Expected (today or later)',
     !view.delivery && 'Delivery Location',
     view.brands.length === 0 && `Preferred Brand: ${VISIT_BRANDS.join(', ')}`,
     view.brands.includes('Others') && !view.brandOther && 'Other brand',
     !view.payment && `Payment Terms: ${VISIT_PAYMENT_TERMS.join(', ')}`,
     !view.followAction && 'Follow-up Action',
-    !view.followDate && 'Follow-up Date (e.g. 20-10-2026)',
+    !isVisitDateOnOrAfterToday(view.followDate) && 'Follow-up Date (e.g. 20-10-2026) (today or later)',
     !view.remarks && 'Meeting Remarks',
     !view.photo && 'Visit photo from the camera',
   ].filter(Boolean);

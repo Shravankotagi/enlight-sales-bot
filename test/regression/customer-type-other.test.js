@@ -7,6 +7,23 @@ const {
   visitRowColumns,
 } = require('../../src/core/visitRequirements');
 
+function calendarShift(days) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const year = Number(parts.find((part) => part.type === 'year').value);
+  const month = Number(parts.find((part) => part.type === 'month').value);
+  const day = Number(parts.find((part) => part.type === 'day').value);
+  const date = new Date(Date.UTC(year, month - 1, day + days));
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(date.getUTCDate()).padStart(2, '0');
+  return { iso: `${y}-${m}-${d}`, dmy: `${d}-${m}-${y}` };
+}
+
 function completeDraft(overrides = {}) {
   return {
     company_name: 'Acme',
@@ -28,7 +45,7 @@ function completeDraft(overrides = {}) {
     preferred_make: 'TATA',
     payment_terms: '30 days credit',
     followup_action: 'Send quote',
-    follow_up_date: '20-10-2026',
+    follow_up_date: calendarShift(7).dmy,
     meeting_remarks: 'Discussed rates',
     gps_photo_url: 'data:image/jpeg;base64,abc',
     gps_latitude: 18.52,
