@@ -48,6 +48,17 @@ function loadCatalogFlow({ tables = {}, employees = {}, scope, llm } = {}) {
     isPhoneInScope: realSupabase.isPhoneInScope,
     normalizePhone: realSupabase.normalizePhone,
     getPhoneVariants: realSupabase.getPhoneVariants,
+    nextProcurementNumberFromRows: realSupabase.nextProcurementNumberFromRows,
+    procurementOwnerFromEmployees: realSupabase.procurementOwnerFromEmployees,
+    async procurementStampForSalesperson(salespersonPhone) {
+      const ownerId = realSupabase.procurementOwnerFromEmployees(tables.employees || [], salespersonPhone);
+      return {
+        pricing_status: 'awaiting_price',
+        procurement_number: realSupabase.nextProcurementNumberFromRows(tables.inquiries || []),
+        procurement_employee_id: ownerId,
+        procurement_assigned_at: ownerId ? new Date().toISOString() : null,
+      };
+    },
   };
 
   const sessionManagerExports = {

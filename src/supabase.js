@@ -41,6 +41,52 @@ function normalizePhone(phone) {
   return String(phone).replace(/\D/g, '').slice(-10);
 }
 
+function nextProcurementNumberFromRows(rows) {
+  let max = 10000;
+  for (const row of rows || []) {
+    const match = String(row?.procurement_number || '').match(/^PR-(\d+)$/);
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return `PR-${String(max + 1).padStart(5, '0')}`;
+}
+
+async function procurementStampForSalesperson(salespersonPhone) {
+  const stamp = {
+    pricing_status: 'awaiting_price',
+    procurement_number: nextProcurementNumberFromRows([]),
+    procurement_employee_id: null,
+    procurement_assigned_at: null,
+  };
+  try {
+    const { data: employees } = await supabase
+      .from('employees')
+      .select('id, phone, role, is_active, assigned_procurement_employee_id');
+    const ownerId = procurementOwnerFromEmployees(employees, salespersonPhone);
+    if (ownerId) {
+      stamp.procurement_employee_id = ownerId;
+      stamp.procurement_assigned_at = new Date().toISOString();
+    }
+  } catch (routeErr) {}
+  try {
+    const { data: existingNumbers } = await supabase.from('inquiries').select('procurement_number');
+    stamp.procurement_number = nextProcurementNumberFromRows(existingNumbers);
+  } catch (numberErr) {}
+  return stamp;
+}
+
+function procurementOwnerFromEmployees(employees, salespersonPhone) {
+  const target = normalizePhone(salespersonPhone);
+  if (target.length !== 10) return null;
+  const match = (employees || []).find((emp) => {
+    if (String(emp?.role || '') !== 'salesperson') return false;
+    if (emp?.is_active === false) return false;
+    return (
+      normalizePhone(emp.phone) === target && emp.assigned_procurement_employee_id
+    );
+  });
+  return match?.assigned_procurement_employee_id || null;
+}
+
 /**
  * Generates all database-matchable phone number variations (10-digit, 12-digit 91-, +91-, 0-).
  * @param {string|number} phone
@@ -284,13 +330,44 @@ async function saveInquiry(data) {
           : data.confidence != null
             ? Number(data.confidence)
             : 0.92,
+      pricing_status: 'awaiting_price',
     };
 
-    const { data: savedRow, error } = await supabase
+    try {
+      const { data: employees } = await supabase
+        .from('employees')
+        .select('id, phone, role, is_active, assigned_procurement_employee_id');
+      const ownerId = procurementOwnerFromEmployees(
+        employees,
+        effectiveSalespersonPhone,
+      );
+      if (ownerId) {
+        payload.procurement_employee_id = ownerId;
+        payload.procurement_assigned_at = new Date().toISOString();
+      }
+    } catch (routeErr) {}
+
+    try {
+      const { data: existingNumbers } = await supabase
+        .from('inquiries')
+        .select('procurement_number');
+      payload.procurement_number = nextProcurementNumberFromRows(existingNumbers);
+    } catch (numberErr) {
+      payload.procurement_number = nextProcurementNumberFromRows([]);
+    }
+
+    let { data: savedRow, error } = await supabase
       .from('inquiries')
       .insert([payload])
       .select()
       .single();
+
+    if (error && /procurement_number/i.test(error.message || '')) {
+      delete payload.procurement_number;
+      const retry = await supabase.from('inquiries').insert([payload]).select().single();
+      savedRow = retry.data;
+      error = retry.error;
+    }
 
     if (error) {
       throw error;
@@ -1614,5 +1691,8 @@ module.exports = {
   getCustomProductsList,
   getCachedCustomProducts,
   createCustomProductRecord,
+  nextProcurementNumberFromRows,
+  procurementOwnerFromEmployees,
+  procurementStampForSalesperson,
 };
 
