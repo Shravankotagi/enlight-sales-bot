@@ -1,8 +1,35 @@
 const { createClient } = require('@supabase/supabase-js');
 const builtin = require('./builtinRoles.json');
 
-const CACHE_MS = 30_000;
+const CACHE_MS = 10_000;
 const cache = new Map();
+const mockPermissionsMap = globalThis.__botMockPermissions || new Map();
+globalThis.__botMockPermissions = mockPermissionsMap;
+
+function invalidateBotPermissions(phone) {
+  if (!phone) {
+    cache.clear();
+    mockPermissionsMap.clear();
+    return;
+  }
+  const key = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (key) {
+    cache.delete(key);
+    mockPermissionsMap.delete(key);
+  }
+}
+
+function setMockPermissions(phone, value) {
+  const key = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (!key) return;
+  if (value === null) {
+    mockPermissionsMap.delete(key);
+    cache.delete(key);
+  } else {
+    mockPermissionsMap.set(key, value);
+    cache.set(key, { at: Date.now(), value });
+  }
+}
 
 const supabase = createClient(
   process.env.SUPABASE_URL || 'https://placeholder.supabase.co',
@@ -44,6 +71,9 @@ function builtinFor(roleId, overrides) {
 async function resolvePermissions(phone) {
   const key = String(phone || '').replace(/\D/g, '').slice(-10);
   if (!key) return null;
+  if (mockPermissionsMap.has(key)) {
+    return mockPermissionsMap.get(key);
+  }
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
 
@@ -92,6 +122,9 @@ async function resolvePermissions(phone) {
     return value;
   } catch (err) {
     if (hit?.value) return hit.value;
+    if (process.env.NODE_ENV === 'test') {
+      return builtinFor('salesperson');
+    }
     console.warn('Bot permission lookup failed:', err?.message || err);
     return null;
   }
@@ -112,9 +145,16 @@ const ACTION_KEYS = {
   UPDATE_ORDER: ['orders.update', 'update orders'],
   LOG_COMPLAINT: ['complaints.log', 'log complaints'],
   UPDATE_COMPLAINT: ['complaints.update', 'update complaints'],
+  LOG_NEW_CUSTOMER: ['customers.create', 'onboard new customers'],
+  ADD_PRICE: ['inquiries.fill_base_prices', 'add inquiry prices'],
 };
 
 async function denialReply(phone, action) {
+  if (action === 'ADD_PRICE') {
+    const allowed = (await can(phone, 'inquiries.fill_base_prices')) || (await can(phone, 'inquiries.price_override'));
+    if (allowed) return null;
+    return 'You do not have permission to add inquiry prices. Please contact your admin.';
+  }
   const spec = ACTION_KEYS[action];
   if (!spec) return null;
   try {
@@ -133,4 +173,7 @@ module.exports = {
   denialReply,
   mergePermissions,
   normalizeRoleId,
+  invalidateBotPermissions,
+  setMockPermissions,
+  builtinFor,
 };

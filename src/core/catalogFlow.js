@@ -5433,6 +5433,13 @@ function isPlaceholderDocumentCaption(caption) {
  * Processes an incoming Inquiry document (photo or PDF) inside an active LOG_INQUIRY flow session.
  */
 async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, caption = '') {
+  const { can } = require('../utils/permissions');
+  if (!await can(senderPhone, 'inquiries.manage')) {
+    return {
+      handled: true,
+      reply: 'You do not have permission to log inquiries. Please contact your admin.',
+    };
+  }
   const { extractFromImage } = require('../gemini');
   let extraction = null;
   try {
@@ -5621,6 +5628,13 @@ async function finishUnlinkedOrderDraft(draft, senderPhone, notice) {
  * Auto-matches against open inquiries belonging to the salesperson.
  */
 async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, caption = '') {
+  const { can } = require('../utils/permissions');
+  if (!await can(senderPhone, 'orders.create')) {
+    return {
+      handled: true,
+      reply: 'You do not have permission to log orders. Please contact your admin.',
+    };
+  }
   const { extractFromImage } = require('../gemini');
   let extraction = null;
   try {
@@ -10333,6 +10347,11 @@ async function findAndMatchComplaint(draft, senderPhone) {
 
 async function executeAction(action, draft, senderPhone) {
   try {
+    const { denialReply } = require('../utils/permissions');
+    const denied = await denialReply(senderPhone, action);
+    if (denied) {
+      return denied;
+    }
     switch (action) {
       case 'LOG_INQUIRY': {
         const companyName = (draft.company_name || 'Customer').trim();
@@ -14845,6 +14864,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       },
     };
   } else if (isFullPriceEntry(text) || inFullPrice || (!hasActiveCatalogSession && isBareAddPriceChoice(text))) {
+    const { denialReply } = require('../utils/permissions');
+    const denied = await denialReply(senderPhone, 'ADD_PRICE');
+    if (denied) {
+      await recordSessionMessage(senderPhone, 'assistant', denied, { action_type: 'ACCESS_DENIED' });
+      return { handled: true, reply: denied };
+    }
     const quoted = await handleFullSalesPrice(text, senderPhone, lastIntent, {
       supabase,
       saveActiveSession,
@@ -14884,6 +14909,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   }
 
   if (isDirectOrderRequest(text)) {
+    const { can } = require('../utils/permissions');
+    if (!await can(senderPhone, 'orders.create')) {
+      const denied = 'You do not have permission to log orders. Please contact your admin.';
+      await recordSessionMessage(senderPhone, 'assistant', denied, { action_type: 'ACCESS_DENIED' });
+      return { handled: true, reply: denied };
+    }
     return await beginDirectOrder(senderPhone, callerSourceChannel);
   }
 
@@ -14909,6 +14940,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
   const explicitAction = isExplicitMenuSelection(text, hasActiveCatalogSession && !menuAwaiting, canUpdateVisits);
   if (explicitAction) {
+    const { denialReply } = require('../utils/permissions');
+    const denied = await denialReply(senderPhone, explicitAction);
+    if (denied) {
+      await recordSessionMessage(senderPhone, 'assistant', denied, { action_type: 'ACCESS_DENIED' });
+      return { handled: true, reply: denied };
+    }
     if (hasActiveCatalogSession) {
       try {
         const parts = (lastIntent || '').split('|');

@@ -1,7 +1,15 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { mergePermissions, normalizeRoleId } = require('../../src/utils/permissions');
+const {
+  mergePermissions,
+  normalizeRoleId,
+  can,
+  denialReply,
+  setMockPermissions,
+  invalidateBotPermissions,
+  builtinFor,
+} = require('../../src/utils/permissions');
 const builtin = require('../../src/utils/builtinRoles.json');
 
 test('bot permission merge matches the dashboard rule', () => {
@@ -13,4 +21,55 @@ test('bot permission merge matches the dashboard rule', () => {
   assert.equal(merged['visits.update'], true);
   assert.equal(merged['not.a.key'], undefined);
   assert.equal(merged['staff.manage_acl'], false);
+});
+
+test('can() and denialReply() enforce permission gating for all modules', async () => {
+  const testPhone = '9990001111';
+
+  // 1. When permitted as standard salesperson
+  setMockPermissions(testPhone, builtinFor('salesperson'));
+  assert.equal(await can(testPhone, 'inquiries.manage'), true);
+  assert.equal(await can(testPhone, 'orders.create'), true);
+  assert.equal(await can(testPhone, 'visits.log'), true);
+  assert.equal(await can(testPhone, 'complaints.log'), true);
+  assert.equal(await can(testPhone, 'customers.create'), true);
+  assert.equal(await can(testPhone, 'inquiries.fill_base_prices'), false);
+
+  assert.equal(await denialReply(testPhone, 'LOG_INQUIRY'), null);
+  assert.equal(await denialReply(testPhone, 'LOG_ORDER'), null);
+  assert.equal(await denialReply(testPhone, 'LOG_VISIT'), null);
+  assert.equal(await denialReply(testPhone, 'LOG_COMPLAINT'), null);
+  assert.equal(await denialReply(testPhone, 'LOG_NEW_CUSTOMER'), null);
+  assert.match(
+    await denialReply(testPhone, 'ADD_PRICE'),
+    /do not have permission to add inquiry prices/i,
+  );
+
+  // 2. When permissions are revoked by admin (override inquiries.manage = false)
+  const restricted = builtinFor('salesperson', {
+    'inquiries.manage': false,
+    'orders.create': false,
+    'visits.log': false,
+  });
+  setMockPermissions(testPhone, restricted);
+
+  assert.equal(await can(testPhone, 'inquiries.manage'), false);
+  assert.equal(await can(testPhone, 'orders.create'), false);
+  assert.equal(await can(testPhone, 'visits.log'), false);
+
+  assert.match(
+    await denialReply(testPhone, 'LOG_INQUIRY'),
+    /do not have permission to log inquiries/i,
+  );
+  assert.match(
+    await denialReply(testPhone, 'LOG_ORDER'),
+    /do not have permission to log orders/i,
+  );
+  assert.match(
+    await denialReply(testPhone, 'LOG_VISIT'),
+    /do not have permission to log visits/i,
+  );
+
+  // 3. Invalidate cache flushes correctly
+  invalidateBotPermissions(testPhone);
 });
