@@ -40,14 +40,13 @@ test('can() and denialReply() enforce permission gating for all modules', async 
   assert.equal(await denialReply(testPhone, 'LOG_VISIT'), null);
   assert.equal(await denialReply(testPhone, 'LOG_COMPLAINT'), null);
   assert.equal(await denialReply(testPhone, 'LOG_NEW_CUSTOMER'), null);
-  assert.match(
-    await denialReply(testPhone, 'ADD_PRICE'),
-    /do not have permission to add inquiry prices/i,
-  );
+  assert.equal(await denialReply(testPhone, 'ADD_PRICE'), null);
 
   // 2. When permissions are revoked by admin (override inquiries.manage = false)
   const restricted = builtinFor('salesperson', {
     'inquiries.manage': false,
+    'inquiries.edit': false,
+    'inquiries.send_quote': false,
     'orders.create': false,
     'visits.log': false,
   });
@@ -68,6 +67,10 @@ test('can() and denialReply() enforce permission gating for all modules', async 
   assert.match(
     await denialReply(testPhone, 'LOG_VISIT'),
     /do not have permission to log visits/i,
+  );
+  assert.match(
+    await denialReply(testPhone, 'ADD_PRICE'),
+    /do not have permission to add inquiry prices/i,
   );
 
   // 3. Invalidate cache flushes correctly

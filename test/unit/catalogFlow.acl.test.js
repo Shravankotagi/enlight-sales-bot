@@ -78,10 +78,16 @@ test('Option 5 Add Price blocks when pricing permissions are absent', async (t) 
     invalidateBotPermissions();
   });
 
-  // Standard salesperson lacks fill_base_prices and price_override
-  setMockPermissions(TEST_PHONE, builtinFor('salesperson'));
+  // When inquiry management and pricing permissions are revoked
+  setMockPermissions(TEST_PHONE, builtinFor('salesperson', {
+    'inquiries.manage': false,
+    'inquiries.edit': false,
+    'inquiries.send_quote': false,
+    'inquiries.fill_base_prices': false,
+    'inquiries.price_override': false,
+  }));
 
-  const resPrice = await h.catalogFlow.handleCatalogFlow('5', TEST_PHONE);
+  const resPrice = await h.catalogFlow.handleCatalogFlow('menu_price', TEST_PHONE);
   assert.equal(resPrice.handled, true);
   assert.match(resPrice.reply, /do not have permission to add inquiry prices/i);
 });

@@ -14864,11 +14864,13 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       },
     };
   } else if (isFullPriceEntry(text) || inFullPrice || (!hasActiveCatalogSession && isBareAddPriceChoice(text))) {
-    const { denialReply } = require('../utils/permissions');
-    const denied = await denialReply(senderPhone, 'ADD_PRICE');
-    if (denied) {
-      await recordSessionMessage(senderPhone, 'assistant', denied, { action_type: 'ACCESS_DENIED' });
-      return { handled: true, reply: denied };
+    if (!inFullPrice && (isFullPriceEntry(text) || isBareAddPriceChoice(text))) {
+      const { denialReply } = require('../utils/permissions');
+      const denied = await denialReply(senderPhone, 'ADD_PRICE');
+      if (denied) {
+        await recordSessionMessage(senderPhone, 'assistant', denied, { action_type: 'ACCESS_DENIED' });
+        return { handled: true, reply: denied };
+      }
     }
     const quoted = await handleFullSalesPrice(text, senderPhone, lastIntent, {
       supabase,
