@@ -62,7 +62,6 @@ function canonicalPayment(value) {
   if (/\b30\b/.test(raw)) return '30 Days';
   if (/\b45\b/.test(raw)) return '45 Days';
   if (/\b60\b/.test(raw)) return '60 Days';
-  if (/\b90\b/.test(raw)) return '90 Days';
   if (/\blc\b/.test(raw)) return 'LC';
   if (/\bbg\b/.test(raw)) return 'BG';
   if (/\bpdc\b/.test(raw)) return 'PDC';
