@@ -409,6 +409,23 @@ function storedOrRelativeVisitDate(value) {
   return visitCalendarDay(value) || resolveRelativeVisitDate(value);
 }
 
+function explicitFollowUpDate(message) {
+  const source = String(message || '');
+  const labeled = source.match(/follow[\s-]*up\s+dates?\s*(?:[-:=]|is\b)?\s*([^\n]+)/i);
+  const bare = source.match(/^\s*(tomorrow|kal|today|aaj|\d{1,2}[-/]\d{1,2}[-/]\d{4})\s*$/i);
+  const raw = (labeled?.[1] || bare?.[1] || '').trim();
+  if (!raw) return '';
+  return storedOrRelativeVisitDate(raw) || '';
+}
+
+function applyExplicitFollowUpDate(draft, message) {
+  if (!draft) return draft;
+  if (storedOrRelativeVisitDate(draft.follow_up_date || draft.followup_date)) return draft;
+  const date = explicitFollowUpDate(message);
+  if (date) draft.follow_up_date = date;
+  return draft;
+}
+
 function nextVisitPrompts(draft) {
   const view = readDraft(draft);
   writeDraft(draft, view);
@@ -909,6 +926,7 @@ module.exports = {
   captureVisitLocation,
   explicitVisitLocation,
   preserveVisitLocation,
+  applyExplicitFollowUpDate,
   addressFromNominatim,
   addressFromGoogleGeocode,
   visitOtpTemplatePayload,

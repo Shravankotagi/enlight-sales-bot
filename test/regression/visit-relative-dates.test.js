@@ -2,7 +2,7 @@
 // Tomorrow and after a month become calendar days instead of staying in the prompt list.
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { nextVisitPrompts } = require('../../src/core/visitRequirements');
+const { applyExplicitFollowUpDate, nextVisitPrompts } = require('../../src/core/visitRequirements');
 
 function istToday() {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -63,6 +63,30 @@ test('one month later and a follow-up action of tomorrow are stored the same way
   assert.equal(asksFor(prompts, 'Follow-up Date'), false);
   assert.equal(draft.next_purchase_expected, addMonth(today));
   assert.equal(draft.follow_up_date, shiftDay(today, 1));
+});
+
+test('a labeled follow-up date of tomorrow is stored separately from the action', () => {
+  const today = istToday();
+  const draft = { followup_action: 'send quotation' };
+  applyExplicitFollowUpDate(
+    draft,
+    'Follow up action - send quotation\nfollow up Date - tomorrow',
+  );
+  const prompts = nextVisitPrompts(draft);
+
+  assert.equal(asksFor(prompts, 'Follow-up Date'), false);
+  assert.equal(draft.follow_up_date, shiftDay(today, 1));
+  assert.equal(draft.followup_action, 'send quotation');
+});
+
+test('a next purchase phrase does not fill the follow-up date', () => {
+  const draft = { next_purchase_expected: 'one month later' };
+  applyExplicitFollowUpDate(draft, 'next purchase is one month later, visited today');
+
+  assert.equal(draft.follow_up_date, undefined);
+  const prompts = nextVisitPrompts(draft);
+  assert.equal(asksFor(prompts, 'Follow-up Date'), true);
+  assert.equal(asksFor(prompts, 'Next Purchase Expected'), false);
 });
 
 test('a past explicit date stays in the prompt list', () => {
