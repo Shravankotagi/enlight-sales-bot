@@ -1119,8 +1119,22 @@ function getCatalogMenuSections(isAuthorizedForVisits = true) {
 
 // ── MODULE COLLECTION PROMPTS ────────────────────────────────────────────────
 
-const INQUIRY_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60 Days', '90 Days', 'LC', 'BG', 'PDC'];
+const INQUIRY_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60 Days', 'LC', 'BG', 'PDC'];
 const INQUIRY_PREFERRED_MAKES = ['TATA', 'JSW', 'AM/NS India', 'SAIL', 'NMDC', 'Apollo', 'Others'];
+
+function formatMissingFieldItem(item, bullet = '-') {
+  if (item === 'Payment Terms' || item.startsWith('Payment Terms')) {
+    return `${bullet} **Payment Terms: ${INQUIRY_PAYMENT_TERMS.join(', ')}**`;
+  }
+  return `${bullet} **${item}**`;
+}
+
+function formatMissingFieldBullet(item) {
+  if (item === 'Payment Terms' || item.startsWith('Payment Terms')) {
+    return `• *Payment Terms: ${INQUIRY_PAYMENT_TERMS.join(', ')}*`;
+  }
+  return `• *${item}*`;
+}
 
 function normInquiryOpt(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -1132,15 +1146,9 @@ function inquiryOptDistance(a, b) {
   for (let j = 0; j <= b.length; j++) dp[0][j] = j;
   for (let i = 1; i <= a.length; i++) {
     for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[i][j] = Math.min(
-        dp[i - 1][j] + 1,
-        dp[i][j - 1] + 1,
-        dp[i - 1][j - 1] + cost
-      );
-      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
-        dp[i][j] = Math.min(dp[i][j], dp[i - 2][j - 2] + 1);
-      }
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
     }
   }
   return dp[a.length][b.length];
@@ -1166,6 +1174,19 @@ function matchInquiryOption(raw, options) {
     const amns = options.find((opt) => opt === 'AM/NS India');
     if (amns) return amns;
   }
+
+  const isPaymentTerms = options === INQUIRY_PAYMENT_TERMS || (Array.isArray(options) && options.includes('30 Days') && options.includes('60 Days'));
+  if (isPaymentTerms) {
+    if (n === '30' || n === '30d' || n === '30days' || n === '30day' || n === 'thirtydays') return '30 Days';
+    if (n === '45' || n === '45d' || n === '45days' || n === '45day' || n === 'fortyfivedays') return '45 Days';
+    if (n === '60' || n === '60d' || n === '60days' || n === '60day' || n === 'sixtydays') return '60 Days';
+    if (n === 'immediate' || n === 'imm' || n === 'instant') return 'Immediate';
+    if (n === 'advance' || n === 'adv' || n === '100advance' || n === 'fulladvance') return 'Advance';
+    if (n === 'lc' || n === 'letterofcredit') return 'LC';
+    if (n === 'bg' || n === 'bankguarantee') return 'BG';
+    if (n === 'pdc' || n === 'cheque' || n === 'postdatedcheque') return 'PDC';
+  }
+
   const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   const hits = new Set();
   for (const opt of options) {
@@ -1177,21 +1198,21 @@ function matchInquiryOption(raw, options) {
   }
   if (hits.size === 1) return [...hits][0];
   if (hits.size > 1) return null;
-  if (words.length <= 3) {
+  if (words.length <= 4) {
     const joined = words.join('');
-    const inputDigits = (joined.match(/\d+/) || [])[0];
     let best = null;
     let bestDist = 99;
     for (const opt of options) {
       const no = normInquiryOpt(opt);
-      const optDigits = (no.match(/\d+/) || [])[0];
-      // Numeric options (e.g. 30, 45, 60, 90) must match their digits exactly; never fuzzy match different numbers
-      if (inputDigits || optDigits) {
-        if (inputDigits !== optDigits) continue;
-      }
       if (no.length <= 3) continue;
       if (Math.abs(no.length - joined.length) > 2) continue;
       if (Math.min(no.length, joined.length) / Math.max(no.length, joined.length) < 0.7) continue;
+
+      // Digits must match strictly: e.g. 90 cannot match 30, 15 cannot match 45
+      const joinedDigits = joined.replace(/\D/g, '');
+      const noDigits = no.replace(/\D/g, '');
+      if (joinedDigits !== noDigits) continue;
+
       const dist = inquiryOptDistance(joined, no);
       if (dist < bestDist) {
         bestDist = dist;
@@ -1212,19 +1233,9 @@ function pickInquiryOptionFromReply(text, options) {
     const labeledHit = matchInquiryOption(labeled[1], options);
     if (labeledHit) return labeledHit;
   }
-  if (raw.split(/\s+/).length <= 3) {
+  if (raw.split(/\s+/).length <= 4) {
     const hit = matchInquiryOption(raw, options);
-    if (hit) return hit;
-  }
-  // Check comma / semicolon / newline separated segments (e.g. "Customer, email, product, 90 days, location")
-  const parts = raw.split(/[,;\r\n]+/);
-  if (parts.length > 1) {
-    for (const part of parts) {
-      const cleanPart = part.trim();
-      if (!cleanPart || cleanPart.split(/\s+/).length > 3) continue;
-      const partHit = matchInquiryOption(cleanPart, options);
-      if (partHit) return partHit;
-    }
+    return hit || '';
   }
   return '';
 }
@@ -1250,10 +1261,24 @@ function applyInquiryChoices(action, merged, userInput) {
     'Preferred Brand',
   );
   if (action === 'LOG_INQUIRY') {
-    if (payment !== undefined) merged.payment_terms = payment;
-    else if (!merged.payment_terms) {
+    if (payment !== undefined) {
+      merged.payment_terms = payment;
+    } else if (!merged.payment_terms) {
       const fromText = pickInquiryOptionFromReply(userInput, INQUIRY_PAYMENT_TERMS);
-      if (fromText) merged.payment_terms = fromText;
+      if (fromText) {
+        merged.payment_terms = fromText;
+      } else {
+        // Detect if user attempted an invalid payment term in text
+        const payAttempt = userInput.match(/(?:payment\s*terms?|payment)\s*[:=-]?\s*([^\n,;.]+)/i) ||
+                           userInput.match(/\b(\d+\s*days?|credit|cash|cad|cod)\b/i);
+        if (payAttempt && payAttempt[0]) {
+          const rawAttempt = payAttempt[1] || payAttempt[0];
+          const matchedAttempt = matchInquiryOption(rawAttempt, INQUIRY_PAYMENT_TERMS);
+          if (!matchedAttempt && !notices.some(n => n.includes('Payment Terms'))) {
+            notices.push(`Payment Terms must be one of: ${INQUIRY_PAYMENT_TERMS.join(', ')}`);
+          }
+        }
+      }
     }
     if (make !== undefined) merged.preferred_make = make;
     else if (!merged.preferred_make) {
@@ -1266,6 +1291,22 @@ function applyInquiryChoices(action, merged, userInput) {
       if (payment) merged.updates.payment_terms = payment;
       else delete merged.updates.payment_terms;
       merged.payment_terms = payment;
+    } else if (!merged.updates.payment_terms && !merged.payment_terms) {
+      const fromText = pickInquiryOptionFromReply(userInput, INQUIRY_PAYMENT_TERMS);
+      if (fromText) {
+        merged.updates.payment_terms = fromText;
+        merged.payment_terms = fromText;
+      } else {
+        const payAttempt = userInput.match(/(?:payment\s*terms?|payment)\s*[:=-]?\s*([^\n,;.]+)/i) ||
+                           userInput.match(/\b(\d+\s*days?|credit|cash|cad|cod)\b/i);
+        if (payAttempt && payAttempt[0]) {
+          const rawAttempt = payAttempt[1] || payAttempt[0];
+          const matchedAttempt = matchInquiryOption(rawAttempt, INQUIRY_PAYMENT_TERMS);
+          if (!matchedAttempt && !notices.some(n => n.includes('Payment Terms'))) {
+            notices.push(`Payment Terms must be one of: ${INQUIRY_PAYMENT_TERMS.join(', ')}`);
+          }
+        }
+      }
     }
     if (make !== undefined) {
       if (make) merged.updates.preferred_make = make;
@@ -1287,7 +1328,7 @@ Please provide the following details:
 - **Product Description / Quantity:** *
 - **Rate:** (optional)
 - **Preferred Brand:** (optional) TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others
-- **Payment Terms:** * Immediate, Advance, 30 Days, 45 Days, 60 Days, 90 Days, LC, BG, PDC
+- **Payment Terms:** * Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC
 - **Delivery Location:** *
 - **Additional Notes:** (optional)
 
@@ -1303,7 +1344,7 @@ Which fields do you want to update? Mention the field name and new value.
 - Product Description / Quantity / Specification (e.g. 8mm, 78 MT)
 - Rate
 - Preferred Brand (TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others)
-- Payment Terms (Immediate, Advance, 30 Days, 45 Days, 60 Days, 90 Days, LC, BG, PDC)
+- Payment Terms (Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC)
 - Delivery Location
 - Email ID
 - Additional Notes
@@ -2170,7 +2211,7 @@ LOG_INQUIRY:
   "product_description": "<Summary of all products/quantities, else null>",
   "rate": <numeric target rate/price per unit if mentioned, else null>,
   "preferred_make": "<one of TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others, else null>",
-  "payment_terms": "<one of Immediate, Advance, 30 Days, 45 Days, 60 Days, 90 Days, LC, BG, PDC, else null>",
+  "payment_terms": "<Strictly one of: Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC. If the user mentions any other payment terms like 90 days, 15 days, 20 days, cash, or credit, return null. NEVER guess, coerce, or fabricate, else null>",
   "delivery_location": "<e.g. Chakan Pune, Taloja, Aurangabad, else null>",
   "additional_notes": "<Exact literal text provided by user. NEVER summarize, rephrase, or alter user notes, else null>",
   "line_items": [
@@ -2213,7 +2254,7 @@ UPDATE_INQUIRY:
     "product_description": "<if user requested general product text update, else null>",
     "rate": <numeric rate ONLY if a single overall rate was specified without mentioning product names, else null>,
     "preferred_make": "<one of TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others if update requested, else null>",
-    "payment_terms": "<one of Immediate, Advance, 30 Days, 45 Days, 60 Days, 90 Days, LC, BG, PDC if update requested, else null>",
+    "payment_terms": "<Strictly one of: Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC if update requested. If other terms like 90 days or credit are mentioned, return null, else null>",
     "delivery_location": "<if user requested update, else null>",
     "email": "<Customer email if update requested, else null>",
     "additional_notes": "<Exact literal text provided by user if update requested. NEVER summarize, rephrase, or alter user notes, else null>",
@@ -2234,6 +2275,7 @@ UPDATE_INQUIRY:
 }
 
 IMPORTANT RULES FOR INQUIRIES:
+- STRICT PAYMENT TERMS: For "payment_terms", only accept exact matching options: "Immediate", "Advance", "30 Days", "45 Days", "60 Days", "LC", "BG", "PDC". If the user mentions any other term (such as "90 days", "15 days", "20 days", "cash", "credit", "CAD"), you MUST return null. NEVER coerce "90 days" into "30 Days" or fabricate any option!
 - If a user provides line item updates with specifications, thickness, or dimensions (e.g. 'Line item: 78MT 8mm', 'HR Coil 8mm 78MT', 'change thickness to 8mm', 'change spec to 8mm'), extract the dimension/thickness into 'spec' and 'dimensions' ('8mm'), quantity into 'quantity' (78), and unit into 'unit' ('MT')! If product name is not explicitly mentioned (e.g. 'Line item: 78MT 8mm'), set sku_text and description to null or generic, while preserving spec/dimensions and quantity.
 - If a user provides multiple products with individual rates (e.g. 'rate \n MS Sheet 5MM - 20 \n MS Sheet 6MM - 30'), put each product with its specific rate into 'line_item_updates' array! Do NOT put 20 as updates.rate, and do NOT put 'MS Sheet 5MM, MS Sheet 6MM' into updates.product_description.
 - If a user provides multiple products with quantities (e.g. 'MS Sheet 5MM - 15 MT, MS Sheet 6MM - 20 MT'), parse each into line_items/line_item_updates with its respective quantity and unit.
@@ -2587,32 +2629,7 @@ User Message:
     }
   }
 
-  if (action === 'LOG_INQUIRY' || action === 'UPDATE_INQUIRY') {
-    const optPayment = pickInquiryOptionFromReply(userInput, INQUIRY_PAYMENT_TERMS);
-    if (optPayment) {
-      if (action === 'LOG_INQUIRY') fallbackParsed.payment_terms = optPayment;
-      else {
-        fallbackParsed.updates = fallbackParsed.updates || {};
-        fallbackParsed.updates.payment_terms = optPayment;
-        fallbackParsed.payment_terms = optPayment;
-      }
-    }
-    const optMake = pickInquiryOptionFromReply(userInput, INQUIRY_PREFERRED_MAKES);
-    if (optMake) {
-      if (action === 'LOG_INQUIRY') fallbackParsed.preferred_make = optMake;
-      else {
-        fallbackParsed.updates = fallbackParsed.updates || {};
-        fallbackParsed.updates.preferred_make = optMake;
-        fallbackParsed.preferred_make = optMake;
-      }
-    }
-  }
-
-  if (Object.keys(fallbackParsed).length > 0) {
-    return mergeDraft(action, existingDraft, fallbackParsed, userInput);
-  }
-
-  return existingDraft;
+  return mergeDraft(action, existingDraft, fallbackParsed, userInput);
 }
 
 const TOTAL_VALUE_PERMISSION_NOTICE = '⚠️ *Permission Notice:* You do not have permission to directly change the Total Order Value. Total value is calculated automatically from individual line item quantities and rates. To adjust the total value, please update individual line item rates or quantities.';
@@ -3869,8 +3886,10 @@ async function handleLineItemChoiceReply(text, senderPhone, action, draft) {
 
     const missing = validateMandatoryFields(action, draft);
     if (missing.length > 0) {
-      const missingList = missing.map((m) => `- **${m}**`).join('\n');
-      const askMissing = `Please provide the remaining details to update:\n\n${missingList}`;
+      const optionNotice = draft._inquiry_option_notice ? `⚠️ ${draft._inquiry_option_notice}\n\n` : '';
+      delete draft._inquiry_option_notice;
+      const missingList = missing.map((m) => formatMissingFieldItem(m, '-')).join('\n');
+      const askMissing = `${optionNotice}Please provide the remaining details to update:\n\n${missingList}`;
       await recordSessionMessage(senderPhone, 'assistant', askMissing, { action_type: action, customer_name: draft.company_name });
       await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
       return { handled: true, reply: askMissing };
@@ -3939,8 +3958,10 @@ async function handleLineItemChoiceReply(text, senderPhone, action, draft) {
 
   const missing = validateMandatoryFields(action, draft);
   if (missing.length > 0) {
-    const missingList = missing.map((m) => `- **${m}**`).join('\n');
-    const askMissing = `Please provide the remaining details to update:\n\n${missingList}`;
+    const optionNotice = draft._inquiry_option_notice ? `⚠️ ${draft._inquiry_option_notice}\n\n` : '';
+    delete draft._inquiry_option_notice;
+    const missingList = missing.map((m) => formatMissingFieldItem(m, '-')).join('\n');
+    const askMissing = `${optionNotice}Please provide the remaining details to update:\n\n${missingList}`;
     await recordSessionMessage(senderPhone, 'assistant', askMissing, { action_type: action, customer_name: draft.company_name });
     await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
     return { handled: true, reply: askMissing };
@@ -5613,8 +5634,10 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
       interactiveButtons: CONFIRMATION_BUTTONS,
     };
   } else {
-    const missingList = missing.map(m => `• *${m}*`).join('\n');
-    const askMissing = `📄 *Extracted Inquiry Details from Document*\n\nPlease provide the remaining mandatory details for this inquiry:\n\n${missingList}`;
+    const optionNotice = draft._inquiry_option_notice ? `⚠️ ${draft._inquiry_option_notice}\n\n` : '';
+    delete draft._inquiry_option_notice;
+    const missingList = missing.map(m => formatMissingFieldBullet(m)).join('\n');
+    const askMissing = `${optionNotice}📄 *Extracted Inquiry Details from Document*\n\nPlease provide the remaining mandatory details for this inquiry:\n\n${missingList}`;
     await recordSessionMessage(senderPhone, 'assistant', askMissing, { action_type: 'LOG_INQUIRY' });
     await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_INQUIRY|${JSON.stringify(draft)}`);
     return {
@@ -8310,8 +8333,10 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
         interactiveButtons: CONFIRMATION_BUTTONS,
       };
     } else {
-      const missingList = missing.map((m) => `- **${m}**`).join('\n');
-      const askMissing = `Please provide the remaining details to update:\n\n${missingList}`;
+      const optionNotice = updatedDraft._inquiry_option_notice ? `⚠️ ${updatedDraft._inquiry_option_notice}\n\n` : '';
+      delete updatedDraft._inquiry_option_notice;
+      const missingList = missing.map((m) => formatMissingFieldItem(m, '-')).join('\n');
+      const askMissing = `${optionNotice}Please provide the remaining details to update:\n\n${missingList}`;
       await recordSessionMessage(senderPhone, 'assistant', askMissing, {
         action_type: action,
         customer_name: updatedDraft.company_name,
@@ -14350,7 +14375,7 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
       interactiveButtons: CONFIRMATION_BUTTONS,
     };
   } else {
-    const missingList = missing.map((m) => `• *${m}*`).join('\n');
+    const missingList = missing.map((m) => formatMissingFieldBullet(m)).join('\n');
     const indexTag = draft._totalCount > 1 ? ` (${draft._currentIndex || 1} of ${draft._totalCount}: ${draft.company_name || 'Item'})` : '';
     const askMissing = `${optionNotice}Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
     await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
@@ -15367,8 +15392,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           interactiveButtons: CONFIRMATION_BUTTONS,
         };
       } else {
-        const missingList = parentMissing.map((m) => `• *${m}*`).join('\n');
-        const askMsg = `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
+        const optionNotice = originalDraft._inquiry_option_notice ? `⚠️ ${originalDraft._inquiry_option_notice}\n\n` : '';
+        delete originalDraft._inquiry_option_notice;
+        const missingList = parentMissing.map((m) => formatMissingFieldBullet(m)).join('\n');
+        const askMsg = `${optionNotice}Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
         await recordSessionMessage(senderPhone, 'assistant', askMsg, {
           action_type: originalAction,
           customer_name: originalDraft.company_name,
@@ -15515,9 +15542,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
             interactiveButtons: CONFIRMATION_BUTTONS,
           };
         } else {
-          const parentMissingList = parentMissing.map(m => `• *${m}*`).join('\n');
+          const optionNotice = originalDraft._inquiry_option_notice ? `⚠️ ${originalDraft._inquiry_option_notice}\n\n` : '';
+          delete originalDraft._inquiry_option_notice;
+          const parentMissingList = parentMissing.map(m => formatMissingFieldBullet(m)).join('\n');
           const resumeMsg = `✅ *New Customer "${custDraft.company_name}" Created!*\n\n` +
-            `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${parentMissingList}`;
+            `${optionNotice}Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${parentMissingList}`;
           await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
             action_type: originalAction,
             customer_name: originalDraft.company_name,
@@ -15647,8 +15676,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           interactiveButtons: CONFIRMATION_BUTTONS,
         };
       } else {
-        const missingList = parentMissing.map(m => `• *${m}*`).join('\n');
-        const askMissing = `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
+        const optionNotice = originalDraft._inquiry_option_notice ? `⚠️ ${originalDraft._inquiry_option_notice}\n\n` : '';
+        delete originalDraft._inquiry_option_notice;
+        const missingList = parentMissing.map(m => formatMissingFieldBullet(m)).join('\n');
+        const askMissing = `${optionNotice}Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
         await recordSessionMessage(senderPhone, 'assistant', askMissing, {
           action_type: originalAction,
           customer_name: originalDraft.company_name,
@@ -15786,9 +15817,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           interactiveButtons: CONFIRMATION_BUTTONS,
         };
       } else {
-        const parentMissingList = parentMissing.map(m => `• *${m}*`).join('\n');
+        const optionNotice = originalDraft._inquiry_option_notice ? `⚠️ ${originalDraft._inquiry_option_notice}\n\n` : '';
+        delete originalDraft._inquiry_option_notice;
+        const parentMissingList = parentMissing.map(m => formatMissingFieldBullet(m)).join('\n');
         const resumeMsg = `✅ *New Customer "${updatedCustDraft.company_name}" Successfully Created!*\n\n` +
-          `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${parentMissingList}`;
+          `${optionNotice}Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${parentMissingList}`;
         await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
           action_type: originalAction,
           customer_name: originalDraft.company_name,
@@ -16003,8 +16036,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           interactiveButtons: CONFIRMATION_BUTTONS,
         };
       } else {
-        const missingList = missing.map((m) => `• *${m}*`).join('\n');
-        const resumeMsg = `✅ *Product "${prodName}" Added!*\n\nPlease provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
+        const optionNotice = draft._inquiry_option_notice ? `⚠️ ${draft._inquiry_option_notice}\n\n` : '';
+        delete draft._inquiry_option_notice;
+        const missingList = missing.map((m) => formatMissingFieldBullet(m)).join('\n');
+        const resumeMsg = `✅ *Product "${prodName}" Added!*\n\n${optionNotice}Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
         await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
           action_type: originalAction,
           customer_name: draft.company_name,
@@ -16134,6 +16169,17 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       const lineChoiceBeforeSave = await askLineItemChoiceIfNeeded(action, draft, senderPhone);
       if (lineChoiceBeforeSave) return lineChoiceBeforeSave;
 
+      const missingBeforeSave = validateMandatoryFields(action, draft);
+      if (missingBeforeSave.length > 0) {
+        const optionNotice = draft._inquiry_option_notice ? `⚠️ ${draft._inquiry_option_notice}\n\n` : '';
+        delete draft._inquiry_option_notice;
+        const missingList = missingBeforeSave.map((m) => formatMissingFieldBullet(m)).join('\n');
+        const askMsg = `${optionNotice}Please provide the remaining mandatory details before saving:\n\n${missingList}`;
+        await recordSessionMessage(senderPhone, 'assistant', askMsg, { action_type: action, customer_name: draft.company_name });
+        await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
+        return { handled: true, reply: askMsg };
+      }
+
       if (action === 'LOG_VISIT' && !draft.verification_token) {
         await fillVisitCity(draft);
         const ready = assertReadyToSave({ ...draft, verification_token: 'pending' });
@@ -16198,8 +16244,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
             interactiveButtons: CONFIRMATION_BUTTONS,
           };
         } else {
-          const missingList = missing.map((m) => `• *${m}*`).join('\n');
-          const nextPrompt = `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's complete the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\nPlease provide the remaining mandatory details:\n\n${missingList}\n\n💡 _Tip: To skip or finish without logging for ${nextEntry.company_name}, reply "cancel" or "discard"._`;
+          const optionNotice = nextEntry._inquiry_option_notice ? `⚠️ ${nextEntry._inquiry_option_notice}\n\n` : '';
+          delete nextEntry._inquiry_option_notice;
+          const missingList = missing.map((m) => formatMissingFieldBullet(m)).join('\n');
+          const nextPrompt = `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's complete the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\n${optionNotice}Please provide the remaining mandatory details:\n\n${missingList}\n\n💡 _Tip: To skip or finish without logging for ${nextEntry.company_name}, reply "cancel" or "discard"._`;
           await recordSessionMessage(senderPhone, 'assistant', nextPrompt, {
             action_type: nextAction,
             customer_name: nextEntry.company_name,
@@ -16425,14 +16473,17 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       };
     }
 
-    const retryPrompt = `Please reply with:\n• *Yes* — to save\n• *Edit* — to change a field\n• *Cancel* — to discard`;
-    await recordSessionMessage(senderPhone, 'assistant', retryPrompt);
-    return {
-      handled: true,
-      reply: retryPrompt,
-      interactiveType: 'buttons',
-      interactiveButtons: CONFIRMATION_BUTTONS,
-    };
+    const optionNotice = updatedDraft._inquiry_option_notice ? `⚠️ ${updatedDraft._inquiry_option_notice}\n\n` : '';
+    delete updatedDraft._inquiry_option_notice;
+    const missingList = missing.map((m) => formatMissingFieldItem(m, '-')).join('\n');
+    const actionName = getActionFriendlyName(action);
+    const askMissing = `${optionNotice}Please provide the remaining mandatory details for this ${actionName}:\n\n${missingList}`;
+    await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+      action_type: action,
+      customer_name: updatedDraft.company_name,
+    });
+    await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+    return { handled: true, reply: askMissing };
   }
 
   // ── 4. HANDLE EDITING STATE (catalog_editing|...) ───────────────────────────
@@ -16646,10 +16697,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         interactiveButtons: CONFIRMATION_BUTTONS,
       };
     } else {
-      const missingList = missing.map((m) => `- **${m}**`).join('\n');
+      const missingList = missing.map((m) => formatMissingFieldItem(m, '-')).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
       let askMissing = '';
+      if (updatedDraft._inquiry_option_notice) {
+        askMissing += `⚠️ ${updatedDraft._inquiry_option_notice}\n\n`;
+        delete updatedDraft._inquiry_option_notice;
+      }
       if (updatedDraft._permissionNotice) {
         askMissing += `${updatedDraft._permissionNotice}\n\n`;
       }
@@ -17396,8 +17451,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
             interactiveButtons: CONFIRMATION_BUTTONS,
           };
         } else {
-          const missingList = missing.map(m => `• *${m}*`).join('\n');
-          const askMissing = `✅ *Company:* ${existingDraft.company_name}\n\nPlease provide the remaining mandatory details for this ${getActionFriendlyName(action)}:\n\n${missingList}`;
+          const optionNotice = existingDraft._inquiry_option_notice ? `⚠️ ${existingDraft._inquiry_option_notice}\n\n` : '';
+          delete existingDraft._inquiry_option_notice;
+          const missingList = missing.map(m => formatMissingFieldBullet(m)).join('\n');
+          const askMissing = `${optionNotice}✅ *Company:* ${existingDraft.company_name}\n\nPlease provide the remaining mandatory details for this ${getActionFriendlyName(action)}:\n\n${missingList}`;
           await recordSessionMessage(senderPhone, 'assistant', askMissing, {
             action_type: action,
             customer_name: existingDraft.company_name,
@@ -17977,10 +18034,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
         return { handled: true, reply: sysReply };
       }
-      const missingList = missing.map((m) => `- **${m}**`).join('\n');
+      const missingList = missing.map((m) => formatMissingFieldItem(m, '-')).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
       let askMissing = '';
+      if (updatedDraft._inquiry_option_notice) {
+        askMissing += `⚠️ ${updatedDraft._inquiry_option_notice}\n\n`;
+        delete updatedDraft._inquiry_option_notice;
+      }
       if (updatedDraft._permissionNotice) {
         askMissing += `${updatedDraft._permissionNotice}\n\n`;
       }
@@ -18474,8 +18535,9 @@ module.exports = {
   handleResumeMenuButton,
   getAllowedFieldsListForAction,
   matchInquiryOption,
-  pickInquiryOptionFromReply,
   INQUIRY_PAYMENT_TERMS,
+  formatMissingFieldItem,
+  formatMissingFieldBullet,
   getEditPromptForAction,
   scoreLineItemAgainstUpdate,
   matchLineItemUpdate,
