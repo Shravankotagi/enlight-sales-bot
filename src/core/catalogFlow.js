@@ -1123,16 +1123,12 @@ const INQUIRY_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60
 const INQUIRY_PREFERRED_MAKES = ['TATA', 'JSW', 'AM/NS India', 'SAIL', 'NMDC', 'Apollo', 'Others'];
 
 function formatMissingFieldItem(item, bullet = '-') {
-  if (item === 'Payment Terms' || item.startsWith('Payment Terms')) {
-    return `${bullet} **Payment Terms: ${INQUIRY_PAYMENT_TERMS.join(', ')}**`;
-  }
+  
   return `${bullet} **${item}**`;
 }
 
 function formatMissingFieldBullet(item) {
-  if (item === 'Payment Terms' || item.startsWith('Payment Terms')) {
-    return `• *Payment Terms: ${INQUIRY_PAYMENT_TERMS.join(', ')}*`;
-  }
+  
   return `• *${item}*`;
 }
 
