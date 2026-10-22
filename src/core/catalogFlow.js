@@ -31,6 +31,7 @@ const {
 } = require('../supabase');
 const {
   nextVisitPrompts,
+  logVisitOpeningPrompt,
   assertReadyToSave,
   visitRowColumns,
   requestVisitCode,
@@ -38,7 +39,11 @@ const {
   consumeVisitCode,
   releaseVisitCode,
   fillVisitCity,
+  captureVisitLocation,
+  preserveVisitLocation,
+  applyExplicitFollowUpDate,
   attachVisitMedia,
+  visitPhotoAccepted,
 } = require('./visitRequirements');
 const {
   detectHsnCode,
@@ -137,6 +142,8 @@ function extractPhotoAndGps(rawText, options = {}) {
       name: options.name || options.fileName || `attachment-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
       url: photoDataUrl,
       type: mimeType,
+      photoSource: options.photoSource || '',
+      messageType: options.messageType || (isPdf ? 'document' : ''),
       uploaded_at: new Date().toISOString(),
       ...(gpsData ? { gps: gpsData } : {}),
     };
@@ -1379,13 +1386,7 @@ Which field would you like to update? (Rate, Quantity, PO Number, PO Date, Deliv
 - "For Inquiry INQ-936C7B, attach PO number PO-2026-8899"
 - "PO-2026-0042, update delivery location to Pune MIDC, change item 1 rate to 58000"`,
 
-  LOG_VISIT: `**Log Customer Field Visit**
-
-Reply with all of these together. I will ask again only for anything still missing.
-
-${nextVisitPrompts({}).map((item) => `- **${item}**`).join('\n')}
-
-After these details are complete, a code is sent to the customer.`,
+  LOG_VISIT: logVisitOpeningPrompt(),
 
   UPDATE_VISIT: `**Update Field Visit**
 
@@ -2351,14 +2352,16 @@ LOG_VISIT:
   "company_name": "<Customer / Company Name visited, else null>",
   "person_met": "<Person met and/or designation, else null>",
   "contact_phone": "<10-digit phone number if provided, else null>",
-  "city_location": "<City or location of visit, else null>",
+  "city_location": "<Full visit address. If the message has a Location: line, copy that address verbatim, else null>",
   "visit_date": "<Visit date in DD-MM-YYYY format e.g. 10-09-2026, else null>",
   "visit_outcome": "<Positive | Negative | Neutral, else null>",
   "followup_action": "<specific follow up action if mentioned, else null>",
+  "follow_up_date": "<Follow-up date if mentioned, including a labeled line such as follow up date - tomorrow or DD-MM-YYYY, else null>",
   "meeting_remarks": "<meeting remarks & requirements discussed, else null>",
   "email": "<email address if mentioned, else null>",
   "designation": "<job title / designation if mentioned, else null>",
-  "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader if mentioned, else null>",
+  "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader | Other if mentioned, else null>",
+  "customer_type_other": "<the customer type text when customer type is Other, else null>",
   "visit_type": "<First Visit | Follow-up 1 | Follow-up 2 | Follow-up 3 | Regular Visit if mentioned, else null>",
   "customer_probability": "<Hot | Warm | Cold if mentioned, else null>",
   "product_details": "<detailed product specifications or grades discussed, else null>",
@@ -2373,10 +2376,11 @@ LOG_VISIT:
       "company_name": "<Company Name visited>",
       "person_met": "<Person met, else null>",
       "contact_phone": "<Phone, else null>",
-      "city_location": "<City / Location, else null>",
+      "city_location": "<Full Location: address verbatim, else City / Location, else null>",
       "visit_date": "<Visit date in DD-MM-YYYY format, else null>",
       "visit_outcome": "<Positive | Negative | Neutral, else null>",
       "followup_action": "<Follow-up action, else null>",
+      "follow_up_date": "<Follow-up date, including tomorrow or DD-MM-YYYY, else null>",
       "meeting_remarks": "<Meeting remarks, else null>"
     }
   ]
@@ -2398,7 +2402,8 @@ UPDATE_VISIT:
     "status": "<Completed | Follow-up Pending | Cancelled if updated, else null>",
     "email": "<Email if updated, else null>",
     "designation": "<Designation if updated, else null>",
-    "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader if updated, else null>",
+    "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader | Other if updated, else null>",
+    "customer_type_other": "<the customer type text when customer type is Other, else null>",
     "visit_type": "<First Visit | Follow-up 1-3 | Regular Visit if updated, else null>",
     "customer_probability": "<Hot | Warm | Cold if updated, else null>",
     "product_details": "<Product Details if updated, else null>",
@@ -2604,6 +2609,7 @@ User Message:
         delete merged._non_editable_request;
         if (nonEditableRequested) merged._non_editable_request = nonEditableRequested;
       }
+      if (action === 'LOG_VISIT') applyExplicitFollowUpDate(merged, userInput);
       return merged;
     }
   } catch (err) {
@@ -2623,9 +2629,13 @@ User Message:
       fallbackParsed.updates = { meeting_remarks: verbatimNotes };
       fallbackParsed.meeting_remarks = verbatimNotes;
     }
+    const merged = mergeDraft(action, existingDraft, fallbackParsed, userInput);
+    if (action === 'LOG_VISIT') applyExplicitFollowUpDate(merged, userInput);
+    return merged;
   }
 
-  return mergeDraft(action, existingDraft, fallbackParsed, userInput);
+  if (action === 'LOG_VISIT') applyExplicitFollowUpDate(existingDraft, userInput);
+  return existingDraft;
 }
 
 const TOTAL_VALUE_PERMISSION_NOTICE = '⚠️ *Permission Notice:* You do not have permission to directly change the Total Order Value. Total value is calculated automatically from individual line item quantities and rates. To adjust the total value, please update individual line item rates or quantities.';
@@ -2727,7 +2737,7 @@ function getAllowedFieldsListForAction(action) {
     case 'UPDATE_ORDER':
       return `• *PO Number*\n• *PO Date / Delivery Date*\n• *Delivery Location*\n• *Payment Terms*\n• *Status (Pending, Processing, Dispatched, Delivered, Cancelled)*\n• *Line Item Rates & Quantities*`;
     case 'LOG_VISIT':
-      return `- *Person Met*\n- *Contact Phone*\n- *City / Location*\n- *Visit Date*\n- *Visit Outcome (Positive / Neutral / Negative)*\n- *Meeting Remarks & Discussion Notes*`;
+      return `- *Person Met*\n- *Contact Phone*\n- *Visit Date*\n- *Visit Outcome (Positive / Neutral / Negative)*\n- *Meeting Remarks & Discussion Notes*`;
     case 'UPDATE_VISIT':
       return `- *Person Met*\n- *Contact Phone*\n- *Designation & Email*\n- *City / Location*\n- *Customer Type & Visit Type*\n- *Visit Outcome & Probability*\n- *Product Details & Monthly Consumption*\n- *Current Requirement & Next Purchase Expected*\n- *Delivery Location & Preferred Make & Payment Terms*\n- *Follow-up Action & Date*\n- *Meeting Remarks*\n- *Add Photo / Document (Attach additional site photos)*\n- *Status*`;
     case 'LOG_COMPLAINT':
@@ -2741,10 +2751,28 @@ function getAllowedFieldsListForAction(action) {
   }
 }
 
-function detectNonEditableFieldAttempt(action, text, draft = {}) {
+function isLogVisitLocationEdit(clean) {
+  const withoutDelivery = String(clean || '').replace(/\bdelivery\s+locations?\b/gi, ' ');
+  return (
+    /\b(?:change|edit|update|modify|set|alter|replace)\b(?:\s+\w+){0,4}\s+(?:the\s+)?(?:city|location|address)\b/i.test(withoutDelivery) ||
+    /\b(?:city|location|address)\s*(?:to|as|is|:|=)\s*\S/i.test(withoutDelivery) ||
+    /\b(?:city|location|address)\b(?:\s+\w+){0,3}\s+bad(?:lo|al)\b/i.test(withoutDelivery)
+  );
+}
+
+function detectNonEditableFieldAttempt(action, text, draft = {}, options = {}) {
   if (!text || typeof text !== 'string') return { isNonEditable: false };
   const clean = text.trim();
   if (!clean) return { isNonEditable: false };
+
+  if (options.lockVisitLocation && action === 'LOG_VISIT' && isLogVisitLocationEdit(clean)) {
+    return {
+      isNonEditable: true,
+      fieldName: 'City / Location',
+      message: '*Visit location cannot be edited before the visit is saved.*\n\n- The location is taken from the device or the WhatsApp location pin.',
+      allowedFieldsList: getAllowedFieldsListForAction(action),
+    };
+  }
 
   // Fast bypass: If user is explicitly targeting an editable field (notes, remarks, rate, qty, payment terms, delivery location, etc.)
   const isExplicitEditableField = /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|resolution\s*notes?|comments?|description|rate|price|target\s*price|bhav|quantity|qty|payment\s*terms?|delivery\s*location|location|city|person\s*met|contact\s*person|contact\s*phone|phone|mobile|email(?:\s*id)?|visit\s*date|po\s*number|po\s*no|po\s*date|status|stage|preferred\s*make|make)\s*(?:to|as|is|:|=|\s+-)\s*/i.test(clean);
@@ -4719,6 +4747,7 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.email && !merged.updates.email) merged.updates.email = newExtracted.email;
     if (newExtracted.designation && !merged.updates.designation) merged.updates.designation = newExtracted.designation;
     if (newExtracted.customer_type && !merged.updates.customer_type) merged.updates.customer_type = newExtracted.customer_type;
+    if (newExtracted.customer_type_other && !merged.updates.customer_type_other) merged.updates.customer_type_other = newExtracted.customer_type_other;
     if (newExtracted.visit_type && !merged.updates.visit_type) merged.updates.visit_type = newExtracted.visit_type;
     if (newExtracted.customer_probability && !merged.updates.customer_probability) merged.updates.customer_probability = newExtracted.customer_probability;
     if (newExtracted.product_details && !merged.updates.product_details) merged.updates.product_details = newExtracted.product_details;
@@ -10090,7 +10119,12 @@ function buildConfirmationSummary(action, draft) {
       summary += `• *Meeting Remarks:* ${draft.meeting_remarks || '-'}\n`;
       if (draft.designation) summary += `• *Designation:* ${draft.designation}\n`;
       if (draft.email) summary += `• *Email:* ${draft.email}\n`;
-      if (draft.customer_type) summary += `• *Customer Type:* ${draft.customer_type}\n`;
+      if (draft.customer_type) {
+        const customerTypeLabel = draft.customer_type === 'Other' && draft.customer_type_other
+          ? draft.customer_type_other
+          : draft.customer_type;
+        summary += `• *Customer Type:* ${customerTypeLabel}\n`;
+      }
       if (draft.visit_type) summary += `• *Visit Type:* ${draft.visit_type}\n`;
       if (draft.customer_probability) summary += `• *Customer Probability:* ${draft.customer_probability}\n`;
       if (draft.product_details) summary += `• *Product Details:* ${draft.product_details}\n`;
@@ -12392,7 +12426,12 @@ async function executeAction(action, draft, senderPhone) {
         let extDetails = '';
         if (draft.designation) extDetails += `• *Designation:* ${draft.designation}\n`;
         if (draft.email) extDetails += `• *Email:* ${draft.email}\n`;
-        if (draft.customer_type) extDetails += `• *Customer Type:* ${draft.customer_type}\n`;
+        if (draft.customer_type) {
+          const customerTypeLabel = draft.customer_type === 'Other' && draft.customer_type_other
+            ? draft.customer_type_other
+            : draft.customer_type;
+          extDetails += `• *Customer Type:* ${customerTypeLabel}\n`;
+        }
         if (draft.visit_type) extDetails += `• *Visit Type:* ${draft.visit_type}\n`;
         if (draft.customer_probability) extDetails += `• *Customer Probability:* ${draft.customer_probability}\n`;
         if (draft.monthly_consumption) extDetails += `• *Monthly Consumption:* ${draft.monthly_consumption}\n`;
@@ -12570,6 +12609,13 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.email) visitUpdates.email = updates.email;
         if (updates.designation) visitUpdates.designation = updates.designation;
         if (updates.customer_type) visitUpdates.customer_type = updates.customer_type;
+        if (updates.customer_type === 'Other') {
+          visitUpdates.customer_type_other = updates.customer_type_other || null;
+        } else if (updates.customer_type) {
+          visitUpdates.customer_type_other = null;
+        } else if (updates.customer_type_other) {
+          visitUpdates.customer_type_other = updates.customer_type_other;
+        }
         if (updates.visit_type) visitUpdates.visit_type = updates.visit_type;
         if (updates.customer_probability) visitUpdates.customer_probability = updates.customer_probability;
         if (updates.product_details) visitUpdates.product_details = updates.product_details;
@@ -12599,18 +12645,22 @@ async function executeAction(action, draft, senderPhone) {
 
         const existingUrls = new Set(existingAttachments.map(a => a && a.url).filter(Boolean));
         const distinctNew = newAttachmentsToAdd.filter(a => a && a.url && !existingUrls.has(a.url));
-
-        if (distinctNew.length > 0) {
-          visitUpdates.attachments = [...existingAttachments, ...distinctNew];
-          // Never replace previously added pic: only populate gps_photo_url if not set
-          if (!targetVisit.gps_photo_url) {
-            visitUpdates.gps_photo_url = distinctNew[0].url;
-          }
-        }
-
         const updLat = updates.gps_latitude ?? draft.gps_latitude;
         const updLng = updates.gps_longitude ?? draft.gps_longitude;
         const updAcc = updates.gps_accuracy ?? draft.gps_accuracy;
+
+        if (distinctNew.length > 0) {
+          visitUpdates.attachments = [...existingAttachments, ...distinctNew];
+          // Never replace previously added pic: only a camera photo with coordinates fills it.
+          if (!targetVisit.gps_photo_url) {
+            const photo = distinctNew.find((item) => visitPhotoAccepted(
+              { gps_latitude: targetVisit.gps_latitude ?? updLat, gps_longitude: targetVisit.gps_longitude ?? updLng },
+              item,
+              typeof updLat === 'number' ? { latitude: updLat, longitude: updLng } : null,
+            ));
+            if (photo) visitUpdates.gps_photo_url = photo.url;
+          }
+        }
         if (typeof updLat === 'number' && typeof updLng === 'number') {
           if (!targetVisit.gps_latitude || !targetVisit.gps_longitude) {
             visitUpdates.gps_latitude = updLat;
@@ -14973,7 +15023,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       return catalogSelectionResult(selectionRes);
     }
 
-    const initialPrompt = MODULE_PROMPTS[explicitAction];
+    const initialPrompt = explicitAction === 'LOG_VISIT'
+      ? logVisitOpeningPrompt(callerSourceChannel)
+      : MODULE_PROMPTS[explicitAction];
     if (initialPrompt) {
       await startNewCatalogSession(senderPhone, initialPrompt);
       await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: explicitAction });
@@ -16343,7 +16395,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // Check if user is attempting to edit a non-editable or system-generated field
-    const nonEditableCheckConfirm = detectNonEditableFieldAttempt(action, text, draft);
+    const nonEditableCheckConfirm = detectNonEditableFieldAttempt(action, text, draft, { lockVisitLocation: true });
     if (nonEditableCheckConfirm.isNonEditable) {
       await recordSessionMessage(senderPhone, 'user', text);
       const fullReply = nonEditableCheckConfirm.compactReply || `${nonEditableCheckConfirm.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheckConfirm.allowedFieldsList}\n\nWhich editable field would you like to change?`;
@@ -16363,7 +16415,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     if (action === 'LOG_VISIT') {
       attachVisitMedia(updatedDraft, attachmentObj, gpsData);
-      await fillVisitCity(updatedDraft);
+      await captureVisitLocation(updatedDraft, text, draft);
+      preserveVisitLocation(updatedDraft, draft);
     } else if (action === 'UPDATE_VISIT') {
       if (attachmentObj) {
         updatedDraft.updates = updatedDraft.updates || {};
@@ -16543,7 +16596,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // Check if user is attempting to edit a non-editable or system-generated field
-    const nonEditableCheck = detectNonEditableFieldAttempt(action, text, draft);
+    const nonEditableCheck = detectNonEditableFieldAttempt(action, text, draft, { lockVisitLocation: true });
     if (nonEditableCheck.isNonEditable) {
       await recordSessionMessage(senderPhone, 'user', text);
       const fullReply = nonEditableCheck.compactReply || `${nonEditableCheck.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheck.allowedFieldsList}\n\nWhich editable field would you like to change?`;
@@ -16574,7 +16627,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     if (action === 'LOG_VISIT') {
       attachVisitMedia(updatedDraft, attachmentObj, gpsData);
-      await fillVisitCity(updatedDraft);
+      await captureVisitLocation(updatedDraft, text, draft);
+      preserveVisitLocation(updatedDraft, draft);
     } else if (action === 'UPDATE_VISIT') {
       if (attachmentObj) {
         updatedDraft.updates = updatedDraft.updates || {};
@@ -17722,7 +17776,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         if (!prevAtts.some(a => a && a.url === attachmentObj.url)) {
           updatedDraft.attachments = [...prevAtts, attachmentObj];
         }
-        if (!updatedDraft.gps_photo_url && !existingDraft.gps_photo_url) {
+        const photoDraft = updatedDraft.gps_latitude != null ? updatedDraft : existingDraft;
+        if (
+          !updatedDraft.gps_photo_url &&
+          !existingDraft.gps_photo_url &&
+          visitPhotoAccepted(photoDraft, attachmentObj, gpsData)
+        ) {
           updatedDraft.gps_photo_url = attachmentObj.url;
         }
       }
@@ -17731,6 +17790,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         updatedDraft.gps_longitude = gpsData.longitude;
         updatedDraft.gps_accuracy = gpsData.accuracy;
       }
+      await captureVisitLocation(updatedDraft, text, existingDraft);
     } else if (action === 'UPDATE_VISIT') {
       if (attachmentObj) {
         updatedDraft.updates = updatedDraft.updates || {};
@@ -18098,7 +18158,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       return catalogSelectionResult(selectionRes);
     }
 
-    const initialPrompt = MODULE_PROMPTS[matchedAction];
+    const initialPrompt = matchedAction === 'LOG_VISIT'
+      ? logVisitOpeningPrompt(callerSourceChannel)
+      : MODULE_PROMPTS[matchedAction];
     if (initialPrompt) {
       await startNewCatalogSession(senderPhone, initialPrompt);
       await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: matchedAction });
@@ -18244,8 +18306,6 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   if (isColdVisitIntent) {
     const initialVisitDraft = {
       action: 'LOG_VISIT',
-      ...(photoDataUrl ? { gps_photo_url: photoDataUrl } : {}),
-      ...(attachmentObj ? { attachments: [attachmentObj] } : {}),
       ...(gpsData ? {
         gps_latitude: gpsData.latitude,
         gps_longitude: gpsData.longitude,
@@ -18256,17 +18316,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     await recordSessionMessage(senderPhone, 'user', text);
     const updatedDraft = await extractFieldsWithLLM('LOG_VISIT', text, initialVisitDraft);
 
-    if (photoDataUrl && !updatedDraft.gps_photo_url) updatedDraft.gps_photo_url = photoDataUrl;
-    if (attachmentObj) {
-      if (!Array.isArray(updatedDraft.attachments) || updatedDraft.attachments.length === 0) {
-        updatedDraft.attachments = [attachmentObj];
-      }
-    }
-    if (gpsData && (updatedDraft.gps_latitude === undefined || updatedDraft.gps_latitude === null)) {
-      updatedDraft.gps_latitude = gpsData.latitude;
-      updatedDraft.gps_longitude = gpsData.longitude;
-      updatedDraft.gps_accuracy = gpsData.accuracy;
-    }
+    attachVisitMedia(updatedDraft, attachmentObj, gpsData);
+    await captureVisitLocation(updatedDraft, text, initialVisitDraft);
 
     const nonEditableColdLog = detectNonEditableFieldAttempt('LOG_VISIT', text, updatedDraft);
     if (nonEditableColdLog.isNonEditable) {

@@ -1,8 +1,8 @@
 const crypto = require('crypto');
 
 const VISIT_BRANDS = ['TATA', 'JSW', 'AM/NS India', 'SAIL', 'NMDC', 'Apollo', 'Others'];
-const VISIT_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60 Days', '90 Days', 'LC', 'BG', 'PDC'];
-const VISIT_CUSTOMER_TYPES = ['OEM', 'Fabricator', 'EPC', 'Manufacturer', 'Trader'];
+const VISIT_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60 Days', 'LC', 'BG', 'PDC'];
+const VISIT_CUSTOMER_TYPES = ['OEM', 'Fabricator', 'EPC', 'Manufacturer', 'Trader', 'Other'];
 const VISIT_TYPES = ['First Visit', 'Follow-up 1', 'Follow-up 2', 'Follow-up 3', 'Regular Visit'];
 const VISIT_OUTCOMES = ['Positive', 'Neutral', 'Negative'];
 const VISIT_PROBABILITIES = ['Hot', 'Warm', 'Cold'];
@@ -177,6 +177,7 @@ function addressFromGoogleGeocode(body) {
   if (!result) return '';
   const types = Array.isArray(result.types) ? result.types : [];
   const formatted = text(result.formatted_address);
+  if (formatted) return formatted;
   const premise = googleComponent(result, 'premise') || googleComponent(result, 'subpremise');
   const streetNumber = googleComponent(result, 'street_number');
   const route = googleComponent(result, 'route');
@@ -227,16 +228,21 @@ function readDraft(draft) {
   const email = text(source.email).toLowerCase();
   const latitude = finiteNumber(source.gps_latitude ?? source.visit_latitude);
   const longitude = finiteNumber(source.gps_longitude ?? source.visit_longitude);
-  const followDate = text(source.follow_up_date || source.followup_date);
+  const typedCity = text(source.city_location || source.city || source.location);
+  const city = visitRequiresLocationPin(source) && (latitude == null || longitude == null)
+    ? ''
+    : typedCity;
   const action = text(source.followup_action || source.follow_up_action);
-  const dateInAction = action.match(/\b(\d{1,2}-\d{1,2}-\d{4})\b/);
+  const followFromField = storedOrRelativeVisitDate(source.follow_up_date || source.followup_date);
+  const followDate = followFromField || resolveRelativeVisitDate(action) || text(source.follow_up_date || source.followup_date);
+  const nextPurchase = storedOrRelativeVisitDate(source.next_purchase_expected) || text(source.next_purchase_expected);
   return {
     company: text(source.company_name || source.customer_name),
     person: text(source.person_met),
     designation: text(source.designation),
     phone,
     email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '',
-    city: text(source.city_location || source.city || source.location),
+    city,
     visitDate: text(source.visit_date || source.visit_date_display),
     customerType: canonical(VISIT_CUSTOMER_TYPES, source.customer_type),
     visitType: canonical(VISIT_TYPES, source.visit_type),
@@ -245,13 +251,14 @@ function readDraft(draft) {
     product: text(source.product_details),
     consumption: text(source.monthly_consumption),
     requirement: text(source.current_requirement),
-    nextPurchase: text(source.next_purchase_expected),
+    nextPurchase,
     delivery: text(source.delivery_location),
     brands: uniqueBrands,
     brandOther: text(source.preferred_make_other),
+    customerTypeOther: text(source.customer_type_other),
     payment: canonicalPayment(source.payment_terms),
     followAction: action,
-    followDate: followDate || (dateInAction ? dateInAction[1] : ''),
+    followDate,
     remarks: text(source.meeting_remarks || source.remarks),
     photo: text(source.gps_photo_url),
     latitude,
@@ -274,9 +281,15 @@ function writeDraft(draft, view) {
   if (view.probability) draft.customer_probability = view.probability;
   if (view.brands.length) draft.preferred_make = view.brands.join(', ');
   if (view.brandOther) draft.preferred_make_other = view.brandOther;
+  if (view.customerTypeOther) draft.customer_type_other = view.customerTypeOther;
   if (view.payment) draft.payment_terms = view.payment;
+  if (view.nextPurchase) draft.next_purchase_expected = view.nextPurchase;
   if (view.followDate) draft.follow_up_date = view.followDate;
-  if (view.city) {
+  if (visitRequiresLocationPin(draft) && (view.latitude == null || view.longitude == null)) {
+    draft.city_location = '';
+    draft.city = '';
+    draft.location_source = null;
+  } else if (view.city) {
     draft.city_location = view.city;
     draft.city = view.city;
   }
@@ -291,6 +304,129 @@ function writeDraft(draft, view) {
   }
 }
 
+function visitCalendarToday(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const year = parts.find((part) => part.type === 'year')?.value || '';
+  const month = parts.find((part) => part.type === 'month')?.value || '';
+  const day = parts.find((part) => part.type === 'day')?.value || '';
+  return `${year}-${month}-${day}`;
+}
+
+function visitCalendarDay(value) {
+  const normalized = followUpDateForRow(value);
+  const match = String(normalized).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return '';
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const check = new Date(Date.UTC(year, month - 1, day));
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) {
+    return '';
+  }
+  return `${match[1]}-${match[2]}-${match[3]}`;
+}
+
+function isVisitDateOnOrAfterToday(value) {
+  const day = visitCalendarDay(value);
+  return Boolean(day) && day >= visitCalendarToday();
+}
+
+function formatUtcDay(date) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+}
+
+function shiftCalendarDay(isoDay, days) {
+  const [year, month, day] = isoDay.split('-').map(Number);
+  return formatUtcDay(new Date(Date.UTC(year, month - 1, day + days)));
+}
+
+function addCalendarMonths(isoDay, months) {
+  const [year, month, day] = isoDay.split('-').map(Number);
+  return formatUtcDay(new Date(Date.UTC(year, month - 1 + months, day)));
+}
+
+const VISIT_WORD_NUMBERS = {
+  a: 1,
+  an: 1,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+};
+
+function visitQuantity(value) {
+  const raw = String(value || '').toLowerCase();
+  if (VISIT_WORD_NUMBERS[raw]) return VISIT_WORD_NUMBERS[raw];
+  const number = Number(raw);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function resolveRelativeVisitDate(value, now = new Date()) {
+  const explicit = visitCalendarDay(value);
+  if (explicit) return explicit;
+  const raw = text(value).toLowerCase();
+  if (!raw) return '';
+  const today = visitCalendarToday(now);
+  if (/\b(?:tomorrow|kal)\b/.test(raw)) return shiftCalendarDay(today, 1);
+  if (/\b(?:today|aaj)\b/.test(raw)) return today;
+  if (
+    /\bnext\s+week\b/.test(raw) ||
+    /\b(?:in|after|within)\s+(?:a|an|one)\s+weeks?\b/.test(raw) ||
+    /\b(?:a|one)\s+weeks?\s+later\b/.test(raw)
+  ) {
+    return shiftCalendarDay(today, 7);
+  }
+  if (
+    /\b(?:after|in|within)\s+(?:a|an|one)\s+months?\b/.test(raw) ||
+    /\b(?:a|one)\s+months?\s+later\b/.test(raw) ||
+    /\bnext\s+month\b/.test(raw)
+  ) {
+    return addCalendarMonths(today, 1);
+  }
+  const amount = '(?:\\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
+  const days = raw.match(new RegExp(`\\b(?:in|after|within)\\s+(${amount})\\s+days?\\b`));
+  if (days) return shiftCalendarDay(today, visitQuantity(days[1]));
+  const weeks = raw.match(new RegExp(`\\b(?:in|after|within)\\s+(${amount})\\s+weeks?\\b`));
+  if (weeks) return shiftCalendarDay(today, visitQuantity(weeks[1]) * 7);
+  const months = raw.match(new RegExp(`\\b(?:in|after|within)\\s+(${amount})\\s+months?\\b`));
+  if (months) return addCalendarMonths(today, visitQuantity(months[1]));
+  return '';
+}
+
+function storedOrRelativeVisitDate(value) {
+  return visitCalendarDay(value) || resolveRelativeVisitDate(value);
+}
+
+function explicitFollowUpDate(message) {
+  const source = String(message || '');
+  const labeled = source.match(/follow[\s-]*up\s+dates?\s*(?:[-:=]|is\b)?\s*([^\n]+)/i);
+  const bare = source.match(/^\s*(tomorrow|kal|today|aaj|\d{1,2}[-/]\d{1,2}[-/]\d{4})\s*$/i);
+  const raw = (labeled?.[1] || bare?.[1] || '').trim();
+  if (!raw) return '';
+  return storedOrRelativeVisitDate(raw) || '';
+}
+
+function applyExplicitFollowUpDate(draft, message) {
+  if (!draft) return draft;
+  if (storedOrRelativeVisitDate(draft.follow_up_date || draft.followup_date)) return draft;
+  const date = explicitFollowUpDate(message);
+  if (date) draft.follow_up_date = date;
+  return draft;
+}
+
 function nextVisitPrompts(draft) {
   const view = readDraft(draft);
   writeDraft(draft, view);
@@ -302,28 +438,48 @@ function nextVisitPrompts(draft) {
     !view.email && 'Email',
     !view.visitDate && 'Visit Date (e.g. 10-09-2026)',
     !view.customerType && `Customer Type: ${VISIT_CUSTOMER_TYPES.join(', ')}`,
+    view.customerType === 'Other' && !view.customerTypeOther && 'Other customer type',
     !view.visitType && `Visit Type: ${VISIT_TYPES.join(', ')}`,
     !view.outcome && `Visit Outcome: ${VISIT_OUTCOMES.join(', ')}`,
     !view.probability && `Customer Probability: ${VISIT_PROBABILITIES.join(', ')}`,
     !view.product && 'Product Details',
     !view.consumption && 'Monthly Consumption',
     !view.requirement && 'Current Requirement',
-    !view.nextPurchase && 'Next Purchase Expected',
+    !isVisitDateOnOrAfterToday(view.nextPurchase) && 'Next Purchase Expected (today or later)',
     !view.delivery && 'Delivery Location',
     view.brands.length === 0 && `Preferred Brand: ${VISIT_BRANDS.join(', ')}`,
     view.brands.includes('Others') && !view.brandOther && 'Other brand',
     !view.payment && `Payment Terms: ${VISIT_PAYMENT_TERMS.join(', ')}`,
     !view.followAction && 'Follow-up Action',
-    !view.followDate && 'Follow-up Date (e.g. 20-10-2026)',
+    !isVisitDateOnOrAfterToday(view.followDate) && 'Follow-up Date (today or later, e.g. tomorrow or DD-MM-YYYY)',
     !view.remarks && 'Meeting Remarks',
-    !view.photo && 'Visit photo from the camera',
+    !view.photo && !visitImageWaitingForPin(draft, view) && 'Visit photo from the camera',
   ].filter(Boolean);
-  if (!view.city && view.latitude != null) {
+  if (visitImageWaitingForPin(draft, view)) {
+    prompts.unshift('Share a location pin first, then send the visit photo from the camera.');
+  }
+  if (visitRequiresLocationPin(draft)) {
+    if (view.latitude == null || view.longitude == null) {
+      prompts.push('Share a WhatsApp location pin.');
+    }
+  } else if (!view.city && view.latitude != null) {
     prompts.push('City could not be read from the location. Type the city.');
   } else if (!view.city) {
-    prompts.push('Location pin or city. Share a location pin, or type the city if GPS is unavailable.');
+    prompts.push('Location is auto-fetched.');
   }
   return prompts;
+}
+
+function logVisitOpeningPrompt(sourceChannel) {
+  const channel = text(sourceChannel).toLowerCase();
+  const draft = channel === 'ai_assistant' ? { source_channel: 'ai_assistant' } : {};
+  return `**Log Customer Field Visit**
+
+Reply with all of these together. I will ask again only for anything still missing.
+
+${nextVisitPrompts(draft).map((item) => `- **${item}**`).join('\n')}
+
+After these details are complete, a code is sent to the customer.`;
 }
 
 function assertReadyToSave(draft) {
@@ -369,6 +525,7 @@ function visitRowColumns(draft) {
     delivery_location: view.delivery,
     preferred_make: view.brands.join(', '),
     preferred_make_other: view.brands.includes('Others') ? view.brandOther : null,
+    customer_type_other: view.customerType === 'Other' ? view.customerTypeOther : null,
     payment_terms: view.payment,
     follow_up_action: view.followAction,
     follow_up_date: followUpDateForRow(view.followDate),
@@ -383,20 +540,41 @@ function visitRowColumns(draft) {
   };
 }
 
-function visitCodeMessage(otp) {
-  return [
-    'Enlight Metals – Customer Visits',
-    '',
-    `Your visit verification code is: *${otp}*`,
-    '',
-    'This code expires in 5 minutes. Do not share it with anyone.',
-  ].join('\n');
+function visitOtpTemplatePayload(phone, otp, templateName) {
+  return {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: phone,
+    type: 'template',
+    template: {
+      name: templateName,
+      language: { code: 'en' },
+      components: [
+        {
+          type: 'body',
+          parameters: [{ type: 'text', text: otp }],
+        },
+        {
+          type: 'button',
+          sub_type: 'url',
+          index: '0',
+          parameters: [{ type: 'text', text: otp }],
+        },
+      ],
+    },
+  };
 }
 
-async function defaultSendVisitCode(to, body) {
+/** TEMPORARY VISIT OTP TEST MODE — delete this after the WhatsApp Authentication template is live. */
+function visitOtpTestMode() {
+  return text(process.env.VISIT_OTP_TEST_MODE).toLowerCase() === 'true';
+}
+
+async function defaultSendVisitCode(to, payload) {
   const token = process.env.WHATSAPP_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  if (!token || !phoneNumberId) {
+  const templateName = text(process.env.WHATSAPP_VISIT_OTP_TEMPLATE);
+  if (!token || !phoneNumberId || !templateName) {
     const error = new Error('WhatsApp is not configured for visit codes.');
     error.code = 'WHATSAPP_NOT_CONFIGURED';
     throw error;
@@ -404,13 +582,7 @@ async function defaultSendVisitCode(to, body) {
   const axios = require('axios');
   await axios.post(
     `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
-    {
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to,
-      type: 'text',
-      text: { body },
-    },
+    payload,
     {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -459,8 +631,19 @@ async function requestVisitCode(supabase, rawPhone, send = defaultSendVisitCode)
     created_at: now.toISOString(),
   });
   if (error) return { ok: false, message: 'Unable to send the visit code right now.' };
+  if (visitOtpTestMode()) {
+    console.log(`Visit test code issued for ****${phone.slice(-4)}`);
+    return {
+      ok: true,
+      testOtp: otp,
+      message: `Temporary test code: ${otp}. Enter it here. WhatsApp was not used. It expires in 5 minutes.`,
+    };
+  }
   try {
-    await send(`91${phone}`, visitCodeMessage(otp));
+    await send(
+      `91${phone}`,
+      visitOtpTemplatePayload(`91${phone}`, otp, text(process.env.WHATSAPP_VISIT_OTP_TEMPLATE)),
+    );
   } catch (err) {
     await patchVisitCode(supabase, id, {
       consumed_at: now.toISOString(),
@@ -532,9 +715,32 @@ async function releaseVisitCode(supabase, id) {
   await patchVisitCode(supabase, id, { consumed_at: null });
 }
 
+function visitRequiresLocationPin(source) {
+  const channel = text(source?.source_channel || source?.channel).toLowerCase();
+  return channel !== 'ai_assistant' && channel !== 'web';
+}
+
+function explicitVisitLocation(message) {
+  const source = String(message || '');
+  const matches = [...source.matchAll(/(?:^|\n)\s*Location:\s*([^\n]+)/gi)];
+  if (!matches.length) return '';
+  return matches[matches.length - 1][1].replace(/\s*\[GPS:[^\]]*\]\s*$/i, '').trim();
+}
+
+function storeVisitAddress(draft, address) {
+  draft.city_location = address;
+  draft.city = address;
+  draft.visit_city_from_pin = true;
+  if (finiteNumber(draft.gps_latitude ?? draft.visit_latitude) != null) {
+    draft.location_source = 'gps';
+  }
+}
+
 async function fillVisitCity(draft) {
   const view = readDraft(draft);
-  if (view.city || view.latitude == null || view.longitude == null) return draft;
+  const pinOnly = visitRequiresLocationPin(draft);
+  if (view.latitude == null || view.longitude == null) return draft;
+  if (view.city && draft.visit_city_from_pin) return draft;
   const key = process.env.GOOGLE_MAPS_API_KEY;
   if (!key) return draft;
   try {
@@ -542,36 +748,135 @@ async function fillVisitCity(draft) {
       `https://maps.googleapis.com/maps/api/geocode/json?latlng=${encodeURIComponent(`${view.latitude},${view.longitude}`)}&key=${encodeURIComponent(key)}`,
       { headers: { Accept: 'application/json' } },
     );
-    if (!response.ok) return draft;
-    const body = await response.json();
-    if (body?.status !== 'OK') return draft;
-    const location = addressFromGoogleGeocode(body) || cityFromGoogleGeocode(body);
+    const body = response.ok ? await response.json() : null;
+    const location = body?.status === 'OK'
+      ? (addressFromGoogleGeocode(body) || cityFromGoogleGeocode(body))
+      : '';
     if (location) {
-      draft.city_location = location;
-      draft.city = location;
+      storeVisitAddress(draft, location);
+    } else if (pinOnly) {
+      draft.city_location = '';
+      draft.city = '';
     }
   } catch {
-    // A typed city remains available when the lookup fails.
+    if (pinOnly) {
+      draft.city_location = '';
+      draft.city = '';
+    }
   }
   return draft;
+}
+
+async function captureVisitLocation(draft, message, previous) {
+  if (!draft) return draft;
+  const explicit = explicitVisitLocation(message);
+  if (explicit) {
+    storeVisitAddress(draft, explicit);
+  } else if (!(previous && previous.visit_city_from_pin)) {
+    await fillVisitCity(draft);
+  }
+  if (!explicit && previous && previous.visit_city_from_pin) {
+    const previousAddress = text(previous.city_location || previous.city);
+    if (previousAddress) {
+      draft.city_location = previousAddress;
+      draft.city = previousAddress;
+      draft.visit_city_from_pin = true;
+      if (previous.location_source) draft.location_source = previous.location_source;
+    }
+  }
+  return draft;
+}
+
+function visitAttachmentKind(attachment) {
+  const type = String(attachment?.type || '').toLowerCase();
+  const source = String(attachment?.photoSource || '');
+  const messageType = String(attachment?.messageType || '');
+  if (source === 'upload' || messageType === 'document' || type.includes('pdf') || type === 'document') {
+    return 'document';
+  }
+  if (source === 'camera') return 'camera';
+  if (messageType === 'image' || type === 'image' || type.startsWith('image/')) return 'image';
+  return 'other';
+}
+
+function visitPhotoAccepted(draft, attachment, gps) {
+  if (!attachment || !attachment.url) return false;
+  const kind = visitAttachmentKind(attachment);
+  if (kind !== 'camera' && kind !== 'image') return false;
+  const incoming = Boolean(
+    gps && finiteNumber(gps.latitude) != null && finiteNumber(gps.longitude) != null,
+  );
+  if (kind === 'camera') return incoming;
+  return incoming || finiteNumber(draft?.gps_latitude) != null;
+}
+
+function visitImageWaitingForPin(draft, view) {
+  if (!view || view.photo || view.latitude != null) return false;
+  return Array.isArray(draft?.attachments) && draft.attachments.some((item) => {
+    const kind = visitAttachmentKind(item);
+    return kind === 'image' || kind === 'camera';
+  });
 }
 
 function attachVisitMedia(draft, attachment, gps) {
   if (!draft) return draft;
   if (attachment && attachment.url) {
-    const isPdf = String(attachment.type || '').includes('pdf');
     const previous = Array.isArray(draft.attachments) ? draft.attachments : [];
     if (!previous.some((item) => item && item.url === attachment.url)) {
       draft.attachments = [...previous, attachment];
     }
-    if (!isPdf && !draft.gps_photo_url) draft.gps_photo_url = attachment.url;
+    if (visitPhotoAccepted(draft, attachment, gps) && !draft.gps_photo_url) {
+      draft.gps_photo_url = attachment.url;
+    }
   }
-  if (gps && finiteNumber(gps.latitude) != null && finiteNumber(gps.longitude) != null && draft.gps_latitude == null) {
+  if (
+    gps &&
+    finiteNumber(gps.latitude) != null &&
+    finiteNumber(gps.longitude) != null &&
+    draft.gps_latitude == null
+  ) {
     draft.gps_latitude = gps.latitude;
     draft.gps_longitude = gps.longitude;
     draft.gps_accuracy = gps.accuracy ?? null;
+    draft.location_source = 'gps';
   }
   return draft;
+}
+
+const VISIT_LOCATION_KEYS = [
+  'city_location',
+  'city',
+  'gps_latitude',
+  'gps_longitude',
+  'gps_accuracy',
+  'visit_latitude',
+  'visit_longitude',
+  'location_source',
+  'visit_city_from_pin',
+];
+
+function preserveVisitLocation(updated, original) {
+  if (!updated || !original) return updated;
+  const hadCity = text(original.city_location || original.city);
+  const hadCoords = finiteNumber(original.gps_latitude ?? original.visit_latitude) != null;
+  if (!hadCity && !hadCoords) return updated;
+  const captured = text(updated.city_location || updated.city);
+  const firstPin = Boolean(updated.visit_city_from_pin)
+    && !original.visit_city_from_pin
+    && captured
+    && (!hadCity || (captured.length > hadCity.length && captured.toLowerCase().includes(hadCity.toLowerCase())));
+  const pinnedAddress = firstPin ? captured : '';
+  const pinnedSource = firstPin ? updated.location_source : '';
+  for (const key of VISIT_LOCATION_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(original, key)) updated[key] = original[key];
+  }
+  if (pinnedAddress) {
+    updated.city_location = pinnedAddress;
+    updated.city = pinnedAddress;
+    updated.visit_city_from_pin = true;
+    if (pinnedSource) updated.location_source = pinnedSource;
+  }
+  return updated;
 }
 
 function promptsFromVisitState(state) {
@@ -594,6 +899,7 @@ function promptsFromVisitState(state) {
     delivery_location: state.delivery_location,
     preferred_make: state.preferred_make,
     preferred_make_other: state.preferred_make_other,
+    customer_type_other: state.customer_type_other,
     payment_terms: state.payment_terms,
     followup_action: state.follow_up_action,
     follow_up_date: state.follow_up_date,
@@ -602,6 +908,7 @@ function promptsFromVisitState(state) {
     gps_latitude: state.gps_latitude,
     gps_longitude: state.gps_longitude,
     verification_token: state.verification_token,
+    source_channel: state.source_channel || 'ai_assistant',
   });
 }
 
@@ -609,6 +916,7 @@ module.exports = {
   VISIT_BRANDS,
   VISIT_PAYMENT_TERMS,
   nextVisitPrompts,
+  logVisitOpeningPrompt,
   assertReadyToSave,
   visitRowColumns,
   requestVisitCode,
@@ -616,9 +924,15 @@ module.exports = {
   consumeVisitCode,
   releaseVisitCode,
   fillVisitCity,
+  captureVisitLocation,
+  explicitVisitLocation,
+  preserveVisitLocation,
+  applyExplicitFollowUpDate,
   addressFromNominatim,
   addressFromGoogleGeocode,
+  visitOtpTemplatePayload,
   attachVisitMedia,
+  visitPhotoAccepted,
   promptsFromVisitState,
   hashVisitSecret,
 };
