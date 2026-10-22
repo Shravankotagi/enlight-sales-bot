@@ -31,6 +31,7 @@ const {
 } = require('../supabase');
 const {
   nextVisitPrompts,
+  logVisitOpeningPrompt,
   assertReadyToSave,
   visitRowColumns,
   requestVisitCode,
@@ -38,6 +39,8 @@ const {
   consumeVisitCode,
   releaseVisitCode,
   fillVisitCity,
+  captureVisitLocation,
+  preserveVisitLocation,
   attachVisitMedia,
   visitPhotoAccepted,
 } = require('./visitRequirements');
@@ -1180,13 +1183,7 @@ Which field would you like to update? (Rate, Quantity, PO Number, PO Date, Deliv
 - "For Inquiry INQ-936C7B, attach PO number PO-2026-8899"
 - "PO-2026-0042, update delivery location to Pune MIDC, change item 1 rate to 58000"`,
 
-  LOG_VISIT: `**Log Customer Field Visit**
-
-Reply with all of these together. I will ask again only for anything still missing.
-
-${nextVisitPrompts({}).map((item) => `- **${item}**`).join('\n')}
-
-After these details are complete, a code is sent to the customer.`,
+  LOG_VISIT: logVisitOpeningPrompt(),
 
   UPDATE_VISIT: `**Update Field Visit**
 
@@ -2131,7 +2128,7 @@ LOG_VISIT:
   "company_name": "<Customer / Company Name visited, else null>",
   "person_met": "<Person met and/or designation, else null>",
   "contact_phone": "<10-digit phone number if provided, else null>",
-  "city_location": "<City or location of visit, else null>",
+  "city_location": "<Full visit address. If the message has a Location: line, copy that address verbatim, else null>",
   "visit_date": "<Visit date in DD-MM-YYYY format e.g. 10-09-2026, else null>",
   "visit_outcome": "<Positive | Negative | Neutral, else null>",
   "followup_action": "<specific follow up action if mentioned, else null>",
@@ -2154,7 +2151,7 @@ LOG_VISIT:
       "company_name": "<Company Name visited>",
       "person_met": "<Person met, else null>",
       "contact_phone": "<Phone, else null>",
-      "city_location": "<City / Location, else null>",
+      "city_location": "<Full Location: address verbatim, else City / Location, else null>",
       "visit_date": "<Visit date in DD-MM-YYYY format, else null>",
       "visit_outcome": "<Positive | Negative | Neutral, else null>",
       "followup_action": "<Follow-up action, else null>",
@@ -2510,7 +2507,7 @@ function getAllowedFieldsListForAction(action) {
     case 'UPDATE_ORDER':
       return `• *PO Number*\n• *PO Date / Delivery Date*\n• *Delivery Location*\n• *Payment Terms*\n• *Status (Pending, Processing, Dispatched, Delivered, Cancelled)*\n• *Line Item Rates & Quantities*`;
     case 'LOG_VISIT':
-      return `- *Person Met*\n- *Contact Phone*\n- *City / Location*\n- *Visit Date*\n- *Visit Outcome (Positive / Neutral / Negative)*\n- *Meeting Remarks & Discussion Notes*`;
+      return `- *Person Met*\n- *Contact Phone*\n- *Visit Date*\n- *Visit Outcome (Positive / Neutral / Negative)*\n- *Meeting Remarks & Discussion Notes*`;
     case 'UPDATE_VISIT':
       return `- *Person Met*\n- *Contact Phone*\n- *Designation & Email*\n- *City / Location*\n- *Customer Type & Visit Type*\n- *Visit Outcome & Probability*\n- *Product Details & Monthly Consumption*\n- *Current Requirement & Next Purchase Expected*\n- *Delivery Location & Preferred Make & Payment Terms*\n- *Follow-up Action & Date*\n- *Meeting Remarks*\n- *Add Photo / Document (Attach additional site photos)*\n- *Status*`;
     case 'LOG_COMPLAINT':
@@ -2524,10 +2521,28 @@ function getAllowedFieldsListForAction(action) {
   }
 }
 
-function detectNonEditableFieldAttempt(action, text, draft = {}) {
+function isLogVisitLocationEdit(clean) {
+  const withoutDelivery = String(clean || '').replace(/\bdelivery\s+locations?\b/gi, ' ');
+  return (
+    /\b(?:change|edit|update|modify|set|alter|replace)\b(?:\s+\w+){0,4}\s+(?:the\s+)?(?:city|location|address)\b/i.test(withoutDelivery) ||
+    /\b(?:city|location|address)\s*(?:to|as|is|:|=)\s*\S/i.test(withoutDelivery) ||
+    /\b(?:city|location|address)\b(?:\s+\w+){0,3}\s+bad(?:lo|al)\b/i.test(withoutDelivery)
+  );
+}
+
+function detectNonEditableFieldAttempt(action, text, draft = {}, options = {}) {
   if (!text || typeof text !== 'string') return { isNonEditable: false };
   const clean = text.trim();
   if (!clean) return { isNonEditable: false };
+
+  if (options.lockVisitLocation && action === 'LOG_VISIT' && isLogVisitLocationEdit(clean)) {
+    return {
+      isNonEditable: true,
+      fieldName: 'City / Location',
+      message: '*Visit location cannot be edited before the visit is saved.*\n\n- The location is taken from the device or the WhatsApp location pin.',
+      allowedFieldsList: getAllowedFieldsListForAction(action),
+    };
+  }
 
   // Fast bypass: If user is explicitly targeting an editable field (notes, remarks, rate, qty, payment terms, delivery location, etc.)
   const isExplicitEditableField = /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|resolution\s*notes?|comments?|description|rate|price|target\s*price|bhav|quantity|qty|payment\s*terms?|delivery\s*location|location|city|person\s*met|contact\s*person|contact\s*phone|phone|mobile|visit\s*date|po\s*number|po\s*no|po\s*date|status|stage|preferred\s*make|make)\s*(?:to|as|is|:|=|\s+-)\s*/i.test(clean);
@@ -14582,7 +14597,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       return catalogSelectionResult(selectionRes);
     }
 
-    const initialPrompt = MODULE_PROMPTS[explicitAction];
+    const initialPrompt = explicitAction === 'LOG_VISIT'
+      ? logVisitOpeningPrompt(callerSourceChannel)
+      : MODULE_PROMPTS[explicitAction];
     if (initialPrompt) {
       await startNewCatalogSession(senderPhone, initialPrompt);
       await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: explicitAction });
@@ -15773,7 +15790,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // Check if user is attempting to edit a non-editable or system-generated field
-    const nonEditableCheckConfirm = detectNonEditableFieldAttempt(action, text, draft);
+    const nonEditableCheckConfirm = detectNonEditableFieldAttempt(action, text, draft, { lockVisitLocation: true });
     if (nonEditableCheckConfirm.isNonEditable) {
       await recordSessionMessage(senderPhone, 'user', text);
       const fullReply = nonEditableCheckConfirm.compactReply || `${nonEditableCheckConfirm.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheckConfirm.allowedFieldsList}\n\nWhich editable field would you like to change?`;
@@ -15793,7 +15810,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     if (action === 'LOG_VISIT') {
       attachVisitMedia(updatedDraft, attachmentObj, gpsData);
-      await fillVisitCity(updatedDraft);
+      await captureVisitLocation(updatedDraft, text, draft);
+      preserveVisitLocation(updatedDraft, draft);
     } else if (action === 'UPDATE_VISIT') {
       if (attachmentObj) {
         updatedDraft.updates = updatedDraft.updates || {};
@@ -15956,7 +15974,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // Check if user is attempting to edit a non-editable or system-generated field
-    const nonEditableCheck = detectNonEditableFieldAttempt(action, text, draft);
+    const nonEditableCheck = detectNonEditableFieldAttempt(action, text, draft, { lockVisitLocation: true });
     if (nonEditableCheck.isNonEditable) {
       await recordSessionMessage(senderPhone, 'user', text);
       const fullReply = nonEditableCheck.compactReply || `${nonEditableCheck.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheck.allowedFieldsList}\n\nWhich editable field would you like to change?`;
@@ -15987,7 +16005,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     if (action === 'LOG_VISIT') {
       attachVisitMedia(updatedDraft, attachmentObj, gpsData);
-      await fillVisitCity(updatedDraft);
+      await captureVisitLocation(updatedDraft, text, draft);
+      preserveVisitLocation(updatedDraft, draft);
     } else if (action === 'UPDATE_VISIT') {
       if (attachmentObj) {
         updatedDraft.updates = updatedDraft.updates || {};
@@ -17129,6 +17148,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         updatedDraft.gps_longitude = gpsData.longitude;
         updatedDraft.gps_accuracy = gpsData.accuracy;
       }
+      await captureVisitLocation(updatedDraft, text, existingDraft);
     } else if (action === 'UPDATE_VISIT') {
       if (attachmentObj) {
         updatedDraft.updates = updatedDraft.updates || {};
@@ -17478,7 +17498,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       return catalogSelectionResult(selectionRes);
     }
 
-    const initialPrompt = MODULE_PROMPTS[matchedAction];
+    const initialPrompt = matchedAction === 'LOG_VISIT'
+      ? logVisitOpeningPrompt(callerSourceChannel)
+      : MODULE_PROMPTS[matchedAction];
     if (initialPrompt) {
       await startNewCatalogSession(senderPhone, initialPrompt);
       await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: matchedAction });
@@ -17635,7 +17657,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const updatedDraft = await extractFieldsWithLLM('LOG_VISIT', text, initialVisitDraft);
 
     attachVisitMedia(updatedDraft, attachmentObj, gpsData);
-    await fillVisitCity(updatedDraft);
+    await captureVisitLocation(updatedDraft, text, initialVisitDraft);
 
     const nonEditableColdLog = detectNonEditableFieldAttempt('LOG_VISIT', text, updatedDraft);
     if (nonEditableColdLog.isNonEditable) {

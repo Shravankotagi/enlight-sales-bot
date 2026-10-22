@@ -228,7 +228,7 @@ test('reads a building and street from a Google geocode response', () => {
   };
   assert.equal(
     addressFromGoogleGeocode(girgaon),
-    'Girgaon Court, 12 Girgaon Road, Girgaon, Mumbai, Maharashtra, 400004',
+    'Girgaon Court, 12, Girgaon Road, Girgaon, Mumbai, Maharashtra 400004, India',
   );
   assert.equal(
     addressFromGoogleGeocode({
@@ -246,7 +246,24 @@ test('reads a building and street from a Google geocode response', () => {
         },
       ],
     }),
-    'Girgaon Road, Girgaon, Mumbai, Maharashtra, 400004',
+    'Girgaon Road, Girgaon, Mumbai, Maharashtra 400004, India',
+  );
+  assert.equal(
+    addressFromGoogleGeocode({
+      results: [
+        {
+          formatted_address:
+            'Enlight Office, Plot 12, MIDC Road, Bhosari, Pune, Maharashtra 411026, India',
+          types: ['street_address'],
+          address_components: [
+            { long_name: 'MIDC Road', types: ['route'] },
+            { long_name: 'Bhosari', types: ['sublocality_level_1', 'sublocality'] },
+            { long_name: 'Pune', types: ['locality', 'political'] },
+          ],
+        },
+      ],
+    }),
+    'Enlight Office, Plot 12, MIDC Road, Bhosari, Pune, Maharashtra 411026, India',
   );
   assert.equal(
     addressFromGoogleGeocode({

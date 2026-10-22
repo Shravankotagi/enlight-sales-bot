@@ -176,6 +176,7 @@ function addressFromGoogleGeocode(body) {
   if (!result) return '';
   const types = Array.isArray(result.types) ? result.types : [];
   const formatted = text(result.formatted_address);
+  if (formatted) return formatted;
   const premise = googleComponent(result, 'premise') || googleComponent(result, 'subpremise');
   const streetNumber = googleComponent(result, 'street_number');
   const route = googleComponent(result, 'route');
@@ -446,9 +447,21 @@ function nextVisitPrompts(draft) {
   } else if (!view.city && view.latitude != null) {
     prompts.push('City could not be read from the location. Type the city.');
   } else if (!view.city) {
-    prompts.push('Location pin or city. Share a location pin, or type the city if GPS is unavailable.');
+    prompts.push('Location is auto-fetched.');
   }
   return prompts;
+}
+
+function logVisitOpeningPrompt(sourceChannel) {
+  const channel = text(sourceChannel).toLowerCase();
+  const draft = channel === 'ai_assistant' ? { source_channel: 'ai_assistant' } : {};
+  return `**Log Customer Field Visit**
+
+Reply with all of these together. I will ask again only for anything still missing.
+
+${nextVisitPrompts(draft).map((item) => `- **${item}**`).join('\n')}
+
+After these details are complete, a code is sent to the customer.`;
 }
 
 function assertReadyToSave(draft) {
@@ -689,11 +702,27 @@ function visitRequiresLocationPin(source) {
   return channel !== 'ai_assistant' && channel !== 'web';
 }
 
+function explicitVisitLocation(message) {
+  const source = String(message || '');
+  const matches = [...source.matchAll(/(?:^|\n)\s*Location:\s*([^\n]+)/gi)];
+  if (!matches.length) return '';
+  return matches[matches.length - 1][1].replace(/\s*\[GPS:[^\]]*\]\s*$/i, '').trim();
+}
+
+function storeVisitAddress(draft, address) {
+  draft.city_location = address;
+  draft.city = address;
+  draft.visit_city_from_pin = true;
+  if (finiteNumber(draft.gps_latitude ?? draft.visit_latitude) != null) {
+    draft.location_source = 'gps';
+  }
+}
+
 async function fillVisitCity(draft) {
   const view = readDraft(draft);
   const pinOnly = visitRequiresLocationPin(draft);
   if (view.latitude == null || view.longitude == null) return draft;
-  if (view.city && (!pinOnly || draft.visit_city_from_pin)) return draft;
+  if (view.city && draft.visit_city_from_pin) return draft;
   const key = process.env.GOOGLE_MAPS_API_KEY;
   if (!key) return draft;
   try {
@@ -706,9 +735,7 @@ async function fillVisitCity(draft) {
       ? (addressFromGoogleGeocode(body) || cityFromGoogleGeocode(body))
       : '';
     if (location) {
-      draft.city_location = location;
-      draft.city = location;
-      draft.visit_city_from_pin = true;
+      storeVisitAddress(draft, location);
     } else if (pinOnly) {
       draft.city_location = '';
       draft.city = '';
@@ -717,6 +744,26 @@ async function fillVisitCity(draft) {
     if (pinOnly) {
       draft.city_location = '';
       draft.city = '';
+    }
+  }
+  return draft;
+}
+
+async function captureVisitLocation(draft, message, previous) {
+  if (!draft) return draft;
+  const explicit = explicitVisitLocation(message);
+  if (explicit) {
+    storeVisitAddress(draft, explicit);
+  } else if (!(previous && previous.visit_city_from_pin)) {
+    await fillVisitCity(draft);
+  }
+  if (!explicit && previous && previous.visit_city_from_pin) {
+    const previousAddress = text(previous.city_location || previous.city);
+    if (previousAddress) {
+      draft.city_location = previousAddress;
+      draft.city = previousAddress;
+      draft.visit_city_from_pin = true;
+      if (previous.location_source) draft.location_source = previous.location_source;
     }
   }
   return draft;
@@ -778,6 +825,42 @@ function attachVisitMedia(draft, attachment, gps) {
   return draft;
 }
 
+const VISIT_LOCATION_KEYS = [
+  'city_location',
+  'city',
+  'gps_latitude',
+  'gps_longitude',
+  'gps_accuracy',
+  'visit_latitude',
+  'visit_longitude',
+  'location_source',
+  'visit_city_from_pin',
+];
+
+function preserveVisitLocation(updated, original) {
+  if (!updated || !original) return updated;
+  const hadCity = text(original.city_location || original.city);
+  const hadCoords = finiteNumber(original.gps_latitude ?? original.visit_latitude) != null;
+  if (!hadCity && !hadCoords) return updated;
+  const captured = text(updated.city_location || updated.city);
+  const firstPin = Boolean(updated.visit_city_from_pin)
+    && !original.visit_city_from_pin
+    && captured
+    && (!hadCity || (captured.length > hadCity.length && captured.toLowerCase().includes(hadCity.toLowerCase())));
+  const pinnedAddress = firstPin ? captured : '';
+  const pinnedSource = firstPin ? updated.location_source : '';
+  for (const key of VISIT_LOCATION_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(original, key)) updated[key] = original[key];
+  }
+  if (pinnedAddress) {
+    updated.city_location = pinnedAddress;
+    updated.city = pinnedAddress;
+    updated.visit_city_from_pin = true;
+    if (pinnedSource) updated.location_source = pinnedSource;
+  }
+  return updated;
+}
+
 function promptsFromVisitState(state) {
   return nextVisitPrompts({
     company_name: state.customer_name,
@@ -815,6 +898,7 @@ module.exports = {
   VISIT_BRANDS,
   VISIT_PAYMENT_TERMS,
   nextVisitPrompts,
+  logVisitOpeningPrompt,
   assertReadyToSave,
   visitRowColumns,
   requestVisitCode,
@@ -822,6 +906,9 @@ module.exports = {
   consumeVisitCode,
   releaseVisitCode,
   fillVisitCity,
+  captureVisitLocation,
+  explicitVisitLocation,
+  preserveVisitLocation,
   addressFromNominatim,
   addressFromGoogleGeocode,
   visitOtpTemplatePayload,
