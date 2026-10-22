@@ -226,6 +226,10 @@ function readDraft(draft) {
   const email = text(source.email).toLowerCase();
   const latitude = finiteNumber(source.gps_latitude ?? source.visit_latitude);
   const longitude = finiteNumber(source.gps_longitude ?? source.visit_longitude);
+  const typedCity = text(source.city_location || source.city || source.location);
+  const city = visitRequiresLocationPin(source) && (latitude == null || longitude == null)
+    ? ''
+    : typedCity;
   const action = text(source.followup_action || source.follow_up_action);
   const followFromField = storedOrRelativeVisitDate(source.follow_up_date || source.followup_date);
   const followDate = followFromField || resolveRelativeVisitDate(action) || text(source.follow_up_date || source.followup_date);
@@ -236,7 +240,7 @@ function readDraft(draft) {
     designation: text(source.designation),
     phone,
     email: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '',
-    city: text(source.city_location || source.city || source.location),
+    city,
     visitDate: text(source.visit_date || source.visit_date_display),
     customerType: canonical(VISIT_CUSTOMER_TYPES, source.customer_type),
     visitType: canonical(VISIT_TYPES, source.visit_type),
@@ -279,7 +283,11 @@ function writeDraft(draft, view) {
   if (view.payment) draft.payment_terms = view.payment;
   if (view.nextPurchase) draft.next_purchase_expected = view.nextPurchase;
   if (view.followDate) draft.follow_up_date = view.followDate;
-  if (view.city) {
+  if (visitRequiresLocationPin(draft) && (view.latitude == null || view.longitude == null)) {
+    draft.city_location = '';
+    draft.city = '';
+    draft.location_source = null;
+  } else if (view.city) {
     draft.city_location = view.city;
     draft.city = view.city;
   }
@@ -431,7 +439,11 @@ function nextVisitPrompts(draft) {
   if (visitImageWaitingForPin(draft, view)) {
     prompts.unshift('Share a location pin first, then send the visit photo from the camera.');
   }
-  if (!view.city && view.latitude != null) {
+  if (visitRequiresLocationPin(draft)) {
+    if (view.latitude == null || view.longitude == null) {
+      prompts.push('Share a WhatsApp location pin.');
+    }
+  } else if (!view.city && view.latitude != null) {
     prompts.push('City could not be read from the location. Type the city.');
   } else if (!view.city) {
     prompts.push('Location pin or city. Share a location pin, or type the city if GPS is unavailable.');
@@ -672,9 +684,16 @@ async function releaseVisitCode(supabase, id) {
   await patchVisitCode(supabase, id, { consumed_at: null });
 }
 
+function visitRequiresLocationPin(source) {
+  const channel = text(source?.source_channel || source?.channel).toLowerCase();
+  return channel !== 'ai_assistant' && channel !== 'web';
+}
+
 async function fillVisitCity(draft) {
   const view = readDraft(draft);
-  if (view.city || view.latitude == null || view.longitude == null) return draft;
+  const pinOnly = visitRequiresLocationPin(draft);
+  if (view.latitude == null || view.longitude == null) return draft;
+  if (view.city && (!pinOnly || draft.visit_city_from_pin)) return draft;
   const key = process.env.GOOGLE_MAPS_API_KEY;
   if (!key) return draft;
   try {
@@ -682,16 +701,23 @@ async function fillVisitCity(draft) {
       `https://maps.googleapis.com/maps/api/geocode/json?latlng=${encodeURIComponent(`${view.latitude},${view.longitude}`)}&key=${encodeURIComponent(key)}`,
       { headers: { Accept: 'application/json' } },
     );
-    if (!response.ok) return draft;
-    const body = await response.json();
-    if (body?.status !== 'OK') return draft;
-    const location = addressFromGoogleGeocode(body) || cityFromGoogleGeocode(body);
+    const body = response.ok ? await response.json() : null;
+    const location = body?.status === 'OK'
+      ? (addressFromGoogleGeocode(body) || cityFromGoogleGeocode(body))
+      : '';
     if (location) {
       draft.city_location = location;
       draft.city = location;
+      draft.visit_city_from_pin = true;
+    } else if (pinOnly) {
+      draft.city_location = '';
+      draft.city = '';
     }
   } catch {
-    // A typed city remains available when the lookup fails.
+    if (pinOnly) {
+      draft.city_location = '';
+      draft.city = '';
+    }
   }
   return draft;
 }
@@ -781,6 +807,7 @@ function promptsFromVisitState(state) {
     gps_latitude: state.gps_latitude,
     gps_longitude: state.gps_longitude,
     verification_token: state.verification_token,
+    source_channel: state.source_channel || 'ai_assistant',
   });
 }
 

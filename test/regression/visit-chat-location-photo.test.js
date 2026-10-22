@@ -124,3 +124,38 @@ test('an assistant camera photo with coordinates is the visit photo', () => {
   assert.equal(draft.gps_longitude, 73.85);
   assert.equal(draft.location_source, 'gps');
 });
+
+test('a typed city does not count as a WhatsApp visit location', () => {
+  const draft = { city_location: 'Pune', delivery_location: 'Pune' };
+  const prompts = nextVisitPrompts(draft);
+
+  assert.ok(prompts.includes('Share a WhatsApp location pin.'));
+  assert.equal(draft.city_location, '');
+  assert.equal(draft.location_source, null);
+  assert.equal(draft.delivery_location, 'Pune');
+});
+
+test('a typed city still counts on the assistant', () => {
+  const draft = { city_location: 'Pune', source_channel: 'ai_assistant' };
+  const prompts = nextVisitPrompts(draft);
+
+  assert.equal(prompts.includes('Share a WhatsApp location pin.'), false);
+  assert.equal(draft.city_location, 'Pune');
+  assert.equal(draft.location_source, 'manual');
+});
+
+test('a WhatsApp pin replaces a typed city with the geocoded address', async () => {
+  process.env.GOOGLE_MAPS_API_KEY = 'test-key';
+  globalThis.fetch = async () => geocodeResponse();
+  const draft = {
+    city_location: 'Pune',
+    location_source: 'gps',
+    gps_latitude: 18.6298,
+    gps_longitude: 73.7997,
+  };
+
+  await fillVisitCity(draft);
+
+  assert.equal(draft.gps_latitude, 18.6298);
+  assert.equal(draft.city_location, 'Plant 2, Bhosari, Pune, Maharashtra');
+});
