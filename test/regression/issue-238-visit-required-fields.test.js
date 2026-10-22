@@ -133,7 +133,7 @@ test('a visit is not inserted until the fields, photo, and correct code are pres
   assert.equal(visits[0].preferred_make_other, 'Local mill');
   assert.equal(visits[0].payment_terms, '30 Days');
   assert.equal(visits[0].follow_up_date, futureFollowUp.iso);
-  assert.equal(readyForCode.follow_up_date, futureFollowUp.dmy);
+  assert.equal(readyForCode.follow_up_date, futureFollowUp.iso);
   assert.equal(visits.length, 1);
 });
 

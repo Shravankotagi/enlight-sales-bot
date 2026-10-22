@@ -15,7 +15,7 @@ const realSupabase = require('../../src/supabase');
  *   llm         (messages) => string; defaults to throwing so unexpected
  *               model calls fail the test
  */
-function loadCatalogFlow({ tables = {}, employees = {}, scope, llm } = {}) {
+function loadCatalogFlow({ tables = {}, employees = {}, scope, llm, envelope } = {}) {
   const db = createSupabaseMock({ tables });
   const sessions = new Map();
   const events = [];
@@ -54,7 +54,10 @@ function loadCatalogFlow({ tables = {}, employees = {}, scope, llm } = {}) {
     async startNewCatalogSession(phone, reply) { events.push({ type: 'startNewCatalogSession', reply }); },
     async recordSessionMessage(phone, role, text, meta) { events.push({ type: 'message', role, text, meta }); },
     async finalizeCurrentSession(phone, summary) { events.push({ type: 'finalizeCurrentSession', summary }); },
-    async getSessionEnvelope() { return null; },
+    async getSessionEnvelope(phone) {
+      if (typeof envelope === 'function') return envelope(phone);
+      return envelope || null;
+    },
     async getScopedSessionContext() { return null; },
     async clearActiveSession(phone) { sessions.delete(last10(phone)); },
   };
