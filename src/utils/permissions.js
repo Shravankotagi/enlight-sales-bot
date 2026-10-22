@@ -68,7 +68,8 @@ async function resolvePermissions(phone) {
     if (!roleError && roleRow) {
       if (roleRow.is_active === false) {
         value = builtinFor('salesperson', employee.permissions);
-      } else {
+      } else if (!builtin.templates[roleId]) {
+        // Custom roles: use custom roleRow permissions and scope from database
         const scope = ['own', 'team', 'all'].includes(roleRow.data_scope)
           ? roleRow.data_scope
           : 'own';
@@ -80,6 +81,9 @@ async function resolvePermissions(phone) {
           isActive: true,
           employee,
         };
+      } else {
+        // Builtin fixed roles: keep fixed permissions, just carry display roleName if present
+        value.roleName = roleRow.name || value.role;
       }
     }
     value.employee = employee;
