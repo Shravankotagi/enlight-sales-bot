@@ -133,3 +133,67 @@ test('replying 1, 2, 3, or yes to customer validation continues original flow wi
   assert.ok(savedStateName.includes('"company_name":"Rajeshwari industries"'));
   assert.ok(savedStateName.includes('"_customer_verified":true'));
 });
+
+test('inquiry with 90 days payment terms retains 90 Days and does not ask again after customer confirmation', async (t) => {
+  const PHONE = '919822000001';
+  const candidates = ['rajesh company', 'Rajeshwari industries', 'Rajeshwari Shah Industries'];
+  const fetchedName = 'rajesh company';
+  const draft = {
+    company_name: fetchedName,
+    email: 'xyz@gmail.com',
+    product_description: 'HR plate 3*250*2500',
+    line_items: [{ sku_text: 'HR Plate', spec: '3*250*2500', quantity: 1, unit: 'MT' }],
+    payment_terms: '90 Days',
+    delivery_location: 'Satara',
+  };
+
+  const h = loadCatalogFlow();
+  t.after(h.restore);
+
+  // When customer validation triggers with 90 Days payment terms already in draft
+  h.setSession(
+    PHONE,
+    `catalog_cust_match_confirm|LOG_INQUIRY|${fetchedName}|${JSON.stringify(candidates)}|${JSON.stringify(draft)}`
+  );
+
+  // User replies "1" to pick customer #1
+  const res = await h.catalogFlow.handleCatalogFlow('1', PHONE);
+  assert.equal(res.handled, true);
+  // Must NOT ask for Payment Terms again!
+  assert.doesNotMatch(res.reply, /Please provide the remaining mandatory details.*Payment Terms/is);
+  // Must go directly to confirmation summary with 90 Days captured
+  assert.match(res.reply, /Payment Terms:\* 90 Days/i);
+  assert.match(res.reply, /Customer \/ Company:\* rajesh company/i);
+  assert.match(res.reply, /Delivery Location:\* Satara/i);
+  const savedState = h.getSession(PHONE).last_intent;
+  assert.ok(savedState.startsWith('catalog_confirm|LOG_INQUIRY|'));
+  assert.ok(savedState.includes('"payment_terms":"90 Days"'));
+});
+
+test('filling missing payment terms with "90 days" or "90 dyas" captures 90 Days and never 30 Days', async (t) => {
+  const PHONE = '919822000001';
+  const draft = {
+    company_name: 'rajesh company',
+    email: 'xyz@gmail.com',
+    product_description: 'HR plate 3*250*2500',
+    line_items: [{ sku_text: 'HR Plate', spec: '3*250*2500', quantity: 1, unit: 'MT' }],
+    delivery_location: 'Satara',
+    _customer_verified: true,
+  };
+
+  const h = loadCatalogFlow();
+  t.after(h.restore);
+
+  h.setSession(PHONE, `catalog_flow|LOG_INQUIRY|${JSON.stringify(draft)}`);
+  const res = await h.catalogFlow.handleCatalogFlow('90 days', PHONE);
+  assert.equal(res.handled, true);
+  assert.doesNotMatch(res.reply, /Payment Terms:\* 30 Days/i);
+  assert.match(res.reply, /Payment Terms:\* 90 Days/i);
+
+  // Also test typo "90 dyas"
+  h.setSession(PHONE, `catalog_flow|LOG_INQUIRY|${JSON.stringify(draft)}`);
+  const resTypo = await h.catalogFlow.handleCatalogFlow('90 dyas', PHONE);
+  assert.equal(resTypo.handled, true);
+  assert.doesNotMatch(resTypo.reply, /Payment Terms:\* 30 Days/i);
+  assert.match(resTypo.reply, /Payment Terms:\* 90 Days/i);
+});

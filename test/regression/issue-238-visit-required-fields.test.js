@@ -58,7 +58,7 @@ test('a new visit asks for every missing field together', () => {
   assert.ok(prompts.some((item) => item.includes('Location pin or city')));
 
   const remaining = nextVisitPrompts(completeDraft({ email: '', payment_terms: '' }));
-  assert.deepEqual(remaining, ['Email', 'Payment Terms: Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC']);
+  assert.deepEqual(remaining, ['Email', 'Payment Terms: Immediate, Advance, 30 Days, 45 Days, 60 Days, 90 Days, LC, BG, PDC']);
 });
 
 test('LOG_VISIT validation asks for every missing field together', (t) => {

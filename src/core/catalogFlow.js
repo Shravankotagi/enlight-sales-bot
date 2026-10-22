@@ -1119,7 +1119,7 @@ function getCatalogMenuSections(isAuthorizedForVisits = true) {
 
 // ── MODULE COLLECTION PROMPTS ────────────────────────────────────────────────
 
-const INQUIRY_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60 Days', 'LC', 'BG', 'PDC'];
+const INQUIRY_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60 Days', '90 Days', 'LC', 'BG', 'PDC'];
 const INQUIRY_PREFERRED_MAKES = ['TATA', 'JSW', 'AM/NS India', 'SAIL', 'NMDC', 'Apollo', 'Others'];
 
 function normInquiryOpt(value) {
@@ -1132,9 +1132,15 @@ function inquiryOptDistance(a, b) {
   for (let j = 0; j <= b.length; j++) dp[0][j] = j;
   for (let i = 1; i <= a.length; i++) {
     for (let j = 1; j <= b.length; j++) {
-      dp[i][j] = a[i - 1] === b[j - 1]
-        ? dp[i - 1][j - 1]
-        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        dp[i][j] = Math.min(dp[i][j], dp[i - 2][j - 2] + 1);
+      }
     }
   }
   return dp[a.length][b.length];
@@ -1173,10 +1179,16 @@ function matchInquiryOption(raw, options) {
   if (hits.size > 1) return null;
   if (words.length <= 3) {
     const joined = words.join('');
+    const inputDigits = (joined.match(/\d+/) || [])[0];
     let best = null;
     let bestDist = 99;
     for (const opt of options) {
       const no = normInquiryOpt(opt);
+      const optDigits = (no.match(/\d+/) || [])[0];
+      // Numeric options (e.g. 30, 45, 60, 90) must match their digits exactly; never fuzzy match different numbers
+      if (inputDigits || optDigits) {
+        if (inputDigits !== optDigits) continue;
+      }
       if (no.length <= 3) continue;
       if (Math.abs(no.length - joined.length) > 2) continue;
       if (Math.min(no.length, joined.length) / Math.max(no.length, joined.length) < 0.7) continue;
@@ -1202,7 +1214,17 @@ function pickInquiryOptionFromReply(text, options) {
   }
   if (raw.split(/\s+/).length <= 3) {
     const hit = matchInquiryOption(raw, options);
-    return hit || '';
+    if (hit) return hit;
+  }
+  // Check comma / semicolon / newline separated segments (e.g. "Customer, email, product, 90 days, location")
+  const parts = raw.split(/[,;\r\n]+/);
+  if (parts.length > 1) {
+    for (const part of parts) {
+      const cleanPart = part.trim();
+      if (!cleanPart || cleanPart.split(/\s+/).length > 3) continue;
+      const partHit = matchInquiryOption(cleanPart, options);
+      if (partHit) return partHit;
+    }
   }
   return '';
 }
@@ -1265,7 +1287,7 @@ Please provide the following details:
 - **Product Description / Quantity:** *
 - **Rate:** (optional)
 - **Preferred Brand:** (optional) TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others
-- **Payment Terms:** * Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC
+- **Payment Terms:** * Immediate, Advance, 30 Days, 45 Days, 60 Days, 90 Days, LC, BG, PDC
 - **Delivery Location:** *
 - **Additional Notes:** (optional)
 
@@ -1281,7 +1303,7 @@ Which fields do you want to update? Mention the field name and new value.
 - Product Description / Quantity / Specification (e.g. 8mm, 78 MT)
 - Rate
 - Preferred Brand (TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others)
-- Payment Terms (Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC)
+- Payment Terms (Immediate, Advance, 30 Days, 45 Days, 60 Days, 90 Days, LC, BG, PDC)
 - Delivery Location
 - Email ID
 - Additional Notes
@@ -2148,7 +2170,7 @@ LOG_INQUIRY:
   "product_description": "<Summary of all products/quantities, else null>",
   "rate": <numeric target rate/price per unit if mentioned, else null>,
   "preferred_make": "<one of TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others, else null>",
-  "payment_terms": "<one of Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC, else null>",
+  "payment_terms": "<one of Immediate, Advance, 30 Days, 45 Days, 60 Days, 90 Days, LC, BG, PDC, else null>",
   "delivery_location": "<e.g. Chakan Pune, Taloja, Aurangabad, else null>",
   "additional_notes": "<Exact literal text provided by user. NEVER summarize, rephrase, or alter user notes, else null>",
   "line_items": [
@@ -2191,7 +2213,7 @@ UPDATE_INQUIRY:
     "product_description": "<if user requested general product text update, else null>",
     "rate": <numeric rate ONLY if a single overall rate was specified without mentioning product names, else null>,
     "preferred_make": "<one of TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others if update requested, else null>",
-    "payment_terms": "<one of Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC if update requested, else null>",
+    "payment_terms": "<one of Immediate, Advance, 30 Days, 45 Days, 60 Days, 90 Days, LC, BG, PDC if update requested, else null>",
     "delivery_location": "<if user requested update, else null>",
     "email": "<Customer email if update requested, else null>",
     "additional_notes": "<Exact literal text provided by user if update requested. NEVER summarize, rephrase, or alter user notes, else null>",
@@ -2550,8 +2572,8 @@ User Message:
     console.error('[CatalogFlow] LLM extraction error:', err.message);
   }
 
+  const fallbackParsed = {};
   if (verbatimNotes) {
-    const fallbackParsed = {};
     if (action === 'LOG_INQUIRY') {
       fallbackParsed.additional_notes = verbatimNotes;
     } else if (action === 'UPDATE_INQUIRY') {
@@ -2563,6 +2585,30 @@ User Message:
       fallbackParsed.updates = { meeting_remarks: verbatimNotes };
       fallbackParsed.meeting_remarks = verbatimNotes;
     }
+  }
+
+  if (action === 'LOG_INQUIRY' || action === 'UPDATE_INQUIRY') {
+    const optPayment = pickInquiryOptionFromReply(userInput, INQUIRY_PAYMENT_TERMS);
+    if (optPayment) {
+      if (action === 'LOG_INQUIRY') fallbackParsed.payment_terms = optPayment;
+      else {
+        fallbackParsed.updates = fallbackParsed.updates || {};
+        fallbackParsed.updates.payment_terms = optPayment;
+        fallbackParsed.payment_terms = optPayment;
+      }
+    }
+    const optMake = pickInquiryOptionFromReply(userInput, INQUIRY_PREFERRED_MAKES);
+    if (optMake) {
+      if (action === 'LOG_INQUIRY') fallbackParsed.preferred_make = optMake;
+      else {
+        fallbackParsed.updates = fallbackParsed.updates || {};
+        fallbackParsed.updates.preferred_make = optMake;
+        fallbackParsed.preferred_make = optMake;
+      }
+    }
+  }
+
+  if (Object.keys(fallbackParsed).length > 0) {
     return mergeDraft(action, existingDraft, fallbackParsed, userInput);
   }
 
@@ -18428,6 +18474,8 @@ module.exports = {
   handleResumeMenuButton,
   getAllowedFieldsListForAction,
   matchInquiryOption,
+  pickInquiryOptionFromReply,
+  INQUIRY_PAYMENT_TERMS,
   getEditPromptForAction,
   scoreLineItemAgainstUpdate,
   matchLineItemUpdate,

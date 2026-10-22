@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 
 const VISIT_BRANDS = ['TATA', 'JSW', 'AM/NS India', 'SAIL', 'NMDC', 'Apollo', 'Others'];
-const VISIT_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60 Days', 'LC', 'BG', 'PDC'];
+const VISIT_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60 Days', '90 Days', 'LC', 'BG', 'PDC'];
 const VISIT_CUSTOMER_TYPES = ['OEM', 'Fabricator', 'EPC', 'Manufacturer', 'Trader'];
 const VISIT_TYPES = ['First Visit', 'Follow-up 1', 'Follow-up 2', 'Follow-up 3', 'Regular Visit'];
 const VISIT_OUTCOMES = ['Positive', 'Neutral', 'Negative'];
@@ -62,6 +62,7 @@ function canonicalPayment(value) {
   if (/\b30\b/.test(raw)) return '30 Days';
   if (/\b45\b/.test(raw)) return '45 Days';
   if (/\b60\b/.test(raw)) return '60 Days';
+  if (/\b90\b/.test(raw)) return '90 Days';
   if (/\blc\b/.test(raw)) return 'LC';
   if (/\bbg\b/.test(raw)) return 'BG';
   if (/\bpdc\b/.test(raw)) return 'PDC';
