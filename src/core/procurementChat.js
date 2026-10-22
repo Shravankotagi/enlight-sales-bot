@@ -79,6 +79,8 @@ function sourceLines(inquiry) {
     sku_text: item.sku_text || item.description || 'Material',
     quantity: Number(item.original_quantity ?? item.quantity ?? item.qty) || 0,
     unit: item.original_unit || item.unit || 'MT',
+    dimensions: item.dimensions || item.spec || null,
+    weight_mt: item.weight_mt ?? item.converted_mt ?? null,
   }));
 }
 

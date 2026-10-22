@@ -10172,6 +10172,9 @@ async function executeAction(action, draft, senderPhone) {
             media_urls: inquirySourceMediaUrls,
             sender_phone: senderPhone,
             salesperson_phone: senderPhone,
+            ...(procurementStamp.salesperson_employee_id
+              ? { employee_id: procurementStamp.salesperson_employee_id }
+              : {}),
             status: 'new_inquiry',
             stage: 'new_inquiry',
             delivery_location: draft.delivery_location || null,
@@ -10191,11 +10194,12 @@ async function executeAction(action, draft, senderPhone) {
           .insert(inquiryInsert)
           .select()
           .single();
-        if (inqErr && /procurement_number|pricing_status|procurement_employee_id|procurement_assigned_at/i.test(inqErr.message || '')) {
+        if (inqErr && /procurement_number|pricing_status|procurement_employee_id|procurement_assigned_at|\bemployee_id\b/i.test(inqErr.message || '')) {
           delete inquiryInsert.pricing_status;
           delete inquiryInsert.procurement_number;
           delete inquiryInsert.procurement_employee_id;
           delete inquiryInsert.procurement_assigned_at;
+          if (/\bemployee_id\b/i.test(inqErr.message || '')) delete inquiryInsert.employee_id;
           ({ data: inqRow, error: inqErr } = await supabase.from('inquiries').insert(inquiryInsert).select().single());
         }
 
