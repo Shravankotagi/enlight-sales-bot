@@ -39,6 +39,7 @@ const {
   releaseVisitCode,
   fillVisitCity,
   attachVisitMedia,
+  visitPhotoAccepted,
 } = require('./visitRequirements');
 const {
   detectHsnCode,
@@ -137,6 +138,8 @@ function extractPhotoAndGps(rawText, options = {}) {
       name: options.name || options.fileName || `attachment-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
       url: photoDataUrl,
       type: mimeType,
+      photoSource: options.photoSource || '',
+      messageType: options.messageType || (isPdf ? 'document' : ''),
       uploaded_at: new Date().toISOString(),
       ...(gpsData ? { gps: gpsData } : {}),
     };
@@ -2281,7 +2284,8 @@ LOG_VISIT:
   "meeting_remarks": "<meeting remarks & requirements discussed, else null>",
   "email": "<email address if mentioned, else null>",
   "designation": "<job title / designation if mentioned, else null>",
-  "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader if mentioned, else null>",
+  "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader | Other if mentioned, else null>",
+  "customer_type_other": "<the customer type text when customer type is Other, else null>",
   "visit_type": "<First Visit | Follow-up 1 | Follow-up 2 | Follow-up 3 | Regular Visit if mentioned, else null>",
   "customer_probability": "<Hot | Warm | Cold if mentioned, else null>",
   "product_details": "<detailed product specifications or grades discussed, else null>",
@@ -2321,7 +2325,8 @@ UPDATE_VISIT:
     "status": "<Completed | Follow-up Pending | Cancelled if updated, else null>",
     "email": "<Email if updated, else null>",
     "designation": "<Designation if updated, else null>",
-    "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader if updated, else null>",
+    "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader | Other if updated, else null>",
+    "customer_type_other": "<the customer type text when customer type is Other, else null>",
     "visit_type": "<First Visit | Follow-up 1-3 | Regular Visit if updated, else null>",
     "customer_probability": "<Hot | Warm | Cold if updated, else null>",
     "product_details": "<Product Details if updated, else null>",
@@ -4639,6 +4644,7 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.email && !merged.updates.email) merged.updates.email = newExtracted.email;
     if (newExtracted.designation && !merged.updates.designation) merged.updates.designation = newExtracted.designation;
     if (newExtracted.customer_type && !merged.updates.customer_type) merged.updates.customer_type = newExtracted.customer_type;
+    if (newExtracted.customer_type_other && !merged.updates.customer_type_other) merged.updates.customer_type_other = newExtracted.customer_type_other;
     if (newExtracted.visit_type && !merged.updates.visit_type) merged.updates.visit_type = newExtracted.visit_type;
     if (newExtracted.customer_probability && !merged.updates.customer_probability) merged.updates.customer_probability = newExtracted.customer_probability;
     if (newExtracted.product_details && !merged.updates.product_details) merged.updates.product_details = newExtracted.product_details;
@@ -10006,7 +10012,12 @@ function buildConfirmationSummary(action, draft) {
       summary += `• *Meeting Remarks:* ${draft.meeting_remarks || '-'}\n`;
       if (draft.designation) summary += `• *Designation:* ${draft.designation}\n`;
       if (draft.email) summary += `• *Email:* ${draft.email}\n`;
-      if (draft.customer_type) summary += `• *Customer Type:* ${draft.customer_type}\n`;
+      if (draft.customer_type) {
+        const customerTypeLabel = draft.customer_type === 'Other' && draft.customer_type_other
+          ? draft.customer_type_other
+          : draft.customer_type;
+        summary += `• *Customer Type:* ${customerTypeLabel}\n`;
+      }
       if (draft.visit_type) summary += `• *Visit Type:* ${draft.visit_type}\n`;
       if (draft.customer_probability) summary += `• *Customer Probability:* ${draft.customer_probability}\n`;
       if (draft.product_details) summary += `• *Product Details:* ${draft.product_details}\n`;
@@ -12308,7 +12319,12 @@ async function executeAction(action, draft, senderPhone) {
         let extDetails = '';
         if (draft.designation) extDetails += `• *Designation:* ${draft.designation}\n`;
         if (draft.email) extDetails += `• *Email:* ${draft.email}\n`;
-        if (draft.customer_type) extDetails += `• *Customer Type:* ${draft.customer_type}\n`;
+        if (draft.customer_type) {
+          const customerTypeLabel = draft.customer_type === 'Other' && draft.customer_type_other
+            ? draft.customer_type_other
+            : draft.customer_type;
+          extDetails += `• *Customer Type:* ${customerTypeLabel}\n`;
+        }
         if (draft.visit_type) extDetails += `• *Visit Type:* ${draft.visit_type}\n`;
         if (draft.customer_probability) extDetails += `• *Customer Probability:* ${draft.customer_probability}\n`;
         if (draft.monthly_consumption) extDetails += `• *Monthly Consumption:* ${draft.monthly_consumption}\n`;
@@ -12486,6 +12502,13 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.email) visitUpdates.email = updates.email;
         if (updates.designation) visitUpdates.designation = updates.designation;
         if (updates.customer_type) visitUpdates.customer_type = updates.customer_type;
+        if (updates.customer_type === 'Other') {
+          visitUpdates.customer_type_other = updates.customer_type_other || null;
+        } else if (updates.customer_type) {
+          visitUpdates.customer_type_other = null;
+        } else if (updates.customer_type_other) {
+          visitUpdates.customer_type_other = updates.customer_type_other;
+        }
         if (updates.visit_type) visitUpdates.visit_type = updates.visit_type;
         if (updates.customer_probability) visitUpdates.customer_probability = updates.customer_probability;
         if (updates.product_details) visitUpdates.product_details = updates.product_details;
@@ -12515,18 +12538,22 @@ async function executeAction(action, draft, senderPhone) {
 
         const existingUrls = new Set(existingAttachments.map(a => a && a.url).filter(Boolean));
         const distinctNew = newAttachmentsToAdd.filter(a => a && a.url && !existingUrls.has(a.url));
-
-        if (distinctNew.length > 0) {
-          visitUpdates.attachments = [...existingAttachments, ...distinctNew];
-          // Never replace previously added pic: only populate gps_photo_url if not set
-          if (!targetVisit.gps_photo_url) {
-            visitUpdates.gps_photo_url = distinctNew[0].url;
-          }
-        }
-
         const updLat = updates.gps_latitude ?? draft.gps_latitude;
         const updLng = updates.gps_longitude ?? draft.gps_longitude;
         const updAcc = updates.gps_accuracy ?? draft.gps_accuracy;
+
+        if (distinctNew.length > 0) {
+          visitUpdates.attachments = [...existingAttachments, ...distinctNew];
+          // Never replace previously added pic: only a camera photo with coordinates fills it.
+          if (!targetVisit.gps_photo_url) {
+            const photo = distinctNew.find((item) => visitPhotoAccepted(
+              { gps_latitude: targetVisit.gps_latitude ?? updLat, gps_longitude: targetVisit.gps_longitude ?? updLng },
+              item,
+              typeof updLat === 'number' ? { latitude: updLat, longitude: updLng } : null,
+            ));
+            if (photo) visitUpdates.gps_photo_url = photo.url;
+          }
+        }
         if (typeof updLat === 'number' && typeof updLng === 'number') {
           if (!targetVisit.gps_latitude || !targetVisit.gps_longitude) {
             visitUpdates.gps_latitude = updLat;
@@ -17588,7 +17615,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         if (!prevAtts.some(a => a && a.url === attachmentObj.url)) {
           updatedDraft.attachments = [...prevAtts, attachmentObj];
         }
-        if (!updatedDraft.gps_photo_url && !existingDraft.gps_photo_url) {
+        const photoDraft = updatedDraft.gps_latitude != null ? updatedDraft : existingDraft;
+        if (
+          !updatedDraft.gps_photo_url &&
+          !existingDraft.gps_photo_url &&
+          visitPhotoAccepted(photoDraft, attachmentObj, gpsData)
+        ) {
           updatedDraft.gps_photo_url = attachmentObj.url;
         }
       }
@@ -18106,8 +18138,6 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   if (isColdVisitIntent) {
     const initialVisitDraft = {
       action: 'LOG_VISIT',
-      ...(photoDataUrl ? { gps_photo_url: photoDataUrl } : {}),
-      ...(attachmentObj ? { attachments: [attachmentObj] } : {}),
       ...(gpsData ? {
         gps_latitude: gpsData.latitude,
         gps_longitude: gpsData.longitude,
@@ -18118,17 +18148,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     await recordSessionMessage(senderPhone, 'user', text);
     const updatedDraft = await extractFieldsWithLLM('LOG_VISIT', text, initialVisitDraft);
 
-    if (photoDataUrl && !updatedDraft.gps_photo_url) updatedDraft.gps_photo_url = photoDataUrl;
-    if (attachmentObj) {
-      if (!Array.isArray(updatedDraft.attachments) || updatedDraft.attachments.length === 0) {
-        updatedDraft.attachments = [attachmentObj];
-      }
-    }
-    if (gpsData && (updatedDraft.gps_latitude === undefined || updatedDraft.gps_latitude === null)) {
-      updatedDraft.gps_latitude = gpsData.latitude;
-      updatedDraft.gps_longitude = gpsData.longitude;
-      updatedDraft.gps_accuracy = gpsData.accuracy;
-    }
+    attachVisitMedia(updatedDraft, attachmentObj, gpsData);
+    await fillVisitCity(updatedDraft);
 
     const nonEditableColdLog = detectNonEditableFieldAttempt('LOG_VISIT', text, updatedDraft);
     if (nonEditableColdLog.isNonEditable) {

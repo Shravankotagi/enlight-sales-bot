@@ -8,9 +8,29 @@ const {
   visitRowColumns,
   requestVisitCode,
   verifyVisitCode,
+  visitOtpTemplatePayload,
   addressFromNominatim,
   addressFromGoogleGeocode,
 } = require('../../src/core/visitRequirements');
+
+function calendarShift(days) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const year = Number(parts.find((part) => part.type === 'year').value);
+  const month = Number(parts.find((part) => part.type === 'month').value);
+  const day = Number(parts.find((part) => part.type === 'day').value);
+  const date = new Date(Date.UTC(year, month - 1, day + days));
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(date.getUTCDate()).padStart(2, '0');
+  return { iso: `${y}-${m}-${d}`, dmy: `${d}-${m}-${y}` };
+}
+
+const futureFollowUp = calendarShift(7);
 
 function completeDraft(overrides = {}) {
   return {
@@ -34,7 +54,7 @@ function completeDraft(overrides = {}) {
     preferred_make_other: 'Local mill',
     payment_terms: '30 days credit',
     followup_action: 'Send quote',
-    follow_up_date: '20-10-2026',
+    follow_up_date: futureFollowUp.dmy,
     meeting_remarks: 'Discussed rates',
     gps_photo_url: 'data:image/jpeg;base64,abc',
     gps_latitude: 18.5,
@@ -90,12 +110,13 @@ test('a visit is not inserted until the fields, photo, and correct code are pres
   assert.equal(saveIfReady(readyForCode), false);
 
   const db = createSupabaseMock({ tables: { visit_phone_verifications: [] } });
-  let sentBody = '';
-  const sent = await requestVisitCode(db.client, '9822012345', async (_to, body) => {
-    sentBody = body;
+  let sentPayload = null;
+  const sent = await requestVisitCode(db.client, '9822012345', async (_to, payload) => {
+    sentPayload = payload;
   });
   assert.equal(sent.ok, true);
-  const otp = sentBody.match(/\*(\d{6})\*/)[1];
+  assert.equal(sentPayload.type, 'template');
+  const otp = sentPayload.template.components[0].parameters[0].text;
   const wrongCode = otp === '000000' ? '111111' : '000000';
   const wrong = await verifyVisitCode(db.client, '98220 12345', wrongCode);
   assert.equal(wrong.ok, false);
@@ -111,9 +132,23 @@ test('a visit is not inserted until the fields, photo, and correct code are pres
   assert.equal(visits[0].preferred_make, 'TATA, Others');
   assert.equal(visits[0].preferred_make_other, 'Local mill');
   assert.equal(visits[0].payment_terms, '30 Days');
-  assert.equal(visits[0].follow_up_date, '2026-10-20');
-  assert.equal(readyForCode.follow_up_date, '20-10-2026');
+  assert.equal(visits[0].follow_up_date, futureFollowUp.iso);
+  assert.equal(readyForCode.follow_up_date, futureFollowUp.dmy);
   assert.equal(visits.length, 1);
+});
+
+test('sends the visit code as an authentication template', () => {
+  const payload = visitOtpTemplatePayload(
+    '919822012345',
+    '123456',
+    'visit_verification_code',
+  );
+  assert.equal(payload.type, 'template');
+  assert.equal(payload.template.name, 'visit_verification_code');
+  assert.equal(payload.template.language.code, 'en');
+  assert.equal(payload.template.components[0].parameters[0].text, '123456');
+  assert.equal(payload.template.components[1].parameters[0].text, '123456');
+  assert.equal(payload.text, undefined);
 });
 
 test('reads a full address from a reverse-geocode response', () => {
