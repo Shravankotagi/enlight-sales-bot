@@ -75,7 +75,7 @@ test('a new visit asks for every missing field together', () => {
   assert.ok(prompts.some((item) => item.includes('Email')));
   assert.ok(prompts.some((item) => item.includes('Payment Terms')));
   assert.ok(prompts.some((item) => item.includes('Visit photo')));
-  assert.ok(prompts.some((item) => item.includes('Location pin or city')));
+  assert.ok(prompts.some((item) => item.includes('Share a WhatsApp location pin.')));
 
   const remaining = nextVisitPrompts(completeDraft({ email: '', payment_terms: '' }));
   assert.deepEqual(remaining, ['Email', 'Payment Terms: Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC']);
