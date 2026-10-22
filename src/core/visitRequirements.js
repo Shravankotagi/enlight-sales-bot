@@ -522,6 +522,11 @@ function visitOtpTemplatePayload(phone, otp, templateName) {
   };
 }
 
+/** TEMPORARY VISIT OTP TEST MODE — delete this after the WhatsApp Authentication template is live. */
+function visitOtpTestMode() {
+  return text(process.env.VISIT_OTP_TEST_MODE).toLowerCase() === 'true';
+}
+
 async function defaultSendVisitCode(to, payload) {
   const token = process.env.WHATSAPP_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
@@ -583,6 +588,14 @@ async function requestVisitCode(supabase, rawPhone, send = defaultSendVisitCode)
     created_at: now.toISOString(),
   });
   if (error) return { ok: false, message: 'Unable to send the visit code right now.' };
+  if (visitOtpTestMode()) {
+    console.log(`Visit test code issued for ****${phone.slice(-4)}`);
+    return {
+      ok: true,
+      testOtp: otp,
+      message: `Temporary test code: ${otp}. Enter it here. WhatsApp was not used. It expires in 5 minutes.`,
+    };
+  }
   try {
     await send(
       `91${phone}`,
