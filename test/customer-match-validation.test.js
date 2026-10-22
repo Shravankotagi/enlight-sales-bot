@@ -43,3 +43,93 @@ test('customer match score calculation and threshold handling', () => {
   assert.ok(!msg1.includes('2. *'));
   assert.ok(msg1.includes('reply with *1*'));
 });
+
+test('replying 1, 2, 3, or yes to customer validation continues original flow without catalog preemption', async (t) => {
+  const PHONE = '919822000001';
+  const candidates = ['rajesh company', 'Rajeshwari industries', 'Rajeshwari Shah Industries'];
+  const fetchedName = 'rajesh company';
+  const draft = { company_name: fetchedName };
+  const lastPrompt = `Do you want to continue with the fetched customer name: *${fetchedName}*?\n\nMatching accounts from your assigned list:\n  1. *${candidates[0]}*\n  2. *${candidates[1]}*\n  3. *${candidates[2]}*\n\n👉 Tap *Yes* to continue with *${fetchedName}*, or reply with *1*, *2*, or *3* to choose a customer.`;
+
+  // Provide envelope simulating the assistant just sent the customer validation prompt
+  const h = loadCatalogFlow({
+    envelope: {
+      current_session: {
+        messages: [
+          { role: 'user', content: 'Log a visit for rajesh company Industry' },
+          { role: 'assistant', content: lastPrompt, action_type: 'LOG_VISIT', sub_action: 'CUST_MATCH_CONFIRM' },
+        ],
+      },
+    },
+  });
+  t.after(h.restore);
+
+  // 1. Reply "1": Must pick candidates[0] ("rajesh company") and NOT start LOG_INQUIRY
+  h.setSession(
+    PHONE,
+    `catalog_cust_match_confirm|LOG_VISIT|${fetchedName}|${JSON.stringify(candidates)}|${JSON.stringify(draft)}`
+  );
+  const res1 = await h.catalogFlow.handleCatalogFlow('1', PHONE);
+  assert.equal(res1.handled, true);
+  // Must NOT have started Log New Inquiry
+  assert.doesNotMatch(res1.reply, /Log New Inquiry/i);
+  assert.doesNotMatch(res1.reply, /Please send the inquiry details/i);
+  // Must prompt for visit details
+  assert.match(res1.reply, /visit report/i);
+  const savedState1 = h.getSession(PHONE).last_intent;
+  assert.ok(savedState1.startsWith('catalog_flow|LOG_VISIT|'), `Expected catalog_flow|LOG_VISIT|, got ${savedState1}`);
+  assert.ok(savedState1.includes('"company_name":"rajesh company"'));
+  assert.ok(savedState1.includes('"_customer_verified":true'));
+
+  // 2. Reply "2": Must pick candidates[1] ("Rajeshwari industries")
+  h.setSession(
+    PHONE,
+    `catalog_cust_match_confirm|LOG_VISIT|${fetchedName}|${JSON.stringify(candidates)}|${JSON.stringify(draft)}`
+  );
+  const res2 = await h.catalogFlow.handleCatalogFlow('2', PHONE);
+  assert.equal(res2.handled, true);
+  assert.doesNotMatch(res2.reply, /Log New Inquiry/i);
+  assert.match(res2.reply, /visit report/i);
+  const savedState2 = h.getSession(PHONE).last_intent;
+  assert.ok(savedState2.includes('"company_name":"Rajeshwari industries"'));
+  assert.ok(savedState2.includes('"_customer_verified":true'));
+
+  // 3. Reply "3": Must pick candidates[2] ("Rajeshwari Shah Industries")
+  h.setSession(
+    PHONE,
+    `catalog_cust_match_confirm|LOG_VISIT|${fetchedName}|${JSON.stringify(candidates)}|${JSON.stringify(draft)}`
+  );
+  const res3 = await h.catalogFlow.handleCatalogFlow('3', PHONE);
+  assert.equal(res3.handled, true);
+  assert.doesNotMatch(res3.reply, /Log New Inquiry/i);
+  assert.match(res3.reply, /visit report/i);
+  const savedState3 = h.getSession(PHONE).last_intent;
+  assert.ok(savedState3.includes('"company_name":"Rajeshwari Shah Industries"'));
+  assert.ok(savedState3.includes('"_customer_verified":true'));
+
+  // 4. Reply "Yes": Must pick fetchedName ("rajesh company")
+  h.setSession(
+    PHONE,
+    `catalog_cust_match_confirm|LOG_VISIT|${fetchedName}|${JSON.stringify(candidates)}|${JSON.stringify(draft)}`
+  );
+  const resYes = await h.catalogFlow.handleCatalogFlow('yes', PHONE);
+  assert.equal(resYes.handled, true);
+  assert.doesNotMatch(resYes.reply, /Log New Inquiry/i);
+  assert.match(resYes.reply, /visit report/i);
+  const savedStateYes = h.getSession(PHONE).last_intent;
+  assert.ok(savedStateYes.includes('"company_name":"rajesh company"'));
+  assert.ok(savedStateYes.includes('"_customer_verified":true'));
+
+  // 5. Reply candidate name directly: e.g. "Rajeshwari industries"
+  h.setSession(
+    PHONE,
+    `catalog_cust_match_confirm|LOG_VISIT|${fetchedName}|${JSON.stringify(candidates)}|${JSON.stringify(draft)}`
+  );
+  const resName = await h.catalogFlow.handleCatalogFlow('Rajeshwari industries', PHONE);
+  assert.equal(resName.handled, true);
+  assert.doesNotMatch(resName.reply, /Log New Inquiry/i);
+  assert.match(resName.reply, /visit report/i);
+  const savedStateName = h.getSession(PHONE).last_intent;
+  assert.ok(savedStateName.includes('"company_name":"Rajeshwari industries"'));
+  assert.ok(savedStateName.includes('"_customer_verified":true'));
+});

@@ -1829,18 +1829,35 @@ async function isCatalogMenuAwaitingSelection(senderPhone) {
     const last = msgs[msgs.length - 1];
     if (!last || last.role !== 'assistant') return false;
     const content = String(last.content || '');
+
+    // Never consider candidate/account selection or form questions as a catalog menu
+    if (
+      last.action_type === 'CUST_MATCH_CONFIRM' ||
+      last.metadata?.sub_action === 'CUST_MATCH_CONFIRM' ||
+      /\bchoose a customer\b/i.test(content) ||
+      /\bMatching accounts from your assigned list\b/i.test(content) ||
+      /\bDo you want to continue with the fetched customer name\b/i.test(content) ||
+      /\bWhich existing line item should\b/i.test(content) ||
+      /\bWhich inquiry is this PO against\b/i.test(content) ||
+      /\bOption Number\s*\(\s*1\s*[-–]/i.test(content) ||
+      /\bmissing mandatory fields\b/i.test(content)
+    ) {
+      return false;
+    }
+
     return last.agent === 'catalog_menu' ||
       last.action_type === 'CATALOG_MENU' ||
       last.metadata?.action_type === 'CATALOG_MENU' ||
-      /Reply with a number \(1\s*[–-]/i.test(content) ||
+      /Reply with a number \(1\s*[–-]\s*10\)/i.test(content) ||
+      /Reply with a number \(1\s*[–-]\s*9\)/i.test(content) ||
       /\bChoose Action\b/i.test(content) ||
       /\bWhat would you like to do today\b/i.test(content) ||
       /\bActivity cancelled\b/i.test(content) ||
       /\bHere is the menu to start a new activity\b/i.test(content) ||
-      /\breply with \*(?:[1-9]|10)\*/i.test(content);
+      /\bIf you would like to log a new (?:inquiry|order|complaint|field visit), reply with \*(?:[1-9]|10)\*/i.test(content);
   } catch (err) {
-    console.warn('[CatalogFlow] Menu-awaiting check failed, allowing selection:', err.message);
-    return true;
+    console.warn('[CatalogFlow] Menu-awaiting check failed, disallowing menu hijack:', err.message);
+    return false;
   }
 }
 
@@ -5494,7 +5511,7 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
     const custVerification = await verifyDraftCustomer('LOG_INQUIRY', draft, senderPhone);
     if (!custVerification.isValid) {
       if (custVerification.isLowMatchCustomer) {
-        await recordSessionMessage(senderPhone, 'assistant', custVerification.prompt, { action_type: 'LOG_INQUIRY' });
+        await recordSessionMessage(senderPhone, 'assistant', custVerification.prompt, { action_type: 'LOG_INQUIRY', sub_action: 'CUST_MATCH_CONFIRM' });
         await saveActiveSession(
           senderPhone,
           custVerification.fetchedName,
@@ -14835,7 +14852,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   // ── 2a. DIRECT EXPLICIT MENU SELECTION (PREEMPTION) ────────────────────────
   // When user selects any option from catalog list ([Choose Action] or direct action commands),
   // immediately clean up any prior flow and start the newly selected module prompt.
-  const isAwaitingCandidateSelection = lastIntent.startsWith('catalog_update_select|');
+  const isAwaitingCandidateSelection =
+    lastIntent.startsWith('catalog_update_select|') ||
+    lastIntent.startsWith('catalog_cust_match_confirm|') ||
+    lastIntent.startsWith('catalog_implicit_cust_ask|') ||
+    lastIntent.startsWith('catalog_implicit_cust_collect|') ||
+    lastIntent.startsWith('catalog_implicit_prod_add|') ||
+    lastIntent.startsWith('catalog_confirm|') ||
+    lastIntent.startsWith('catalog_resume_ask|');
   const menuAwaiting = (!isAwaitingCandidateSelection && isBareCatalogNumber(text))
     ? await isCatalogMenuAwaitingSelection(senderPhone)
     : false;
@@ -15234,12 +15258,23 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (isYes) {
       chosenCustomer = fetchedName;
     } else {
-      const numMatch = cleanInput.match(/^[#*]?\s*([1-3])\s*[.)]?$/);
+      const numMatch = cleanInput.match(/^(?:option\s*|choice\s*)?[#*]?\s*([1-3])\s*[.)]?$/i);
       if (numMatch) {
         const idx = parseInt(numMatch[1], 10) - 1;
         if (idx >= 0 && idx < candidates.length) {
           chosenCustomer = candidates[idx];
         }
+      }
+    }
+
+    if (!chosenCustomer && Array.isArray(candidates)) {
+      const matchedCand = candidates.find(
+        (c) => c.toLowerCase() === cleanInput ||
+               cleanInput.includes(c.toLowerCase()) ||
+               c.toLowerCase().includes(cleanInput)
+      );
+      if (matchedCand) {
+        chosenCustomer = matchedCand;
       }
     }
 
@@ -16008,7 +16043,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       const custCheck = await verifyDraftCustomer(action, draft, senderPhone);
       if (!custCheck.isValid) {
         if (custCheck.isLowMatchCustomer) {
-          await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+          await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action, sub_action: 'CUST_MATCH_CONFIRM' });
           await saveActiveSession(
             senderPhone,
             custCheck.fetchedName,
@@ -16283,7 +16318,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
       if (custCheck.isLowMatchCustomer) {
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action, sub_action: 'CUST_MATCH_CONFIRM' });
         await saveActiveSession(
           senderPhone,
           custCheck.fetchedName,
@@ -16491,7 +16526,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
       if (custCheck.isLowMatchCustomer) {
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action, sub_action: 'CUST_MATCH_CONFIRM' });
         await saveActiveSession(
           senderPhone,
           custCheck.fetchedName,
@@ -17673,7 +17708,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
       if (custCheck.isLowMatchCustomer) {
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action, sub_action: 'CUST_MATCH_CONFIRM' });
         await saveActiveSession(
           senderPhone,
           custCheck.fetchedName,
@@ -18146,7 +18181,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const custCheck = await verifyDraftCustomer('LOG_VISIT', updatedDraft, senderPhone);
     if (!custCheck.isValid) {
       if (custCheck.isLowMatchCustomer) {
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: 'LOG_VISIT' });
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: 'LOG_VISIT', sub_action: 'CUST_MATCH_CONFIRM' });
         await saveActiveSession(
           senderPhone,
           custCheck.fetchedName,
