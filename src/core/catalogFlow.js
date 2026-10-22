@@ -41,6 +41,7 @@ const {
   fillVisitCity,
   captureVisitLocation,
   preserveVisitLocation,
+  applyExplicitFollowUpDate,
   attachVisitMedia,
   visitPhotoAccepted,
 } = require('./visitRequirements');
@@ -2132,6 +2133,7 @@ LOG_VISIT:
   "visit_date": "<Visit date in DD-MM-YYYY format e.g. 10-09-2026, else null>",
   "visit_outcome": "<Positive | Negative | Neutral, else null>",
   "followup_action": "<specific follow up action if mentioned, else null>",
+  "follow_up_date": "<Follow-up date if mentioned, including a labeled line such as follow up date - tomorrow or DD-MM-YYYY, else null>",
   "meeting_remarks": "<meeting remarks & requirements discussed, else null>",
   "email": "<email address if mentioned, else null>",
   "designation": "<job title / designation if mentioned, else null>",
@@ -2155,6 +2157,7 @@ LOG_VISIT:
       "visit_date": "<Visit date in DD-MM-YYYY format, else null>",
       "visit_outcome": "<Positive | Negative | Neutral, else null>",
       "followup_action": "<Follow-up action, else null>",
+      "follow_up_date": "<Follow-up date, including tomorrow or DD-MM-YYYY, else null>",
       "meeting_remarks": "<Meeting remarks, else null>"
     }
   ]
@@ -2383,6 +2386,7 @@ User Message:
         delete merged._non_editable_request;
         if (nonEditableRequested) merged._non_editable_request = nonEditableRequested;
       }
+      if (action === 'LOG_VISIT') applyExplicitFollowUpDate(merged, userInput);
       return merged;
     }
   } catch (err) {
@@ -2402,9 +2406,12 @@ User Message:
       fallbackParsed.updates = { meeting_remarks: verbatimNotes };
       fallbackParsed.meeting_remarks = verbatimNotes;
     }
-    return mergeDraft(action, existingDraft, fallbackParsed, userInput);
+    const merged = mergeDraft(action, existingDraft, fallbackParsed, userInput);
+    if (action === 'LOG_VISIT') applyExplicitFollowUpDate(merged, userInput);
+    return merged;
   }
 
+  if (action === 'LOG_VISIT') applyExplicitFollowUpDate(existingDraft, userInput);
   return existingDraft;
 }
 
