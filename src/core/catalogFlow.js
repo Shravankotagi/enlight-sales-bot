@@ -2629,13 +2629,11 @@ User Message:
       fallbackParsed.updates = { meeting_remarks: verbatimNotes };
       fallbackParsed.meeting_remarks = verbatimNotes;
     }
-    const merged = mergeDraft(action, existingDraft, fallbackParsed, userInput);
-    if (action === 'LOG_VISIT') applyExplicitFollowUpDate(merged, userInput);
-    return merged;
   }
 
-  if (action === 'LOG_VISIT') applyExplicitFollowUpDate(existingDraft, userInput);
-  return existingDraft;
+  const merged = mergeDraft(action, existingDraft, fallbackParsed, userInput);
+  if (action === 'LOG_VISIT') applyExplicitFollowUpDate(merged, userInput);
+  return merged;
 }
 
 const TOTAL_VALUE_PERMISSION_NOTICE = '⚠️ *Permission Notice:* You do not have permission to directly change the Total Order Value. Total value is calculated automatically from individual line item quantities and rates. To adjust the total value, please update individual line item rates or quantities.';

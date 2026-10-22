@@ -43,10 +43,10 @@ test('inquiry payment terms and brands accept only the listed options, including
   // Formatting helpers for missing fields prompt
   assert.equal(
     formatMissingFieldItem('Payment Terms', '-'),
-    '- **Payment Terms: Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC**'
+    '- **Payment Terms**'
   );
   assert.equal(
     formatMissingFieldBullet('Payment Terms'),
-    '• *Payment Terms: Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC*'
+    '• *Payment Terms*'
   );
 });

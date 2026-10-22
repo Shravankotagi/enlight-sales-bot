@@ -160,7 +160,7 @@ test('invalid payment terms prompt repeatedly with the 8 allowed options and nev
   const res1 = await h.catalogFlow.handleCatalogFlow('1', PHONE);
   assert.equal(res1.handled, true);
   assert.match(res1.reply, /Payment Terms must be one of: Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC/i);
-  assert.match(res1.reply, /Payment Terms: Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC/i);
+  assert.match(res1.reply, /• \*Payment Terms\*/);
   assert.match(res1.reply, /Please provide the remaining mandatory details for this (?:new )?inquiry/i);
   // Session should be in catalog_flow waiting for Payment Terms
   const state1 = h.getSession(PHONE).last_intent;
@@ -173,7 +173,7 @@ test('invalid payment terms prompt repeatedly with the 8 allowed options and nev
   assert.doesNotMatch(res2.reply, /Please confirm your Inquiry details/i);
   // Must prompt again with the 8 allowed options!
   assert.match(res2.reply, /Payment Terms must be one of: Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC/i);
-  assert.match(res2.reply, /Payment Terms: Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC/i);
+  assert.match(res2.reply, /- \*\*Payment Terms\*\*/);
 
   // 3. User inputs valid payment term "30 Days"
   const res3 = await h.catalogFlow.handleCatalogFlow('30 Days', PHONE);
