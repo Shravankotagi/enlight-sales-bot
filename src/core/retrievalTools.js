@@ -1108,12 +1108,9 @@ async function executeGetInquiries(args, callerContext, supabaseAdmin = supabase
         const dim = it.dimensions || it.spec;
         let spec = '';
         if (dim) {
-          const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
-          const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
-          if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
-            spec = ` (${shortSpec})`;
-          } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
-            spec = ` (${dim})`;
+          const cleanDim = String(dim).trim();
+          if (cleanDim && !name.toLowerCase().includes(cleanDim.toLowerCase())) {
+            spec = ` (${cleanDim})`;
           }
         }
         const calc = calculateLineItem(it);
@@ -3593,12 +3590,9 @@ async function executeGetMyOpenDeals(args, callerContext, supabaseAdmin = supaba
       const dim = it.dimensions || it.spec;
       let spec = '';
       if (dim) {
-        const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
-        const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
-        if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
-          spec = ` (${shortSpec})`;
-        } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
-          spec = ` (${dim})`;
+        const cleanDim = String(dim).trim();
+        if (cleanDim && !name.toLowerCase().includes(cleanDim.toLowerCase())) {
+          spec = ` (${cleanDim})`;
         }
       }
       const calc = calculateLineItem(it);
@@ -4295,12 +4289,9 @@ async function executeGetDealIds(args, callerContext, supabaseAdmin = supabase) 
       const dim = it.dimensions || it.spec;
       let spec = '';
       if (dim) {
-        const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
-        const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
-        if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
-          spec = ` (${shortSpec})`;
-        } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
-          spec = ` (${dim})`;
+        const cleanDim = String(dim).trim();
+        if (cleanDim && !name.toLowerCase().includes(cleanDim.toLowerCase())) {
+          spec = ` (${cleanDim})`;
         }
       }
       const calc = calculateLineItem(it);
