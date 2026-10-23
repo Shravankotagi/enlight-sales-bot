@@ -32,6 +32,7 @@ const {
 } = require('../supabase');
 const {
   nextVisitPrompts,
+  logVisitOpeningPrompt,
   assertReadyToSave,
   visitRowColumns,
   requestVisitCode,
@@ -39,7 +40,11 @@ const {
   consumeVisitCode,
   releaseVisitCode,
   fillVisitCity,
+  captureVisitLocation,
+  preserveVisitLocation,
+  applyExplicitFollowUpDate,
   attachVisitMedia,
+  visitPhotoAccepted,
 } = require('./visitRequirements');
 const {
   customerTargetNote,
@@ -148,6 +153,8 @@ function extractPhotoAndGps(rawText, options = {}) {
       name: options.name || options.fileName || `attachment-${Date.now()}.${isPdf ? 'pdf' : 'jpg'}`,
       url: photoDataUrl,
       type: mimeType,
+      photoSource: options.photoSource || '',
+      messageType: options.messageType || (isPdf ? 'document' : ''),
       uploaded_at: new Date().toISOString(),
       ...(gpsData ? { gps: gpsData } : {}),
     };
@@ -1139,6 +1146,16 @@ function getCatalogMenuSections(isAuthorizedForVisits = true) {
 const INQUIRY_PAYMENT_TERMS = ['Immediate', 'Advance', '30 Days', '45 Days', '60 Days', 'LC', 'BG', 'PDC'];
 const INQUIRY_PREFERRED_MAKES = ['TATA', 'JSW', 'AM/NS India', 'SAIL', 'NMDC', 'Apollo', 'Others'];
 
+function formatMissingFieldItem(item, bullet = '-') {
+  
+  return `${bullet} **${item}**`;
+}
+
+function formatMissingFieldBullet(item) {
+  
+  return `• *${item}*`;
+}
+
 function normInquiryOpt(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -1177,6 +1194,19 @@ function matchInquiryOption(raw, options) {
     const amns = options.find((opt) => opt === 'AM/NS India');
     if (amns) return amns;
   }
+
+  const isPaymentTerms = options === INQUIRY_PAYMENT_TERMS || (Array.isArray(options) && options.includes('30 Days') && options.includes('60 Days'));
+  if (isPaymentTerms) {
+    if (n === '30' || n === '30d' || n === '30days' || n === '30day' || n === 'thirtydays') return '30 Days';
+    if (n === '45' || n === '45d' || n === '45days' || n === '45day' || n === 'fortyfivedays') return '45 Days';
+    if (n === '60' || n === '60d' || n === '60days' || n === '60day' || n === 'sixtydays') return '60 Days';
+    if (n === 'immediate' || n === 'imm' || n === 'instant') return 'Immediate';
+    if (n === 'advance' || n === 'adv' || n === '100advance' || n === 'fulladvance') return 'Advance';
+    if (n === 'lc' || n === 'letterofcredit') return 'LC';
+    if (n === 'bg' || n === 'bankguarantee') return 'BG';
+    if (n === 'pdc' || n === 'cheque' || n === 'postdatedcheque') return 'PDC';
+  }
+
   const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   const hits = new Set();
   for (const opt of options) {
@@ -1188,7 +1218,7 @@ function matchInquiryOption(raw, options) {
   }
   if (hits.size === 1) return [...hits][0];
   if (hits.size > 1) return null;
-  if (words.length <= 3) {
+  if (words.length <= 4) {
     const joined = words.join('');
     let best = null;
     let bestDist = 99;
@@ -1197,6 +1227,12 @@ function matchInquiryOption(raw, options) {
       if (no.length <= 3) continue;
       if (Math.abs(no.length - joined.length) > 2) continue;
       if (Math.min(no.length, joined.length) / Math.max(no.length, joined.length) < 0.7) continue;
+
+      // Digits must match strictly: e.g. 90 cannot match 30, 15 cannot match 45
+      const joinedDigits = joined.replace(/\D/g, '');
+      const noDigits = no.replace(/\D/g, '');
+      if (joinedDigits !== noDigits) continue;
+
       const dist = inquiryOptDistance(joined, no);
       if (dist < bestDist) {
         bestDist = dist;
@@ -1217,7 +1253,7 @@ function pickInquiryOptionFromReply(text, options) {
     const labeledHit = matchInquiryOption(labeled[1], options);
     if (labeledHit) return labeledHit;
   }
-  if (raw.split(/\s+/).length <= 3) {
+  if (raw.split(/\s+/).length <= 4) {
     const hit = matchInquiryOption(raw, options);
     return hit || '';
   }
@@ -1245,10 +1281,24 @@ function applyInquiryChoices(action, merged, userInput) {
     'Preferred Brand',
   );
   if (action === 'LOG_INQUIRY') {
-    if (payment !== undefined) merged.payment_terms = payment;
-    else if (!merged.payment_terms) {
+    if (payment !== undefined) {
+      merged.payment_terms = payment;
+    } else if (!merged.payment_terms) {
       const fromText = pickInquiryOptionFromReply(userInput, INQUIRY_PAYMENT_TERMS);
-      if (fromText) merged.payment_terms = fromText;
+      if (fromText) {
+        merged.payment_terms = fromText;
+      } else {
+        // Detect if user attempted an invalid payment term in text
+        const payAttempt = userInput.match(/(?:payment\s*terms?|payment)\s*[:=-]?\s*([^\n,;.]+)/i) ||
+                           userInput.match(/\b(\d+\s*days?|credit|cash|cad|cod)\b/i);
+        if (payAttempt && payAttempt[0]) {
+          const rawAttempt = payAttempt[1] || payAttempt[0];
+          const matchedAttempt = matchInquiryOption(rawAttempt, INQUIRY_PAYMENT_TERMS);
+          if (!matchedAttempt && !notices.some(n => n.includes('Payment Terms'))) {
+            notices.push(`Payment Terms must be one of: ${INQUIRY_PAYMENT_TERMS.join(', ')}`);
+          }
+        }
+      }
     }
     if (make !== undefined) merged.preferred_make = make;
     else if (!merged.preferred_make) {
@@ -1261,6 +1311,22 @@ function applyInquiryChoices(action, merged, userInput) {
       if (payment) merged.updates.payment_terms = payment;
       else delete merged.updates.payment_terms;
       merged.payment_terms = payment;
+    } else if (!merged.updates.payment_terms && !merged.payment_terms) {
+      const fromText = pickInquiryOptionFromReply(userInput, INQUIRY_PAYMENT_TERMS);
+      if (fromText) {
+        merged.updates.payment_terms = fromText;
+        merged.payment_terms = fromText;
+      } else {
+        const payAttempt = userInput.match(/(?:payment\s*terms?|payment)\s*[:=-]?\s*([^\n,;.]+)/i) ||
+                           userInput.match(/\b(\d+\s*days?|credit|cash|cad|cod)\b/i);
+        if (payAttempt && payAttempt[0]) {
+          const rawAttempt = payAttempt[1] || payAttempt[0];
+          const matchedAttempt = matchInquiryOption(rawAttempt, INQUIRY_PAYMENT_TERMS);
+          if (!matchedAttempt && !notices.some(n => n.includes('Payment Terms'))) {
+            notices.push(`Payment Terms must be one of: ${INQUIRY_PAYMENT_TERMS.join(', ')}`);
+          }
+        }
+      }
     }
     if (make !== undefined) {
       if (make) merged.updates.preferred_make = make;
@@ -1340,13 +1406,7 @@ Which field would you like to update? (Rate, Quantity, PO Number, PO Date, Deliv
 - "For Inquiry INQ-936C7B, attach PO number PO-2026-8899"
 - "PO-2026-0042, update delivery location to Pune MIDC, change item 1 rate to 58000"`,
 
-  LOG_VISIT: `**Log Customer Field Visit**
-
-Reply with all of these together. I will ask again only for anything still missing.
-
-${nextVisitPrompts({}).map((item) => `- **${item}**`).join('\n')}
-
-After these details are complete, a code is sent to the customer.`,
+  LOG_VISIT: logVisitOpeningPrompt(),
 
   UPDATE_VISIT: `**Update Field Visit**
 
@@ -1850,18 +1910,35 @@ async function isCatalogMenuAwaitingSelection(senderPhone) {
     const last = msgs[msgs.length - 1];
     if (!last || last.role !== 'assistant') return false;
     const content = String(last.content || '');
+
+    // Never consider candidate/account selection or form questions as a catalog menu
+    if (
+      last.action_type === 'CUST_MATCH_CONFIRM' ||
+      last.metadata?.sub_action === 'CUST_MATCH_CONFIRM' ||
+      /\bchoose a customer\b/i.test(content) ||
+      /\bMatching accounts from your assigned list\b/i.test(content) ||
+      /\bDo you want to continue with the fetched customer name\b/i.test(content) ||
+      /\bWhich existing line item should\b/i.test(content) ||
+      /\bWhich inquiry is this PO against\b/i.test(content) ||
+      /\bOption Number\s*\(\s*1\s*[-–]/i.test(content) ||
+      /\bmissing mandatory fields\b/i.test(content)
+    ) {
+      return false;
+    }
+
     return last.agent === 'catalog_menu' ||
       last.action_type === 'CATALOG_MENU' ||
       last.metadata?.action_type === 'CATALOG_MENU' ||
-      /Reply with a number \(1\s*[–-]/i.test(content) ||
+      /Reply with a number \(1\s*[–-]\s*10\)/i.test(content) ||
+      /Reply with a number \(1\s*[–-]\s*9\)/i.test(content) ||
       /\bChoose Action\b/i.test(content) ||
       /\bWhat would you like to do today\b/i.test(content) ||
       /\bActivity cancelled\b/i.test(content) ||
       /\bHere is the menu to start a new activity\b/i.test(content) ||
-      /\breply with \*(?:[1-9]|10)\*/i.test(content);
+      /\bIf you would like to log a new (?:inquiry|order|complaint|field visit), reply with \*(?:[1-9]|10)\*/i.test(content);
   } catch (err) {
-    console.warn('[CatalogFlow] Menu-awaiting check failed, allowing selection:', err.message);
-    return true;
+    console.warn('[CatalogFlow] Menu-awaiting check failed, disallowing menu hijack:', err.message);
+    return false;
   }
 }
 
@@ -2152,7 +2229,7 @@ LOG_INQUIRY:
   "product_description": "<Summary of all products/quantities, else null>",
   "rate": <numeric target rate/price per unit if mentioned, else null>,
   "preferred_make": "<one of TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others, else null>",
-  "payment_terms": "<one of Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC, else null>",
+  "payment_terms": "<Strictly one of: Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC. If the user mentions any other payment terms like 90 days, 15 days, 20 days, cash, or credit, return null. NEVER guess, coerce, or fabricate, else null>",
   "delivery_location": "<e.g. Chakan Pune, Taloja, Aurangabad, else null>",
   "additional_notes": "<Exact literal text provided by user. NEVER summarize, rephrase, or alter user notes, else null>",
   "line_items": [
@@ -2195,7 +2272,7 @@ UPDATE_INQUIRY:
     "product_description": "<if user requested general product text update, else null>",
     "rate": <numeric rate ONLY if a single overall rate was specified without mentioning product names, else null>,
     "preferred_make": "<one of TATA, JSW, AM/NS India, SAIL, NMDC, Apollo, Others if update requested, else null>",
-    "payment_terms": "<one of Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC if update requested, else null>",
+    "payment_terms": "<Strictly one of: Immediate, Advance, 30 Days, 45 Days, 60 Days, LC, BG, PDC if update requested. If other terms like 90 days or credit are mentioned, return null, else null>",
     "delivery_location": "<if user requested update, else null>",
     "email": "<Customer email if update requested, else null>",
     "additional_notes": "<Exact literal text provided by user if update requested. NEVER summarize, rephrase, or alter user notes, else null>",
@@ -2216,6 +2293,7 @@ UPDATE_INQUIRY:
 }
 
 IMPORTANT RULES FOR INQUIRIES:
+- STRICT PAYMENT TERMS: For "payment_terms", only accept exact matching options: "Immediate", "Advance", "30 Days", "45 Days", "60 Days", "LC", "BG", "PDC". If the user mentions any other term (such as "90 days", "15 days", "20 days", "cash", "credit", "CAD"), you MUST return null. NEVER coerce "90 days" into "30 Days" or fabricate any option!
 - If a user provides line item updates with specifications, thickness, or dimensions (e.g. 'Line item: 78MT 8mm', 'HR Coil 8mm 78MT', 'change thickness to 8mm', 'change spec to 8mm'), extract the dimension/thickness into 'spec' and 'dimensions' ('8mm'), quantity into 'quantity' (78), and unit into 'unit' ('MT')! If product name is not explicitly mentioned (e.g. 'Line item: 78MT 8mm'), set sku_text and description to null or generic, while preserving spec/dimensions and quantity.
 - If a user provides multiple products with individual rates (e.g. 'rate \n MS Sheet 5MM - 20 \n MS Sheet 6MM - 30'), put each product with its specific rate into 'line_item_updates' array! Do NOT put 20 as updates.rate, and do NOT put 'MS Sheet 5MM, MS Sheet 6MM' into updates.product_description.
 - If a user provides multiple products with quantities (e.g. 'MS Sheet 5MM - 15 MT, MS Sheet 6MM - 20 MT'), parse each into line_items/line_item_updates with its respective quantity and unit.
@@ -2295,14 +2373,16 @@ LOG_VISIT:
   "company_name": "<Customer / Company Name visited, else null>",
   "person_met": "<Person met and/or designation, else null>",
   "contact_phone": "<10-digit phone number if provided, else null>",
-  "city_location": "<City or location of visit, else null>",
+  "city_location": "<Full visit address. If the message has a Location: line, copy that address verbatim, else null>",
   "visit_date": "<Visit date in DD-MM-YYYY format e.g. 10-09-2026, else null>",
   "visit_outcome": "<Positive | Negative | Neutral, else null>",
   "followup_action": "<specific follow up action if mentioned, else null>",
+  "follow_up_date": "<Follow-up date if mentioned, including a labeled line such as follow up date - tomorrow or DD-MM-YYYY, else null>",
   "meeting_remarks": "<meeting remarks & requirements discussed, else null>",
   "email": "<email address if mentioned, else null>",
   "designation": "<job title / designation if mentioned, else null>",
-  "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader if mentioned, else null>",
+  "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader | Other if mentioned, else null>",
+  "customer_type_other": "<the customer type text when customer type is Other, else null>",
   "visit_type": "<First Visit | Follow-up 1 | Follow-up 2 | Follow-up 3 | Regular Visit if mentioned, else null>",
   "customer_probability": "<Hot | Warm | Cold if mentioned, else null>",
   "product_details": "<detailed product specifications or grades discussed, else null>",
@@ -2317,10 +2397,11 @@ LOG_VISIT:
       "company_name": "<Company Name visited>",
       "person_met": "<Person met, else null>",
       "contact_phone": "<Phone, else null>",
-      "city_location": "<City / Location, else null>",
+      "city_location": "<Full Location: address verbatim, else City / Location, else null>",
       "visit_date": "<Visit date in DD-MM-YYYY format, else null>",
       "visit_outcome": "<Positive | Negative | Neutral, else null>",
       "followup_action": "<Follow-up action, else null>",
+      "follow_up_date": "<Follow-up date, including tomorrow or DD-MM-YYYY, else null>",
       "meeting_remarks": "<Meeting remarks, else null>"
     }
   ]
@@ -2342,7 +2423,8 @@ UPDATE_VISIT:
     "status": "<Completed | Follow-up Pending | Cancelled if updated, else null>",
     "email": "<Email if updated, else null>",
     "designation": "<Designation if updated, else null>",
-    "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader if updated, else null>",
+    "customer_type": "<OEM | Fabricator | EPC | Manufacturer | Trader | Other if updated, else null>",
+    "customer_type_other": "<the customer type text when customer type is Other, else null>",
     "visit_type": "<First Visit | Follow-up 1-3 | Regular Visit if updated, else null>",
     "customer_probability": "<Hot | Warm | Cold if updated, else null>",
     "product_details": "<Product Details if updated, else null>",
@@ -2548,14 +2630,15 @@ User Message:
         delete merged._non_editable_request;
         if (nonEditableRequested) merged._non_editable_request = nonEditableRequested;
       }
+      if (action === 'LOG_VISIT') applyExplicitFollowUpDate(merged, userInput);
       return merged;
     }
   } catch (err) {
     console.error('[CatalogFlow] LLM extraction error:', err.message);
   }
 
+  const fallbackParsed = {};
   if (verbatimNotes) {
-    const fallbackParsed = {};
     if (action === 'LOG_INQUIRY') {
       fallbackParsed.additional_notes = verbatimNotes;
     } else if (action === 'UPDATE_INQUIRY') {
@@ -2567,10 +2650,11 @@ User Message:
       fallbackParsed.updates = { meeting_remarks: verbatimNotes };
       fallbackParsed.meeting_remarks = verbatimNotes;
     }
-    return mergeDraft(action, existingDraft, fallbackParsed, userInput);
   }
 
-  return existingDraft;
+  const merged = mergeDraft(action, existingDraft, fallbackParsed, userInput);
+  if (action === 'LOG_VISIT') applyExplicitFollowUpDate(merged, userInput);
+  return merged;
 }
 
 const TOTAL_VALUE_PERMISSION_NOTICE = '⚠️ *Permission Notice:* You do not have permission to directly change the Total Order Value. Total value is calculated automatically from individual line item quantities and rates. To adjust the total value, please update individual line item rates or quantities.';
@@ -2672,7 +2756,7 @@ function getAllowedFieldsListForAction(action) {
     case 'UPDATE_ORDER':
       return `• *PO Number*\n• *PO Date / Delivery Date*\n• *Delivery Location*\n• *Payment Terms*\n• *Status (Pending, Processing, Dispatched, Delivered, Cancelled)*\n• *Line Item Rates & Quantities*`;
     case 'LOG_VISIT':
-      return `- *Person Met*\n- *Contact Phone*\n- *City / Location*\n- *Visit Date*\n- *Visit Outcome (Positive / Neutral / Negative)*\n- *Meeting Remarks & Discussion Notes*`;
+      return `- *Person Met*\n- *Contact Phone*\n- *Visit Date*\n- *Visit Outcome (Positive / Neutral / Negative)*\n- *Meeting Remarks & Discussion Notes*`;
     case 'UPDATE_VISIT':
       return `- *Person Met*\n- *Contact Phone*\n- *Designation & Email*\n- *City / Location*\n- *Customer Type & Visit Type*\n- *Visit Outcome & Probability*\n- *Product Details & Monthly Consumption*\n- *Current Requirement & Next Purchase Expected*\n- *Delivery Location & Preferred Make & Payment Terms*\n- *Follow-up Action & Date*\n- *Meeting Remarks*\n- *Add Photo / Document (Attach additional site photos)*\n- *Status*`;
     case 'LOG_COMPLAINT':
@@ -2686,10 +2770,28 @@ function getAllowedFieldsListForAction(action) {
   }
 }
 
-function detectNonEditableFieldAttempt(action, text, draft = {}) {
+function isLogVisitLocationEdit(clean) {
+  const withoutDelivery = String(clean || '').replace(/\bdelivery\s+locations?\b/gi, ' ');
+  return (
+    /\b(?:change|edit|update|modify|set|alter|replace)\b(?:\s+\w+){0,4}\s+(?:the\s+)?(?:city|location|address)\b/i.test(withoutDelivery) ||
+    /\b(?:city|location|address)\s*(?:to|as|is|:|=)\s*\S/i.test(withoutDelivery) ||
+    /\b(?:city|location|address)\b(?:\s+\w+){0,3}\s+bad(?:lo|al)\b/i.test(withoutDelivery)
+  );
+}
+
+function detectNonEditableFieldAttempt(action, text, draft = {}, options = {}) {
   if (!text || typeof text !== 'string') return { isNonEditable: false };
   const clean = text.trim();
   if (!clean) return { isNonEditable: false };
+
+  if (options.lockVisitLocation && action === 'LOG_VISIT' && isLogVisitLocationEdit(clean)) {
+    return {
+      isNonEditable: true,
+      fieldName: 'City / Location',
+      message: '*Visit location cannot be edited before the visit is saved.*\n\n- The location is taken from the device or the WhatsApp location pin.',
+      allowedFieldsList: getAllowedFieldsListForAction(action),
+    };
+  }
 
   // Fast bypass: If user is explicitly targeting an editable field (notes, remarks, rate, qty, payment terms, delivery location, etc.)
   const isExplicitEditableField = /^(?:(?:change|edit|update|modify|set|alter|revise|amend|replace)\s+(?:the\s+)?)?(?:additional\s*notes?|notes?|remarks?|meeting\s*remarks?|discussion\s*notes?|resolution\s*notes?|comments?|description|rate|price|target\s*price|bhav|quantity|qty|payment\s*terms?|delivery\s*location|location|city|person\s*met|contact\s*person|contact\s*phone|phone|mobile|email(?:\s*id)?|visit\s*date|po\s*number|po\s*no|po\s*date|status|stage|preferred\s*make|make)\s*(?:to|as|is|:|=|\s+-)\s*/i.test(clean);
@@ -3827,8 +3929,10 @@ async function handleLineItemChoiceReply(text, senderPhone, action, draft) {
 
     const missing = validateMandatoryFields(action, draft);
     if (missing.length > 0) {
-      const missingList = missing.map((m) => `- **${m}**`).join('\n');
-      const askMissing = `Please provide the remaining details to update:\n\n${missingList}`;
+      const optionNotice = draft._inquiry_option_notice ? `⚠️ ${draft._inquiry_option_notice}\n\n` : '';
+      delete draft._inquiry_option_notice;
+      const missingList = missing.map((m) => formatMissingFieldItem(m, '-')).join('\n');
+      const askMissing = `${optionNotice}Please provide the remaining details to update:\n\n${missingList}`;
       await recordSessionMessage(senderPhone, 'assistant', askMissing, { action_type: action, customer_name: draft.company_name });
       await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
       return { handled: true, reply: askMissing };
@@ -3897,8 +4001,10 @@ async function handleLineItemChoiceReply(text, senderPhone, action, draft) {
 
   const missing = validateMandatoryFields(action, draft);
   if (missing.length > 0) {
-    const missingList = missing.map((m) => `- **${m}**`).join('\n');
-    const askMissing = `Please provide the remaining details to update:\n\n${missingList}`;
+    const optionNotice = draft._inquiry_option_notice ? `⚠️ ${draft._inquiry_option_notice}\n\n` : '';
+    delete draft._inquiry_option_notice;
+    const missingList = missing.map((m) => formatMissingFieldItem(m, '-')).join('\n');
+    const askMissing = `${optionNotice}Please provide the remaining details to update:\n\n${missingList}`;
     await recordSessionMessage(senderPhone, 'assistant', askMissing, { action_type: action, customer_name: draft.company_name });
     await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
     return { handled: true, reply: askMissing };
@@ -4660,6 +4766,7 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
     if (newExtracted.email && !merged.updates.email) merged.updates.email = newExtracted.email;
     if (newExtracted.designation && !merged.updates.designation) merged.updates.designation = newExtracted.designation;
     if (newExtracted.customer_type && !merged.updates.customer_type) merged.updates.customer_type = newExtracted.customer_type;
+    if (newExtracted.customer_type_other && !merged.updates.customer_type_other) merged.updates.customer_type_other = newExtracted.customer_type_other;
     if (newExtracted.visit_type && !merged.updates.visit_type) merged.updates.visit_type = newExtracted.visit_type;
     if (newExtracted.customer_probability && !merged.updates.customer_probability) merged.updates.customer_probability = newExtracted.customer_probability;
     if (newExtracted.product_details && !merged.updates.product_details) merged.updates.product_details = newExtracted.product_details;
@@ -5522,7 +5629,7 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
     const custVerification = await verifyDraftCustomer('LOG_INQUIRY', draft, senderPhone);
     if (!custVerification.isValid) {
       if (custVerification.isLowMatchCustomer) {
-        await recordSessionMessage(senderPhone, 'assistant', custVerification.prompt, { action_type: 'LOG_INQUIRY' });
+        await recordSessionMessage(senderPhone, 'assistant', custVerification.prompt, { action_type: 'LOG_INQUIRY', sub_action: 'CUST_MATCH_CONFIRM' });
         await saveActiveSession(
           senderPhone,
           custVerification.fetchedName,
@@ -5578,8 +5685,10 @@ async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, capt
       interactiveButtons: CONFIRMATION_BUTTONS,
     };
   } else {
-    const missingList = missing.map(m => `• *${m}*`).join('\n');
-    const askMissing = `📄 *Extracted Inquiry Details from Document*\n\nPlease provide the remaining mandatory details for this inquiry:\n\n${missingList}`;
+    const optionNotice = draft._inquiry_option_notice ? `⚠️ ${draft._inquiry_option_notice}\n\n` : '';
+    delete draft._inquiry_option_notice;
+    const missingList = missing.map(m => formatMissingFieldBullet(m)).join('\n');
+    const askMissing = `${optionNotice}📄 *Extracted Inquiry Details from Document*\n\nPlease provide the remaining mandatory details for this inquiry:\n\n${missingList}`;
     await recordSessionMessage(senderPhone, 'assistant', askMissing, { action_type: 'LOG_INQUIRY' });
     await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|LOG_INQUIRY|${JSON.stringify(draft)}`);
     return {
@@ -8282,8 +8391,10 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
         interactiveButtons: CONFIRMATION_BUTTONS,
       };
     } else {
-      const missingList = missing.map((m) => `- **${m}**`).join('\n');
-      const askMissing = `Please provide the remaining details to update:\n\n${missingList}`;
+      const optionNotice = updatedDraft._inquiry_option_notice ? `⚠️ ${updatedDraft._inquiry_option_notice}\n\n` : '';
+      delete updatedDraft._inquiry_option_notice;
+      const missingList = missing.map((m) => formatMissingFieldItem(m, '-')).join('\n');
+      const askMissing = `${optionNotice}Please provide the remaining details to update:\n\n${missingList}`;
       await recordSessionMessage(senderPhone, 'assistant', askMissing, {
         action_type: action,
         customer_name: updatedDraft.company_name,
@@ -10036,7 +10147,12 @@ function buildConfirmationSummary(action, draft) {
       summary += `• *Meeting Remarks:* ${draft.meeting_remarks || '-'}\n`;
       if (draft.designation) summary += `• *Designation:* ${draft.designation}\n`;
       if (draft.email) summary += `• *Email:* ${draft.email}\n`;
-      if (draft.customer_type) summary += `• *Customer Type:* ${draft.customer_type}\n`;
+      if (draft.customer_type) {
+        const customerTypeLabel = draft.customer_type === 'Other' && draft.customer_type_other
+          ? draft.customer_type_other
+          : draft.customer_type;
+        summary += `• *Customer Type:* ${customerTypeLabel}\n`;
+      }
       if (draft.visit_type) summary += `• *Visit Type:* ${draft.visit_type}\n`;
       if (draft.customer_probability) summary += `• *Customer Probability:* ${draft.customer_probability}\n`;
       if (draft.product_details) summary += `• *Product Details:* ${draft.product_details}\n`;
@@ -12355,7 +12471,12 @@ async function executeAction(action, draft, senderPhone) {
         let extDetails = '';
         if (draft.designation) extDetails += `• *Designation:* ${draft.designation}\n`;
         if (draft.email) extDetails += `• *Email:* ${draft.email}\n`;
-        if (draft.customer_type) extDetails += `• *Customer Type:* ${draft.customer_type}\n`;
+        if (draft.customer_type) {
+          const customerTypeLabel = draft.customer_type === 'Other' && draft.customer_type_other
+            ? draft.customer_type_other
+            : draft.customer_type;
+          extDetails += `• *Customer Type:* ${customerTypeLabel}\n`;
+        }
         if (draft.visit_type) extDetails += `• *Visit Type:* ${draft.visit_type}\n`;
         if (draft.customer_probability) extDetails += `• *Customer Probability:* ${draft.customer_probability}\n`;
         if (draft.monthly_consumption) extDetails += `• *Monthly Consumption:* ${draft.monthly_consumption}\n`;
@@ -12533,6 +12654,13 @@ async function executeAction(action, draft, senderPhone) {
         if (updates.email) visitUpdates.email = updates.email;
         if (updates.designation) visitUpdates.designation = updates.designation;
         if (updates.customer_type) visitUpdates.customer_type = updates.customer_type;
+        if (updates.customer_type === 'Other') {
+          visitUpdates.customer_type_other = updates.customer_type_other || null;
+        } else if (updates.customer_type) {
+          visitUpdates.customer_type_other = null;
+        } else if (updates.customer_type_other) {
+          visitUpdates.customer_type_other = updates.customer_type_other;
+        }
         if (updates.visit_type) visitUpdates.visit_type = updates.visit_type;
         if (updates.customer_probability) visitUpdates.customer_probability = updates.customer_probability;
         if (updates.product_details) visitUpdates.product_details = updates.product_details;
@@ -12562,18 +12690,22 @@ async function executeAction(action, draft, senderPhone) {
 
         const existingUrls = new Set(existingAttachments.map(a => a && a.url).filter(Boolean));
         const distinctNew = newAttachmentsToAdd.filter(a => a && a.url && !existingUrls.has(a.url));
-
-        if (distinctNew.length > 0) {
-          visitUpdates.attachments = [...existingAttachments, ...distinctNew];
-          // Never replace previously added pic: only populate gps_photo_url if not set
-          if (!targetVisit.gps_photo_url) {
-            visitUpdates.gps_photo_url = distinctNew[0].url;
-          }
-        }
-
         const updLat = updates.gps_latitude ?? draft.gps_latitude;
         const updLng = updates.gps_longitude ?? draft.gps_longitude;
         const updAcc = updates.gps_accuracy ?? draft.gps_accuracy;
+
+        if (distinctNew.length > 0) {
+          visitUpdates.attachments = [...existingAttachments, ...distinctNew];
+          // Never replace previously added pic: only a camera photo with coordinates fills it.
+          if (!targetVisit.gps_photo_url) {
+            const photo = distinctNew.find((item) => visitPhotoAccepted(
+              { gps_latitude: targetVisit.gps_latitude ?? updLat, gps_longitude: targetVisit.gps_longitude ?? updLng },
+              item,
+              typeof updLat === 'number' ? { latitude: updLat, longitude: updLng } : null,
+            ));
+            if (photo) visitUpdates.gps_photo_url = photo.url;
+          }
+        }
         if (typeof updLat === 'number' && typeof updLng === 'number') {
           if (!targetVisit.gps_latitude || !targetVisit.gps_longitude) {
             visitUpdates.gps_latitude = updLat;
@@ -14334,7 +14466,7 @@ async function restoreInterruptedFlow(senderPhone, interruptedState, action, dra
       interactiveButtons: CONFIRMATION_BUTTONS,
     };
   } else {
-    const missingList = missing.map((m) => `• *${m}*`).join('\n');
+    const missingList = missing.map((m) => formatMissingFieldBullet(m)).join('\n');
     const indexTag = draft._totalCount > 1 ? ` (${draft._currentIndex || 1} of ${draft._totalCount}: ${draft.company_name || 'Item'})` : '';
     const askMissing = `${optionNotice}Please provide the remaining mandatory details for this ${actionName}${indexTag}:\n\n${missingList}`;
     await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
@@ -14935,7 +15067,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   // ── 2a. DIRECT EXPLICIT MENU SELECTION (PREEMPTION) ────────────────────────
   // When user selects any option from catalog list ([Choose Action] or direct action commands),
   // immediately clean up any prior flow and start the newly selected module prompt.
-  const isAwaitingCandidateSelection = lastIntent.startsWith('catalog_update_select|');
+  const isAwaitingCandidateSelection =
+    lastIntent.startsWith('catalog_update_select|') ||
+    lastIntent.startsWith('catalog_cust_match_confirm|') ||
+    lastIntent.startsWith('catalog_implicit_cust_ask|') ||
+    lastIntent.startsWith('catalog_implicit_cust_collect|') ||
+    lastIntent.startsWith('catalog_implicit_prod_add|') ||
+    lastIntent.startsWith('catalog_confirm|') ||
+    lastIntent.startsWith('catalog_resume_ask|');
   const menuAwaiting = (!isAwaitingCandidateSelection && isBareCatalogNumber(text))
     ? await isCatalogMenuAwaitingSelection(senderPhone)
     : false;
@@ -14988,7 +15127,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       return catalogSelectionResult(selectionRes);
     }
 
-    const initialPrompt = MODULE_PROMPTS[explicitAction];
+    const initialPrompt = explicitAction === 'LOG_VISIT'
+      ? logVisitOpeningPrompt(callerSourceChannel)
+      : MODULE_PROMPTS[explicitAction];
     if (initialPrompt) {
       await startNewCatalogSession(senderPhone, initialPrompt);
       await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: explicitAction });
@@ -15340,12 +15481,23 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (isYes) {
       chosenCustomer = fetchedName;
     } else {
-      const numMatch = cleanInput.match(/^[#*]?\s*([1-3])\s*[.)]?$/);
+      const numMatch = cleanInput.match(/^(?:option\s*|choice\s*)?[#*]?\s*([1-3])\s*[.)]?$/i);
       if (numMatch) {
         const idx = parseInt(numMatch[1], 10) - 1;
         if (idx >= 0 && idx < candidates.length) {
           chosenCustomer = candidates[idx];
         }
+      }
+    }
+
+    if (!chosenCustomer && Array.isArray(candidates)) {
+      const matchedCand = candidates.find(
+        (c) => c.toLowerCase() === cleanInput ||
+               cleanInput.includes(c.toLowerCase()) ||
+               c.toLowerCase().includes(cleanInput)
+      );
+      if (matchedCand) {
+        chosenCustomer = matchedCand;
       }
     }
 
@@ -15392,8 +15544,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           interactiveButtons: CONFIRMATION_BUTTONS,
         };
       } else {
-        const missingList = parentMissing.map((m) => `• *${m}*`).join('\n');
-        const askMsg = `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
+        const optionNotice = originalDraft._inquiry_option_notice ? `⚠️ ${originalDraft._inquiry_option_notice}\n\n` : '';
+        delete originalDraft._inquiry_option_notice;
+        const missingList = parentMissing.map((m) => formatMissingFieldBullet(m)).join('\n');
+        const askMsg = `${optionNotice}Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
         await recordSessionMessage(senderPhone, 'assistant', askMsg, {
           action_type: originalAction,
           customer_name: originalDraft.company_name,
@@ -15540,9 +15694,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
             interactiveButtons: CONFIRMATION_BUTTONS,
           };
         } else {
-          const parentMissingList = parentMissing.map(m => `• *${m}*`).join('\n');
+          const optionNotice = originalDraft._inquiry_option_notice ? `⚠️ ${originalDraft._inquiry_option_notice}\n\n` : '';
+          delete originalDraft._inquiry_option_notice;
+          const parentMissingList = parentMissing.map(m => formatMissingFieldBullet(m)).join('\n');
           const resumeMsg = `✅ *New Customer "${custDraft.company_name}" Created!*\n\n` +
-            `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${parentMissingList}`;
+            `${optionNotice}Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${parentMissingList}`;
           await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
             action_type: originalAction,
             customer_name: originalDraft.company_name,
@@ -15672,8 +15828,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           interactiveButtons: CONFIRMATION_BUTTONS,
         };
       } else {
-        const missingList = parentMissing.map(m => `• *${m}*`).join('\n');
-        const askMissing = `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
+        const optionNotice = originalDraft._inquiry_option_notice ? `⚠️ ${originalDraft._inquiry_option_notice}\n\n` : '';
+        delete originalDraft._inquiry_option_notice;
+        const missingList = parentMissing.map(m => formatMissingFieldBullet(m)).join('\n');
+        const askMissing = `${optionNotice}Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
         await recordSessionMessage(senderPhone, 'assistant', askMissing, {
           action_type: originalAction,
           customer_name: originalDraft.company_name,
@@ -15811,9 +15969,11 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           interactiveButtons: CONFIRMATION_BUTTONS,
         };
       } else {
-        const parentMissingList = parentMissing.map(m => `• *${m}*`).join('\n');
+        const optionNotice = originalDraft._inquiry_option_notice ? `⚠️ ${originalDraft._inquiry_option_notice}\n\n` : '';
+        delete originalDraft._inquiry_option_notice;
+        const parentMissingList = parentMissing.map(m => formatMissingFieldBullet(m)).join('\n');
         const resumeMsg = `✅ *New Customer "${updatedCustDraft.company_name}" Successfully Created!*\n\n` +
-          `Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${parentMissingList}`;
+          `${optionNotice}Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${parentMissingList}`;
         await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
           action_type: originalAction,
           customer_name: originalDraft.company_name,
@@ -16028,8 +16188,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           interactiveButtons: CONFIRMATION_BUTTONS,
         };
       } else {
-        const missingList = missing.map((m) => `• *${m}*`).join('\n');
-        const resumeMsg = `✅ *Product "${prodName}" Added!*\n\nPlease provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
+        const optionNotice = draft._inquiry_option_notice ? `⚠️ ${draft._inquiry_option_notice}\n\n` : '';
+        delete draft._inquiry_option_notice;
+        const missingList = missing.map((m) => formatMissingFieldBullet(m)).join('\n');
+        const resumeMsg = `✅ *Product "${prodName}" Added!*\n\n${optionNotice}Please provide the remaining mandatory details for this ${getActionFriendlyName(originalAction)}:\n\n${missingList}`;
         await recordSessionMessage(senderPhone, 'assistant', resumeMsg, {
           action_type: originalAction,
           customer_name: draft.company_name,
@@ -16114,7 +16276,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       const custCheck = await verifyDraftCustomer(action, draft, senderPhone);
       if (!custCheck.isValid) {
         if (custCheck.isLowMatchCustomer) {
-          await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+          await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action, sub_action: 'CUST_MATCH_CONFIRM' });
           await saveActiveSession(
             senderPhone,
             custCheck.fetchedName,
@@ -16158,6 +16320,17 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
       const lineChoiceBeforeSave = await askLineItemChoiceIfNeeded(action, draft, senderPhone);
       if (lineChoiceBeforeSave) return lineChoiceBeforeSave;
+
+      const missingBeforeSave = validateMandatoryFields(action, draft);
+      if (missingBeforeSave.length > 0) {
+        const optionNotice = draft._inquiry_option_notice ? `⚠️ ${draft._inquiry_option_notice}\n\n` : '';
+        delete draft._inquiry_option_notice;
+        const missingList = missingBeforeSave.map((m) => formatMissingFieldBullet(m)).join('\n');
+        const askMsg = `${optionNotice}Please provide the remaining mandatory details before saving:\n\n${missingList}`;
+        await recordSessionMessage(senderPhone, 'assistant', askMsg, { action_type: action, customer_name: draft.company_name });
+        await saveActiveSession(senderPhone, draft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(draft)}`);
+        return { handled: true, reply: askMsg };
+      }
 
       if (action === 'LOG_VISIT' && !draft.verification_token) {
         await fillVisitCity(draft);
@@ -16223,8 +16396,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
             interactiveButtons: CONFIRMATION_BUTTONS,
           };
         } else {
-          const missingList = missing.map((m) => `• *${m}*`).join('\n');
-          const nextPrompt = `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's complete the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\nPlease provide the remaining mandatory details:\n\n${missingList}\n\n💡 _Tip: To skip or finish without logging for ${nextEntry.company_name}, reply "cancel" or "discard"._`;
+          const optionNotice = nextEntry._inquiry_option_notice ? `⚠️ ${nextEntry._inquiry_option_notice}\n\n` : '';
+          delete nextEntry._inquiry_option_notice;
+          const missingList = missing.map((m) => formatMissingFieldBullet(m)).join('\n');
+          const nextPrompt = `${reply}\n\n━━━━━━━━━━━━━━━━━━━━\nNow let's complete the ${getActionFriendlyName(nextAction)} for *${nextEntry.company_name}* (${nextEntry._currentIndex} of ${nextEntry._totalCount}):\n\n${optionNotice}Please provide the remaining mandatory details:\n\n${missingList}\n\n💡 _Tip: To skip or finish without logging for ${nextEntry.company_name}, reply "cancel" or "discard"._`;
           await recordSessionMessage(senderPhone, 'assistant', nextPrompt, {
             action_type: nextAction,
             customer_name: nextEntry.company_name,
@@ -16324,7 +16499,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // Check if user is attempting to edit a non-editable or system-generated field
-    const nonEditableCheckConfirm = detectNonEditableFieldAttempt(action, text, draft);
+    const nonEditableCheckConfirm = detectNonEditableFieldAttempt(action, text, draft, { lockVisitLocation: true });
     if (nonEditableCheckConfirm.isNonEditable) {
       await recordSessionMessage(senderPhone, 'user', text);
       const fullReply = nonEditableCheckConfirm.compactReply || `${nonEditableCheckConfirm.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheckConfirm.allowedFieldsList}\n\nWhich editable field would you like to change?`;
@@ -16344,7 +16519,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     if (action === 'LOG_VISIT') {
       attachVisitMedia(updatedDraft, attachmentObj, gpsData);
-      await fillVisitCity(updatedDraft);
+      await captureVisitLocation(updatedDraft, text, draft);
+      preserveVisitLocation(updatedDraft, draft);
     } else if (action === 'UPDATE_VISIT') {
       if (attachmentObj) {
         updatedDraft.updates = updatedDraft.updates || {};
@@ -16389,7 +16565,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
       if (custCheck.isLowMatchCustomer) {
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action, sub_action: 'CUST_MATCH_CONFIRM' });
         await saveActiveSession(
           senderPhone,
           custCheck.fetchedName,
@@ -16450,14 +16626,17 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       };
     }
 
-    const retryPrompt = `Please reply with:\n• *Yes* — to save\n• *Edit* — to change a field\n• *Cancel* — to discard`;
-    await recordSessionMessage(senderPhone, 'assistant', retryPrompt);
-    return {
-      handled: true,
-      reply: retryPrompt,
-      interactiveType: 'buttons',
-      interactiveButtons: CONFIRMATION_BUTTONS,
-    };
+    const optionNotice = updatedDraft._inquiry_option_notice ? `⚠️ ${updatedDraft._inquiry_option_notice}\n\n` : '';
+    delete updatedDraft._inquiry_option_notice;
+    const missingList = missing.map((m) => formatMissingFieldItem(m, '-')).join('\n');
+    const actionName = getActionFriendlyName(action);
+    const askMissing = `${optionNotice}Please provide the remaining mandatory details for this ${actionName}:\n\n${missingList}`;
+    await recordSessionMessage(senderPhone, 'assistant', askMissing, {
+      action_type: action,
+      customer_name: updatedDraft.company_name,
+    });
+    await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
+    return { handled: true, reply: askMissing };
   }
 
   // ── 4. HANDLE EDITING STATE (catalog_editing|...) ───────────────────────────
@@ -16521,7 +16700,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
 
     // Check if user is attempting to edit a non-editable or system-generated field
-    const nonEditableCheck = detectNonEditableFieldAttempt(action, text, draft);
+    const nonEditableCheck = detectNonEditableFieldAttempt(action, text, draft, { lockVisitLocation: true });
     if (nonEditableCheck.isNonEditable) {
       await recordSessionMessage(senderPhone, 'user', text);
       const fullReply = nonEditableCheck.compactReply || `${nonEditableCheck.message}\n\n*Editable fields for this ${getActionFriendlyName(action)}:*\n${nonEditableCheck.allowedFieldsList}\n\nWhich editable field would you like to change?`;
@@ -16552,7 +16731,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     if (action === 'LOG_VISIT') {
       attachVisitMedia(updatedDraft, attachmentObj, gpsData);
-      await fillVisitCity(updatedDraft);
+      await captureVisitLocation(updatedDraft, text, draft);
+      preserveVisitLocation(updatedDraft, draft);
     } else if (action === 'UPDATE_VISIT') {
       if (attachmentObj) {
         updatedDraft.updates = updatedDraft.updates || {};
@@ -16597,7 +16777,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
       if (custCheck.isLowMatchCustomer) {
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action, sub_action: 'CUST_MATCH_CONFIRM' });
         await saveActiveSession(
           senderPhone,
           custCheck.fetchedName,
@@ -16671,10 +16851,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         interactiveButtons: CONFIRMATION_BUTTONS,
       };
     } else {
-      const missingList = missing.map((m) => `- **${m}**`).join('\n');
+      const missingList = missing.map((m) => formatMissingFieldItem(m, '-')).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
       let askMissing = '';
+      if (updatedDraft._inquiry_option_notice) {
+        askMissing += `⚠️ ${updatedDraft._inquiry_option_notice}\n\n`;
+        delete updatedDraft._inquiry_option_notice;
+      }
       if (updatedDraft._permissionNotice) {
         askMissing += `${updatedDraft._permissionNotice}\n\n`;
       }
@@ -17421,8 +17605,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
             interactiveButtons: CONFIRMATION_BUTTONS,
           };
         } else {
-          const missingList = missing.map(m => `• *${m}*`).join('\n');
-          const askMissing = `✅ *Company:* ${existingDraft.company_name}\n\nPlease provide the remaining mandatory details for this ${getActionFriendlyName(action)}:\n\n${missingList}`;
+          const optionNotice = existingDraft._inquiry_option_notice ? `⚠️ ${existingDraft._inquiry_option_notice}\n\n` : '';
+          delete existingDraft._inquiry_option_notice;
+          const missingList = missing.map(m => formatMissingFieldBullet(m)).join('\n');
+          const askMissing = `${optionNotice}✅ *Company:* ${existingDraft.company_name}\n\nPlease provide the remaining mandatory details for this ${getActionFriendlyName(action)}:\n\n${missingList}`;
           await recordSessionMessage(senderPhone, 'assistant', askMissing, {
             action_type: action,
             customer_name: existingDraft.company_name,
@@ -17694,7 +17880,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         if (!prevAtts.some(a => a && a.url === attachmentObj.url)) {
           updatedDraft.attachments = [...prevAtts, attachmentObj];
         }
-        if (!updatedDraft.gps_photo_url && !existingDraft.gps_photo_url) {
+        const photoDraft = updatedDraft.gps_latitude != null ? updatedDraft : existingDraft;
+        if (
+          !updatedDraft.gps_photo_url &&
+          !existingDraft.gps_photo_url &&
+          visitPhotoAccepted(photoDraft, attachmentObj, gpsData)
+        ) {
           updatedDraft.gps_photo_url = attachmentObj.url;
         }
       }
@@ -17703,6 +17894,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         updatedDraft.gps_longitude = gpsData.longitude;
         updatedDraft.gps_accuracy = gpsData.accuracy;
       }
+      await captureVisitLocation(updatedDraft, text, existingDraft);
     } else if (action === 'UPDATE_VISIT') {
       if (attachmentObj) {
         updatedDraft.updates = updatedDraft.updates || {};
@@ -17779,7 +17971,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const custCheck = await verifyDraftCustomer(action, updatedDraft, senderPhone);
     if (!custCheck.isValid) {
       if (custCheck.isLowMatchCustomer) {
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action });
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: action, sub_action: 'CUST_MATCH_CONFIRM' });
         await saveActiveSession(
           senderPhone,
           custCheck.fetchedName,
@@ -18002,10 +18194,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         await saveActiveSession(senderPhone, updatedDraft.company_name || 'Customer', `catalog_flow|${action}|${JSON.stringify(updatedDraft)}`);
         return { handled: true, reply: sysReply };
       }
-      const missingList = missing.map((m) => `- **${m}**`).join('\n');
+      const missingList = missing.map((m) => formatMissingFieldItem(m, '-')).join('\n');
       const actionName = getActionFriendlyName(action);
       const indexTag = updatedDraft._totalCount > 1 ? ` (${updatedDraft._currentIndex || 1} of ${updatedDraft._totalCount}: ${updatedDraft.company_name || 'Item'})` : '';
       let askMissing = '';
+      if (updatedDraft._inquiry_option_notice) {
+        askMissing += `⚠️ ${updatedDraft._inquiry_option_notice}\n\n`;
+        delete updatedDraft._inquiry_option_notice;
+      }
       if (updatedDraft._permissionNotice) {
         askMissing += `${updatedDraft._permissionNotice}\n\n`;
       }
@@ -18072,7 +18268,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       return catalogSelectionResult(selectionRes);
     }
 
-    const initialPrompt = MODULE_PROMPTS[matchedAction];
+    const initialPrompt = matchedAction === 'LOG_VISIT'
+      ? logVisitOpeningPrompt(callerSourceChannel)
+      : MODULE_PROMPTS[matchedAction];
     if (initialPrompt) {
       await startNewCatalogSession(senderPhone, initialPrompt);
       await recordSessionMessage(senderPhone, 'assistant', initialPrompt, { action_type: matchedAction });
@@ -18218,8 +18416,6 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   if (isColdVisitIntent) {
     const initialVisitDraft = {
       action: 'LOG_VISIT',
-      ...(photoDataUrl ? { gps_photo_url: photoDataUrl } : {}),
-      ...(attachmentObj ? { attachments: [attachmentObj] } : {}),
       ...(gpsData ? {
         gps_latitude: gpsData.latitude,
         gps_longitude: gpsData.longitude,
@@ -18230,17 +18426,8 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     await recordSessionMessage(senderPhone, 'user', text);
     const updatedDraft = await extractFieldsWithLLM('LOG_VISIT', text, initialVisitDraft);
 
-    if (photoDataUrl && !updatedDraft.gps_photo_url) updatedDraft.gps_photo_url = photoDataUrl;
-    if (attachmentObj) {
-      if (!Array.isArray(updatedDraft.attachments) || updatedDraft.attachments.length === 0) {
-        updatedDraft.attachments = [attachmentObj];
-      }
-    }
-    if (gpsData && (updatedDraft.gps_latitude === undefined || updatedDraft.gps_latitude === null)) {
-      updatedDraft.gps_latitude = gpsData.latitude;
-      updatedDraft.gps_longitude = gpsData.longitude;
-      updatedDraft.gps_accuracy = gpsData.accuracy;
-    }
+    attachVisitMedia(updatedDraft, attachmentObj, gpsData);
+    await captureVisitLocation(updatedDraft, text, initialVisitDraft);
 
     const nonEditableColdLog = detectNonEditableFieldAttempt('LOG_VISIT', text, updatedDraft);
     if (nonEditableColdLog.isNonEditable) {
@@ -18258,7 +18445,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const custCheck = await verifyDraftCustomer('LOG_VISIT', updatedDraft, senderPhone);
     if (!custCheck.isValid) {
       if (custCheck.isLowMatchCustomer) {
-        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: 'LOG_VISIT' });
+        await recordSessionMessage(senderPhone, 'assistant', custCheck.prompt, { action_type: 'LOG_VISIT', sub_action: 'CUST_MATCH_CONFIRM' });
         await saveActiveSession(
           senderPhone,
           custCheck.fetchedName,
@@ -18505,6 +18692,9 @@ module.exports = {
   handleResumeMenuButton,
   getAllowedFieldsListForAction,
   matchInquiryOption,
+  INQUIRY_PAYMENT_TERMS,
+  formatMissingFieldItem,
+  formatMissingFieldBullet,
   getEditPromptForAction,
   scoreLineItemAgainstUpdate,
   matchLineItemUpdate,

@@ -262,6 +262,9 @@ router.post('/', async (req, res) => {
               media_urls = [message.document.id];
             }
             break;
+          case 'location':
+            raw_text = 'Location pin';
+            break;
           case 'interactive':
             if (message.interactive) {
               if (message.interactive.type === 'button_reply' && message.interactive.button_reply) {
@@ -292,6 +295,49 @@ router.post('/', async (req, res) => {
           default:
             raw_text = `${messageType} message type received`;
             break;
+        }
+
+        // A location pin is part of a visit. Other flows still reject it below.
+        if (messageType === 'location') {
+          const { getFullActiveSession } = require('./supabase');
+          const activeForPin = await getFullActiveSession(senderPhone);
+          const pinIntent = String(activeForPin?.last_intent || '');
+          const inVisit = /catalog_(?:flow|confirm|editing)\|(?:LOG_VISIT|UPDATE_VISIT)/.test(pinIntent);
+          if (inVisit) {
+            const loc = message.location || {};
+            const latitude = Number(loc.latitude);
+            const longitude = Number(loc.longitude);
+            if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+              await sendTextMessage(senderPhone, 'That location pin could not be read. Share it again, or type the city.');
+              return;
+            }
+            const { handleCatalogFlow } = require('./core/catalogFlow');
+            const catalogResult = await handleCatalogFlow('Location pin', senderPhone, {
+              gps: { latitude, longitude },
+              messageType: 'location',
+            });
+            if (catalogResult && catalogResult.handled && catalogResult.reply) {
+              if (catalogResult.interactiveType === 'buttons' && Array.isArray(catalogResult.interactiveButtons)) {
+                await sendInteractiveButtons(
+                  senderPhone,
+                  catalogResult.reply,
+                  catalogResult.interactiveButtons,
+                  catalogResult.interactiveOptions || {}
+                );
+              } else if (catalogResult.interactiveType === 'list' && catalogResult.interactiveList) {
+                await sendInteractiveList(
+                  senderPhone,
+                  catalogResult.interactiveList.bodyText || catalogResult.reply,
+                  catalogResult.interactiveList.buttonText || 'Choose Action',
+                  catalogResult.interactiveList.sections || [],
+                  catalogResult.interactiveOptions || {}
+                );
+              } else {
+                await sendTextMessage(senderPhone, catalogResult.reply);
+              }
+            }
+            return;
+          }
         }
 
         // ── UNSUPPORTED MEDIA (video, sticker, location, contact card, ...) ──
@@ -388,7 +434,7 @@ router.post('/', async (req, res) => {
             lastIntent.startsWith('catalog_confirm|LOG_ORDER') ||
             lastIntent.startsWith('catalog_selection|LOG_ORDER');
 
-          const isVisitFlow = messageType === 'image' && (
+          const inVisitSession = (
             lastIntent.startsWith('catalog_flow|LOG_VISIT') ||
             lastIntent.startsWith('catalog_flow|UPDATE_VISIT') ||
             lastIntent.startsWith('catalog_confirm|LOG_VISIT') ||
@@ -396,6 +442,7 @@ router.post('/', async (req, res) => {
             lastIntent.startsWith('catalog_editing|LOG_VISIT') ||
             lastIntent.startsWith('catalog_editing|UPDATE_VISIT')
           );
+          const isVisitFlow = (messageType === 'image' || messageType === 'document') && inVisitSession;
 
           const isComplaintFlow = (
             lastIntent.startsWith('catalog_flow|LOG_COMPLAINT') ||
@@ -471,7 +518,17 @@ router.post('/', async (req, res) => {
             const mediaId = media_urls[0];
             const mediaData = await downloadMedia(mediaId);
             let attachmentObj = null;
-            if (mediaData && mediaData.buffer) {
+            if (mediaData && mediaData.buffer && messageType === 'document') {
+              const mime = mediaData.mimeType || 'application/pdf';
+              attachmentObj = {
+                type: mime,
+                url: `data:${mime};base64,${mediaData.buffer.toString('base64')}`,
+                mimeType: mime,
+                fileName: (message.document && message.document.filename) || 'visit-document',
+                messageType: 'document',
+                photoSource: 'upload',
+              };
+            } else if (mediaData && mediaData.buffer) {
               const compressed = await compressImageBuffer(mediaData.buffer, mediaData.mimeType);
               const finalBuffer = compressed.buffer || mediaData.buffer;
               const finalMime = compressed.mimeType || 'image/jpeg';
@@ -480,6 +537,7 @@ router.post('/', async (req, res) => {
                 url: `data:${finalMime};base64,${finalBuffer.toString('base64')}`,
                 mimeType: finalMime,
                 fileName: 'visit_site_photo.jpg',
+                messageType: 'image',
               };
             }
             const { handleCatalogFlow } = require('./core/catalogFlow');
