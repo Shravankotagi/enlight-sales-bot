@@ -714,9 +714,7 @@ async function handleProcurementChat(text, phone, deps) {
   }
 
   if (choice === 'pending') {
-    const rows = visibleInquiries(await loadInquiries(supabase), scope).filter(
-      isAwaitingPrice,
-    );
+    const rows = await loadDashboardAwaiting(supabase, scope, employees || []);
     return { handled: true, reply: listReply('*Pending prices*', rows, employees || []) };
   }
   if (choice === 'all') {
