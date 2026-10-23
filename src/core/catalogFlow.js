@@ -2165,6 +2165,81 @@ function extractVerbatimNotes(text) {
   return body.length > 0 ? body : null;
 }
 
+function parseStructuredFormLinesFallback(action, text) {
+  if (!text || typeof text !== 'string') return {};
+  const res = {};
+  const lines = text.split(/[\r\n]+/);
+
+  for (const line of lines) {
+    const m = line.match(/^\s*(?:[-•*]\s*)?([^:]+):\s*(.+)$/);
+    if (!m) continue;
+    const key = m[1].toLowerCase().trim().replace(/[*_]/g, '');
+    const val = m[2].trim().replace(/^[*_]|[*_]$/g, '');
+
+    if (/\b(?:customer|company)\b/.test(key) && !res.company_name) {
+      res.company_name = val;
+    } else if (/\bemail\b/.test(key) && !res.email) {
+      const emailMatch = val.match(/[\w.-]+@[\w.-]+\.\w+/);
+      if (emailMatch) res.email = emailMatch[0];
+    } else if (/\b(?:product|item|description|requirement)\b/.test(key) && !res.product_description) {
+      res.product_description = val;
+    } else if (/\b(?:rate|price)\b/.test(key) && res.rate === undefined) {
+      const rateNum = parseFloat(val.replace(/,/g, '').match(/\d+(?:\.\d+)?/)?.[0]);
+      if (!isNaN(rateNum)) res.rate = rateNum;
+    } else if (/\b(?:brand|make)\b/.test(key) && !res.preferred_make) {
+      res.preferred_make = val;
+    } else if (/\b(?:payment|terms)\b/.test(key) && !res.payment_terms) {
+      res.payment_terms = val;
+    } else if (/\b(?:delivery|location|city|address)\b/.test(key) && !res.delivery_location) {
+      res.delivery_location = val;
+    } else if (/\b(?:notes?|remarks?)\b/.test(key) && !res.additional_notes) {
+      res.additional_notes = val;
+    }
+  }
+
+  if (res.product_description && (!res.line_items || res.line_items.length === 0)) {
+    const raw = res.product_description;
+    const qtyMatch = raw.match(/(\d+(?:\.\d+)?)\s*(MT|ton|tonne|kg|pcs|nos)\b/i);
+    const qty = qtyMatch ? parseFloat(qtyMatch[1]) : null;
+    const unit = qtyMatch ? (qtyMatch[2].toUpperCase().startsWith('TON') ? 'MT' : qtyMatch[2].toUpperCase()) : 'MT';
+    const hsnMatch = raw.match(/hsn\s*[:#-]?\s*(\d{4,8})/i);
+    const hsn = hsnMatch ? hsnMatch[1] : null;
+
+    let cleaned = raw
+      .replace(/(\d+(?:\.\d+)?)\s*(MT|ton|tonne|kg|pcs|nos)\b/gi, '')
+      .replace(/hsn\s*[:#-]?\s*\d{4,8}/gi, '')
+      .replace(/,\s*,/g, ',')
+      .replace(/^[\s,]+|[\s,]+$/g, '');
+
+    const dimMatch = cleaned.match(/(\d+(?:\.\d+)?\s*(?:[xX*]\s*\d+(?:\.\d+)?)+(?:\s*(?:[xX*]\s*\d+(?:\.\d+)?))?|\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
+    const dim = dimMatch ? dimMatch[0].trim() : null;
+
+    let prodName = cleaned;
+    if (dim) {
+      prodName = cleaned.replace(dim, '').replace(/^[\s,]+|[\s,]+$/g, '').trim();
+    }
+
+    if (prodName) {
+      res.line_items = [
+        {
+          sku_text: prodName,
+          description: raw,
+          dimensions: dim || '',
+          spec: dim || '',
+          quantity: qty || '',
+          unit,
+          rate: res.rate || '',
+          amount: qty && res.rate ? qty * res.rate : '',
+          hsn_sac: hsn,
+          hsn_code: hsn,
+        }
+      ];
+    }
+  }
+
+  return res;
+}
+
 // ── LLM FIELD EXTRACTION ENGINE ──────────────────────────────────────────────
 
 async function extractFieldsWithLLM(action, userInput, existingDraft = {}) {
@@ -2499,7 +2574,8 @@ If only a single company is mentioned or if filling missing fields for an existi
 8. In LOG_ORDER: If the user provides an Inquiry ID (e.g. INQ-F4D982 or 'regarding inquiry INQ-F4D982'), extract the inquiry ID into 'inquiry_id'.
 9. In UPDATE_ORDER: If the user explicitly asks to change the system/internal/generated PO, extract it into 'po_number' and 'updates.po_number'. If the user mentions a customer/document/voucher PO, extract it into 'reference_po_number' and never replace the canonical system PO.
 10. PRODUCT EXTRACTION & CATALOG INTEGRITY RULES (CRITICAL):
-- Extract the EXACT, LITERAL product term mentioned by the user (e.g. 'Sheet', 'Coil', 'Plate', 'Pipe', 'Tube', 'MS Sheet', 'HR Sheet', 'CR Coil', 'MS Angle', 'TMT Bar').
+- Extract the EXACT, LITERAL product term mentioned by the user as it is (e.g. 'Sheet', 'Coil', 'Plate', 'Pipe', 'Tube', 'MS Sheet', 'HR Sheet', 'HR Plate', 'CR Coil', 'MS Angle', 'TMT Bar').
+- PRESERVE USER DETAILS AS-IS: Never alter, normalize away, coerce, or strip specs, product names, or descriptions provided by the user. If the user writes 'HR Plate 5 x 1250 x 67', extract 'HR Plate' as sku_text and '5 x 1250 x 67' as dimensions verbatim as typed. Users will manage and adjust specs directly on the dashboard.
 - ZERO FABRICATION / ZERO AUTO-CONVERSION: NEVER guess, assume, or auto-convert generic or ambiguous words (e.g. 'sheet', 'coil', 'plate', 'pipe', 'tube', 'bar', 'rod') to a specific catalog variant.
   - If the user says "sheet", extract sku_text as "Sheet" (NEVER auto-convert "sheet" to "HR Sheet" or "CR Sheet").
   - If the user says "coil", extract sku_text as "Coil" (NEVER auto-convert "coil" to "HR Coil").
@@ -2507,7 +2583,7 @@ If only a single company is mentioned or if filling missing fields for an existi
   - If the user says "pipe", extract sku_text as "Pipe" (NEVER auto-convert "pipe" to "MS Round Pipe").
   The backend validation engine will automatically detect generic/ambiguous terms and ask the user to clarify the exact catalog variant.
 - In LOG_COMPLAINT: if no official catalog product name is mentioned, leave 'affected_product' as null so the system automatically resolves it from the linked Order / PO!
-- "dimensions" / "spec": Extract thickness, gauge, width, and size (e.g. '8mm', '1250 x 2500', '50x50x6').
+- "dimensions" / "spec": Extract the COMPLETE, EXACT dimensions verbatim as typed by the user (e.g. '5 x 1250 x 67', '8mm', '1250 x 2500', '50x50x6'). NEVER truncate, summarize, or strip dimensions down to a single number or single axis.
 - "grade": When the user writes a steel grade such as E350, E250, E410, E450, SAILMA, Fe500, Fe550, Fe500D, or Fe550D, return it on each line item. If that grade is written once before a size list (e.g. "HR E350" then several sizes), repeat the same grade on every line. Do not put make names such as SAIL or NMDC in grade.
 11. TOTAL ORDER VALUE / DIRECT MONEY MODIFICATION (CRITICAL):
 - In UPDATE_ORDER: Total order value (or total money / total amount / grand total) is a computed calculation derived strictly from line item rates, quantities, and taxes.
@@ -2616,17 +2692,18 @@ User Message:
     console.error('[CatalogFlow] LLM extraction error:', err.message);
   }
 
-  const fallbackParsed = {};
+  const templateFallback = parseStructuredFormLinesFallback(action, userInput);
+  const fallbackParsed = { ...templateFallback };
   if (verbatimNotes) {
     if (action === 'LOG_INQUIRY') {
       fallbackParsed.additional_notes = verbatimNotes;
     } else if (action === 'UPDATE_INQUIRY') {
-      fallbackParsed.updates = { additional_notes: verbatimNotes };
+      fallbackParsed.updates = { ...(fallbackParsed.updates || {}), additional_notes: verbatimNotes };
       fallbackParsed.additional_notes = verbatimNotes;
     } else if (action === 'LOG_VISIT') {
       fallbackParsed.meeting_remarks = verbatimNotes;
     } else if (action === 'UPDATE_VISIT') {
-      fallbackParsed.updates = { meeting_remarks: verbatimNotes };
+      fallbackParsed.updates = { ...(fallbackParsed.updates || {}), meeting_remarks: verbatimNotes };
       fallbackParsed.meeting_remarks = verbatimNotes;
     }
   }
@@ -6891,12 +6968,9 @@ function formatDetailedInquiryItemsList(items, { includeHsn = false } = {}) {
     const dim = item.dimensions || item.spec || item.thickness || item.size;
     let spec = '';
     if (dim) {
-      const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
-      const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
-      if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
-        spec = ` (${shortSpec})`;
-      } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
-        spec = ` (${dim})`;
+      const cleanDim = String(dim).trim();
+      if (cleanDim && !name.toLowerCase().includes(cleanDim.toLowerCase())) {
+        spec = ` (${cleanDim})`;
       }
     }
 
@@ -7198,10 +7272,9 @@ function formatProductSummaryCompact(item) {
       const name = it.sku_text || it.description || it.product_name || 'Item';
       const dim = it.dimensions || it.spec;
       if (dim) {
-        const thkMatch = dim.match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
-        const shortSpec = thkMatch ? thkMatch[0].trim().toUpperCase() : dim.split(/[\s(,]/)[0].trim();
-        if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
-          return `${name} (${shortSpec})`;
+        const cleanDim = String(dim).trim();
+        if (cleanDim && !name.toLowerCase().includes(cleanDim.toLowerCase())) {
+          return `${name} (${cleanDim})`;
         }
       }
       return name;
@@ -9047,10 +9120,9 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         const name = it.sku_text || it.description || it.product_name || 'Item';
         const dim = it.dimensions || it.spec;
         if (dim) {
-          const thkMatch = dim.match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
-          const shortSpec = thkMatch ? thkMatch[0].trim().toUpperCase() : dim.split(/[\s(,]/)[0].trim();
-          if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
-            return `${name} (${shortSpec})`;
+          const cleanDim = String(dim).trim();
+          if (cleanDim && !name.toLowerCase().includes(cleanDim.toLowerCase())) {
+            return `${name} (${cleanDim})`;
           }
         }
         return name;

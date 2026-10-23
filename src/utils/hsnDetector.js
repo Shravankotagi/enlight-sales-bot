@@ -414,12 +414,11 @@ function normalizeProductToCatalog(productName, dimensions = null) {
     return { isValid: true, catalogName: 'CR Sheet', category: 'Flat Steel', hsnCode: code };
   }
 
-  // HR Plate (14mm+)
+  // HR Plate
   if (/\bhr\s*plate\b|\bhot\s*rolled\s*plate\b/i.test(combined)) {
-    if (t !== null && t < 12.00) {
-      return { isValid: true, catalogName: 'HR Sheet', category: 'Flat Steel', hsnCode: '72083730' };
-    }
-    return { isValid: true, catalogName: 'HR Plate', category: 'Flat Steel', hsnCode: '72085110' };
+    let code = '72085110';
+    if (t !== null && t < 12.00) code = '72083730';
+    return { isValid: true, catalogName: 'HR Plate', category: 'Flat Steel', hsnCode: code };
   }
 
   // HR Sheet

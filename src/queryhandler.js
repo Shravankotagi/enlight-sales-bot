@@ -3688,12 +3688,9 @@ async function getInquiryOrDealByCode(scopeOrPhone, text, explicitCode = null) {
         const dim = item.dimensions || item.spec;
         let spec = '';
         if (dim) {
-          const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
-          const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
-          if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
-            spec = ` (${shortSpec})`;
-          } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
-            spec = ` (${dim})`;
+          const cleanDim = String(dim).trim();
+          if (cleanDim && !name.toLowerCase().includes(cleanDim.toLowerCase())) {
+            spec = ` (${cleanDim})`;
           }
         } else if (item.grade && !name.toLowerCase().includes(String(item.grade).toLowerCase())) {
           spec = ` (${item.grade})`;
