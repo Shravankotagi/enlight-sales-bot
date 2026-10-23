@@ -6891,12 +6891,9 @@ function formatDetailedInquiryItemsList(items, { includeHsn = false } = {}) {
     const dim = item.dimensions || item.spec || item.thickness || item.size;
     let spec = '';
     if (dim) {
-      const thkMatch = String(dim).match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
-      const shortSpec = thkMatch ? thkMatch[0].trim() : String(dim).split(/[\s(,]/)[0].trim();
-      if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
-        spec = ` (${shortSpec})`;
-      } else if (!name.toLowerCase().includes(String(dim).toLowerCase())) {
-        spec = ` (${dim})`;
+      const cleanDim = String(dim).trim();
+      if (cleanDim && !name.toLowerCase().includes(cleanDim.toLowerCase())) {
+        spec = ` (${cleanDim})`;
       }
     }
 
@@ -7198,10 +7195,9 @@ function formatProductSummaryCompact(item) {
       const name = it.sku_text || it.description || it.product_name || 'Item';
       const dim = it.dimensions || it.spec;
       if (dim) {
-        const thkMatch = dim.match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
-        const shortSpec = thkMatch ? thkMatch[0].trim().toUpperCase() : dim.split(/[\s(,]/)[0].trim();
-        if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
-          return `${name} (${shortSpec})`;
+        const cleanDim = String(dim).trim();
+        if (cleanDim && !name.toLowerCase().includes(cleanDim.toLowerCase())) {
+          return `${name} (${cleanDim})`;
         }
       }
       return name;
@@ -9047,10 +9043,9 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         const name = it.sku_text || it.description || it.product_name || 'Item';
         const dim = it.dimensions || it.spec;
         if (dim) {
-          const thkMatch = dim.match(/(\d+(?:\.\d+)?\s*(?:mm|thk|gauge|g))\b/i);
-          const shortSpec = thkMatch ? thkMatch[0].trim().toUpperCase() : dim.split(/[\s(,]/)[0].trim();
-          if (shortSpec && !name.toLowerCase().includes(shortSpec.toLowerCase())) {
-            return `${name} (${shortSpec})`;
+          const cleanDim = String(dim).trim();
+          if (cleanDim && !name.toLowerCase().includes(cleanDim.toLowerCase())) {
+            return `${name} (${cleanDim})`;
           }
         }
         return name;
