@@ -137,7 +137,7 @@ test('log a base price lists seven procurement numbers and points to the inquiri
   const copied = three.reply.split('\n').find((line) => line.startsWith('PR-10003'));
   const fromLine = await chat(person, threeRows).handle(copied);
   assert.match(fromLine.reply, /PR-10003/);
-  assert.match(fromLine.reply, /one base price per line/);
+  assert.match(fromLine.reply, /Reply with the base price/);
 });
 
 test('a blank pricing status is not awaiting a price', async () => {
@@ -198,7 +198,8 @@ test('asking for details returns the inquiry and does not open base pricing', as
   assert.equal(String(opened.sessions.get(person.phone)?.last_intent || '').startsWith('procurement|base|'), false);
 
   const priced = await opened.handle('PR-10226');
-  assert.match(priced.reply, /one base price per line/);
+  assert.match(priced.reply, /Reply with the line number/);
+  assert.doesNotMatch(priced.reply, /one base price per line/);
   assert.match(opened.sessions.get(person.phone).last_intent, /^procurement\|base\|PR-10226$/);
 });
 
