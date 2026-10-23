@@ -1076,7 +1076,7 @@ const CATALOG_MENU_SECTIONS = [
 ];
 
 async function canUserUpdateVisits(senderPhone) {
-  if (!senderPhone) return true;
+  if (!senderPhone) return false;
   try {
     const { can } = require('../utils/permissions');
     return can(senderPhone, 'visits.update');
