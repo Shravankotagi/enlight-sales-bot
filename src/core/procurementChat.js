@@ -244,6 +244,64 @@ function isAwaitingPrice(row) {
   return row?.pricing_status === 'awaiting_price';
 }
 
+function isDashboardAwaiting(row) {
+  return preservedPricingStatus(row) === 'awaiting_price';
+}
+
+function realSalespersonPhone(phone) {
+  const lower = String(phone || '').trim().toLowerCase();
+  if (!lower || lower === 'unassigned' || lower === 'null' || lower === 'undefined') return '';
+  const clean = lower.replace(/\D/g, '').slice(-10);
+  if (clean.length < 10 || clean === '9975003940' || clean === '0000000000') return '';
+  return String(phone).trim();
+}
+
+function stripCompanyName(value) {
+  return String(value || '')
+    .replace(/\b(private\s+limited|pvt\s+ltd|pvt\s+limited|private\s+ltd|co\s+ltd|co\s+limited|llp|limited|pvt|ltd|inc|corp|co|corporation)\b/gi, '')
+    .replace(/[^a-z0-9]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function customerLabel(inquiry) {
+  const ai = inquiry?.ai_extraction_json || {};
+  return String(inquiry?.customer_name || ai.customer_name || ai.customer?.name || '').trim().toLowerCase();
+}
+
+function lookupOwnerPhone(name, owners) {
+  if (!name || !owners || !owners.size) return '';
+  if (owners.has(name)) return owners.get(name);
+  const stripped = stripCompanyName(name);
+  if (!stripped) return '';
+  for (const [key, phone] of owners.entries()) {
+    const other = stripCompanyName(key);
+    if (other && (stripped === other || stripped.startsWith(other) || other.startsWith(stripped))) return phone;
+  }
+  return '';
+}
+
+function resolvedSalespersonPhone(inquiry, owners) {
+  const stored = realSalespersonPhone(inquiry?.salesperson_phone);
+  if (stored) return stored;
+  const owner = lookupOwnerPhone(customerLabel(inquiry), owners);
+  if (owner) return owner;
+  const sender = realSalespersonPhone(inquiry?.sender_phone);
+  if (sender) return sender;
+  const raw = String(inquiry?.salesperson_phone || '').trim().toLowerCase();
+  if (raw && raw !== 'unassigned' && raw !== 'null' && raw !== 'undefined') return String(inquiry.salesperson_phone).trim();
+  const rawSender = String(inquiry?.sender_phone || '').trim().toLowerCase();
+  if (rawSender && rawSender !== 'unassigned' && rawSender !== 'null' && rawSender !== 'undefined') {
+    return String(inquiry.sender_phone).trim();
+  }
+  return '';
+}
+
+function withResolvedSalesperson(inquiry, owners) {
+  const phone = resolvedSalespersonPhone(inquiry, owners);
+  return phone ? { ...inquiry, salesperson_phone: phone } : inquiry;
+}
+
 function formatInquiryLine(inquiry, salespersonName, badge) {
   const number = inquiry?.procurement_number || 'No procurement number';
   const when = formatInquiryWhen(inquiry?.created_at);
@@ -323,32 +381,43 @@ function formatWeightMt(line) {
   return `${Math.round(mt * 1000) / 1000} MT`;
 }
 
-function lineOffer(line, saved) {
-  const parts = [line.sku_text || 'Material'];
-  const spec = line.dimensions || line.grade || null;
-  if (spec) parts.push(spec);
-  parts.push(line.quantity ? `${line.quantity} ${line.unit || 'MT'}` : (line.unit || 'MT'));
+function lineQuantityText(line) {
+  const unit = line.unit || 'MT';
+  const qty = line.quantity ? `${line.quantity} ${unit}` : unit;
   const weight = formatWeightMt(line);
-  if (weight) parts.push(weight);
-  const body = parts.join(' · ');
+  if (!weight || weight === qty) return qty;
+  return `${qty}\n${weight}`;
+}
+
+function lineStatusText(saved) {
   const price = Number(saved?.procurement_base_price_per_mt);
-  if (saved && Number.isFinite(price) && price > 0) return `${body} — ₹${price}/MT`;
+  if (saved && Number.isFinite(price) && price > 0) return `₹${price}/MT`;
   const note = String(saved?.procurement_line_note || '').trim();
   if (saved && (saved.line_status === 'cannot_price' || note)) {
-    return note ? `${body} — Unavailable: ${note}` : `${body} — Unavailable`;
+    return note ? `Unavailable: ${note}` : 'Unavailable';
   }
-  return `${body} — Awaiting price`;
+  return 'Awaiting price';
+}
+
+function lineOffer(line, saved, index) {
+  const rows = [`*${index + 1}. ${line.sku_text || 'Material'}*`];
+  const spec = line.dimensions || line.grade || null;
+  if (spec) rows.push(spec);
+  rows.push(lineQuantityText(line));
+  rows.push(lineStatusText(saved));
+  return rows.join('\n');
 }
 
 function basePriceHeader(inquiry, employees) {
+  const number = inquiry?.procurement_number || 'No procurement number';
   const when = formatInquiryWhen(inquiry?.created_at);
+  const who = salespersonName(inquiry, employees);
   return [
-    inquiry?.procurement_number || 'No procurement number',
-    when,
-    salespersonName(inquiry, employees),
+    `*${number}*`,
+    [when, who].filter(Boolean).join(' · '),
     inquiry?.delivery_location || 'Delivery not set',
     statusLabel(inquiry?.pricing_status),
-  ].filter(Boolean).join(' · ');
+  ].join('\n');
 }
 
 function latestSaved(rows, lineKey) {
@@ -358,27 +427,8 @@ function latestSaved(rows, lineKey) {
 
 function basePriceInquiryBlock(inquiry, employees, savedRows) {
   const saved = (savedRows || []).filter((row) => !row.inquiry_id || row.inquiry_id === inquiry.id);
-  const lines = sourceLines(inquiry).map((line, index) => `${index + 1}. ${lineOffer(line, latestSaved(saved, line.line_key))}`);
-  return [basePriceHeader(inquiry, employees), ...lines].join('\n');
-}
-
-function lineChoices(inquiry, lines) {
-  if (!lines.length || lines.length > 10) return null;
-  return {
-    bodyText: `${inquiry.procurement_number}. Choose a line.`,
-    buttonText: 'Choose line',
-    sections: [{
-      title: 'Lines',
-      rows: lines.map((line, index) => ({
-        id: `proc_line_${index + 1}`,
-        title: `${index + 1}. ${line.sku_text || 'Material'}`.slice(0, 24),
-        description: [
-          line.quantity ? `${line.quantity} ${line.unit || 'MT'}` : '',
-          formatWeightMt(line),
-        ].filter(Boolean).join(' · ').slice(0, 72),
-      })),
-    }],
-  };
+  const lines = sourceLines(inquiry).map((line, index) => lineOffer(line, latestSaved(saved, line.line_key), index));
+  return [basePriceHeader(inquiry, employees), ...lines].join('\n\n');
 }
 
 async function loadSavedLines(supabase, inquiryIds) {
@@ -389,7 +439,7 @@ async function loadSavedLines(supabase, inquiryIds) {
 }
 
 async function basePriceListResult(rows, employees, supabase) {
-  const waiting = byNewest(rows).filter(isAwaitingPrice);
+  const waiting = byNewest(rows).filter(isDashboardAwaiting);
   const shown = waiting.slice(0, 7);
   if (!shown.length) {
     return { handled: true, reply: 'None are waiting for a base price.' };
@@ -399,6 +449,36 @@ async function basePriceListResult(rows, employees, supabase) {
   let reply = `Copy a procurement number, or the whole line, and send it.\n\n${blocks.join('\n\n')}`;
   if (waiting.length > 7) reply += '\n\nView the rest in the Inquiries tab.';
   return { handled: true, reply };
+}
+
+function readPricePair(chunk, lineCount) {
+  const match = String(chunk || '').trim().match(/^(\d+)\s*[-–—:]?\s*(.*)$/);
+  if (!match) return null;
+  const line = Number(match[1]);
+  const priceText = match[2].trim();
+  if (!priceText) return line >= 1 && line <= lineCount ? { line } : null;
+  if (line < 1 || line > lineCount) return { error: `Choose a line from 1 to ${lineCount}.` };
+  return { line, priceText };
+}
+
+function parsePriceAssignments(text, lineCount) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed || /^proc_line_\d+$/i.test(trimmed)) return null;
+  const chunks = trimmed.split(/[\n,]+/).map((part) => part.trim()).filter(Boolean);
+  if (chunks.length > 1) {
+    const parsed = chunks.map((chunk) => readPricePair(chunk, lineCount));
+    if (parsed.every((item) => item && item.priceText && !item.error)) {
+      const byLine = new Map();
+      for (const item of parsed) byLine.set(item.line, item.priceText);
+      return { pairs: [...byLine.entries()].map(([line, priceText]) => ({ line, priceText })) };
+    }
+    const failed = parsed.find((item) => item?.error);
+    if (failed) return { error: failed.error };
+  }
+  const one = readPricePair(trimmed, lineCount);
+  if (!one) return null;
+  if (one.error) return one;
+  return { pairs: [one] };
 }
 
 function parseLineChoice(text, lineCount) {
@@ -596,7 +676,8 @@ async function handleProcurementChat(text, phone, deps) {
     return inquiryDetailsReply(number, scope, employees || [], deps);
   }
 
-  const choice = normalizeMenuChoice(clean);
+  const menuChoice = normalizeMenuChoice(clean);
+  const choice = intent.startsWith('procurement|base|') && /^\d+$/.test(clean) ? null : menuChoice;
   const listedOffset = allInquiriesOffset(intent);
   if (listedOffset != null && !choice) {
     if (/^next$/i.test(clean)) {
@@ -606,6 +687,14 @@ async function handleProcurementChat(text, phone, deps) {
     if (pasted) return inquiryDetailsReply(pasted[0], scope, employees || [], deps);
   }
 
+  if (intent.startsWith('procurement|base|confirm|') && isBasePriceSave(clean)) {
+    return commitConfirmedBasePrice(intent, phone, employee, scope, employees || [], deps);
+  }
+  if (intent.startsWith('procurement|base|confirm|') && !choice) {
+    const draft = readBasePriceDraft(intent);
+    if (!draft) return { handled: true, reply: 'Reply with the procurement number again.' };
+    return saveBasePrices(clean, draft.n, null, phone, employee, scope, employees || [], deps);
+  }
   if (intent.startsWith('procurement|base|') && !choice) {
     const parsedIntent = baseIntent(intent);
     return saveBasePrices(clean, parsedIntent.number, parsedIntent.line, phone, employee, scope, employees || [], deps);
@@ -635,7 +724,7 @@ async function handleProcurementChat(text, phone, deps) {
   }
   if (choice === 'base') {
     await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|ask');
-    const rows = visibleInquiries(await loadInquiries(supabase), scope);
+    const rows = await loadDashboardAwaiting(supabase, scope, employees || []);
     return basePriceListResult(rows, employees || [], supabase);
   }
   if (choice === 'team' && manager) {
@@ -664,6 +753,9 @@ async function handleProcurementChat(text, phone, deps) {
   return showMenu();
 }
 
+const AWAITING_PAGE = 1000;
+const AWAITING_COLUMNS = 'id, procurement_number, procurement_employee_id, status, stage, pricing_status, salesperson_phone, sender_phone, employee_id, customer_name, delivery_location, ai_extraction_json, created_at';
+
 async function loadInquiries(supabase) {
   const { data } = await supabase
     .from('inquiries')
@@ -671,6 +763,73 @@ async function loadInquiries(supabase) {
     .order('created_at', { ascending: false })
     .limit(500);
   return data || [];
+}
+
+async function loadCustomerOwners(supabase, employees) {
+  const { data, error } = await supabase
+    .from('recurring_customers')
+    .select('customer_name, assigned_salesperson_phone, updated_at')
+    .order('updated_at', { ascending: false });
+  if (error) return new Map();
+  const phones = new Set();
+  for (const emp of employees || []) {
+    const clean = String(emp?.phone || '').replace(/\D/g, '');
+    if (!clean) continue;
+    phones.add(clean);
+    phones.add(clean.slice(-10));
+  }
+  const owners = new Map();
+  for (const row of data || []) {
+    const name = String(row?.customer_name || '').trim().toLowerCase();
+    const phone = realSalespersonPhone(row?.assigned_salesperson_phone);
+    if (!name || !phone || owners.has(name)) continue;
+    const last10 = phone.replace(/\D/g, '').slice(-10);
+    if (phones.size && !phones.has(last10)) continue;
+    owners.set(name, phone);
+  }
+  return owners;
+}
+
+async function loadAwaitingInquiries(supabase) {
+  const rows = [];
+  const seen = new Set();
+  for (let from = 0; ; from += AWAITING_PAGE) {
+    const { data, error } = await supabase
+      .from('inquiries')
+      .select(AWAITING_COLUMNS)
+      .eq('pricing_status', 'awaiting_price')
+      .order('created_at', { ascending: false })
+      .range(from, from + AWAITING_PAGE - 1);
+    if (error) break;
+    const page = data || [];
+    const fresh = page.filter((row) => row?.id && !seen.has(row.id));
+    if (!fresh.length) break;
+    fresh.forEach((row) => seen.add(row.id));
+    rows.push(...fresh);
+    if (page.length < AWAITING_PAGE) break;
+  }
+  return rows;
+}
+
+async function loadDashboardAwaiting(supabase, scope, employees) {
+  const owners = await loadCustomerOwners(supabase, employees);
+  const rows = await loadAwaitingInquiries(supabase);
+  return byNewest(rows)
+    .map((row) => withResolvedSalesperson(row, owners))
+    .filter((row) => isDashboardAwaiting(row) && matchesProcurementScope(row, scope));
+}
+
+async function findBasePriceInquiry(supabase, scope, employees, number) {
+  const owners = await loadCustomerOwners(supabase, employees);
+  const { data, error } = await supabase
+    .from('inquiries')
+    .select(AWAITING_COLUMNS)
+    .eq('procurement_number', number);
+  if (error) return null;
+  return (data || [])
+    .map((row) => withResolvedSalesperson(row, owners))
+    .find((row) => String(row.procurement_number || '').toUpperCase() === String(number).toUpperCase() && matchesProcurementScope(row, scope))
+    || null;
 }
 
 async function loadDeals(supabase) {
@@ -711,39 +870,141 @@ async function inquiryDetailsReply(number, scope, employees, deps) {
   return { handled: true, reply: `${header}\n${summary}\n${listed.join('\n')}` };
 }
 
+function awaitingPriceRefusal(number) {
+  return {
+    handled: true,
+    reply: `${number} is not awaiting a price. Only an awaiting price inquiry can take a base price.`,
+  };
+}
+
 async function beginBasePrice(number, phone, employee, scope, employees, deps) {
-  const rows = visibleInquiries(await loadInquiries(deps.supabase), scope);
-  const inquiry = rows.find((row) => String(row.procurement_number || '').toUpperCase() === number.toUpperCase());
+  const inquiry = await findBasePriceInquiry(deps.supabase, scope, employees, number);
   if (!inquiry) {
     return { handled: true, reply: `${number} is not in your inquiries.` };
   }
+  if (!isDashboardAwaiting(inquiry)) return awaitingPriceRefusal(number);
   const lines = sourceLines(inquiry);
   const saved = await loadSavedLines(deps.supabase, [inquiry.id]);
   await deps.saveActiveSession(phone, employee.name || 'Procurement', `procurement|base|${inquiry.procurement_number}`);
-  const listed = lines.map((line, index) => {
-    const match = saved.find((row) => row.line_key === line.line_key);
-    return `${index + 1}. ${lineOffer(line, match)}`;
-  }).join('\n');
   const prompt = lines.length === 1
-    ? 'Reply with the base price in rupees per MT, or unavailable.'
-    : 'Reply with the line number and its base price, in rupees per MT. Use unavailable for a line you cannot price.\nExample: 2 51000';
-  const result = {
+    ? 'Reply with the base price in rupees per MT, or unavailable.\nExample: 51000'
+    : 'Reply with the line number and its base price, in rupees per MT.\nExample: 1 - 2300\nOr several: 1 2300, 2 2500, 4 unavailable: not in stock';
+  return {
     handled: true,
-    reply: `${inquiry.procurement_number} · ${salespersonName(inquiry, employees)}\n${listed}\n\n${prompt}`,
+    reply: `${basePriceInquiryBlock(inquiry, employees, saved)}\n\n${prompt}`,
   };
-  const choices = lineChoices(inquiry, lines);
-  if (choices) {
-    result.interactiveType = 'list';
-    result.interactiveList = choices;
-  }
-  return result;
 }
 
-function mergedPricingStatus(lines, existing, updated) {
-  const merged = lines.map((line) => {
-    if (line.line_key === updated.line_key) return updated;
-    return latestSaved(existing, line.line_key) || { line_status: 'needs_price' };
+const BASE_PRICE_BUTTONS = [
+  { id: 'btn_price_save', title: 'Save' },
+  { id: 'btn_confirm_cancel', title: 'Cancel' },
+];
+
+function isBasePriceSave(text) {
+  const clean = String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return ['btn_price_save', 'btn_confirm_yes', 'save', 'yes'].includes(clean);
+}
+
+function readBasePriceDraft(intent) {
+  try {
+    const data = JSON.parse(String(intent || '').slice('procurement|base|confirm|'.length));
+    if (!data?.n || !Array.isArray(data.pairs) || !data.pairs.length) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function pairsToUpdates(lines, existing, pairs, inquiryId) {
+  return pairs.map((pair) => {
+    const source = lines[pair.line - 1];
+    return {
+      ...deriveProcurementLines(existing || [], [{
+        ...source,
+        base_price_per_mt: pair.price,
+        line_note: pair.note,
+      }])[0],
+      inquiry_id: inquiryId,
+    };
   });
+}
+
+function basePriceHeadline(inquiry, status) {
+  if (status === 'price_ready') {
+    return `${inquiry.procurement_number} is now Price ready. Sales can add transport, loading, credit, and margin.`;
+  }
+  if (status === 'unavailable') {
+    return `${inquiry.procurement_number} is now Unavailable. Sales can send the decline from the dashboard.`;
+  }
+  return `${inquiry.procurement_number} still has lines awaiting a price.`;
+}
+
+async function previewBasePrice(inquiry, employees, existing, pairs, phone, employee, saveActiveSession) {
+  const lines = sourceLines(inquiry);
+  const updates = pairsToUpdates(lines, existing, pairs, inquiry.id);
+  const status = mergedPricingStatus(lines, existing, updates);
+  const keys = new Set(updates.map((row) => row.line_key));
+  const savedRows = [...(existing || []).filter((row) => !keys.has(row.line_key)), ...updates];
+  await saveActiveSession(
+    phone,
+    employee.name || 'Procurement',
+    `procurement|base|confirm|${JSON.stringify({ n: inquiry.procurement_number, pairs })}`,
+  );
+  return {
+    handled: true,
+    reply: `*Save this base price?*\n\n${basePriceInquiryBlock({ ...inquiry, pricing_status: status }, employees, savedRows)}\n\nSave or Cancel.`,
+    interactiveType: 'buttons',
+    interactiveButtons: BASE_PRICE_BUTTONS,
+  };
+}
+
+async function writeBasePriceUpdates(supabase, inquiry, updates) {
+  const payload = updates.flatMap((line) => pricingPayload(inquiry, line));
+  let { error } = await supabase.from('inquiry_line_pricing').upsert(payload, { onConflict: 'inquiry_id,line_key' });
+  if (error && /credit_per_mt/i.test(error.message || '')) {
+    const retry = await supabase.from('inquiry_line_pricing').upsert(payload.map((row) => {
+      const copy = { ...row };
+      delete copy.credit_per_mt;
+      return copy;
+    }), { onConflict: 'inquiry_id,line_key' });
+    error = retry.error;
+  }
+  return error;
+}
+
+async function finishBasePriceSave(inquiry, employees, existing, updates, status, phone, employee, saveActiveSession) {
+  await saveActiveSession(phone, employee.name || 'Procurement', `procurement|base|${inquiry.procurement_number}`);
+  const keys = new Set(updates.map((row) => row.line_key));
+  const savedRows = [...(existing || []).filter((row) => !keys.has(row.line_key)), ...updates];
+  return {
+    handled: true,
+    reply: `${basePriceHeadline(inquiry, status)}\n\n${basePriceInquiryBlock({ ...inquiry, pricing_status: status }, employees, savedRows)}`,
+  };
+}
+
+async function commitConfirmedBasePrice(intent, phone, employee, scope, employees, deps) {
+  const draft = readBasePriceDraft(intent);
+  const { supabase, saveActiveSession } = deps;
+  if (!draft) return { handled: true, reply: 'Reply with the procurement number again.' };
+  const inquiry = await findBasePriceInquiry(supabase, scope, employees, draft.n);
+  if (!inquiry) {
+    await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|menu');
+    return { handled: true, reply: `${draft.n} is not in your inquiries.` };
+  }
+  if (!isDashboardAwaiting(inquiry)) return awaitingPriceRefusal(draft.n);
+  const lines = sourceLines(inquiry);
+  const { data: existing } = await supabase.from('inquiry_line_pricing').select('*').eq('inquiry_id', inquiry.id);
+  const updates = pairsToUpdates(lines, existing, draft.pairs, inquiry.id);
+  const status = mergedPricingStatus(lines, existing, updates);
+  const error = await writeBasePriceUpdates(supabase, inquiry, updates);
+  if (error) return { handled: true, reply: 'The base price could not be saved. Try again from the dashboard.' };
+  await supabase.from('inquiries').update({ pricing_status: status }).eq('id', inquiry.id);
+  return finishBasePriceSave(inquiry, employees, existing, updates, status, phone, employee, saveActiveSession);
+}
+
+function mergedPricingStatus(lines, existing, updates) {
+  const byKey = new Map([].concat(updates || []).map((row) => [row.line_key, row]));
+  const merged = lines.map((line) => byKey.get(line.line_key) || latestSaved(existing, line.line_key) || { line_status: 'needs_price' });
   return procurementStatus(merged);
 }
 
@@ -769,14 +1030,25 @@ function pricingPayload(inquiry, line) {
 
 async function saveBasePrices(text, number, selectedLine, phone, employee, scope, employees, deps) {
   const { supabase, saveActiveSession } = deps;
-  const rows = visibleInquiries(await loadInquiries(supabase), scope);
-  const inquiry = rows.find((row) => String(row.procurement_number || '').toUpperCase() === String(number).toUpperCase());
+  const inquiry = await findBasePriceInquiry(supabase, scope, employees, number);
   if (!inquiry) {
     await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|menu');
     return { handled: true, reply: `${number} is not in your inquiries.` };
   }
+  if (!isDashboardAwaiting(inquiry)) return awaitingPriceRefusal(number);
   const lines = sourceLines(inquiry);
   const { data: existing } = await supabase.from('inquiry_line_pricing').select('*').eq('inquiry_id', inquiry.id);
+  const assignments = parsePriceAssignments(text, lines.length);
+  if (assignments?.error) return { handled: true, reply: assignments.error };
+  if (assignments?.pairs?.length && assignments.pairs.every((pair) => pair.priceText)) {
+    const pairs = [];
+    for (const pair of assignments.pairs) {
+      const token = parseBaseToken(pair.priceText);
+      if (token.error) return { handled: true, reply: token.error };
+      pairs.push({ line: pair.line, price: token.price, note: token.note });
+    }
+    return previewBasePrice(inquiry, employees, existing, pairs, phone, employee, saveActiveSession);
+  }
   const choice = parseLineChoice(text, lines.length);
   if (choice?.error) return { handled: true, reply: choice.error };
 
@@ -791,7 +1063,7 @@ async function saveBasePrices(text, number, selectedLine, phone, employee, scope
   if (!lineIndex) {
     return {
       handled: true,
-      reply: 'Reply with the line number and its base price, in rupees per MT.\nExample: 2 51000',
+      reply: 'Reply with the line number and its base price, in rupees per MT.\nExample: 1 - 2300',
     };
   }
   if (!priceText) {
@@ -800,45 +1072,21 @@ async function saveBasePrices(text, number, selectedLine, phone, employee, scope
     await saveActiveSession(phone, employee.name || 'Procurement', `procurement|base|${inquiry.procurement_number}|${lineIndex}`);
     return {
       handled: true,
-      reply: `${inquiry.procurement_number}\n${lineIndex}. ${lineOffer(line, match)}\n\nReply with the base price in rupees per MT, or unavailable.`,
+      reply: `*${inquiry.procurement_number}*\n\n${lineOffer(line, match, lineIndex - 1)}\n\nReply with the base price in rupees per MT, or unavailable.`,
     };
   }
 
   const parsed = parseBaseToken(priceText);
   if (parsed.error) return { handled: true, reply: parsed.error };
-  const source = lines[lineIndex - 1];
-  const updated = {
-    ...deriveProcurementLines(existing || [], [{
-      ...source,
-      base_price_per_mt: parsed.price,
-      line_note: parsed.note,
-    }])[0],
-    inquiry_id: inquiry.id,
-  };
-  const status = mergedPricingStatus(lines, existing || [], updated);
-  const payload = pricingPayload(inquiry, updated);
-  let { error } = await supabase.from('inquiry_line_pricing').upsert(payload, { onConflict: 'inquiry_id,line_key' });
-  if (error && /credit_per_mt/i.test(error.message || '')) {
-    const retry = await supabase.from('inquiry_line_pricing').upsert(payload.map((row) => {
-      const copy = { ...row };
-      delete copy.credit_per_mt;
-      return copy;
-    }), { onConflict: 'inquiry_id,line_key' });
-    error = retry.error;
-  }
-  if (error) return { handled: true, reply: 'The base price could not be saved. Try again from the dashboard.' };
-  await supabase.from('inquiries').update({ pricing_status: status }).eq('id', inquiry.id);
-  await saveActiveSession(phone, employee.name || 'Procurement', `procurement|base|${inquiry.procurement_number}`);
-  const savedRows = [...(existing || []).filter((row) => row.line_key !== updated.line_key), updated];
-  const headline = status === 'price_ready'
-    ? `${inquiry.procurement_number} is now Price ready. Sales can add transport, loading, credit, and margin.`
-    : status === 'unavailable'
-      ? `${inquiry.procurement_number} is now Unavailable. Sales can send the decline from the dashboard.`
-      : `${inquiry.procurement_number} still has lines awaiting a price.`;
-  return {
-    handled: true,
-    reply: `${headline}\n\n${basePriceInquiryBlock({ ...inquiry, pricing_status: status }, employees, savedRows)}`,
-  };
+  return previewBasePrice(
+    inquiry,
+    employees,
+    existing,
+    [{ line: lineIndex, price: parsed.price, note: parsed.note }],
+    phone,
+    employee,
+    saveActiveSession,
+  );
 }
 
 module.exports = {
