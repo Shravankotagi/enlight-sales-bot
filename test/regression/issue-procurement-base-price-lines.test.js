@@ -286,6 +286,16 @@ test('log a base price lists the dashboard awaiting set without line buttons', a
     assigned_salesperson_phone: '9844444444',
     updated_at: '2026-10-20T00:00:00.000Z',
   }]);
+  const pending = await session.handle('pending prices');
+  assert.match(pending.reply, /PR-30001/);
+  assert.match(pending.reply, /PR-30002/);
+  assert.match(pending.reply, /Ravi/);
+  assert.doesNotMatch(pending.reply, /PR-30003/);
+  assert.doesNotMatch(pending.reply, /PR-30004/);
+  assert.doesNotMatch(pending.reply, /Acme Steel/);
+  assert.doesNotMatch(pending.reply, /Hidden Buyer/);
+  assert.match(pending.reply, /PR-30001 · /);
+
   const listed = await session.handle('log a base price');
   assert.match(listed.reply, /PR-30001/);
   assert.match(listed.reply, /PR-30002/);
