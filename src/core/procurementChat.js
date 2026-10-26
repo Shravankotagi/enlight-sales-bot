@@ -915,6 +915,116 @@ async function showAllInquiries(phone, employee, scope, employees, deps, offset)
   return { handled: true, reply: allInquiriesText(rows, employees, start) };
 }
 
+async function loadCustomerOwners(supabase, employees) {
+  const { data, error } = await supabase
+    .from('recurring_customers')
+    .select('customer_name, assigned_salesperson_phone, updated_at')
+    .order('updated_at', { ascending: false });
+  if (error) return new Map();
+  const phones = new Set();
+  for (const emp of employees || []) {
+    const clean = String(emp?.phone || '').replace(/\D/g, '');
+    if (!clean) continue;
+    phones.add(clean);
+    phones.add(clean.slice(-10));
+  }
+  const owners = new Map();
+  for (const row of data || []) {
+    const name = String(row?.customer_name || '').trim().toLowerCase();
+    const phone = realSalespersonPhone(row?.assigned_salesperson_phone);
+    if (!name || !phone || owners.has(name)) continue;
+    const last10 = phone.replace(/\D/g, '').slice(-10);
+    if (phones.size && !phones.has(last10)) continue;
+    owners.set(name, phone);
+  }
+  return owners;
+}
+
+async function loadAwaitingInquiries(supabase) {
+  const rows = [];
+  const seen = new Set();
+  for (let from = 0; ; from += AWAITING_PAGE) {
+    const { data, error } = await supabase
+      .from('inquiries')
+      .select(AWAITING_COLUMNS)
+      .eq('pricing_status', 'awaiting_price')
+      .order('created_at', { ascending: false })
+      .range(from, from + AWAITING_PAGE - 1);
+    if (error) break;
+    const page = data || [];
+    const fresh = page.filter((row) => row?.id && !seen.has(row.id));
+    if (!fresh.length) break;
+    fresh.forEach((row) => seen.add(row.id));
+    rows.push(...fresh);
+    if (page.length < AWAITING_PAGE) break;
+  }
+  return rows;
+}
+
+async function loadInquiryPages(supabase) {
+  const rows = [];
+  const seen = new Set();
+  for (let from = 0; ; from += AWAITING_PAGE) {
+    const { data, error } = await supabase
+      .from('inquiries')
+      .select(ALL_INQUIRY_COLUMNS)
+      .order('created_at', { ascending: false })
+      .range(from, from + AWAITING_PAGE - 1);
+    if (error) break;
+    const page = data || [];
+    const fresh = page.filter((row) => row?.id && !seen.has(row.id));
+    if (!fresh.length) break;
+    fresh.forEach((row) => seen.add(row.id));
+    rows.push(...fresh);
+    if (page.length < AWAITING_PAGE) break;
+  }
+  return rows;
+}
+
+async function loadScopedInquiries(supabase, scope, employees) {
+  const owners = await loadCustomerOwners(supabase, employees);
+  const rows = await loadInquiryPages(supabase);
+  return byNewest(rows)
+    .map((row) => withResolvedSalesperson(row, owners))
+    .filter((row) => matchesProcurementScope(row, scope));
+}
+
+async function loadDashboardAwaiting(supabase, scope, employees) {
+  const owners = await loadCustomerOwners(supabase, employees);
+  const rows = await loadAwaitingInquiries(supabase);
+  return byNewest(rows)
+    .map((row) => withResolvedSalesperson(row, owners))
+    .filter((row) => isDashboardAwaiting(row) && matchesProcurementScope(row, scope));
+}
+
+async function findBasePriceInquiry(supabase, scope, employees, number) {
+  const owners = await loadCustomerOwners(supabase, employees);
+  const { data, error } = await supabase
+    .from('inquiries')
+    .select(AWAITING_COLUMNS)
+    .eq('procurement_number', number);
+  if (error) return null;
+  return (data || [])
+    .map((row) => withResolvedSalesperson(row, owners))
+    .find((row) => String(row.procurement_number || '').toUpperCase() === String(number).toUpperCase() && matchesProcurementScope(row, scope))
+    || null;
+}
+
+async function loadDeals(supabase) {
+  const { data, error } = await supabase.from('deals').select('id, inquiry_id, stage');
+  if (error) return [];
+  return data || [];
+}
+
+async function showAllInquiries(phone, employee, scope, employees, deps, offset) {
+  const rows = await loadScopedInquiries(deps.supabase, scope, employees);
+  const deals = await loadDeals(deps.supabase);
+  const lastPage = rows.length === 0 ? 0 : Math.floor((rows.length - 1) / ALL_INQUIRY_PAGE) * ALL_INQUIRY_PAGE;
+  const start = Math.min(Math.max(0, offset || 0), lastPage);
+  await deps.saveActiveSession(phone, employee.name || 'Procurement', `procurement|all|${start}`);
+  return { handled: true, reply: allInquiriesText(rows, employees, deals, start) };
+}
+
 async function inquiryDetailsReply(number, scope, employees, deps) {
   const rows = await loadScopedInquiries(deps, scope, employees);
   const inquiry = rows.find((row) => String(row.procurement_number || '').toUpperCase() === number.toUpperCase());
