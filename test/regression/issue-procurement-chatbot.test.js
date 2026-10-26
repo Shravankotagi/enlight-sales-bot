@@ -91,6 +91,7 @@ function chat(caller, rows, intent, extraTables) {
         supabase: db.client,
         getEmployeeByPhone: async () => caller,
         getFullActiveSession: async () => sessions.get(caller.phone) || null,
+        loadCanonicalInquiries: async () => db.store.inquiries,
         saveActiveSession: async (phone, name, next) => {
           sessions.set(phone, { last_intent: next, customer_name: name });
         },
@@ -116,7 +117,7 @@ test('log a base price lists seven procurement numbers and points to the inquiri
     procurement_number: `PR-${10001 + index}`,
     procurement_employee_id: 'proc-a',
     pricing_status: 'awaiting_price',
-    created_at: `2026-10-${String(index + 1).padStart(2, '0')}T00:00:00.000Z`,
+    created_at: `2026-10-${String(index + 16).padStart(2, '0')}T00:00:00.000Z`,
     customer_name: 'Secret Mills',
   }));
   const eight = await chat(person, rows).handle('proc_3');
@@ -124,7 +125,8 @@ test('log a base price lists seven procurement numbers and points to the inquiri
   assert.match(eight.reply, /PR-10002/);
   assert.doesNotMatch(eight.reply, /PR-10001/);
   assert.match(eight.reply, /View the rest in the Inquiries tab/);
-  assert.match(eight.reply, /PR-10008 · 8 Oct 2026, 5:30 am/);
+  assert.match(eight.reply, /\*PR-10008\*/);
+  assert.match(eight.reply, /23 Oct 2026, 5:30 am/);
   assert.doesNotMatch(eight.reply, /Secret Mills/);
   assert.equal(eight.interactiveList, undefined);
 
@@ -134,10 +136,10 @@ test('log a base price lists seven procurement numbers and points to the inquiri
   assert.match(three.reply, /PR-10003/);
   assert.doesNotMatch(three.reply, /Inquiries tab/);
   assert.equal(three.interactiveList, undefined);
-  const copied = three.reply.split('\n').find((line) => line.startsWith('PR-10003'));
+  const copied = three.reply.split('\n').find((line) => line.includes('PR-10003'));
   const fromLine = await chat(person, threeRows).handle(copied);
   assert.match(fromLine.reply, /PR-10003/);
-  assert.match(fromLine.reply, /one base price per line/);
+  assert.match(fromLine.reply, /Reply with the base price/);
 });
 
 test('a blank pricing status is not awaiting a price', async () => {
@@ -198,8 +200,9 @@ test('asking for details returns the inquiry and does not open base pricing', as
   assert.equal(String(opened.sessions.get(person.phone)?.last_intent || '').startsWith('procurement|base|'), false);
 
   const priced = await opened.handle('PR-10226');
-  assert.match(priced.reply, /one base price per line/);
-  assert.match(opened.sessions.get(person.phone).last_intent, /^procurement\|base\|PR-10226$/);
+  assert.match(priced.reply, /Only an awaiting price inquiry can take a base price/);
+  assert.doesNotMatch(priced.reply, /Reply with the line number/);
+  assert.equal(String(opened.sessions.get(person.phone)?.last_intent || '').startsWith('procurement|base|'), false);
 });
 
 test('a procurement person can ask how many inquiries a salesperson has left to price', async () => {
@@ -254,7 +257,7 @@ test('a procurement person cannot read another person procurement number', async
   assert.match(result.reply, /not in your inquiries/);
   assert.doesNotMatch(result.reply, /Secret Mills/);
   const team = await handle('4');
-  assert.match(team.reply, /procurement manager/);
+  assert.match(team.reply, /not available for your access/);
 });
 
 test('a procurement manager can read a report procurement number', async () => {
@@ -297,7 +300,11 @@ test('a base price of 500 makes the line price ready and a blank base makes it u
     margin_per_mt: 1500,
   }];
   const ready = chat(person, [owned], 'procurement|base|PR-10041', { inquiry_line_pricing: existing });
-  const priced = await ready.handle('500');
+  const preview = await ready.handle('500');
+  assert.match(preview.reply, /Save this base price/);
+  assert.deepEqual(preview.interactiveButtons.map((button) => button.id), ['btn_price_save', 'btn_confirm_cancel']);
+  assert.equal(ready.db.store.inquiries[0].pricing_status, 'awaiting_price');
+  const priced = await ready.handle('btn_price_save');
   assert.match(priced.reply, /Price ready/);
   assert.doesNotMatch(priced.reply, /Secret Mills/);
   const saved = ready.db.store.inquiry_line_pricing.find((row) => row.line_status === 'priced');
@@ -309,7 +316,10 @@ test('a base price of 500 makes the line price ready and a blank base makes it u
   const blank = chat(person, [inquiry({ procurement_employee_id: 'proc-a' })], 'procurement|base|PR-10041', {
     inquiry_line_pricing: existing,
   });
-  const unavailable = await blank.handle('unavailable: not in stock');
+  const unavailablePreview = await blank.handle('unavailable: not in stock');
+  assert.match(unavailablePreview.reply, /Save this base price/);
+  assert.equal(blank.db.store.inquiries[0].pricing_status, 'awaiting_price');
+  const unavailable = await blank.handle('yes');
   assert.match(unavailable.reply, /Unavailable/);
   const closed = blank.db.store.inquiry_line_pricing.find((row) => row.line_status === 'cannot_price');
   assert.equal(closed.procurement_base_price_per_mt, null);
@@ -349,12 +359,18 @@ test('a missing credit column is left off the retry', async () => {
       return api;
     },
   };
-  const result = await handleProcurementChat('500', person.phone, {
+  let intent = 'procurement|base|PR-10041';
+  const deps = {
     supabase,
     getEmployeeByPhone: async () => person,
-    getFullActiveSession: async () => ({ last_intent: 'procurement|base|PR-10041' }),
-    saveActiveSession: async () => {},
-  });
+    getFullActiveSession: async () => ({ last_intent: intent }),
+    loadCanonicalInquiries: async () => inquiries,
+    saveActiveSession: async (_phone, _name, next) => { intent = next; },
+  };
+  const preview = await handleProcurementChat('500', person.phone, deps);
+  assert.match(preview.reply, /Save this base price/);
+  assert.equal(payloads.length, 0);
+  const result = await handleProcurementChat('btn_price_save', person.phone, deps);
   assert.match(result.reply, /Price ready/);
   assert.equal(payloads.length, 2);
   assert.equal(Object.hasOwn(payloads[1][0], 'credit_per_mt'), false);

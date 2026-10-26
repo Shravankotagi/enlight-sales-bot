@@ -57,11 +57,16 @@ async function procurementStampForSalesperson(salespersonPhone) {
     procurement_number: nextProcurementNumberFromRows([]),
     procurement_employee_id: null,
     procurement_assigned_at: null,
+    salesperson_employee_id: null,
   };
   try {
     const { data: employees } = await supabase
       .from('employees')
       .select('id, phone, role, is_active, assigned_procurement_employee_id');
+    stamp.salesperson_employee_id = salespersonIdFromEmployees(
+      employees,
+      salespersonPhone,
+    );
     const ownerId = procurementOwnerFromEmployees(employees, salespersonPhone);
     if (ownerId) {
       stamp.procurement_employee_id = ownerId;
@@ -73,6 +78,19 @@ async function procurementStampForSalesperson(salespersonPhone) {
     stamp.procurement_number = nextProcurementNumberFromRows(existingNumbers);
   } catch (numberErr) {}
   return stamp;
+}
+
+function salespersonIdFromEmployees(employees, salespersonPhone) {
+  const target = normalizePhone(salespersonPhone);
+  if (target.length !== 10) return null;
+  const matches = (employees || []).filter((emp) => {
+    if (emp?.is_active === false || !emp?.id) return false;
+    return normalizePhone(emp.phone) === target;
+  });
+  const salesperson =
+    matches.find((emp) => String(emp?.role || '') === 'salesperson') ||
+    matches[0];
+  return salesperson?.id || null;
 }
 
 function procurementOwnerFromEmployees(employees, salespersonPhone) {

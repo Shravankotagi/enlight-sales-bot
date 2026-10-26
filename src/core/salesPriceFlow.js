@@ -12,6 +12,39 @@ function quantityToMt(quantity, unit) {
   return nonNegative(quantity);
 }
 
+const PIECE_UNITS = new Set([
+  'nos',
+  'no',
+  'pcs',
+  'pc',
+  'pieces',
+  'piece',
+  'units',
+  'unit',
+  'sheets',
+  'sheet',
+  'plates',
+  'plate',
+  'bundles',
+  'bundle',
+  'coils',
+  'coil',
+]);
+
+function weightMtForLine(line) {
+  const { convertLineItemToMt } = require('../utils/pricingEngine');
+  const converted = convertLineItemToMt(line);
+  if (typeof converted === 'number' && Number.isFinite(converted) && converted > 0) {
+    return Math.round(converted * 1000) / 1000;
+  }
+  if (PIECE_UNITS.has(String(line?.unit || '').toLowerCase())) return 0;
+  return quantityToMt(Number(line?.quantity) || 0, line?.unit || 'MT');
+}
+
+function taxableFromRate(rate, line) {
+  return money(rate * weightMtForLine(line));
+}
+
 function parseIndianAmount(value) {
   if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -77,7 +110,7 @@ function priceSalesLine(line, parts, deliveryAddress) {
     margin_per_mt: nonNegative(parts.margin_per_mt),
   };
   const rate = calculateSellRate(next);
-  const taxable = money(rate * quantityToMt(Number(line.quantity) || 0, line.unit || 'MT'));
+  const taxable = taxableFromRate(rate, line);
   const gst = gstSplit(taxable, deliveryAddress);
   return {
     ...next,
@@ -192,7 +225,19 @@ async function handleSalesPriceChat(text, phone, lastIntent, deps) {
   const inquiry = await findSalesInquiry(supabase, phones, scope.isAdmin, state.number);
   if (!inquiry) return { handled: true, reply: 'That inquiry is no longer in your list.' };
   const { data: existing } = await supabase.from('inquiry_line_pricing').select('*').eq('inquiry_id', inquiry.id);
-  const lines = existing || [];
+  const { sourceLines } = require('./procurementChat');
+  const source = sourceLines(inquiry);
+  const lines = (existing || []).map((row, index) => {
+    const match = source.find((line) => line.line_key === row.line_key) || source[index] || {};
+    return {
+      ...row,
+      sku_text: row.sku_text || match.sku_text,
+      quantity: row.quantity ?? match.quantity,
+      unit: row.unit || match.unit,
+      dimensions: row.dimensions || match.dimensions,
+      weight_mt: row.weight_mt ?? match.weight_mt,
+    };
+  });
   const parsed = parseSalesPrices(clean, lines.length || state.count || 1);
   if (parsed.error) return { handled: true, reply: parsed.error };
   const delivery = inquiry.delivery_location || inquiry.ai_extraction_json?.delivery_location || '';
@@ -425,7 +470,7 @@ function priceFullLine(line, parts, deliveryAddress) {
     margin_per_mt: nonNegative(parts.margin_per_mt),
   };
   const rate = calculateSellRate(next);
-  const taxable = money(rate * quantityToMt(Number(line.quantity) || 0, line.unit || 'MT'));
+  const taxable = taxableFromRate(rate, line);
   const gst = gstSplit(taxable, deliveryAddress);
   return {
     ...next,
@@ -491,6 +536,8 @@ async function loadFullPriceLines(inquiry, deps) {
       sku_text: line.sku_text || saved.sku_text,
       quantity: line.quantity ?? saved.quantity,
       unit: line.unit || saved.unit || 'MT',
+      dimensions: line.dimensions || saved.dimensions,
+      weight_mt: line.weight_mt ?? saved.weight_mt,
       procurement_base_price_per_mt: saved.procurement_base_price_per_mt ?? null,
     };
   });
