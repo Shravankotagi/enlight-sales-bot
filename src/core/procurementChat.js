@@ -19,12 +19,67 @@ function normalizePhone(phone) {
   return String(phone || '').replace(/\D/g, '').slice(-10);
 }
 
+const PROCUREMENT_INQUIRY_DEFAULTS = {
+  procurement_person: {
+    'inquiries.view': true,
+    'inquiries.manage': false,
+    'inquiries.edit': true,
+    'inquiries.delete': false,
+    'inquiries.send_quote': false,
+    'inquiries.scope_assigned': true,
+    'inquiries.price_override': false,
+    'inquiries.fill_base_prices': true,
+    'inquiries.team_inquiries': false,
+  },
+  procurement_manager: {
+    'inquiries.view': true,
+    'inquiries.manage': false,
+    'inquiries.edit': true,
+    'inquiries.delete': true,
+    'inquiries.send_quote': false,
+    'inquiries.scope_assigned': false,
+    'inquiries.price_override': true,
+    'inquiries.fill_base_prices': true,
+    'inquiries.team_inquiries': true,
+  },
+};
+
+function resolveProcurementPermissions(employee) {
+  const role = String(employee?.role || '').toLowerCase();
+  const defaults = { ...(PROCUREMENT_INQUIRY_DEFAULTS[role] || {}) };
+  const stored = employee?.permissions;
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return defaults;
+  const overlay = {};
+  for (const [key, value] of Object.entries(stored)) {
+    if (typeof value === 'boolean') overlay[key] = value;
+  }
+  return { ...defaults, ...overlay };
+}
+
+function canViewInquiries(permissions) {
+  return permissions['inquiries.view'] === true;
+}
+
+function canFillBasePrices(permissions) {
+  return canViewInquiries(permissions)
+    && permissions['inquiries.edit'] === true
+    && permissions['inquiries.fill_base_prices'] === true;
+}
+
+function canSeeTeam(permissions) {
+  return canViewInquiries(permissions) && permissions['inquiries.team_inquiries'] === true;
+}
+
+const BASE_PRICE_PERMISSION_REFUSAL = 'You can view inquiries, but you cannot enter a base price.';
+const VIEW_PERMISSION_REFUSAL = 'You do not have permission to view inquiries.';
+
 function matchesProcurementScope(item, scope) {
   if (!scope) return false;
   const ids = scope.ids || [];
   if (item?.procurement_employee_id && ids.includes(item.procurement_employee_id)) {
     return true;
   }
+  if (scope.stampedOnly) return false;
   if (item?.procurement_employee_id) return false;
   const status = String(item?.status || '').toLowerCase();
   if (scope.includeUnassignedPool && OPEN_STATUSES.includes(status)) return true;
@@ -49,10 +104,25 @@ function salespeopleRouted(employees, personIds) {
   };
 }
 
-function scopeFromEmployees(employee, employees) {
+function scopeFromEmployees(employee, employees, permissions) {
   const ownId = employee?.id ? [employee.id] : [];
-  const manager = isProcurementManager(employee?.role);
-  if (!manager) {
+  const teamScope = permissions
+    ? permissions['inquiries.team_inquiries'] === true
+    : isProcurementManager(employee?.role);
+  const assignedScope = permissions
+    ? permissions['inquiries.scope_assigned'] === true
+    : !isProcurementManager(employee?.role);
+  if (permissions && !teamScope && !assignedScope) {
+    return {
+      ids: ownId,
+      includeUnassignedPool: false,
+      salespersonPhones: [],
+      salespersonEmployeeIds: [],
+      stampedOnly: true,
+      team: [],
+    };
+  }
+  if (!teamScope) {
     const routed = salespeopleRouted(employees, ownId);
     return {
       ids: ownId,
@@ -180,21 +250,48 @@ function pipelineStage(value) {
   return null;
 }
 
-function statusStage(status) {
-  const value = String(status || '').toLowerCase().trim();
-  if (value === 'won') return 'won';
-  if (value === 'lost') return 'lost';
-  if (value === 'negotiation') return 'negotiation';
-  if (value === 'on_hold' || value === 'hold') return 'on_hold';
-  if (['quoted', 'quotation_sent', 'qualified', 'saved', 'confirmed', 'processed', 'proposal'].includes(value)) {
-    return 'quoted';
+function dealStageKey(inquiry, deals) {
+  const linked = (deals || []).find((deal) => deal?.inquiry_id === inquiry?.id);
+  const linkedStage = pipelineStage(linked?.stage);
+  if (linkedStage) return linkedStage;
+  const directStage = pipelineStage(inquiry?.stage);
+  if (directStage) return directStage;
+  const status = String(inquiry?.status || '').toLowerCase().trim();
+  const type = String(inquiry?.inquiry_type || '').toLowerCase();
+  const channel = String(inquiry?.source_channel || '').toLowerCase();
+  if ((type === 'purchase_order' || channel === 'whatsapp_po') && ['confirmed', 'won', 'processed'].includes(status)) {
+    return 'won';
   }
+  if (status === 'won') return 'won';
+  if (status === 'negotiation') return 'negotiation';
+  if (status === 'lost') return 'lost';
+  if (
+    status === 'quoted'
+    || status === 'quotation_sent'
+    || type === 'quotation_sent'
+    || status === 'confirmed'
+    || status === 'saved'
+    || status === 'processed'
+  ) return 'quoted';
+  if (status === 'on_hold' || status === 'hold') return 'on_hold';
   return 'new_inquiry';
 }
 
-function dealStageKey(inquiry, deals) {
-  const linked = (deals || []).find((deal) => deal?.inquiry_id === inquiry?.id && pipelineStage(deal.stage));
-  return pipelineStage(linked?.stage) || pipelineStage(inquiry?.stage) || statusStage(inquiry?.status);
+function filterStatusCount(label, inquiry, deals) {
+  const pricing = preservedPricingStatus(inquiry);
+  const stage = dealStageKey(inquiry, deals);
+  if (label === 'Awaiting Price') return pricing === 'awaiting_price';
+  if (label === 'Price Ready') return pricing === 'price_ready';
+  if (label === 'Unavailable') return pricing === 'unavailable';
+  const stages = {
+    'New Inquiry': 'new_inquiry',
+    'Price Quote': 'quoted',
+    Negotiation: 'negotiation',
+    'On Hold': 'on_hold',
+    Won: 'won',
+    Lost: 'lost',
+  };
+  return stage === stages[label];
 }
 
 function stageBadge(stage) {
@@ -592,8 +689,9 @@ function allInquiriesOffset(intent) {
 function allInquiriesText(rows, employees, deals, offset) {
   const counts = Object.fromEntries(BADGE_ORDER.map((label) => [label, 0]));
   for (const row of rows) {
-    const badge = inquiryBadge(row, deals);
-    counts[badge] = (counts[badge] || 0) + 1;
+    for (const label of BADGE_ORDER) {
+      if (filterStatusCount(label, row, deals)) counts[label] += 1;
+    }
   }
   const summary = BADGE_ORDER.map((label) => `${label}: ${counts[label] || 0}`).join('\n');
   const start = Math.max(0, offset || 0);
@@ -653,15 +751,16 @@ async function handleProcurementChat(text, phone, deps) {
   const { data: employees } = await supabase
     .from('employees')
     .select('id, name, phone, role, is_active, manager_id, manager_phone, assigned_procurement_employee_id');
-  const scope = scopeFromEmployees(employee, employees || []);
+  const permissions = resolveProcurementPermissions(employee);
+  const scope = scopeFromEmployees(employee, employees || [], permissions);
   const session = await getFullActiveSession(phone);
   const intent = String(session?.last_intent || '');
   const clean = String(text || '').trim();
-  const manager = isProcurementManager(employee.role);
+  const showTeam = canSeeTeam(permissions);
 
   const showMenu = async () => {
     await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|menu');
-    return menuResult(manager);
+    return menuResult(showTeam);
   };
 
   if (!clean || /^(menu|hi|hello|hey|start)$/i.test(clean)) return showMenu();
@@ -672,6 +771,9 @@ async function handleProcurementChat(text, phone, deps) {
   }
 
   if (isDetailsRequest(clean)) {
+    if (!canViewInquiries(permissions)) {
+      return { handled: true, reply: VIEW_PERMISSION_REFUSAL };
+    }
     const number = clean.toUpperCase().match(/PR-\d+/)[0];
     return inquiryDetailsReply(number, scope, employees || [], deps);
   }
@@ -680,6 +782,9 @@ async function handleProcurementChat(text, phone, deps) {
   const choice = intent.startsWith('procurement|base|') && /^\d+$/.test(clean) ? null : menuChoice;
   const listedOffset = allInquiriesOffset(intent);
   if (listedOffset != null && !choice) {
+    if (!canViewInquiries(permissions)) {
+      return { handled: true, reply: VIEW_PERMISSION_REFUSAL };
+    }
     if (/^next$/i.test(clean)) {
       return showAllInquiries(phone, employee, scope, employees || [], deps, listedOffset + ALL_INQUIRY_PAGE);
     }
@@ -700,7 +805,7 @@ async function handleProcurementChat(text, phone, deps) {
     return saveBasePrices(clean, parsedIntent.number, parsedIntent.line, phone, employee, scope, employees || [], deps);
   }
 
-  if (intent === 'procurement|team' && manager && !choice) {
+  if (intent === 'procurement|team' && showTeam && !choice) {
     const person = findTeamPerson(clean, scope.team);
     if (person) {
       const rows = await loadInquiries(supabase);
@@ -713,6 +818,9 @@ async function handleProcurementChat(text, phone, deps) {
     }
   }
 
+  if ((choice === 'pending' || choice === 'all') && !canViewInquiries(permissions)) {
+    return { handled: true, reply: VIEW_PERMISSION_REFUSAL };
+  }
   if (choice === 'pending') {
     const rows = await loadDashboardAwaiting(supabase, scope, employees || []);
     return { handled: true, reply: listReply('*Pending prices*', rows, employees || []) };
@@ -720,19 +828,22 @@ async function handleProcurementChat(text, phone, deps) {
   if (choice === 'all') {
     return showAllInquiries(phone, employee, scope, employees || [], deps, 0);
   }
+  if (choice === 'base' && !canFillBasePrices(permissions)) {
+    return { handled: true, reply: BASE_PRICE_PERMISSION_REFUSAL };
+  }
   if (choice === 'base') {
     await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|ask');
     const rows = await loadDashboardAwaiting(supabase, scope, employees || []);
     return basePriceListResult(rows, employees || [], supabase);
   }
-  if (choice === 'team' && manager) {
+  if (choice === 'team' && showTeam) {
     const rows = visibleInquiries(await loadInquiries(supabase), scope);
     await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|team');
     return { handled: true, reply: teamReply(scope.team, rows) };
   }
-  if (choice === 'team' && !manager) {
+  if (choice === 'team' && !showTeam) {
     const menu = menuResult(false);
-    return { ...menu, reply: `My team is available to a procurement manager.\n\n${menu.reply}` };
+    return { ...menu, reply: `My team is not available for your access.\n\n${menu.reply}` };
   }
 
   const numberMatch = clean.toUpperCase().match(/PR-\d+/);
@@ -753,6 +864,7 @@ async function handleProcurementChat(text, phone, deps) {
 
 const AWAITING_PAGE = 1000;
 const AWAITING_COLUMNS = 'id, procurement_number, procurement_employee_id, status, stage, pricing_status, salesperson_phone, sender_phone, employee_id, customer_name, delivery_location, ai_extraction_json, created_at';
+const ALL_INQUIRY_COLUMNS = `${AWAITING_COLUMNS}, inquiry_type, source_channel`;
 
 async function loadInquiries(supabase) {
   const { data } = await supabase
@@ -809,6 +921,34 @@ async function loadAwaitingInquiries(supabase) {
   return rows;
 }
 
+async function loadInquiryPages(supabase) {
+  const rows = [];
+  const seen = new Set();
+  for (let from = 0; ; from += AWAITING_PAGE) {
+    const { data, error } = await supabase
+      .from('inquiries')
+      .select(ALL_INQUIRY_COLUMNS)
+      .order('created_at', { ascending: false })
+      .range(from, from + AWAITING_PAGE - 1);
+    if (error) break;
+    const page = data || [];
+    const fresh = page.filter((row) => row?.id && !seen.has(row.id));
+    if (!fresh.length) break;
+    fresh.forEach((row) => seen.add(row.id));
+    rows.push(...fresh);
+    if (page.length < AWAITING_PAGE) break;
+  }
+  return rows;
+}
+
+async function loadScopedInquiries(supabase, scope, employees) {
+  const owners = await loadCustomerOwners(supabase, employees);
+  const rows = await loadInquiryPages(supabase);
+  return byNewest(rows)
+    .map((row) => withResolvedSalesperson(row, owners))
+    .filter((row) => matchesProcurementScope(row, scope));
+}
+
 async function loadDashboardAwaiting(supabase, scope, employees) {
   const owners = await loadCustomerOwners(supabase, employees);
   const rows = await loadAwaitingInquiries(supabase);
@@ -837,7 +977,7 @@ async function loadDeals(supabase) {
 }
 
 async function showAllInquiries(phone, employee, scope, employees, deps, offset) {
-  const rows = byNewest(visibleInquiries(await loadInquiries(deps.supabase), scope));
+  const rows = await loadScopedInquiries(deps.supabase, scope, employees);
   const deals = await loadDeals(deps.supabase);
   const lastPage = rows.length === 0 ? 0 : Math.floor((rows.length - 1) / ALL_INQUIRY_PAGE) * ALL_INQUIRY_PAGE;
   const start = Math.min(Math.max(0, offset || 0), lastPage);
@@ -846,7 +986,7 @@ async function showAllInquiries(phone, employee, scope, employees, deps, offset)
 }
 
 async function inquiryDetailsReply(number, scope, employees, deps) {
-  const rows = visibleInquiries(await loadInquiries(deps.supabase), scope);
+  const rows = await loadScopedInquiries(deps.supabase, scope, employees);
   const inquiry = rows.find((row) => String(row.procurement_number || '').toUpperCase() === number.toUpperCase());
   if (!inquiry) {
     return { handled: true, reply: `${number} is not in your inquiries.` };
@@ -876,6 +1016,9 @@ function awaitingPriceRefusal(number) {
 }
 
 async function beginBasePrice(number, phone, employee, scope, employees, deps) {
+  if (!canFillBasePrices(resolveProcurementPermissions(employee))) {
+    return { handled: true, reply: BASE_PRICE_PERMISSION_REFUSAL };
+  }
   const inquiry = await findBasePriceInquiry(deps.supabase, scope, employees, number);
   if (!inquiry) {
     return { handled: true, reply: `${number} is not in your inquiries.` };
@@ -981,6 +1124,9 @@ async function finishBasePriceSave(inquiry, employees, existing, updates, status
 }
 
 async function commitConfirmedBasePrice(intent, phone, employee, scope, employees, deps) {
+  if (!canFillBasePrices(resolveProcurementPermissions(employee))) {
+    return { handled: true, reply: BASE_PRICE_PERMISSION_REFUSAL };
+  }
   const draft = readBasePriceDraft(intent);
   const { supabase, saveActiveSession } = deps;
   if (!draft) return { handled: true, reply: 'Reply with the procurement number again.' };
@@ -1027,6 +1173,9 @@ function pricingPayload(inquiry, line) {
 }
 
 async function saveBasePrices(text, number, selectedLine, phone, employee, scope, employees, deps) {
+  if (!canFillBasePrices(resolveProcurementPermissions(employee))) {
+    return { handled: true, reply: BASE_PRICE_PERMISSION_REFUSAL };
+  }
   const { supabase, saveActiveSession } = deps;
   const inquiry = await findBasePriceInquiry(supabase, scope, employees, number);
   if (!inquiry) {
