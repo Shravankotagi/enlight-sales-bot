@@ -50,6 +50,7 @@ function chat(rows, intent, extraTables) {
       inquiries: rows,
       inquiry_line_pricing: extraTables?.inquiry_line_pricing || [],
       deals: extraTables?.deals || [],
+      recurring_customers: extraTables?.recurring_customers || [],
     },
   });
   const sessions = new Map();
@@ -141,7 +142,7 @@ test('all inquiries summarizes every badge and pages the newest ten', async () =
   assert.match(first.reply, /Awaiting Price: 1/);
   assert.match(first.reply, /Price Ready: 1/);
   assert.match(first.reply, /Unavailable: 1/);
-  assert.match(first.reply, /New Inquiry: 7/);
+  assert.match(first.reply, /New Inquiry: 10/);
   assert.match(first.reply, /Price Quote: 1/);
   assert.match(first.reply, /Negotiation: 0/);
   assert.match(first.reply, /On Hold: 0/);
@@ -219,4 +220,75 @@ test('a historical awaiting price uses the deal-stage badge', async () => {
   assert.equal(numberLine, '*PR-10050*');
   assert.doesNotMatch(numberLine, /Awaiting Price/);
   assert.equal(opened.reply.split('\n')[opened.reply.split('\n').indexOf('*PR-10050*') + 1], 'Won');
+});
+
+test('all inquiries counts every inquiries-tab filter, including a resolved owner', async () => {
+  const rows = [
+    inquiry({
+      id: 'inq-owner',
+      procurement_number: 'PR-30001',
+      procurement_employee_id: null,
+      salesperson_phone: 'unassigned',
+      customer_name: 'Acme Steel',
+      pricing_status: 'awaiting_price',
+      status: 'new_inquiry',
+      created_at: '2026-10-23T11:36:00.000Z',
+    }),
+    inquiry({
+      id: 'inq-sender',
+      procurement_number: 'PR-30002',
+      procurement_employee_id: null,
+      salesperson_phone: null,
+      sender_phone: '9844444444',
+      pricing_status: 'price_ready',
+      status: 'quoted',
+      created_at: '2026-10-23T10:13:00.000Z',
+    }),
+    inquiry({
+      id: 'inq-old',
+      procurement_number: 'PR-30003',
+      pricing_status: 'awaiting_price',
+      status: 'negotiation',
+      created_at: '2026-10-01T00:00:00.000Z',
+    }),
+    inquiry({
+      id: 'inq-hold',
+      procurement_number: 'PR-30004',
+      status: 'on_hold',
+      pricing_status: null,
+      created_at: '2026-10-12T00:00:00.000Z',
+    }),
+    inquiry({
+      id: 'inq-lost',
+      procurement_number: 'PR-30005',
+      status: 'lost',
+      pricing_status: null,
+      created_at: '2026-10-08T00:00:00.000Z',
+    }),
+  ];
+  const customers = [{
+    customer_name: 'Acme Steel',
+    assigned_salesperson_phone: '9844444444',
+    updated_at: '2026-10-20T00:00:00.000Z',
+  }];
+  const opened = await chat(rows, null, { recurring_customers: customers }).handle('all inquiries');
+  assert.match(opened.reply, /Awaiting Price: 1/);
+  assert.match(opened.reply, /Price Ready: 1/);
+  assert.match(opened.reply, /Unavailable: 0/);
+  assert.match(opened.reply, /New Inquiry: 1/);
+  assert.match(opened.reply, /Price Quote: 1/);
+  assert.match(opened.reply, /Negotiation: 1/);
+  assert.match(opened.reply, /On Hold: 1/);
+  assert.match(opened.reply, /Won: 0/);
+  assert.match(opened.reply, /Lost: 1/);
+  const lines = opened.reply.split('\n');
+  assert.equal(lines[lines.indexOf('*PR-30001*') + 1], 'Awaiting Price');
+  assert.equal(lines[lines.indexOf('*PR-30002*') + 1], 'Price Ready');
+  assert.equal(lines[lines.indexOf('*PR-30003*') + 1], 'Negotiation');
+  assert.doesNotMatch(opened.reply, /Acme Steel/);
+
+  const pending = await chat(rows, null, { recurring_customers: customers }).handle('pending prices');
+  assert.match(pending.reply, /PR-30001/);
+  assert.doesNotMatch(pending.reply, /PR-30002/);
+  assert.doesNotMatch(pending.reply, /PR-30003/);
 });

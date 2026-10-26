@@ -256,7 +256,7 @@ test('a procurement person cannot read another person procurement number', async
   assert.match(result.reply, /not in your inquiries/);
   assert.doesNotMatch(result.reply, /Secret Mills/);
   const team = await handle('4');
-  assert.match(team.reply, /procurement manager/);
+  assert.match(team.reply, /not available for your access/);
 });
 
 test('a procurement manager can read a report procurement number', async () => {
