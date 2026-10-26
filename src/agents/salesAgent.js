@@ -1528,6 +1528,13 @@ async function syncInquiryFromDeal(inquiryId, dealObj, dealItems) {
  * attaching the official Enlight Metals commercial quotation PDF.
  */
 async function sendQuotationEmail(dealId, targetEmail, senderPhone) {
+  const { can } = require('../utils/permissions');
+  if (senderPhone && !(await can(senderPhone, 'inquiries.send_quote'))) {
+    return {
+      success: false,
+      message: 'You do not have permission to issue quotes. Please contact your admin.',
+    };
+  }
   const { data: deals } = await supabase
     .from('deals')
     .select('*, deal_items(*)')

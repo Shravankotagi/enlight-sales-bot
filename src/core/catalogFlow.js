@@ -1076,11 +1076,10 @@ const CATALOG_MENU_SECTIONS = [
 ];
 
 async function canUserUpdateVisits(senderPhone) {
-  if (!senderPhone) return true;
+  if (!senderPhone) return false;
   try {
-    const { getAccessibleSalespersonPhonesForBot } = require('../supabase');
-    const scope = await getAccessibleSalespersonPhonesForBot(senderPhone);
-    return Boolean(scope.isAdmin || scope.isManager);
+    const { can } = require('../utils/permissions');
+    return can(senderPhone, 'visits.update');
   } catch (err) {
     console.error('Error checking visit update permissions:', err?.message);
     return false;
@@ -5618,6 +5617,13 @@ function isPlaceholderDocumentCaption(caption) {
  * Processes an incoming Inquiry document (photo or PDF) inside an active LOG_INQUIRY flow session.
  */
 async function handleInquiryDocumentOcr(imageBuffer, mimeType, senderPhone, caption = '') {
+  const { can } = require('../utils/permissions');
+  if (!await can(senderPhone, 'inquiries.manage')) {
+    return {
+      handled: true,
+      reply: 'You do not have permission to log inquiries. Please contact your admin.',
+    };
+  }
   const { extractFromImage } = require('../gemini');
   let extraction = null;
   try {
@@ -5808,6 +5814,13 @@ async function finishUnlinkedOrderDraft(draft, senderPhone, notice) {
  * Auto-matches against open inquiries belonging to the salesperson.
  */
 async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, caption = '') {
+  const { can } = require('../utils/permissions');
+  if (!await can(senderPhone, 'orders.create')) {
+    return {
+      handled: true,
+      reply: 'You do not have permission to log orders. Please contact your admin.',
+    };
+  }
   const { extractFromImage } = require('../gemini');
   let extraction = null;
   try {
@@ -10522,6 +10535,11 @@ async function findAndMatchComplaint(draft, senderPhone) {
 
 async function executeAction(action, draft, senderPhone) {
   try {
+    const { denialReply } = require('../utils/permissions');
+    const denied = await denialReply(senderPhone, action);
+    if (denied) {
+      return denied;
+    }
     switch (action) {
       case 'LOG_INQUIRY': {
         const companyName = (draft.company_name || 'Customer').trim();
@@ -15054,6 +15072,14 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       },
     };
   } else if (isFullPriceEntry(text) || inFullPrice || (!hasActiveCatalogSession && isBareAddPriceChoice(text))) {
+    if (!inFullPrice && (isFullPriceEntry(text) || isBareAddPriceChoice(text))) {
+      const { denialReply } = require('../utils/permissions');
+      const denied = await denialReply(senderPhone, 'ADD_PRICE');
+      if (denied) {
+        await recordSessionMessage(senderPhone, 'assistant', denied, { action_type: 'ACCESS_DENIED' });
+        return { handled: true, reply: denied };
+      }
+    }
     const quoted = await handleFullSalesPrice(text, senderPhone, lastIntent, {
       supabase,
       saveActiveSession,
@@ -15093,6 +15119,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   }
 
   if (isDirectOrderRequest(text)) {
+    const { can } = require('../utils/permissions');
+    if (!await can(senderPhone, 'orders.create')) {
+      const denied = 'You do not have permission to log orders. Please contact your admin.';
+      await recordSessionMessage(senderPhone, 'assistant', denied, { action_type: 'ACCESS_DENIED' });
+      return { handled: true, reply: denied };
+    }
     return await beginDirectOrder(senderPhone, callerSourceChannel);
   }
 
@@ -15125,6 +15157,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
   const explicitAction = isExplicitMenuSelection(text, hasActiveCatalogSession && !menuAwaiting, canUpdateVisits);
   if (explicitAction) {
+    const { denialReply } = require('../utils/permissions');
+    const denied = await denialReply(senderPhone, explicitAction);
+    if (denied) {
+      await recordSessionMessage(senderPhone, 'assistant', denied, { action_type: 'ACCESS_DENIED' });
+      return { handled: true, reply: denied };
+    }
     if (hasActiveCatalogSession) {
       try {
         const parts = (lastIntent || '').split('|');
@@ -18269,6 +18307,12 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   // ── 6. DIRECT ACTION ROUTING (Menu Selection 1-10 or Action Keywords) ────────
   const matchedAction = matchActionFromInput(text, false, canUpdateVisits);
   if (matchedAction) {
+    const { denialReply } = require('../utils/permissions');
+    const denied = await denialReply(senderPhone, matchedAction);
+    if (denied) {
+      await recordSessionMessage(senderPhone, 'assistant', denied, { action_type: 'ACCESS_DENIED' });
+      return { handled: true, reply: denied };
+    }
     await recordSessionMessage(senderPhone, 'user', text);
     if (matchedAction === 'GENERAL_QUERY') {
       const genReply = `🔍 *SalesOS Search & Intelligence*\n\nAsk any question about your inquiries, quotations, customer profiles, site visits, or complaints!\n\n_Example: "What was the last rate quoted to Horizon Sheet Metal?" or "Show pending complaints"_`;

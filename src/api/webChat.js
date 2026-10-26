@@ -214,6 +214,21 @@ router.post('/reset', requireWebApiKey, async (req, res) => {
 });
 
 /**
+ * POST /chat/web/permissions/invalidate
+ * Instantly invalidates cached bot permissions for a specific phone or globally.
+ */
+router.post('/permissions/invalidate', requireWebApiKey, async (req, res) => {
+  try {
+    const { invalidateBotPermissions } = require('../utils/permissions');
+    const targetPhone = req.body?.phone || req.body?.employeePhone;
+    invalidateBotPermissions(targetPhone);
+    return res.json({ success: true, message: 'Bot permission cache invalidated successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
  * POST /chat/web/message
  * Entry point for Web AI Assistant messages.
  * Body: { message: string, employeePhone?: string, userId?: string, employeeName?: string, role?: string, resetSession?: boolean }
