@@ -1,4 +1,5 @@
 const { isProcurementManager, isProcurementRole } = require('../utils/roles');
+const axios = require('axios');
 
 const OPEN_STATUSES = ['new', 'pending', 'review', 'draft', 'new_inquiry'];
 const ALL_INQUIRY_PAGE = 10;
@@ -242,44 +243,16 @@ function preservedPricingStatus(inquiry) {
   return 'awaiting_price';
 }
 
-function pipelineStage(value) {
-  const stage = String(value || '').toLowerCase().trim();
-  if (stage === 'qualified') return 'quoted';
-  if (stage === 'hold') return 'on_hold';
-  if (['won', 'lost', 'negotiation', 'quoted', 'on_hold'].includes(stage)) return stage;
-  return null;
+function displayStageKey(inquiry) {
+  const stage = String(inquiry?.display_stage || '').toLowerCase().trim();
+  return ['new_inquiry', 'quoted', 'negotiation', 'on_hold', 'won', 'lost'].includes(stage)
+    ? stage
+    : 'new_inquiry';
 }
 
-function dealStageKey(inquiry, deals) {
-  const linked = (deals || []).find((deal) => deal?.inquiry_id === inquiry?.id);
-  const linkedStage = pipelineStage(linked?.stage);
-  if (linkedStage) return linkedStage;
-  const directStage = pipelineStage(inquiry?.stage);
-  if (directStage) return directStage;
-  const status = String(inquiry?.status || '').toLowerCase().trim();
-  const type = String(inquiry?.inquiry_type || '').toLowerCase();
-  const channel = String(inquiry?.source_channel || '').toLowerCase();
-  if ((type === 'purchase_order' || channel === 'whatsapp_po') && ['confirmed', 'won', 'processed'].includes(status)) {
-    return 'won';
-  }
-  if (status === 'won') return 'won';
-  if (status === 'negotiation') return 'negotiation';
-  if (status === 'lost') return 'lost';
-  if (
-    status === 'quoted'
-    || status === 'quotation_sent'
-    || type === 'quotation_sent'
-    || status === 'confirmed'
-    || status === 'saved'
-    || status === 'processed'
-  ) return 'quoted';
-  if (status === 'on_hold' || status === 'hold') return 'on_hold';
-  return 'new_inquiry';
-}
-
-function filterStatusCount(label, inquiry, deals) {
+function filterStatusCount(label, inquiry) {
   const pricing = preservedPricingStatus(inquiry);
-  const stage = dealStageKey(inquiry, deals);
+  const stage = displayStageKey(inquiry);
   if (label === 'Awaiting Price') return pricing === 'awaiting_price';
   if (label === 'Price Ready') return pricing === 'price_ready';
   if (label === 'Unavailable') return pricing === 'unavailable';
@@ -305,12 +278,12 @@ function stageBadge(stage) {
   }[stage] || 'New Inquiry';
 }
 
-function inquiryBadge(inquiry, deals) {
+function inquiryBadge(inquiry) {
   const pricing = preservedPricingStatus(inquiry);
   if (pricing === 'awaiting_price') return 'Awaiting Price';
   if (pricing === 'price_ready') return 'Price Ready';
   if (pricing === 'unavailable') return 'Unavailable';
-  return stageBadge(dealStageKey(inquiry, deals));
+  return stageBadge(displayStageKey(inquiry));
 }
 
 function productSummary(inquiry) {
@@ -549,7 +522,7 @@ async function basePriceListResult(rows, employees, supabase) {
 }
 
 function readPricePair(chunk, lineCount) {
-  const match = String(chunk || '').trim().match(/^(\d+)\s*[-–—:]?\s*(.*)$/);
+  const match = String(chunk || '').trim().match(/^(\d+)\s*[-–—:.]?\s*(.*)$/);
   if (!match) return null;
   const line = Number(match[1]);
   const priceText = match[2].trim();
@@ -686,11 +659,11 @@ function allInquiriesOffset(intent) {
   return match ? Number(match[1]) : null;
 }
 
-function allInquiriesText(rows, employees, deals, offset) {
+function allInquiriesText(rows, employees, offset) {
   const counts = Object.fromEntries(BADGE_ORDER.map((label) => [label, 0]));
   for (const row of rows) {
     for (const label of BADGE_ORDER) {
-      if (filterStatusCount(label, row, deals)) counts[label] += 1;
+      if (filterStatusCount(label, row)) counts[label] += 1;
     }
   }
   const summary = BADGE_ORDER.map((label) => `${label}: ${counts[label] || 0}`).join('\n');
@@ -698,7 +671,7 @@ function allInquiriesText(rows, employees, deals, offset) {
   const page = rows.slice(start, start + ALL_INQUIRY_PAGE);
   let body = 'None right now.';
   if (rows.length && page.length) {
-    const lines = page.map((row) => formatAllInquiryBlock(row, salespersonName(row, employees), inquiryBadge(row, deals)));
+    const lines = page.map((row) => formatAllInquiryBlock(row, salespersonName(row, employees), inquiryBadge(row)));
     const footer = start + ALL_INQUIRY_PAGE < rows.length
       ? 'Type next to see the next set of inquiries.'
       : 'There are no more inquiries.';
@@ -808,7 +781,7 @@ async function handleProcurementChat(text, phone, deps) {
   if (intent === 'procurement|team' && showTeam && !choice) {
     const person = findTeamPerson(clean, scope.team);
     if (person) {
-      const rows = await loadInquiries(supabase);
+      const rows = await loadInquiries(deps);
       const mine = visibleInquiries(rows, scope).filter((row) => row.procurement_employee_id === person.id);
       await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|menu');
       return { handled: true, reply: listReply(`*${person.name}*`, mine, employees || []) };
@@ -822,7 +795,7 @@ async function handleProcurementChat(text, phone, deps) {
     return { handled: true, reply: VIEW_PERMISSION_REFUSAL };
   }
   if (choice === 'pending') {
-    const rows = await loadDashboardAwaiting(supabase, scope, employees || []);
+    const rows = await loadDashboardAwaiting(deps, scope, employees || []);
     return { handled: true, reply: listReply('*Pending prices*', rows, employees || []) };
   }
   if (choice === 'all') {
@@ -833,11 +806,11 @@ async function handleProcurementChat(text, phone, deps) {
   }
   if (choice === 'base') {
     await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|ask');
-    const rows = await loadDashboardAwaiting(supabase, scope, employees || []);
+    const rows = await loadDashboardAwaiting(deps, scope, employees || []);
     return basePriceListResult(rows, employees || [], supabase);
   }
   if (choice === 'team' && showTeam) {
-    const rows = visibleInquiries(await loadInquiries(supabase), scope);
+    const rows = visibleInquiries(await loadInquiries(deps), scope);
     await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|team');
     return { handled: true, reply: teamReply(scope.team, rows) };
   }
@@ -851,7 +824,7 @@ async function handleProcurementChat(text, phone, deps) {
     return beginBasePrice(numberMatch[0], phone, employee, scope, employees || [], deps);
   }
 
-  const asked = answerSalespersonQuestion(clean, await loadInquiries(supabase), employees || [], scope);
+  const asked = answerSalespersonQuestion(clean, await loadInquiries(deps), employees || [], scope);
   if (asked) return asked;
 
   if (intent === 'procurement|ask') {
@@ -862,17 +835,84 @@ async function handleProcurementChat(text, phone, deps) {
   return showMenu();
 }
 
-const AWAITING_PAGE = 1000;
-const AWAITING_COLUMNS = 'id, procurement_number, procurement_employee_id, status, stage, pricing_status, salesperson_phone, sender_phone, employee_id, customer_name, delivery_location, ai_extraction_json, created_at';
-const ALL_INQUIRY_COLUMNS = `${AWAITING_COLUMNS}, inquiry_type, source_channel`;
+async function loadCanonicalInquiries(deps) {
+  if (typeof deps.loadCanonicalInquiries === 'function') {
+    return deps.loadCanonicalInquiries();
+  }
 
-async function loadInquiries(supabase) {
-  const { data } = await supabase
-    .from('inquiries')
-    .select('id, procurement_number, procurement_employee_id, status, stage, pricing_status, salesperson_phone, employee_id, delivery_location, ai_extraction_json, created_at')
-    .order('created_at', { ascending: false })
-    .limit(500);
-  return data || [];
+  const botSecret = process.env.BOT_INTERNAL_SECRET || 'enlight_bot_secret_2026';
+
+  try {
+    const backendUrl = (process.env.CENTRAL_BACKEND_URL || process.env.BACKEND_URL || 'http://127.0.0.1:3000').replace(/\/$/, '');
+    const response = await axios.get(`${backendUrl}/inquiries`, {
+      headers: { 'x-bot-secret': botSecret },
+      timeout: 15000,
+    });
+    const rows = Array.isArray(response.data) ? response.data : response.data?.data;
+    if (!Array.isArray(rows)) throw new Error('Unexpected canonical inquiry response.');
+    return rows;
+  } catch (error) {
+    throw new Error('Canonical inquiry service is unavailable. Please try again.');
+  }
+}
+
+async function loadInquiries(deps) {
+  return loadCanonicalInquiries(deps);
+}
+
+async function loadCustomerOwners(supabase, employees) {
+  const { data, error } = await supabase
+    .from('recurring_customers')
+    .select('customer_name, assigned_salesperson_phone, updated_at')
+    .order('updated_at', { ascending: false });
+  if (error) return new Map();
+  const phones = new Set();
+  for (const emp of employees || []) {
+    const clean = String(emp?.phone || '').replace(/\D/g, '');
+    if (!clean) continue;
+    phones.add(clean);
+    phones.add(clean.slice(-10));
+  }
+  const owners = new Map();
+  for (const row of data || []) {
+    const name = String(row?.customer_name || '').trim().toLowerCase();
+    const phone = realSalespersonPhone(row?.assigned_salesperson_phone);
+    if (!name || !phone || owners.has(name)) continue;
+    const last10 = phone.replace(/\D/g, '').slice(-10);
+    if (phones.size && !phones.has(last10)) continue;
+    owners.set(name, phone);
+  }
+  return owners;
+}
+
+async function loadScopedInquiries(deps, scope, employees) {
+  const owners = await loadCustomerOwners(deps.supabase, employees);
+  const rows = await loadCanonicalInquiries(deps);
+  return byNewest(rows)
+    .map((row) => withResolvedSalesperson(row, owners))
+    .filter((row) => matchesProcurementScope(row, scope));
+}
+
+async function loadDashboardAwaiting(deps, scope, employees) {
+  const owners = await loadCustomerOwners(deps.supabase, employees);
+  const rows = await loadCanonicalInquiries(deps);
+  return byNewest(rows)
+    .map((row) => withResolvedSalesperson(row, owners))
+    .filter((row) => isDashboardAwaiting(row) && matchesProcurementScope(row, scope));
+}
+
+async function findBasePriceInquiry(deps, scope, employees, number) {
+  return (await loadScopedInquiries(deps, scope, employees))
+    .find((row) => String(row.procurement_number || '').toUpperCase() === String(number).toUpperCase() && matchesProcurementScope(row, scope))
+    || null;
+}
+
+async function showAllInquiries(phone, employee, scope, employees, deps, offset) {
+  const rows = await loadScopedInquiries(deps, scope, employees);
+  const lastPage = rows.length === 0 ? 0 : Math.floor((rows.length - 1) / ALL_INQUIRY_PAGE) * ALL_INQUIRY_PAGE;
+  const start = Math.min(Math.max(0, offset || 0), lastPage);
+  await deps.saveActiveSession(phone, employee.name || 'Procurement', `procurement|all|${start}`);
+  return { handled: true, reply: allInquiriesText(rows, employees, start) };
 }
 
 async function loadCustomerOwners(supabase, employees) {
@@ -986,7 +1026,7 @@ async function showAllInquiries(phone, employee, scope, employees, deps, offset)
 }
 
 async function inquiryDetailsReply(number, scope, employees, deps) {
-  const rows = await loadScopedInquiries(deps.supabase, scope, employees);
+  const rows = await loadScopedInquiries(deps, scope, employees);
   const inquiry = rows.find((row) => String(row.procurement_number || '').toUpperCase() === number.toUpperCase());
   if (!inquiry) {
     return { handled: true, reply: `${number} is not in your inquiries.` };
@@ -999,7 +1039,7 @@ async function inquiryDetailsReply(number, scope, employees, deps) {
   const lines = sourceLines(inquiry);
   const when = formatInquiryWhen(inquiry.created_at);
   const header = `${inquiry.procurement_number}${when ? ` · ${when}` : ''}`;
-  const badge = inquiryBadge(inquiry, await loadDeals(deps.supabase));
+  const badge = inquiryBadge(inquiry);
   const summary = `${salespersonName(inquiry, employees)} · ${inquiry.delivery_location || 'Delivery not set'} · ${badge}`;
   const listed = lines.map((line, index) => {
     const match = saved.find((row) => row.line_key === line.line_key);
@@ -1019,7 +1059,7 @@ async function beginBasePrice(number, phone, employee, scope, employees, deps) {
   if (!canFillBasePrices(resolveProcurementPermissions(employee))) {
     return { handled: true, reply: BASE_PRICE_PERMISSION_REFUSAL };
   }
-  const inquiry = await findBasePriceInquiry(deps.supabase, scope, employees, number);
+  const inquiry = await findBasePriceInquiry(deps, scope, employees, number);
   if (!inquiry) {
     return { handled: true, reply: `${number} is not in your inquiries.` };
   }
@@ -1130,7 +1170,7 @@ async function commitConfirmedBasePrice(intent, phone, employee, scope, employee
   const draft = readBasePriceDraft(intent);
   const { supabase, saveActiveSession } = deps;
   if (!draft) return { handled: true, reply: 'Reply with the procurement number again.' };
-  const inquiry = await findBasePriceInquiry(supabase, scope, employees, draft.n);
+  const inquiry = await findBasePriceInquiry(deps, scope, employees, draft.n);
   if (!inquiry) {
     await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|menu');
     return { handled: true, reply: `${draft.n} is not in your inquiries.` };
@@ -1177,7 +1217,7 @@ async function saveBasePrices(text, number, selectedLine, phone, employee, scope
     return { handled: true, reply: BASE_PRICE_PERMISSION_REFUSAL };
   }
   const { supabase, saveActiveSession } = deps;
-  const inquiry = await findBasePriceInquiry(supabase, scope, employees, number);
+  const inquiry = await findBasePriceInquiry(deps, scope, employees, number);
   if (!inquiry) {
     await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|menu');
     return { handled: true, reply: `${number} is not in your inquiries.` };

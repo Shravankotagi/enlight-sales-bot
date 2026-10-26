@@ -25,7 +25,7 @@ const salesperson = {
 };
 
 function inquiry(overrides) {
-  return {
+  const row = {
     id: 'inq-1',
     procurement_number: 'PR-10001',
     procurement_employee_id: 'proc-a',
@@ -41,6 +41,21 @@ function inquiry(overrides) {
     },
     ...overrides,
   };
+  if (!row.display_stage) {
+    row.display_stage = {
+      quoted: 'quoted',
+      quotation_sent: 'quoted',
+      confirmed: 'quoted',
+      saved: 'quoted',
+      processed: 'quoted',
+      negotiation: 'negotiation',
+      on_hold: 'on_hold',
+      hold: 'on_hold',
+      won: 'won',
+      lost: 'lost',
+    }[row.status] || 'new_inquiry';
+  }
+  return row;
 }
 
 function chat(rows, intent, extraTables) {
@@ -63,6 +78,7 @@ function chat(rows, intent, extraTables) {
         supabase: db.client,
         getEmployeeByPhone: async () => person,
         getFullActiveSession: async () => sessions.get(person.phone) || null,
+        loadCanonicalInquiries: async () => rows,
         saveActiveSession: async (phone, name, next) => {
           sessions.set(phone, { last_intent: next, customer_name: name });
         },
@@ -291,4 +307,23 @@ test('all inquiries counts every inquiries-tab filter, including a resolved owne
   assert.match(pending.reply, /PR-30001/);
   assert.doesNotMatch(pending.reply, /PR-30002/);
   assert.doesNotMatch(pending.reply, /PR-30003/);
+});
+
+test('a quoted inquiry uses the canonical backend stage', async () => {
+  const row = inquiry({
+    id: 'inq-won-deal',
+    procurement_number: 'PR-40001',
+    status: 'quoted',
+    stage: 'quoted',
+    display_stage: 'won',
+    pricing_status: null,
+    created_at: '2026-10-20T00:00:00.000Z',
+  });
+  const won = await chat([row]).handle('all inquiries');
+  assert.match(won.reply, /Won: 1/);
+  assert.match(won.reply, /Price Quote: 0/);
+
+  const newerQuote = await chat([{ ...row, display_stage: 'quoted' }]).handle('all inquiries');
+  assert.match(newerQuote.reply, /Price Quote: 1/);
+  assert.match(newerQuote.reply, /Won: 0/);
 });
