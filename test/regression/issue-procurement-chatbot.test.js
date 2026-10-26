@@ -91,6 +91,7 @@ function chat(caller, rows, intent, extraTables) {
         supabase: db.client,
         getEmployeeByPhone: async () => caller,
         getFullActiveSession: async () => sessions.get(caller.phone) || null,
+        loadCanonicalInquiries: async () => db.store.inquiries,
         saveActiveSession: async (phone, name, next) => {
           sessions.set(phone, { last_intent: next, customer_name: name });
         },
@@ -363,6 +364,7 @@ test('a missing credit column is left off the retry', async () => {
     supabase,
     getEmployeeByPhone: async () => person,
     getFullActiveSession: async () => ({ last_intent: intent }),
+    loadCanonicalInquiries: async () => inquiries,
     saveActiveSession: async (_phone, _name, next) => { intent = next; },
   };
   const preview = await handleProcurementChat('500', person.phone, deps);

@@ -53,6 +53,7 @@ function chat(intent) {
         supabase: db.client,
         getEmployeeByPhone: async () => person,
         getFullActiveSession: async () => sessions.get(person.phone) || null,
+        loadCanonicalInquiries: async () => [inquiry],
         saveActiveSession: async (phone, name, next) => {
           sessions.set(phone, { last_intent: next, customer_name: name });
         },

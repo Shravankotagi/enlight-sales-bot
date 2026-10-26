@@ -96,6 +96,7 @@ function chat() {
         supabase: db.client,
         getEmployeeByPhone: async () => person,
         getFullActiveSession: async () => sessions.get(person.phone) || null,
+        loadCanonicalInquiries: async () => db.store.inquiries,
         saveActiveSession: async (phone, name, next) => {
           sessions.set(phone, { last_intent: next, customer_name: name });
         },
@@ -243,6 +244,7 @@ function chatRows(inquiries, customers) {
         supabase: db.client,
         getEmployeeByPhone: async () => person,
         getFullActiveSession: async () => sessions.get(person.phone) || null,
+        loadCanonicalInquiries: async () => db.store.inquiries,
         saveActiveSession: async (phone, name, next) => {
           sessions.set(phone, { last_intent: next, customer_name: name });
         },
@@ -306,8 +308,7 @@ test('log a base price lists the dashboard awaiting set without line buttons', a
   assert.doesNotMatch(listed.reply, /Hidden Buyer/);
   assert.equal(listed.interactiveList, undefined);
   const inquiryCalls = session.db.calls.filter((call) => call.table === 'inquiries');
-  assert.ok(inquiryCalls.some((call) => (call.modifiers || []).some(([name]) => name === 'range')));
-  assert.equal(inquiryCalls.some((call) => (call.modifiers || []).some(([name, args]) => name === 'limit' && Number(args[0]) === 500)), false);
+  assert.equal(inquiryCalls.length, 0);
 
   const opened = await session.handle('PR-30001');
   assert.match(opened.reply, /Reply with the base price/);
