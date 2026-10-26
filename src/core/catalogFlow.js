@@ -28,6 +28,7 @@ const {
   getCustomProductsList,
   getCachedCustomProducts,
   createCustomProductRecord,
+  procurementStampForSalesperson,
 } = require('../supabase');
 const {
   nextVisitPrompts,
@@ -45,6 +46,16 @@ const {
   attachVisitMedia,
   visitPhotoAccepted,
 } = require('./visitRequirements');
+const {
+  customerTargetNote,
+  prematureUpdateReply,
+  orderRateReply,
+  isSalesPriceText,
+  isFullPriceEntry,
+  isBareAddPriceChoice,
+  handleSalesPriceChat,
+  handleFullSalesPrice,
+} = require('./salesPriceFlow');
 const {
   detectHsnCode,
   normalizeProductToCatalog,
@@ -197,14 +208,15 @@ What would you like to do today?
 2. **Update Inquiry**
 3. **Log New Order**
 4. **Update Order**
-5. **Log Customer Field Visit**
-6. **Update Field Visit**
-7. **New Customer Acquisition**
-8. **Log Customer Complaint**
-9. **Update Customer Complaint**
-10. **Other / General Query**
+5. **Add Price to Inquiry**
+6. **Log Customer Field Visit**
+7. **Update Field Visit**
+8. **New Customer Acquisition**
+9. **Log Customer Complaint**
+10. **Update Customer Complaint**
+11. **Other / General Query**
 
-Reply with a number (1–10) or type what you'd like to do.`;
+Reply with a number (1–11), or type what you'd like to do.`;
 
 const CONFIRMATION_BUTTONS = [
   { id: 'btn_confirm_yes', title: 'Save / Yes' },
@@ -315,7 +327,7 @@ function isComplaintAttachmentSkip(text, draft) {
     /^(?:btn_att_no|no|nah|none|no\s*photos?|no\s*evidence|skip|done|proceed|next|nahi)\b/i.test(clean);
 }
 
-function getPostActivityButtons(action) {
+function getPostActivityButtons(action, draft) {
   switch (action) {
     case 'LOG_COMPLAINT':
       return [
@@ -337,11 +349,14 @@ function getPostActivityButtons(action) {
         { id: 'btn_repeat_update_visit', title: 'Update Another Visit' },
         { id: 'btn_post_menu', title: 'Menu' },
       ];
-    case 'LOG_INQUIRY':
+    case 'LOG_INQUIRY': {
+      const number = draft?.procurement_number;
       return [
         { id: 'btn_repeat_log_inquiry', title: 'Log Another Inquiry' },
+        { id: number ? `btn_price_current|${number}` : 'btn_price_current', title: 'Price This Inquiry' },
         { id: 'btn_post_menu', title: 'Menu' },
       ];
+    }
     case 'UPDATE_INQUIRY':
       return [
         { id: 'btn_repeat_update_inquiry', title: 'Update Another Inq' },
@@ -1039,22 +1054,23 @@ const CATALOG_MENU_SECTIONS = [
       { id: 'menu_2', title: '2. Update Inquiry', description: 'Update rates, specs or stage' },
       { id: 'menu_3', title: '3. Log New Order', description: 'Record new confirmed PO' },
       { id: 'menu_4', title: '4. Update Order', description: 'Attach PO, update items' },
+      { id: 'menu_price', title: '5. Add Price to Inquiry', description: 'Awaiting or price ready' },
     ],
   },
   {
     title: 'Visits & Customers',
     rows: [
-      { id: 'menu_5', title: '5. Log Field Visit', description: 'Record client meeting' },
-      { id: 'menu_6', title: '6. Update Field Visit', description: 'Update meeting outcome' },
-      { id: 'menu_7', title: '7. New Acquisition', description: 'Add new customer profile' },
+      { id: 'menu_5', title: '6. Log Field Visit', description: 'Record client meeting' },
+      { id: 'menu_6', title: '7. Update Field Visit', description: 'Update meeting outcome' },
+      { id: 'menu_7', title: '8. New Acquisition', description: 'Add new customer profile' },
     ],
   },
   {
     title: 'Complaints & Queries',
     rows: [
-      { id: 'menu_8', title: '8. Log Complaint', description: 'Report quality or delay' },
-      { id: 'menu_9', title: '9. Update Complaint', description: 'Update resolution status' },
-      { id: 'menu_10', title: '10. General Query', description: 'Ask any data retrieval query' },
+      { id: 'menu_8', title: '9. Log Complaint', description: 'Report quality or delay' },
+      { id: 'menu_9', title: '10. Update Complaint', description: 'Update resolution status' },
+      { id: 'menu_10', title: '11. General Query', description: 'Ask any data retrieval query' },
     ],
   },
 ];
@@ -1083,13 +1099,14 @@ What would you like to do today?
 2. **Update Inquiry**
 3. **Log New Order**
 4. **Update Order**
-5. **Log Customer Field Visit**
-6. **New Customer Acquisition**
-7. **Log Customer Complaint**
-8. **Update Customer Complaint**
-9. **Other / General Query**
+5. **Add Price to Inquiry**
+6. **Log Customer Field Visit**
+7. **New Customer Acquisition**
+8. **Log Customer Complaint**
+9. **Update Customer Complaint**
+10. **Other / General Query**
 
-Reply with a number (1–9) or type what you'd like to do.`;
+Reply with a number (1–10), or type what you'd like to do.`;
 }
 
 function getCatalogMenuSections(isAuthorizedForVisits = true) {
@@ -1101,24 +1118,25 @@ function getCatalogMenuSections(isAuthorizedForVisits = true) {
       title: 'Inquiries & Orders',
       rows: [
         { id: 'menu_1', title: '1. Log New Inquiry', description: 'Capture customer requirements' },
-        { id: 'menu_2', title: '2. Update Inquiry', description: 'Update rates, specs or stage' },
+        { id: 'menu_2', title: '2. Update Inquiry', description: 'Update specs or details' },
         { id: 'menu_3', title: '3. Log New Order', description: 'Record new confirmed PO' },
         { id: 'menu_4', title: '4. Update Order', description: 'Attach PO, update items' },
+        { id: 'menu_price', title: '5. Add Price to Inquiry', description: 'Awaiting or price ready' },
       ],
     },
     {
       title: 'Visits & Customers',
       rows: [
-        { id: 'menu_5', title: '5. Log Field Visit', description: 'Record client meeting' },
-        { id: 'menu_7', title: '6. New Acquisition', description: 'Add new customer profile' },
+        { id: 'menu_5', title: '6. Log Field Visit', description: 'Record client meeting' },
+        { id: 'menu_7', title: '7. New Acquisition', description: 'Add new customer profile' },
       ],
     },
     {
       title: 'Complaints & Queries',
       rows: [
-        { id: 'menu_8', title: '7. Log Complaint', description: 'Report quality or delay' },
-        { id: 'menu_9', title: '8. Update Complaint', description: 'Update resolution status' },
-        { id: 'menu_10', title: '9. General Query', description: 'Ask any data retrieval query' },
+        { id: 'menu_8', title: '8. Log Complaint', description: 'Report quality or delay' },
+        { id: 'menu_9', title: '9. Update Complaint', description: 'Update resolution status' },
+        { id: 'menu_10', title: '10. General Query', description: 'Ask any data retrieval query' },
       ],
     },
   ];
@@ -1335,6 +1353,8 @@ Please provide the following details:
 - **Delivery Location:** *
 - **Additional Notes:** (optional)
 
+A price typed here is kept as a customer target. It is not the sell rate. Procurement adds the base price first.
+
 You can reply in any format — just include the field names or values in order.`,
 
   UPDATE_INQUIRY: `✏️ **Update Inquiry**
@@ -1351,10 +1371,11 @@ Which fields do you want to update? Mention the field name and new value.
 - Delivery Location
 - Email ID
 - Additional Notes
-- Status (Open / Quoted / Won / Lost / On Hold)
+
+Quoted, Won, and Lost stay closed until the sales price is saved. Reply *Price this inquiry* after the base price is ready. If every line is unavailable, send the decline from the dashboard.
 
 Example:
-"INQ-2026-0042, update rate to 54000, payment terms to 45 days credit, status to Quoted"`,
+"INQ-2026-0042, payment terms to 45 days credit, delivery to Chakan"`,
 
   LOG_ORDER: `🛒 **Record New Order**
 
@@ -1661,12 +1682,12 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
 
   // If text is a full sentence with arguments/details, let natural action detection & LLM extraction handle it
   if (clean.length > 45 || /\b(?:rate|qty|status|inq-|po-|vis-|cmp-|midc|midc\s+pune|midc\s+bhosari|mt|tons|plate|sheet|coil)\b/i.test(clean)) {
-    if (!/^(?:1|2|3|4|5|6|7|8|9|10)\.?$/i.test(clean) && !/^(?:\d+[\.\)\s\-]+|menu_\d+|start_log_|start_update_)?(?:log|update|record|start_log_|start_update_)?\s*(?:new\s*)?(?:inquiry|order|visit|complaint|customer|customer acquisition|field visit|customer visit|customer complaint|general query|other query)$/i.test(clean)) {
+    if (!/^(?:1|2|3|4|5|6|7|8|9|10|11)\.?$/i.test(clean) && !/^(?:\d+[\.\)\s\-]+|menu_\d+|start_log_|start_update_)?(?:log|update|record|start_log_|start_update_)?\s*(?:new\s*)?(?:inquiry|order|visit|complaint|customer|customer acquisition|field visit|customer visit|customer complaint|general query|other query)$/i.test(clean)) {
       return null;
     }
   }
 
-  const isBareNumber = /^(?:[1-9]|10)\.?$/i.test(clean) || /^(?:option|choice)\s*(?:[1-9]|10)\.?$/i.test(clean);
+  const isBareNumber = /^(?:[1-9]|10|11)\.?$/i.test(clean) || /^(?:option|choice)\s*(?:[1-9]|10|11)\.?$/i.test(clean);
   if (isBareNumber && hasActiveSession) {
     return null;
   }
@@ -1687,7 +1708,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
     clean === 'menu_2' ||
     stripped === 'update inquiry' || stripped === 'update inq' || stripped === 'update an inquiry' || stripped === 'update the inquiry' || stripped === 'inquiry update' || stripped === 'inq update' || stripped === 'edit inquiry' || stripped === 'edit inq' || stripped === 'modify inquiry' || stripped === 'start_update_inquiry' ||
     clean === '2. update inquiry' || clean === '2 update inquiry' ||
-    fullClean.includes('update rates, specs or stage')
+    fullClean.includes('update specs or details') || fullClean.includes('update rates, specs or stage')
   ) {
     return 'UPDATE_INQUIRY';
   }
@@ -1710,7 +1731,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
     return 'UPDATE_ORDER';
   }
   if (
-    (!hasActiveSession && (clean === '5' || clean === '5.' || clean === 'option 5' || clean === 'choice 5')) ||
+    (!hasActiveSession && (clean === '6' || clean === '6.' || clean === 'option 6' || clean === 'choice 6')) ||
     clean === 'menu_5' ||
     stripped === 'log visit' || stripped === 'log customer field visit' || stripped === 'log customer visit' || stripped === 'log field visit' || stripped === 'field visit' || stripped === 'new visit' || stripped === 'record visit' || stripped === 'start_log_visit' ||
     clean === '5. log customer field visit' || clean === '5. log field visit' || clean === '5 log customer field visit' ||
@@ -1719,10 +1740,10 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
     return 'LOG_VISIT';
   }
 
-  // If user is a salesperson, option 6 in their menu is New Customer Acquisition
+  // If user is a salesperson, option 7 in their menu is New Customer Acquisition
   if (!isAuthorizedForVisits) {
     if (
-      (!hasActiveSession && (clean === '6' || clean === '6.' || clean === 'option 6' || clean === 'choice 6')) ||
+      (!hasActiveSession && (clean === '7' || clean === '7.' || clean === 'option 7' || clean === 'choice 7')) ||
       clean === 'menu_7' ||
       stripped === 'new acquisition' || stripped === 'new customer' || stripped === 'new customer acquisition' || stripped === 'customer acquisition' || stripped === 'add customer' || stripped === 'onboard customer' || stripped === 'log customer' || stripped === 'start_log_customer' ||
       clean === '6. new customer acquisition' || clean === '6. new acquisition' || clean === '6 new customer acquisition' ||
@@ -1732,7 +1753,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
       return 'LOG_NEW_CUSTOMER';
     }
     if (
-      (!hasActiveSession && (clean === '7' || clean === '7.' || clean === 'option 7' || clean === 'choice 7')) ||
+      (!hasActiveSession && (clean === '8' || clean === '8.' || clean === 'option 8' || clean === 'choice 8')) ||
       clean === 'menu_8' ||
       stripped === 'log complaint' || stripped === 'log customer complaint' || stripped === 'new complaint' || stripped === 'record complaint' || stripped === 'raise complaint' || stripped === 'start_log_complaint' ||
       clean === '7. log customer complaint' || clean === '7. log complaint' || clean === '7 log customer complaint' ||
@@ -1742,7 +1763,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
       return 'LOG_COMPLAINT';
     }
     if (
-      (!hasActiveSession && (clean === '8' || clean === '8.' || clean === 'option 8' || clean === 'choice 8')) ||
+      (!hasActiveSession && (clean === '9' || clean === '9.' || clean === 'option 9' || clean === 'choice 9')) ||
       clean === 'menu_9' ||
       stripped === 'update complaint' || stripped === 'update customer complaint' || stripped === 'complaint update' || stripped === 'resolve complaint' || stripped === 'close complaint' || stripped === 'edit complaint' || stripped === 'start_update_complaint' ||
       clean === '8. update customer complaint' || clean === '8. update complaint' || clean === '8 update customer complaint' ||
@@ -1752,7 +1773,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
       return 'UPDATE_COMPLAINT';
     }
     if (
-      (!hasActiveSession && (clean === '9' || clean === '9.' || clean === 'option 9' || clean === 'choice 9')) ||
+      (!hasActiveSession && (clean === '10' || clean === '10.' || clean === 'option 10' || clean === 'choice 10')) ||
       clean === 'menu_10' ||
       stripped === 'other' || stripped === 'general query' || stripped === 'other query' || stripped === 'general_query' || stripped === 'other / general query' || stripped === 'search query' ||
       clean === '9. other / general query' || clean === '9. other' || clean === '9. general query' || clean === '9 general query' ||
@@ -1765,7 +1786,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
 
   // Explicit Update Visit keywords (always detected so unauthorized users hit the access denied gate)
   if (
-    (isAuthorizedForVisits && !hasActiveSession && (clean === '6' || clean === '6.' || clean === 'option 6' || clean === 'choice 6')) ||
+    (isAuthorizedForVisits && !hasActiveSession && (clean === '7' || clean === '7.' || clean === 'option 7' || clean === 'choice 7')) ||
     clean === 'menu_6' ||
     stripped === 'update visit' || stripped === 'update field visit' || stripped === 'update customer visit' || stripped === 'visit update' || stripped === 'field visit update' || stripped === 'edit visit' || stripped === 'modify visit' || stripped === 'start_update_visit' ||
     clean === '6. update field visit' || clean === '6. update visit' || clean === '6 update field visit' ||
@@ -1775,7 +1796,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
   }
 
   if (
-    (!hasActiveSession && (clean === '7' || clean === '7.' || clean === 'option 7' || clean === 'choice 7')) ||
+    (!hasActiveSession && (clean === '8' || clean === '8.' || clean === 'option 8' || clean === 'choice 8')) ||
     clean === 'menu_7' ||
     stripped === 'new acquisition' || stripped === 'new customer' || stripped === 'new customer acquisition' || stripped === 'customer acquisition' || stripped === 'add customer' || stripped === 'onboard customer' || stripped === 'log customer' || stripped === 'start_log_customer' ||
     clean === '7. new customer acquisition' || clean === '7. new acquisition' || clean === '7 new customer acquisition' ||
@@ -1784,7 +1805,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
     return 'LOG_NEW_CUSTOMER';
   }
   if (
-    (!hasActiveSession && (clean === '8' || clean === '8.' || clean === 'option 8' || clean === 'choice 8')) ||
+    (!hasActiveSession && (clean === '9' || clean === '9.' || clean === 'option 9' || clean === 'choice 9')) ||
     clean === 'menu_8' ||
     stripped === 'log complaint' || stripped === 'log customer complaint' || stripped === 'new complaint' || stripped === 'record complaint' || stripped === 'raise complaint' || stripped === 'start_log_complaint' ||
     clean === '8. log customer complaint' || clean === '8. log complaint' || clean === '8 log customer complaint' ||
@@ -1793,7 +1814,7 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
     return 'LOG_COMPLAINT';
   }
   if (
-    (!hasActiveSession && (clean === '9' || clean === '9.' || clean === 'option 9' || clean === 'choice 9')) ||
+    (!hasActiveSession && (clean === '10' || clean === '10.' || clean === 'option 10' || clean === 'choice 10')) ||
     clean === 'menu_9' ||
     stripped === 'update complaint' || stripped === 'update customer complaint' || stripped === 'complaint update' || stripped === 'resolve complaint' || stripped === 'close complaint' || stripped === 'edit complaint' || stripped === 'start_update_complaint' ||
     clean === '9. update customer complaint' || clean === '9. update complaint' || clean === '9 update customer complaint' ||
@@ -1802,10 +1823,11 @@ function matchActionFromInput(text, hasActiveSession = false, isAuthorizedForVis
     return 'UPDATE_COMPLAINT';
   }
   if (
-    (!hasActiveSession && (clean === '10' || clean === '10.' || clean === 'option 10' || clean === 'choice 10')) ||
+    (!hasActiveSession && (clean === '11' || clean === '11.' || clean === 'option 11' || clean === 'choice 11')) ||
     clean === 'menu_10' ||
     stripped === 'other' || stripped === 'general query' || stripped === 'other query' || stripped === 'general_query' || stripped === 'other / general query' || stripped === 'search query' ||
     clean === '10. other / general query' || clean === '10. other' || clean === '10. general query' ||
+    clean === '11. other / general query' || clean === '11. other' || clean === '11. general query' || clean === '11 general query' ||
     fullClean.includes('general search or intelligence')
   ) {
     return 'GENERAL_QUERY';
@@ -1827,9 +1849,9 @@ function isExplicitMenuSelection(text, hasActiveSession = false, isAuthorizedFor
 
   // 2. Exact catalog list titles / descriptions
   if (
-    /^(?:1|2|3|4|5|6|7|8|9|10)[\.\)\s\-]+(?:log|update|record|new|onboard)?\s*(?:new\s*)?(?:inquiry|order|visit|field visit|customer visit|complaint|customer complaint|customer|acquisition|customer acquisition|general query|other query|other)\b/i.test(clean) ||
+    /^(?:11|10|[1-9])[\.\)\s\-]+(?:log|update|record|new|onboard)?\s*(?:new\s*)?(?:inquiry|order|visit|field visit|customer visit|complaint|customer complaint|customer|acquisition|customer acquisition|general query|other query|other)\b/i.test(clean) ||
     fullClean.includes('capture customer requirements') ||
-    fullClean.includes('update rates, specs or stage') ||
+    fullClean.includes('update specs or details') || fullClean.includes('update rates, specs or stage') ||
     fullClean.includes('record new confirmed po') ||
     fullClean.includes('attach po, update items') ||
     fullClean.includes('record client meeting') ||
@@ -1863,8 +1885,8 @@ function isExplicitMenuSelection(text, hasActiveSession = false, isAuthorizedFor
     return matchedAction;
   }
 
-  // 5. If NOT in an active session (idle/general), single digits 1-10 are catalog selections
-  if (!hasActiveSession && /^(?:[1-9]|10)\.?$/i.test(clean)) {
+  // 5. If NOT in an active session (idle/general), single digits 1-11 are catalog selections
+  if (!hasActiveSession && /^(?:11|10|[1-9])\.?$/i.test(clean)) {
     return matchActionFromInput(text, false, isAuthorizedForVisits);
   }
 
@@ -1875,7 +1897,7 @@ const BARE_NUMBER_FIELD_INPUT_REPLY = `Please describe what you'd like to update
 const BARE_NUMBER_NO_SESSION_REPLY = `Please send 'Hi' or 'Menu' to get started.`;
 
 function isBareCatalogNumber(text) {
-  return typeof text === 'string' && /^\s*(?:option\s*|choice\s*)?(?:[1-9]|10)\s*[.)]?\s*$/i.test(text);
+  return typeof text === 'string' && /^\s*(?:option\s*|choice\s*)?(?:11|10|[1-9])\s*[.)]?\s*$/i.test(text);
 }
 
 // True when the latest bot message in the current session is a catalog menu / numbered start prompt.
@@ -7123,7 +7145,7 @@ function formatSelectedInquiryPrompt(matchedRecord, itemsListText) {
     `• *Additional Notes:* ${formatAttributeValue(matchedRecord.additional_notes)}\n\n` +
     `*Current Line Items:*\n\n${itemsListText}` +
     quoteTotalBlock + `\n\n` +
-    `Want to update Stage (Negotiation, Won, Lost, On Hold), Rate, Quantity or other details?`;
+    `You can update quantity, specs, payment terms, or delivery. Reply *Price this inquiry* after the base price is ready. Quoted, Won, and Lost stay closed until that sales price is saved.`;
 }
 
 /**
@@ -9244,7 +9266,7 @@ async function checkInquiriesForUpdate(action, draft, senderPhone, originalText 
         `• *Additional Notes:* ${formatAttributeValue(single.additional_notes)}\n\n` +
         `*Current Line Items:*\n\n${itemsListText}` +
         quoteTotalBlock + `\n\n` +
-        `Want to update Stage (Negotiation, Won, Lost, On Hold), Rate, Quantity or other details?`;
+        `You can update quantity, specs, payment terms, or delivery. Reply *Price this inquiry* after the base price is ready. Quoted, Won, and Lost stay closed until that sales price is saved.`;
 
       return {
         handled: true,
@@ -9916,30 +9938,25 @@ function buildConfirmationSummary(action, draft) {
 
   switch (action) {
     case 'LOG_INQUIRY': {
+      const displayItems = (draft.line_items || []).map((item) => ({ ...item, rate: null, amount: null }));
+      const target = customerTargetNote({ ...draft, additional_notes: '' });
       summary += `• *Customer / Company:* ${draft.company_name || '-'}\n`;
       summary += `• *Email ID:* ${draft.email || '-'}\n`;
-      if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
-        if (draft.line_items.length === 1) {
-          summary += `• *Product:* ${formatDetailedInquiryItemsList(draft.line_items)}\n`;
+      if (displayItems.length > 0) {
+        if (displayItems.length === 1) {
+          summary += `• *Product:* ${formatDetailedInquiryItemsList(displayItems)}\n`;
         } else {
-          summary += `• *Line Items:*\n${formatDetailedInquiryItemsList(draft.line_items).split('\n').map(l => `  ${l}`).join('\n')}\n`;
+          summary += `• *Line Items:*\n${formatDetailedInquiryItemsList(displayItems).split('\n').map(l => `  ${l}`).join('\n')}\n`;
         }
       } else {
-        const rateStr = draft.rate ? ` | ₹${(parseIndianAmount(draft.rate) ?? 0).toLocaleString('en-IN')} /MT` : '';
-        summary += `• *Product:* ${draft.product_description || '-'}${rateStr}\n`;
+        summary += `• *Product:* ${draft.product_description || '-'}\n`;
       }
       summary += `• *Preferred Make:* ${draft.preferred_make || '-'}\n`;
       summary += `• *Payment Terms:* ${draft.payment_terms || '-'}\n`;
       summary += `• *Delivery Location:* ${draft.delivery_location || '-'}\n`;
       summary += `• *Additional Notes:* ${draft.additional_notes || '-'}\n`;
-      if (Array.isArray(draft.line_items) && draft.line_items.length > 0) {
-        const totalAmt = draft.line_items.reduce((sum, it) => sum + (Number(it.amount) || ((Number(it.quantity) || 0) * (Number(it.rate) || 0)) || 0), 0);
-        if (totalAmt > 0) {
-          const gstAmt = Math.round(totalAmt * 0.18);
-          const grandTot = totalAmt + gstAmt;
-          summary += `• *Quotation Total:* ₹${Number(totalAmt).toLocaleString('en-IN')} + 18% GST (₹${Number(gstAmt).toLocaleString('en-IN')}) = *₹${Number(grandTot).toLocaleString('en-IN')}*\n`;
-        }
-      }
+      if (target) summary += `• *${target}*\n`;
+      summary += `• *Pricing:* Base price is still waiting with procurement.\n`;
       break;
     }
 
@@ -10513,19 +10530,16 @@ async function executeAction(action, draft, senderPhone) {
           city: draft.delivery_location || null,
         });
 
-        let totalAmount = 0;
-        const globalRate = parseIndianAmount(draft.rate) || 0;
+        const totalAmount = 0;
+        const notesWithTarget = customerTargetNote(draft);
 
         const structuredLineItems = (Array.isArray(draft.line_items) && draft.line_items.length > 0)
           ? draft.line_items.map((it) => {
-              const calc = calculateLineItem(it);
+              const calc = calculateLineItem({ ...it, rate: null, amount: null });
               const sText = it.sku_text || it.description || '';
               const sDim = it.dimensions || it.spec || '';
               const hCode = resolveProductHsnOrEmpty(sText || it.description || '', sDim, it.hsn_code || it.hsn_sac, draft);
-              const itRate = calc.rate || globalRate || 0;
-              const itQty = calc.quantity || 0;
-              const itAmt = calc.amount || (itQty && itRate ? itQty * itRate : 0);
-              totalAmount += itAmt;
+              const itQty = calc.quantity || Number(it.quantity) || 0;
               return {
                 sku_text: sText,
                 description: it.description || sText,
@@ -10535,15 +10549,9 @@ async function executeAction(action, draft, senderPhone) {
                 hsn_code: hCode,
                 hsn_sac: hCode,
                 quantity: itQty,
-                unit: calc.unit || 'MT',
-                rate: itRate || null,
-                amount: itAmt || null,
-                cgst_rate: calc.cgst_rate || 9,
-                cgst_amount: calc.cgst_amount || Math.round(itAmt * 0.09 * 100) / 100,
-                sgst_rate: calc.sgst_rate || 9,
-                sgst_amount: calc.sgst_amount || Math.round(itAmt * 0.09 * 100) / 100,
-                total_gst: calc.total_gst || Math.round(itAmt * 0.18 * 100) / 100,
-                final_amount: calc.final_amount || Math.round(itAmt * 1.18 * 100) / 100,
+                unit: calc.unit || it.unit || 'MT',
+                rate: null,
+                amount: null,
               };
             })
           : [
@@ -10556,7 +10564,7 @@ async function executeAction(action, draft, senderPhone) {
                 hsn_sac: resolveProductHsnOrEmpty(draft.product_description || '', '', '', draft),
                 quantity: 0,
                 unit: 'MT',
-                rate: globalRate || null,
+                rate: null,
                 amount: null,
               }
             ];
@@ -10577,11 +10585,11 @@ async function executeAction(action, draft, senderPhone) {
           delivery_address: draft.delivery_location || null,
           payment_terms: draft.payment_terms || null,
           preferred_make: draft.preferred_make || null,
-          additional_notes: draft.additional_notes || null,
-          rate: globalRate || (structuredLineItems[0]?.rate ?? null),
-          unitPrice: globalRate || (structuredLineItems[0]?.rate ?? null),
-          total_amount: totalAmount || null,
-          totalAmount: totalAmount || null,
+          additional_notes: notesWithTarget || null,
+          rate: null,
+          unitPrice: null,
+          total_amount: null,
+          totalAmount: null,
           po_number: draft.po_number || null,
           reference_po_number: draft.reference_po_number || null,
           generated_po_number: draft.generated_po_number || null,
@@ -10597,16 +10605,15 @@ async function executeAction(action, draft, senderPhone) {
 
         let humanRawText = `Customer: ${companyName}\n`;
         if (structuredLineItems.length > 0 && structuredLineItems[0].quantity > 0) {
-          humanRawText += `Products:\n` + structuredLineItems.map((it, i) => `${i + 1}. ${it.description || it.sku_text} - ${it.quantity} ${it.unit}${it.rate ? ` @ ₹${it.rate}/${it.unit}` : ''}`).join('\n') + `\n`;
+          humanRawText += `Products:\n` + structuredLineItems.map((it, i) => `${i + 1}. ${it.description || it.sku_text} - ${it.quantity} ${it.unit}`).join('\n') + `\n`;
         } else if (draft.product_description) {
           humanRawText += `Product: ${draft.product_description}\n`;
-          if (globalRate) humanRawText += `Rate: ₹${globalRate}/MT\n`;
         }
         if (draft.preferred_make) humanRawText += `Preferred Make: ${draft.preferred_make}\n`;
         if (draft.email) humanRawText += `Email: ${draft.email}\n`;
         if (draft.payment_terms) humanRawText += `Payment Terms: ${draft.payment_terms}\n`;
         if (draft.delivery_location) humanRawText += `Delivery Location: ${draft.delivery_location}\n`;
-        if (draft.additional_notes) humanRawText += `Notes: ${draft.additional_notes}\n`;
+        if (notesWithTarget) humanRawText += `Notes: ${notesWithTarget}\n`;
         const inquirySourceMediaUrls = Array.isArray(draft.attachments)
           ? draft.attachments
             .map(a => a?.url || a?.file_url)
@@ -10614,9 +10621,8 @@ async function executeAction(action, draft, senderPhone) {
           : [];
 
         // 1. Insert into inquiries (primary canonical table with pipeline fields)
-        const { data: inqRow, error: inqErr } = await supabase
-          .from('inquiries')
-          .insert({
+        const procurementStamp = await procurementStampForSalesperson(senderPhone);
+        const inquiryInsert = {
             source_channel: draft.source_channel || 'WhatsApp',
             sender_name: companyName,
             customer_name: companyName,
@@ -10624,18 +10630,36 @@ async function executeAction(action, draft, senderPhone) {
             media_urls: inquirySourceMediaUrls,
             sender_phone: senderPhone,
             salesperson_phone: senderPhone,
+            ...(procurementStamp.salesperson_employee_id
+              ? { employee_id: procurementStamp.salesperson_employee_id }
+              : {}),
             status: 'new_inquiry',
             stage: 'new_inquiry',
             delivery_location: draft.delivery_location || null,
             payment_terms: draft.payment_terms || null,
-            total_amount: totalAmount || null,
+            total_amount: null,
+            pricing_status: procurementStamp.pricing_status,
+            procurement_number: procurementStamp.procurement_number,
+            procurement_employee_id: procurementStamp.procurement_employee_id,
+            procurement_assigned_at: procurementStamp.procurement_assigned_at,
             ai_extraction_json: structuredAiJson,
             overall_confidence: 0.95,
             inquiry_type: 'inquiry',
             created_at: new Date().toISOString(),
-          })
+          };
+        let { data: inqRow, error: inqErr } = await supabase
+          .from('inquiries')
+          .insert(inquiryInsert)
           .select()
           .single();
+        if (inqErr && /procurement_number|pricing_status|procurement_employee_id|procurement_assigned_at|\bemployee_id\b/i.test(inqErr.message || '')) {
+          delete inquiryInsert.pricing_status;
+          delete inquiryInsert.procurement_number;
+          delete inquiryInsert.procurement_employee_id;
+          delete inquiryInsert.procurement_assigned_at;
+          if (/\bemployee_id\b/i.test(inqErr.message || '')) delete inquiryInsert.employee_id;
+          ({ data: inqRow, error: inqErr } = await supabase.from('inquiries').insert(inquiryInsert).select().single());
+        }
 
         if (inqErr || !inqRow) {
           console.error('[CatalogFlow] Inquiry insert error:', inqErr);
@@ -10659,8 +10683,8 @@ async function executeAction(action, draft, senderPhone) {
             grade: it.grade || null,
             quantity: Number(it.quantity) || null,
             unit: it.unit || 'MT',
-            rate: Number(it.rate) || null,
-            amount: Number(it.amount) || null,
+            rate: null,
+            amount: null,
             confidence: 0.95,
             created_at: new Date().toISOString(),
           }));
@@ -10693,7 +10717,7 @@ async function executeAction(action, draft, senderPhone) {
             customer_address: draft.delivery_location || null,
             delivery_location: draft.delivery_location || null,
             payment_terms: draft.payment_terms || null,
-            total_amount: totalAmount || null,
+            total_amount: null,
             inquiry_type: 'inquiry',
             status: 'auto_created',
             salesperson_phone: senderPhone,
@@ -10710,8 +10734,8 @@ async function executeAction(action, draft, senderPhone) {
             grade: it.grade || null,
             quantity: Number(it.quantity) || null,
             unit: it.unit || 'MT',
-            rate: Number(it.rate) || null,
-            amount: Number(it.amount) || null,
+            rate: null,
+            amount: null,
             confidence: 0.95,
             created_at: new Date().toISOString(),
           }));
@@ -10750,35 +10774,30 @@ async function executeAction(action, draft, senderPhone) {
           console.warn('[CatalogFlow] Activity log notice for LOG_INQUIRY:', actErr?.message);
         }
 
+        const displayItems = structuredLineItems.map((item) => ({ ...item, rate: null, amount: null }));
         let productSummaryLines = '';
-        if (structuredLineItems.length > 0) {
-          if (structuredLineItems.length === 1) {
-            productSummaryLines = `• *Product:* ${formatDetailedInquiryItemsList(structuredLineItems)}\n`;
+        if (displayItems.length > 0) {
+          if (displayItems.length === 1) {
+            productSummaryLines = `• *Product:* ${formatDetailedInquiryItemsList(displayItems)}\n`;
           } else {
-            productSummaryLines = `• *Line Items:*\n${formatDetailedInquiryItemsList(structuredLineItems).split('\n').map(l => `  ${l}`).join('\n')}\n`;
+            productSummaryLines = `• *Line Items:*\n${formatDetailedInquiryItemsList(displayItems).split('\n').map(l => `  ${l}`).join('\n')}\n`;
           }
         } else {
-          const rateStr = globalRate ? ` | ₹${Number(globalRate).toLocaleString('en-IN')} /MT` : '';
-          productSummaryLines = `• *Product:* ${draft.product_description || 'Steel Material'}${rateStr}\n`;
+          productSummaryLines = `• *Product:* ${draft.product_description || 'Steel Material'}\n`;
         }
-
-        let quoteTotalLines = '';
-        if (totalAmount > 0) {
-          const gstAmt = Math.round(totalAmount * 0.18);
-          const grandTot = totalAmount + gstAmt;
-          quoteTotalLines = `• *Quotation Total:* ₹${Number(totalAmount).toLocaleString('en-IN')} + 18% GST (₹${Number(gstAmt).toLocaleString('en-IN')}) = *₹${Number(grandTot).toLocaleString('en-IN')}*\n`;
-        }
+        const procurementLabel = inqRow.procurement_number || procurementStamp.procurement_number;
+        draft.procurement_number = procurementLabel;
 
         return `🎉 *Inquiry Successfully Created!*\n\n` +
           `• *Inquiry ID:* ${inquiryCode}\n` +
+          `• *Procurement number:* ${procurementLabel}\n` +
           `• *Customer / Company:* ${companyName}\n` +
           productSummaryLines +
           (draft.preferred_make ? `• *Preferred Make:* ${draft.preferred_make}\n` : '') +
           (draft.payment_terms ? `• *Payment Terms:* ${draft.payment_terms}\n` : '') +
           (draft.delivery_location ? `• *Delivery Location:* ${draft.delivery_location}\n` : '') +
-          (draft.additional_notes ? `• *Additional Notes:* ${draft.additional_notes}\n` : '') +
-          quoteTotalLines +
-          `\nLogged to Sales Pipeline & Inquiries! ✅`;
+          (notesWithTarget ? `• *Notes:* ${notesWithTarget}\n` : '') +
+          `\nProcurement can see ${procurementLabel}. Choose *Price This Inquiry* to enter the base, transport, loading, credit, and margin. ✅`;
       }
 
       case 'UPDATE_INQUIRY': {
@@ -10988,13 +11007,13 @@ async function executeAction(action, draft, senderPhone) {
         let targetInqId = deal.inquiry_id || deal.id;
         let inqRow = null;
         if (targetInqId) {
-          const { data: directInq, error: fetchInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status').eq('id', targetInqId).single();
+          const { data: directInq, error: fetchInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status, pricing_status').eq('id', targetInqId).single();
           if (!fetchInqErr && directInq) {
             inqRow = directInq;
           }
         }
         if (!inqRow && cleanId) {
-          const { data: matchedInqs } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status').order('created_at', { ascending: false }).limit(500);
+          const { data: matchedInqs } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status, pricing_status').order('created_at', { ascending: false }).limit(500);
           if (matchedInqs) {
             inqRow = matchedInqs.find(i => (i.id || '').replace(/-/g, '').toUpperCase().startsWith(cleanId) || (i.id || '').replace(/-/g, '').toUpperCase().includes(cleanId)) || null;
             if (inqRow) {
@@ -11006,6 +11025,14 @@ async function executeAction(action, draft, senderPhone) {
             }
           }
         }
+
+        const hasSellRate = Boolean(updates.rate) || (Array.isArray(draft.line_item_updates) && draft.line_item_updates.some((item) => item && item.rate != null && String(item.rate).trim() !== ''));
+        const blockedUpdate = prematureUpdateReply({
+          pricingStatus: inqRow?.pricing_status,
+          stage: dealUpdates.stage,
+          hasRate: hasSellRate,
+        });
+        if (blockedUpdate) return blockedUpdate;
 
         let itemsUpdated = false;
         let totalAmount = 0;
@@ -11373,6 +11400,12 @@ async function executeAction(action, draft, senderPhone) {
       }
 
       case 'LOG_ORDER': {
+        const linkedInquiryId = String(draft.inquiry_id || '').trim();
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(linkedInquiryId)) {
+          const { data: pricedInquiry } = await supabase.from('inquiries').select('pricing_status').eq('id', linkedInquiryId).maybeSingle();
+          const orderBlock = orderRateReply(pricedInquiry?.pricing_status);
+          if (orderBlock) return orderBlock;
+        }
         const companyName = (draft.company_name || 'Customer').trim();
         const poResolution = await resolveFinalPo({
           poNumber: draft.po_number,
@@ -14991,6 +15024,45 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
   const hasActiveCatalogSession = lastIntent.startsWith('catalog_');
 
+  if (isSalesPriceText(text) || (lastIntent.startsWith('sales_price|') && !hasActiveCatalogSession)) {
+    const priced = await handleSalesPriceChat(text, senderPhone, lastIntent, {
+      supabase,
+      saveActiveSession,
+      getAccessibleSalespersonPhonesForBot,
+      expandPhoneVariants,
+    });
+    if (priced?.handled) return priced;
+  }
+
+  const inFullPrice = String(lastIntent || '').startsWith('sales_full|');
+  const fullPriceLeave = text.trim().toLowerCase();
+  if (inFullPrice && /^(menu|hi|hello|hey|start|btn_post_menu)$/i.test(fullPriceLeave)) {
+    await saveActiveSession(senderPhone, 'Unknown', 'general');
+    lastIntent = 'general';
+  } else if (inFullPrice && isDiscardOrCancelIntent(text)) {
+    await saveActiveSession(senderPhone, 'Unknown', 'general');
+    const userMenu = getCatalogMenu(canUpdateVisits);
+    const userSections = getCatalogMenuSections(canUpdateVisits);
+    return {
+      handled: true,
+      reply: `Activity cancelled.\n\n${userMenu}`,
+      interactiveType: 'list',
+      interactiveList: {
+        bodyText: 'Here is the menu to start a new activity:',
+        buttonText: 'Choose Action',
+        sections: userSections,
+      },
+    };
+  } else if (isFullPriceEntry(text) || inFullPrice || (!hasActiveCatalogSession && isBareAddPriceChoice(text))) {
+    const quoted = await handleFullSalesPrice(text, senderPhone, lastIntent, {
+      supabase,
+      saveActiveSession,
+      getAccessibleSalespersonPhonesForBot,
+      expandPhoneVariants,
+    });
+    if (quoted?.handled) return quoted;
+  }
+
   if (options.imageBuffer && (
     lastIntent.startsWith('catalog_flow|LOG_INQUIRY') ||
     lastIntent.startsWith('catalog_editing|LOG_INQUIRY') ||
@@ -16391,7 +16463,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
         handled: true,
         reply,
         interactiveType: 'buttons',
-        interactiveButtons: getPostActivityButtons(action),
+        interactiveButtons: getPostActivityButtons(action, draft),
       };
     }
 
@@ -17604,7 +17676,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
     // Check if user wants to abort / switch (only if not resolving candidate selection)
     if (!candidateResolved && !inquiryCandidateResolved && !orderCandidateResolved && !complaintCandidateResolved) {
-      if (text.trim().toLowerCase() === 'general query' || text.trim() === '10' || text.trim() === '10.' || text.trim() === 'menu_10') {
+      if (text.trim().toLowerCase() === 'general query' || text.trim() === '10' || text.trim() === '10.' || text.trim() === '11' || text.trim() === '11.' || text.trim() === 'menu_10') {
         const queryReply = `🔍 *SalesOS Search & Intelligence*\n\nAsk any question about your inquiries, quotations, customer profiles, site visits, or complaints!\n\n_Example: "What was the last rate quoted to Horizon Sheet Metal?" or "Show pending complaints"_`;
         await recordSessionMessage(senderPhone, 'assistant', queryReply, { action_type: 'GENERAL_QUERY' });
         await saveActiveSession(senderPhone, 'Unknown', 'general');

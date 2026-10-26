@@ -2,8 +2,10 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { handleCatalogFlow } = require('../core/catalogFlow');
+const { handleProcurementChat } = require('../core/procurementChat');
 const { runOrchestrator } = require('../core/orchestrator');
-const { getFullActiveSession, saveActiveSession, supabase } = require('../supabase');
+const { getFullActiveSession, saveActiveSession, supabase, getEmployeeByPhone } = require('../supabase');
+const { isProcurementRole } = require('../utils/roles');
 const { handlePendingSessionState } = require('../core/pendingStateManager');
 const { clearActiveSession } = require('../core/sessionManager');
 
@@ -270,6 +272,25 @@ router.post('/message', requireWebApiKey, async (req, res) => {
     }
 
     console.log(`[WebChat] Processing message from ${empName} (${cleanPhone}): "${augmentedText.slice(0, 80)}" (image: ${Boolean(imageBuffer)}, gps: ${Boolean(gps)})`);
+
+    const employee = await getEmployeeByPhone(cleanPhone);
+    if (employee && isProcurementRole(employee.role)) {
+      const procurementDeps = { getEmployeeByPhone, getFullActiveSession, saveActiveSession, supabase };
+      const procurementResult = imageBuffer
+        ? await handleProcurementChat('menu', cleanPhone, procurementDeps)
+        : await handleProcurementChat(rawText || 'menu', cleanPhone, procurementDeps);
+      const prefix = imageBuffer ? 'Photos are not used for base prices.\n\n' : '';
+      const interactiveType = procurementResult.interactiveType || 'text';
+      return res.json({
+        success: true,
+        reply: formatForWeb(`${prefix}${procurementResult.reply || 'Reply 1, 2, or 3.'}`.trim()),
+        type: interactiveType,
+        interactiveType,
+        interactiveButtons: procurementResult.interactiveButtons || null,
+        interactiveList: procurementResult.interactiveList || null,
+        data: procurementResult.interactiveButtons || procurementResult.interactiveList || null,
+      });
+    }
 
     // Reuse the same document OCR handlers used by WhatsApp for PDFs uploaded
     // during the guided inquiry/order logging flows.

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase, saveInquiry, saveDeal, getEmployeeByPhone } = require('./supabase');
+const { isProcurementRole } = require('./utils/roles');
 const {
   sendTextMessage,
   sendInteractiveButtons,
@@ -28,6 +29,27 @@ const { processComplaintMessage } = require('./agents/complaintAgent');
 const { processVisitMessage } = require('./agents/visitAgent');
 const { processRetentionMessage } = require('./agents/retentionAgent');
 const { calculateSubtotal } = require('./utils/pricingEngine');
+
+async function sendProcurementReply(phone, result, prefix = '') {
+  if (!result) return;
+  const reply = `${prefix}${result.reply || ''}`.trim();
+  if (result.interactiveType === 'buttons' && Array.isArray(result.interactiveButtons) && result.interactiveButtons.length) {
+    await sendInteractiveButtons(phone, reply, result.interactiveButtons, result.interactiveOptions || {});
+    return;
+  }
+  if (result.interactiveType === 'list' && result.interactiveList?.sections?.length) {
+    const list = result.interactiveList;
+    await sendInteractiveList(
+      phone,
+      prefix ? `${prefix}${list.bodyText || result.reply || ''}`.trim() : (list.bodyText || reply),
+      list.buttonText || 'Choose Action',
+      list.sections,
+      result.interactiveOptions || {},
+    );
+    return;
+  }
+  if (reply) await sendTextMessage(phone, reply);
+}
 
 // In-memory deduplication set with 5-minute TTL to prevent double processing of any message (queries, deals, Meta retries)
 const processedMessageIds = new Map();
@@ -213,7 +235,6 @@ router.post('/', async (req, res) => {
 
         const stopTyping = messageType === 'reaction' ? () => {} : keepTypingUntilReply(messageId);
         try {
-
         let raw_text = "";
         let media_urls = [];
         let voice_url = null;
@@ -355,6 +376,19 @@ router.post('/', async (req, res) => {
 
         let isMediaMessage = messageType === 'image' || messageType === 'document';
         const { getFullActiveSession, saveActiveSession } = require('./supabase');
+
+        if (employeeRecord && isProcurementRole(employeeRecord.role)) {
+          const { handleProcurementChat } = require('./core/procurementChat');
+          const procurementDeps = { getEmployeeByPhone, getFullActiveSession, saveActiveSession, supabase };
+          if (!['text', 'interactive'].includes(messageType)) {
+            const menu = await handleProcurementChat('menu', senderPhone, procurementDeps);
+            await sendProcurementReply(senderPhone, menu, 'Photos and files are not used for base prices.\n\n');
+            return;
+          }
+          const procurementResult = await handleProcurementChat(raw_text || 'menu', senderPhone, procurementDeps);
+          await sendProcurementReply(senderPhone, procurementResult);
+          return;
+        }
 
         // ── GUIDED CATALOG & CONVERSATIONAL FORM FLOW (Greetings, 1-10 Routing, Confirmations) ──
         if ((messageType === 'text' || messageType === 'interactive') && raw_text) {

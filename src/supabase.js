@@ -1,4 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
+const { isProcurementRole } = require('./utils/roles');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceRoleKey =
@@ -38,6 +39,70 @@ function sanitizeNumber(val) {
 function normalizePhone(phone) {
   if (!phone) return '';
   return String(phone).replace(/\D/g, '').slice(-10);
+}
+
+function nextProcurementNumberFromRows(rows) {
+  let max = 10000;
+  for (const row of rows || []) {
+    const match = String(row?.procurement_number || '').match(/^PR-(\d+)$/);
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return `PR-${String(max + 1).padStart(5, '0')}`;
+}
+
+async function procurementStampForSalesperson(salespersonPhone) {
+  const stamp = {
+    pricing_status: 'awaiting_price',
+    procurement_number: nextProcurementNumberFromRows([]),
+    procurement_employee_id: null,
+    procurement_assigned_at: null,
+    salesperson_employee_id: null,
+  };
+  try {
+    const { data: employees } = await supabase
+      .from('employees')
+      .select('id, phone, role, is_active, assigned_procurement_employee_id');
+    stamp.salesperson_employee_id = salespersonIdFromEmployees(
+      employees,
+      salespersonPhone,
+    );
+    const ownerId = procurementOwnerFromEmployees(employees, salespersonPhone);
+    if (ownerId) {
+      stamp.procurement_employee_id = ownerId;
+      stamp.procurement_assigned_at = new Date().toISOString();
+    }
+  } catch (routeErr) {}
+  try {
+    const { data: existingNumbers } = await supabase.from('inquiries').select('procurement_number');
+    stamp.procurement_number = nextProcurementNumberFromRows(existingNumbers);
+  } catch (numberErr) {}
+  return stamp;
+}
+
+function salespersonIdFromEmployees(employees, salespersonPhone) {
+  const target = normalizePhone(salespersonPhone);
+  if (target.length !== 10) return null;
+  const matches = (employees || []).filter((emp) => {
+    if (emp?.is_active === false || !emp?.id) return false;
+    return normalizePhone(emp.phone) === target;
+  });
+  const salesperson =
+    matches.find((emp) => String(emp?.role || '') === 'salesperson') ||
+    matches[0];
+  return salesperson?.id || null;
+}
+
+function procurementOwnerFromEmployees(employees, salespersonPhone) {
+  const target = normalizePhone(salespersonPhone);
+  if (target.length !== 10) return null;
+  const match = (employees || []).find((emp) => {
+    if (String(emp?.role || '') !== 'salesperson') return false;
+    if (emp?.is_active === false) return false;
+    return (
+      normalizePhone(emp.phone) === target && emp.assigned_procurement_employee_id
+    );
+  });
+  return match?.assigned_procurement_employee_id || null;
 }
 
 /**
@@ -142,7 +207,18 @@ async function getAccessibleSalespersonPhonesForBot(senderPhone) {
   }
 
   const role = (employee.role || 'salesperson').toLowerCase();
-  const isAdmin = role.includes('admin');
+  const isAdmin = role === 'admin' || (role.includes('admin') && !isProcurementRole(role));
+  // procurement_manager contains "manager"; it is not a sales manager.
+  if (isProcurementRole(role)) {
+    return {
+      role,
+      phones: [],
+      employee,
+      isManager: false,
+      isAdmin: false,
+      assignedSalespersons: [],
+    };
+  }
   const isManager = role.includes('manager') || role === 'sales_manager';
 
   if (isAdmin) {
@@ -165,6 +241,7 @@ async function getAccessibleSalespersonPhonesForBot(senderPhone) {
     const normPhone = normalizePhone(senderPhone);
     const assigned = (allActive || []).filter((emp) => {
       const empRole = (emp.role || '').toLowerCase();
+      if (isProcurementRole(empRole)) return false;
       if (empRole.includes('admin') || empRole.includes('manager'))
         return false;
       if (emp.manager_id && emp.manager_id === employee.id) return true;
@@ -271,13 +348,44 @@ async function saveInquiry(data) {
           : data.confidence != null
             ? Number(data.confidence)
             : 0.92,
+      pricing_status: 'awaiting_price',
     };
 
-    const { data: savedRow, error } = await supabase
+    try {
+      const { data: employees } = await supabase
+        .from('employees')
+        .select('id, phone, role, is_active, assigned_procurement_employee_id');
+      const ownerId = procurementOwnerFromEmployees(
+        employees,
+        effectiveSalespersonPhone,
+      );
+      if (ownerId) {
+        payload.procurement_employee_id = ownerId;
+        payload.procurement_assigned_at = new Date().toISOString();
+      }
+    } catch (routeErr) {}
+
+    try {
+      const { data: existingNumbers } = await supabase
+        .from('inquiries')
+        .select('procurement_number');
+      payload.procurement_number = nextProcurementNumberFromRows(existingNumbers);
+    } catch (numberErr) {
+      payload.procurement_number = nextProcurementNumberFromRows([]);
+    }
+
+    let { data: savedRow, error } = await supabase
       .from('inquiries')
       .insert([payload])
       .select()
       .single();
+
+    if (error && /procurement_number/i.test(error.message || '')) {
+      delete payload.procurement_number;
+      const retry = await supabase.from('inquiries').insert([payload]).select().single();
+      savedRow = retry.data;
+      error = retry.error;
+    }
 
     if (error) {
       throw error;
@@ -1601,5 +1709,8 @@ module.exports = {
   getCustomProductsList,
   getCachedCustomProducts,
   createCustomProductRecord,
+  nextProcurementNumberFromRows,
+  procurementOwnerFromEmployees,
+  procurementStampForSalesperson,
 };
 

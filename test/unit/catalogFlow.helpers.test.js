@@ -9,7 +9,8 @@ test('matchActionFromInput maps menu numbers, ids and phrases to actions', () =>
   assert.equal(catalogFlow.matchActionFromInput('Log Order'), 'LOG_ORDER');
   assert.equal(catalogFlow.matchActionFromInput('update order'), 'UPDATE_ORDER');
   assert.equal(catalogFlow.matchActionFromInput('field visit'), 'LOG_VISIT');
-  assert.equal(catalogFlow.matchActionFromInput('10'), 'GENERAL_QUERY');
+  assert.equal(catalogFlow.matchActionFromInput('10'), 'UPDATE_COMPLAINT');
+  assert.equal(catalogFlow.matchActionFromInput('11'), 'GENERAL_QUERY');
   assert.equal(catalogFlow.matchActionFromInput('hello'), null);
 });
 
