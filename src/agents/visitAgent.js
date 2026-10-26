@@ -51,7 +51,8 @@ Extract into ONLY a JSON object (no prose, no markdown, no backticks):
   "followup_days": <number of days mentioned by customer to think/decide before ordering e.g. 3, 5, 7, else null>,
   "email": "<email address of contact person or customer if explicitly mentioned, else null>",
   "designation": "<job title / designation of person met e.g. 'Purchase Head', 'Director', 'Plant Manager', else null>",
-  "customer_type": "<'OEM' | 'Fabricator' | 'EPC' | 'Manufacturer' | 'Trader' if explicitly stated or inferred, else null>",
+  "customer_type": "<'OEM' | 'Fabricator' | 'EPC' | 'Manufacturer' | 'Trader' | 'Other' if explicitly stated or inferred, else null>",
+  "customer_type_other": "<the customer type text when customer type is Other, else null>",
   "visit_type": "<'First Visit' | 'Follow-up 1' | 'Follow-up 2' | 'Follow-up 3' | 'Regular Visit' if mentioned, else null>",
   "customer_probability": "<'Hot' | 'Warm' | 'Cold' if mentioned or clearly implied, else null>",
   "product_details": "<detailed product specifications or grades discussed, else null>",
@@ -97,7 +98,7 @@ Extract any provided or updated fields:
   "follow_up_action": "<updated follow up action if provided, else null>",
   "email": "<updated email if provided, else null>",
   "designation": "<updated designation if provided, else null>",
-  "customer_type": "<'OEM' | 'Fabricator' | 'EPC' | 'Manufacturer' | 'Trader' if provided, else null>",
+  "customer_type": "<'OEM' | 'Fabricator' | 'EPC' | 'Manufacturer' | 'Trader' | 'Other' if provided, else null>",
   "visit_type": "<'First Visit' | 'Follow-up 1' | 'Follow-up 2' | 'Follow-up 3' | 'Regular Visit' if provided, else null>",
   "customer_probability": "<'Hot' | 'Warm' | 'Cold' if provided, else null>",
   "product_details": "<updated product details if provided, else null>",
@@ -108,6 +109,7 @@ Extract any provided or updated fields:
   "preferred_make": "<updated preferred make if provided, else null>",
   "payment_terms": "<updated payment terms if provided, else null>",
   "preferred_make_other": "<other brand text when preferred make is Others, else null>",
+  "customer_type_other": "<the customer type text when customer type is Other, else null>",
   "follow_up_date": "<follow-up date if provided e.g. 20-10-2026, else null>",
   "is_unrelated_command": <true if the salesperson is ignoring this visit flow and giving an unrelated query or creating an unrelated deal/order for another company, else false>
 }
@@ -145,7 +147,7 @@ Rules:
   * "remarks" if updating discussion notes or remarks
   * "email" if updating email address
   * "designation" if updating job title or designation
-  * "customer_type" if updating customer classification (OEM, Fabricator, EPC, Manufacturer, Trader)
+  * "customer_type" if updating customer classification (OEM, Fabricator, EPC, Manufacturer, Trader, Other)
   * "visit_type" if updating visit category (First Visit, Follow-up 1-3, Regular Visit)
   * "customer_probability" if updating lead probability (Hot, Warm, Cold)
   * "product_details" if updating product specs or details
@@ -619,6 +621,7 @@ async function saveCompletedVisit(visitState, senderPhone) {
     delivery_location,
     preferred_make,
     preferred_make_other: visitState.preferred_make_other,
+    customer_type_other: visitState.customer_type_other,
     payment_terms,
     followup_action: follow_up_action,
     follow_up_date: visitState.follow_up_date,
@@ -678,6 +681,7 @@ async function saveCompletedVisit(visitState, senderPhone) {
       delivery_location,
       preferred_make,
       preferred_make_other: visitState.preferred_make_other,
+    customer_type_other: visitState.customer_type_other,
       payment_terms,
       followup_action: follow_up_action,
       follow_up_date: visitState.follow_up_date || parsedFuDate,
@@ -1011,6 +1015,10 @@ async function handlePendingVisitContinuation(text, senderPhone, storedState) {
   if (extracted.email) storedState.email = extracted.email;
   if (extracted.designation) storedState.designation = extracted.designation;
   if (extracted.customer_type) storedState.customer_type = extracted.customer_type;
+  if (extracted.customer_type && extracted.customer_type !== 'Other') {
+    storedState.customer_type_other = null;
+  }
+  if (extracted.customer_type_other) storedState.customer_type_other = extracted.customer_type_other;
   if (extracted.visit_type) storedState.visit_type = extracted.visit_type;
   if (extracted.customer_probability) storedState.customer_probability = extracted.customer_probability;
   if (extracted.product_details) storedState.product_details = extracted.product_details;

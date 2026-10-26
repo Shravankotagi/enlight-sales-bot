@@ -221,6 +221,9 @@ router.post('/reset', requireWebApiKey, async (req, res) => {
 router.post('/message', requireWebApiKey, async (req, res) => {
   try {
     const { message, employeePhone, employeeName, resetSession, image, gps } = req.body;
+    const photoSource = req.body?.photoSource === 'camera' || req.body?.photoSource === 'upload'
+      ? req.body.photoSource
+      : '';
 
     if (!message && !image) {
       return res.status(400).json({ success: false, error: 'message string or image is required' });
@@ -250,7 +253,7 @@ router.post('/message', requireWebApiKey, async (req, res) => {
     const empName = userPayload?.name || employeeName || 'Sales Staff';
 
     let augmentedText = rawText;
-    if (gps && typeof gps.latitude === 'number' && typeof gps.longitude === 'number') {
+    if (photoSource !== 'upload' && gps && typeof gps.latitude === 'number' && typeof gps.longitude === 'number') {
       const accText = gps.accuracy ? ` (accuracy: ±${Math.round(gps.accuracy)}m)` : '';
       augmentedText = `${rawText} [GPS: ${gps.latitude.toFixed(6)}, ${gps.longitude.toFixed(6)}${accText}]`.trim();
     }
@@ -331,7 +334,9 @@ router.post('/message', requireWebApiKey, async (req, res) => {
       imageBuffer,
       imageMimeType,
       photoDataUrl,
-      gps,
+      gps: photoSource === 'upload' ? null : gps,
+      photoSource,
+      messageType: photoSource === 'upload' ? 'document' : photoSource === 'camera' ? 'image' : '',
       channel: 'ai_assistant',
       source_channel: 'ai_assistant',
     });
