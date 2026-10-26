@@ -522,7 +522,7 @@ async function basePriceListResult(rows, employees, supabase) {
 }
 
 function readPricePair(chunk, lineCount) {
-  const match = String(chunk || '').trim().match(/^(\d+)\s*[-–—:]?\s*(.*)$/);
+  const match = String(chunk || '').trim().match(/^(\d+)\s*[-–—:.]?\s*(.*)$/);
   if (!match) return null;
   const line = Number(match[1]);
   const priceText = match[2].trim();
