@@ -56,6 +56,7 @@ const {
   handleSalesPriceChat,
   handleFullSalesPrice,
 } = require('./salesPriceFlow');
+const { tonnageReviewPatch, commitInquiryUpdate } = require('./tonnageReview');
 const {
   detectHsnCode,
   normalizeProductToCatalog,
@@ -11025,15 +11026,21 @@ async function executeAction(action, draft, senderPhone) {
         let targetInqId = deal.inquiry_id || deal.id;
         let inqRow = null;
         if (targetInqId) {
-          const { data: directInq, error: fetchInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status, pricing_status').eq('id', targetInqId).single();
+          let { data: directInq, error: fetchInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status, pricing_status, tonnage_review_open, tonnage_review').eq('id', targetInqId).single();
+          if (fetchInqErr && /tonnage_review/i.test(fetchInqErr.message || '')) {
+            ({ data: directInq, error: fetchInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status, pricing_status').eq('id', targetInqId).single());
+          }
           if (!fetchInqErr && directInq) {
             inqRow = directInq;
           }
         }
         if (!inqRow && cleanId) {
-          const { data: matchedInqs } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status, pricing_status').order('created_at', { ascending: false }).limit(500);
-          if (matchedInqs) {
-            inqRow = matchedInqs.find(i => (i.id || '').replace(/-/g, '').toUpperCase().startsWith(cleanId) || (i.id || '').replace(/-/g, '').toUpperCase().includes(cleanId)) || null;
+          const { data: matchedInqs, error: matchedInqErr } = await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status, pricing_status, tonnage_review_open, tonnage_review').order('created_at', { ascending: false }).limit(500);
+          const scannedInqs = matchedInqErr && /tonnage_review/i.test(matchedInqErr.message || '')
+            ? (await supabase.from('inquiries').select('id, raw_text, ai_extraction_json, status, pricing_status').order('created_at', { ascending: false }).limit(500)).data
+            : matchedInqs;
+          if (scannedInqs) {
+            inqRow = scannedInqs.find(i => (i.id || '').replace(/-/g, '').toUpperCase().startsWith(cleanId) || (i.id || '').replace(/-/g, '').toUpperCase().includes(cleanId)) || null;
             if (inqRow) {
               targetInqId = inqRow.id;
               if (deal.id && deal.inquiry_id !== inqRow.id) {
@@ -11213,6 +11220,9 @@ async function executeAction(action, draft, senderPhone) {
         }
 
         if (targetInqId && inqRow) {
+            const tonnageBeforeLines = JSON.parse(JSON.stringify(
+              inqRow.ai_extraction_json?.line_items || inqRow.ai_extraction_json?.lineItems || [],
+            ));
             const aiJson = inqRow.ai_extraction_json || {};
             if (updates.payment_terms) {
               aiJson.payment_terms = updates.payment_terms;
@@ -11294,6 +11304,16 @@ async function executeAction(action, draft, senderPhone) {
               ai_extraction_json: aiJson,
               raw_text: updatedRawText.trim(),
             };
+            if (itemsUpdated && Array.isArray(aiJson.line_items) && aiJson.line_items.length) {
+              const review = tonnageReviewPatch({
+                pricingStatus: inqRow.pricing_status,
+                reviewOpen: inqRow.tonnage_review_open,
+                existingReview: inqRow.tonnage_review,
+                beforeLines: tonnageBeforeLines,
+                afterLines: aiJson.line_items,
+              });
+              if (review) Object.assign(inqUpdatePayload, review);
+            }
             if (dealUpdates.stage) {
               inqUpdatePayload.stage = dealUpdates.stage;
               inqUpdatePayload.status = dealUpdates.stage === 'won' ? 'confirmed' : dealUpdates.stage;
@@ -11306,7 +11326,7 @@ async function executeAction(action, draft, senderPhone) {
             if (dealUpdates.won_at) inqUpdatePayload.won_at = dealUpdates.won_at;
             if (dealUpdates.lost_reason) inqUpdatePayload.lost_reason = dealUpdates.lost_reason;
             
-            const { error: inqUpdErr } = await supabase.from('inquiries').update(inqUpdatePayload).eq('id', targetInqId);
+            const { error: inqUpdErr } = await commitInquiryUpdate(supabase, targetInqId, inqUpdatePayload);
             if (inqUpdErr) {
               console.error('[CatalogFlow] Inquiries table update error:', inqUpdErr);
               return `❌ *Failed to update inquiry ${displayInqId} for ${displayCustName}.*\n\nReason: ${inqUpdErr.message || 'Database write error'}. Please try again.`;

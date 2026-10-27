@@ -20,6 +20,7 @@
 
 const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
 const { supabase, verifyAndGetCustomerName, saveActiveSession, getActiveSession } = require('../supabase');
+const { tonnageReviewPatch, commitInquiryUpdate } = require('../core/tonnageReview');
 const { syncActivity } = require('./biginSyncAgent');
 const { logBotActivity } = require('../utils/activityLogger');
 const { resolveFinalPo, claimPoNumber } = require('../core/poResolver');
@@ -1505,15 +1506,21 @@ async function syncInquiryFromDeal(inquiryId, dealObj, dealItems) {
       ai_extraction_json: updatedAi,
       sender_name: dealObj.customer_name || inq.sender_name,
     };
+    const beforeLines = existingAi.line_items || existingAi.lineItems || [];
+    const review = tonnageReviewPatch({
+      pricingStatus: inq.pricing_status,
+      reviewOpen: inq.tonnage_review_open,
+      existingReview: inq.tonnage_review,
+      beforeLines,
+      afterLines: formattedLineItems,
+    });
+    if (review) Object.assign(inqUpdateFields, review);
     if (dealObj.stage) {
       inqUpdateFields.stage = dealObj.stage;
       inqUpdateFields.status = dealObj.stage === 'won' ? 'confirmed' : dealObj.stage;
     }
 
-    const { error: inqUpdErr } = await supabase
-      .from('inquiries')
-      .update(inqUpdateFields)
-      .eq('id', inq.id);
+    const { error: inqUpdErr } = await commitInquiryUpdate(supabase, inq.id, inqUpdateFields);
 
     if (inqUpdErr) {
       console.error('[SalesAgent] Failed to update inquiries row:', inqUpdErr);
@@ -4825,6 +4832,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
 }
 
 module.exports = {
+  syncInquiryFromDeal,
   processSalesMessage,
   processSalesImage,
   handleSendQuotationMessage,

@@ -482,12 +482,14 @@ function basePriceHeader(inquiry, employees) {
   const number = inquiry?.procurement_number || 'No procurement number';
   const when = formatInquiryWhen(inquiry?.created_at);
   const who = salespersonName(inquiry, employees);
-  return [
+  const rows = [
     `*${number}*`,
     [when, who].filter(Boolean).join(' · '),
     inquiry?.delivery_location || 'Delivery not set',
     statusLabel(inquiry?.pricing_status),
-  ].join('\n');
+  ];
+  if (inquiry?.tonnage_review_open) rows.push('Tonnage updated');
+  return rows.join('\n');
 }
 
 function latestSaved(rows, lineKey) {
