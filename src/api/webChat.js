@@ -289,8 +289,21 @@ router.post('/message', requireWebApiKey, async (req, res) => {
     console.log(`[WebChat] Processing message from ${empName} (${cleanPhone}): "${augmentedText.slice(0, 80)}" (image: ${Boolean(imageBuffer)}, gps: ${Boolean(gps)})`);
 
     const employee = await getEmployeeByPhone(cleanPhone);
-    if (employee && isProcurementRole(employee.role)) {
-      const procurementDeps = { getEmployeeByPhone, getFullActiveSession, saveActiveSession, supabase };
+    const role = employee?.role || req.body?.role;
+    if (isProcurementRole(role)) {
+      const activeEmployee = employee || {
+        id: req.body?.userId || 'procurement-user',
+        name: empName,
+        phone: cleanPhone,
+        role: role,
+        is_active: true,
+      };
+      const procurementDeps = {
+        getEmployeeByPhone: async (p) => (String(p || '').replace(/\D/g, '').slice(-10) === cleanPhone ? activeEmployee : (await getEmployeeByPhone(p))),
+        getFullActiveSession,
+        saveActiveSession,
+        supabase,
+      };
       const procurementResult = imageBuffer
         ? await handleProcurementChat('menu', cleanPhone, procurementDeps)
         : await handleProcurementChat(rawText || 'menu', cleanPhone, procurementDeps);

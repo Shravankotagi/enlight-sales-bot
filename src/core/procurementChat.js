@@ -322,7 +322,7 @@ function realSalespersonPhone(phone) {
   const lower = String(phone || '').trim().toLowerCase();
   if (!lower || lower === 'unassigned' || lower === 'null' || lower === 'undefined') return '';
   const clean = lower.replace(/\D/g, '').slice(-10);
-  if (clean.length < 10 || clean === '9975003940' || clean === '0000000000') return '';
+  if (clean.length < 10 || clean === '0000000000') return '';
   return String(phone).trim();
 }
 
@@ -736,7 +736,7 @@ async function handleProcurementChat(text, phone, deps) {
     return menuResult(showTeam);
   };
 
-  if (!clean || /^(menu|hi|hello|hey|start)$/i.test(clean)) return showMenu();
+  if (!clean || /^(menu|hi+|hello+|hey+|start)$/i.test(clean)) return showMenu();
 
   if (isProcurementCancel(clean)) {
     const menu = await showMenu();
