@@ -68,6 +68,25 @@ function builtinFor(roleId, overrides) {
   };
 }
 
+/** Custom roles ignore empty / salesperson-template / role-copy overrides on the employee. */
+function ignoreStaleEmployeeOverrides(roleId, rolePerms, overrides) {
+  if (builtin.templates[roleId]) return overrides;
+  if (!overrides || typeof overrides !== 'object') return null;
+  const keys = Object.keys(overrides).filter(
+    (key) => KEYS.has(key) && typeof overrides[key] === 'boolean',
+  );
+  if (!keys.length) return null;
+  const matches = (base) =>
+    !!base &&
+    keys.every(
+      (key) =>
+        typeof overrides[key] === 'boolean' && overrides[key] === base[key],
+    );
+  if (matches(builtin.templates.salesperson)) return null;
+  if (matches(rolePerms)) return null;
+  return overrides;
+}
+
 async function resolvePermissions(phone) {
   const key = String(phone || '').replace(/\D/g, '').slice(-10);
   if (!key) return null;
@@ -108,8 +127,13 @@ async function resolvePermissions(phone) {
         const scope = ['own', 'team', 'all'].includes(roleRow.data_scope)
           ? roleRow.data_scope
           : 'own';
+        const overrides = ignoreStaleEmployeeOverrides(
+          roleId,
+          roleRow.permissions,
+          employee.permissions,
+        );
         value = {
-          permissions: mergePermissions(roleRow.permissions, employee.permissions),
+          permissions: mergePermissions(roleRow.permissions, overrides),
           dataScope: scope,
           role: roleId,
           roleName: roleRow.name,
@@ -186,4 +210,5 @@ module.exports = {
   invalidateBotPermissions,
   setMockPermissions,
   builtinFor,
+  ignoreStaleEmployeeOverrides,
 };

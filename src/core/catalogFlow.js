@@ -703,8 +703,9 @@ function isStaleResumeNoAction(cleanInput) {
 
 async function handleStaleDraftButton(text, senderPhone, canUpdateVisits) {
   const meta = await getLastInactiveDraft(senderPhone);
-  const userMenu = getCatalogMenu(canUpdateVisits);
-  const userSections = getCatalogMenuSections(canUpdateVisits);
+  const liveCatalog = await catalogForPhone(senderPhone);
+  const userMenu = liveCatalog.text;
+  const userSections = liveCatalog.sections;
 
   let explanation = '';
   if (meta && meta.timestamp && (Date.now() - meta.timestamp <= 48 * 60 * 60 * 1000)) {
@@ -730,18 +731,14 @@ async function handleStaleDraftButton(text, senderPhone, canUpdateVisits) {
   return {
     handled: true,
     reply: fullReply,
-    interactiveType: 'list',
-    interactiveList: {
-      bodyText: 'Here is the menu to start a new activity:',
-      buttonText: 'Choose Action',
-      sections: userSections,
-    },
+    ...catalogInteractive({ sections: userSections }, 'Here is the menu to start a new activity:'),
   };
 }
 
 async function handleResumeMenuButton(text, senderPhone, canUpdateVisits) {
-  const userMenu = getCatalogMenu(canUpdateVisits);
-  const userSections = getCatalogMenuSections(canUpdateVisits);
+  const liveCatalog = await catalogForPhone(senderPhone);
+  const userMenu = liveCatalog.text;
+  const userSections = liveCatalog.sections;
   const fullReply = `Activity cancelled.\n\n${userMenu}`;
   await recordSessionMessage(senderPhone, 'user', text);
   await recordSessionMessage(senderPhone, 'assistant', fullReply, { action_type: 'CATALOG_MENU' });
@@ -749,12 +746,7 @@ async function handleResumeMenuButton(text, senderPhone, canUpdateVisits) {
   return {
     handled: true,
     reply: fullReply,
-    interactiveType: 'list',
-    interactiveList: {
-      bodyText: 'Here is the menu to start a new activity:',
-      buttonText: 'Choose Action',
-      sections: userSections,
-    },
+    ...catalogInteractive({ sections: userSections }, 'Here is the menu to start a new activity:'),
   };
 }
 
@@ -1106,6 +1098,71 @@ What would you like to do today?
 10. **Other / General Query**
 
 Reply with a number (1–10), or type what you'd like to do.`;
+}
+
+const NO_CATALOG_ACTIONS = 'No sales actions are currently enabled for your role. Please contact your administrator.';
+
+const PHONE_CATALOG_ITEMS = [
+  { section: 'Inquiries & Orders', id: 'menu_1', action: 'LOG_INQUIRY', label: 'Log New Inquiry', description: 'Capture customer requirements', allow: (p) => p['inquiries.manage'] === true },
+  { section: 'Inquiries & Orders', id: 'menu_2', action: 'UPDATE_INQUIRY', label: 'Update Inquiry', description: 'Update rates, specs or stage', allow: (p) => p['inquiries.edit'] === true },
+  { section: 'Inquiries & Orders', id: 'menu_3', action: 'LOG_ORDER', label: 'Log New Order', description: 'Record new confirmed PO', allow: (p) => p['orders.create'] === true },
+  { section: 'Inquiries & Orders', id: 'menu_4', action: 'UPDATE_ORDER', label: 'Update Order', description: 'Attach PO, update items', allow: (p) => p['orders.update'] === true },
+  { section: 'Inquiries & Orders', id: 'menu_price', action: 'ADD_PRICE', label: 'Add Price to Inquiry', description: 'Awaiting or price ready', allow: (p) => p['inquiries.manage'] === true || p['inquiries.edit'] === true || p['inquiries.send_quote'] === true || p['inquiries.fill_base_prices'] === true || p['inquiries.price_override'] === true },
+  { section: 'Visits & Customers', id: 'menu_5', action: 'LOG_VISIT', label: 'Log Field Visit', description: 'Record client meeting', allow: (p) => p['visits.log'] === true },
+  { section: 'Visits & Customers', id: 'menu_6', action: 'UPDATE_VISIT', label: 'Update Field Visit', description: 'Update meeting outcome', allow: (p) => p['visits.update'] === true },
+  { section: 'Visits & Customers', id: 'menu_7', action: 'LOG_NEW_CUSTOMER', label: 'New Acquisition', description: 'Add new customer profile', allow: (p) => p['customers.create'] === true },
+  { section: 'Complaints & Queries', id: 'menu_8', action: 'LOG_COMPLAINT', label: 'Log Complaint', description: 'Report quality or delay', allow: (p) => p['complaints.log'] === true },
+  { section: 'Complaints & Queries', id: 'menu_9', action: 'UPDATE_COMPLAINT', label: 'Update Complaint', description: 'Update resolution status', allow: (p) => p['complaints.update'] === true },
+  { section: 'Complaints & Queries', id: 'menu_10', action: 'GENERAL_QUERY', label: 'General Query', description: 'Ask any data retrieval query', allow: (p) => p['inquiries.view'] === true || p['orders.view'] === true || p['visits.view'] === true || p['complaints.view'] === true || p['customers.view'] === true },
+];
+
+function actionForVisibleNumber(catalog, text) {
+  const match = String(text || '').trim().match(/^(?:option\s*|choice\s*|#\s*)?(\d+)\.?$/i);
+  if (!match || !catalog) return null;
+  const row = catalog.items[Number(match[1]) - 1];
+  return row ? row.action : null;
+}
+
+async function catalogForPhone(senderPhone) {
+  const { resolvePermissions } = require('../utils/permissions');
+  const resolved = await resolvePermissions(senderPhone);
+  const perms = resolved?.permissions || {};
+  const visible = PHONE_CATALOG_ITEMS.filter((item) => item.allow(perms));
+  if (!visible.length) {
+    return { text: NO_CATALOG_ACTIONS, sections: [], items: [] };
+  }
+  const numbered = visible.map((item, index) => ({
+    ...item,
+    number: index + 1,
+    title: `${index + 1}. ${item.label}`,
+  }));
+  const sections = [];
+  for (const item of numbered) {
+    let section = sections.find((entry) => entry.title === item.section);
+    if (!section) {
+      section = { title: item.section, rows: [] };
+      sections.push(section);
+    }
+    section.rows.push({ id: item.id, title: item.title, description: item.description });
+  }
+  const lines = numbered.map((item) => `${item.number}. **${item.label}**`).join('\n');
+  return {
+    text: `Welcome to **SalesOS Assistant**!\n\nWhat would you like to do today?\n\n${lines}\n\nReply with a number (1–${numbered.length}) or type what you'd like to do.`,
+    sections,
+    items: numbered,
+  };
+}
+
+function catalogInteractive(catalog, bodyText) {
+  if (!catalog.sections.length) return {};
+  return {
+    interactiveType: 'list',
+    interactiveList: {
+      bodyText,
+      buttonText: 'Choose Action',
+      sections: catalog.sections,
+    },
+  };
 }
 
 function getCatalogMenuSections(isAuthorizedForVisits = true) {
@@ -1568,23 +1625,18 @@ function getEditPromptForAction(action) {
   }
 }
 
-function buildOutOfScopeActivityResponse(currentAction, detectedAction, isAuthorizedForVisits = true) {
+async function buildOutOfScopeActivityResponse(currentAction, detectedAction, isAuthorizedForVisits = true, senderPhone = null) {
   const currentModuleName = getModuleDisplayName(currentAction);
   const targetVerb = getTargetActionVerb(detectedAction);
-  const menuText = getCatalogMenu(isAuthorizedForVisits);
-  const menuSections = getCatalogMenuSections(isAuthorizedForVisits);
-
-  const replyText = `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete the current ongoing activity or select the relevant option from the menu.\n\nHere is the menu to start a new activity:\n\n${menuText}`;
+  const catalog = senderPhone
+    ? await catalogForPhone(senderPhone)
+    : { text: getCatalogMenu(isAuthorizedForVisits), sections: getCatalogMenuSections(isAuthorizedForVisits) };
+  const lead = `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete the current ongoing activity or select the relevant option from the menu.\n\nHere is the menu to start a new activity:`;
 
   return {
     handled: true,
-    reply: replyText,
-    interactiveType: 'list',
-    interactiveList: {
-      bodyText: `You are currently in the *${currentModuleName}* flow. To ${targetVerb}, please complete the current ongoing activity or select the relevant option from the menu.\n\nHere is the menu to start a new activity:`,
-      buttonText: 'Choose Action',
-      sections: menuSections,
-    },
+    reply: `${lead}\n\n${catalog.text}`,
+    ...catalogInteractive(catalog, lead),
   };
 }
 
@@ -5821,6 +5873,12 @@ async function handleOrderDocumentOcr(imageBuffer, mimeType, senderPhone, captio
       reply: 'You do not have permission to log orders. Please contact your admin.',
     };
   }
+  if (!await can(senderPhone, 'orders.attach_po')) {
+    return {
+      handled: true,
+      reply: 'You do not have permission to attach PO documents. Please contact your admin.',
+    };
+  }
   const { extractFromImage } = require('../gemini');
   let extraction = null;
   try {
@@ -8048,8 +8106,9 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
   if (isDiscardOrCancelIntent(clean) || (await isGreeting(clean)) || lower === 'menu' || lower === 'exit' || lower === 'quit') {
     await recordSessionMessage(senderPhone, 'user', text);
     const canUpdate = await canUserUpdateVisits(senderPhone);
-    const userMenu = getCatalogMenu(canUpdate);
-    const userSections = getCatalogMenuSections(canUpdate);
+    const liveCatalog = await catalogForPhone(senderPhone);
+    const userMenu = liveCatalog.text;
+    const userSections = liveCatalog.sections;
     const cancelReply = `Activity cancelled.\n\n` + userMenu;
     await recordSessionMessage(senderPhone, 'assistant', cancelReply, { action_type: 'CATALOG_MENU' });
     recordInactiveDraft(senderPhone, action, null, 'discarded');
@@ -8058,12 +8117,7 @@ async function handleUpdateSelectionState(text, senderPhone, action, selectionSt
     return {
       handled: true,
       reply: cancelReply,
-      interactiveType: 'list',
-      interactiveList: {
-        bodyText: 'Here is the menu to start a new activity:',
-        buttonText: 'Choose Action',
-        sections: userSections,
-      },
+      ...catalogInteractive({ sections: userSections }, 'Here is the menu to start a new activity:'),
     };
   }
 
@@ -15052,6 +15106,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     if (priced?.handled) return priced;
   }
 
+  const bareMenuAction = (!hasActiveCatalogSession && isBareCatalogNumber(text))
+    ? actionForVisibleNumber(await catalogForPhone(senderPhone), text)
+    : null;
+
   const inFullPrice = String(lastIntent || '').startsWith('sales_full|');
   const fullPriceLeave = text.trim().toLowerCase();
   if (inFullPrice && /^(menu|hi|hello|hey|start|btn_post_menu)$/i.test(fullPriceLeave)) {
@@ -15059,19 +15117,15 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     lastIntent = 'general';
   } else if (inFullPrice && isDiscardOrCancelIntent(text)) {
     await saveActiveSession(senderPhone, 'Unknown', 'general');
-    const userMenu = getCatalogMenu(canUpdateVisits);
-    const userSections = getCatalogMenuSections(canUpdateVisits);
+    const liveCatalog = await catalogForPhone(senderPhone);
+    const userMenu = liveCatalog.text;
+    const userSections = liveCatalog.sections;
     return {
       handled: true,
       reply: `Activity cancelled.\n\n${userMenu}`,
-      interactiveType: 'list',
-      interactiveList: {
-        bodyText: 'Here is the menu to start a new activity:',
-        buttonText: 'Choose Action',
-        sections: userSections,
-      },
+      ...catalogInteractive({ sections: userSections }, 'Here is the menu to start a new activity:'),
     };
-  } else if (isFullPriceEntry(text) || inFullPrice || (!hasActiveCatalogSession && isBareAddPriceChoice(text))) {
+  } else if (isFullPriceEntry(text) || inFullPrice || bareMenuAction === 'ADD_PRICE') {
     if (!inFullPrice && (isFullPriceEntry(text) || isBareAddPriceChoice(text))) {
       const { denialReply } = require('../utils/permissions');
       const denied = await denialReply(senderPhone, 'ADD_PRICE');
@@ -15249,19 +15303,15 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
 
   // ── 2b. GREETING CHECK ──────────────────────────────────────────────────────
   if (await isGreeting(text)) {
-    const userMenu = getCatalogMenu(canUpdateVisits);
-    const userSections = getCatalogMenuSections(canUpdateVisits);
+    const liveCatalog = await catalogForPhone(senderPhone);
+    const userMenu = liveCatalog.text;
+    const userSections = liveCatalog.sections;
     await saveActiveSession(senderPhone, 'Unknown', 'general');
     await startNewCatalogSession(senderPhone, userMenu);
     return {
       handled: true,
       reply: userMenu,
-      interactiveType: 'list',
-      interactiveList: {
-        bodyText: `Welcome to *SalesOS Assistant*!\n\nHere is the menu to start a new activity:`,
-        buttonText: 'Choose Action',
-        sections: userSections,
-      },
+      ...catalogInteractive({ sections: userSections }, `Welcome to *SalesOS Assistant*!\n\nHere is the menu to start a new activity:`),
     };
   }
 
@@ -15391,7 +15441,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       if (intentResult.classification === 'DIFFERENT_ACTIVITY') {
         console.log(`[CatalogFlow] Strict activity scope guard: active=${currentAction}, incoming=${intentResult.targetAction}`);
         await recordSessionMessage(senderPhone, 'user', text);
-        const outOfScopeRes = buildOutOfScopeActivityResponse(currentAction, intentResult.targetAction);
+        const outOfScopeRes = await buildOutOfScopeActivityResponse(currentAction, intentResult.targetAction, canUpdateVisits, senderPhone);
         await recordSessionMessage(senderPhone, 'assistant', outOfScopeRes.reply, { action_type: 'OUT_OF_SCOPE_REDIRECT' });
         // NOTE: Session state remains 100% intact in the background. DO NOT overwrite or finalize!
         return outOfScopeRes;
@@ -15462,19 +15512,15 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       recordInactiveDraft(senderPhone, action, draft, 'discarded');
       await finalizeCurrentSession(senderPhone, `Cancelled ${getActionFriendlyName(action)} draft after query interruption`);
       await saveActiveSession(senderPhone, 'Unknown', 'general');
-      const userMenu = getCatalogMenu(canUpdateVisits);
-      const userSections = getCatalogMenuSections(canUpdateVisits);
+      const liveCatalog = await catalogForPhone(senderPhone);
+      const userMenu = liveCatalog.text;
+      const userSections = liveCatalog.sections;
       const exitMsg = `Activity cancelled.\n\n` + userMenu;
       await recordSessionMessage(senderPhone, 'assistant', exitMsg, { action_type: 'CATALOG_MENU' });
       return {
         handled: true,
         reply: exitMsg,
-        interactiveType: 'list',
-        interactiveList: {
-          bodyText: 'Here is the menu to start a new activity:',
-          buttonText: 'Choose Action',
-          sections: userSections,
-        },
+        ...catalogInteractive({ sections: userSections }, 'Here is the menu to start a new activity:'),
       };
     }
 
@@ -15960,7 +16006,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     }
     if (intentResult.classification === 'DIFFERENT_ACTIVITY') {
       console.log(`[CatalogFlow] Strict activity scope guard in customer collect: active=LOG_NEW_CUSTOMER, incoming=${intentResult.targetAction}`);
-      const outOfScopeRes = buildOutOfScopeActivityResponse('LOG_NEW_CUSTOMER', intentResult.targetAction);
+      const outOfScopeRes = await buildOutOfScopeActivityResponse('LOG_NEW_CUSTOMER', intentResult.targetAction, canUpdateVisits, senderPhone);
       await recordSessionMessage(senderPhone, 'assistant', outOfScopeRes.reply, { action_type: 'OUT_OF_SCOPE_REDIRECT' });
       return outOfScopeRes;
     }
@@ -16565,7 +16611,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const outOfScopeAction = detectOutOfScopeActionAttempt(action, text);
     if (outOfScopeAction) {
       console.log(`[CatalogFlow] Strict activity scope guard in catalog_confirm: active=${action} (${getModuleFamily(action)}), incoming=${outOfScopeAction} (${getModuleFamily(outOfScopeAction)})`);
-      return buildOutOfScopeActivityResponse(action, outOfScopeAction);
+      return await buildOutOfScopeActivityResponse(action, outOfScopeAction, canUpdateVisits, senderPhone);
     }
 
     if (isBareCatalogNumber(text)) {
@@ -16752,7 +16798,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     const outOfScopeAction = detectOutOfScopeActionAttempt(action, text);
     if (outOfScopeAction) {
       console.log(`[CatalogFlow] Strict activity scope guard in catalog_editing: active=${action} (${getModuleFamily(action)}), incoming=${outOfScopeAction} (${getModuleFamily(outOfScopeAction)})`);
-      return buildOutOfScopeActivityResponse(action, outOfScopeAction);
+      return await buildOutOfScopeActivityResponse(action, outOfScopeAction, canUpdateVisits, senderPhone);
     }
 
     if (action === 'UPDATE_INQUIRY' || action === 'UPDATE_ORDER') {
@@ -17727,7 +17773,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
       const outOfScopeAction = detectOutOfScopeActionAttempt(action, text);
       if (outOfScopeAction) {
         console.log(`[CatalogFlow] Strict activity scope guard in catalog_flow: active=${action} (${getModuleFamily(action)}), incoming=${outOfScopeAction} (${getModuleFamily(outOfScopeAction)})`);
-        return buildOutOfScopeActivityResponse(action, outOfScopeAction);
+        return await buildOutOfScopeActivityResponse(action, outOfScopeAction, canUpdateVisits, senderPhone);
       }
     }
 
@@ -18305,7 +18351,10 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   }
 
   // ── 6. DIRECT ACTION ROUTING (Menu Selection 1-10 or Action Keywords) ────────
-  const matchedAction = matchActionFromInput(text, false, canUpdateVisits);
+  let matchedAction = matchActionFromInput(text, false, canUpdateVisits);
+  if (!hasActiveCatalogSession && isBareCatalogNumber(text)) {
+    matchedAction = bareMenuAction;
+  }
   if (matchedAction) {
     const { denialReply } = require('../utils/permissions');
     const denied = await denialReply(senderPhone, matchedAction);
@@ -18581,8 +18630,9 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   }
 
   // ── 7. FREE DATA RETRIEVAL QUERIES VS OUT-OF-SCOPE PROMPTS ──
-  const userMenu = getCatalogMenu(canUpdateVisits);
-  const userSections = getCatalogMenuSections(canUpdateVisits);
+  const liveCatalog = await catalogForPhone(senderPhone);
+  const userMenu = liveCatalog.text;
+  const userSections = liveCatalog.sections;
 
   const isGenericOutOfScope = isOutOfScopeGenericPrompt(text);
   if (isGenericOutOfScope) {
@@ -18598,12 +18648,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     return {
       handled: true,
       reply: outOfScopeReply,
-      interactiveType: 'list',
-      interactiveList: {
-        bodyText: `I am the *Enlight Metals SalesOS Assistant*. Here is the menu to start a sales activity:`,
-        buttonText: 'Choose Action',
-        sections: userSections,
-      },
+      ...catalogInteractive({ sections: userSections }, `I am the *Enlight Metals SalesOS Assistant*. Here is the menu to start a sales activity:`),
     };
   }
 
@@ -18641,12 +18686,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
     return {
       handled: true,
       reply: outOfScopeReply,
-      interactiveType: 'list',
-      interactiveList: {
-        bodyText: `I am the *Enlight Metals SalesOS Assistant*. Here is the menu to start a sales activity:`,
-        buttonText: 'Choose Action',
-        sections: userSections,
-      },
+      ...catalogInteractive({ sections: userSections }, `I am the *Enlight Metals SalesOS Assistant*. Here is the menu to start a sales activity:`),
     };
   }
 
@@ -18677,12 +18717,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
   return {
     handled: true,
     reply: gatingReply,
-    interactiveType: 'list',
-    interactiveList: {
-      bodyText: `Here is the menu to start a new activity:`,
-      buttonText: 'Choose Action',
-      sections: userSections,
-    },
+    ...catalogInteractive({ sections: userSections }, `Here is the menu to start a new activity:`),
   };
 }
 
@@ -18743,6 +18778,7 @@ module.exports = {
   canUserUpdateVisits,
   getCatalogMenu,
   getCatalogMenuSections,
+  catalogForPhone,
   extractVisitDetails,
   formatSelectedVisitPrompt,
   formatSelectedComplaintPrompt,
