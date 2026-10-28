@@ -76,6 +76,136 @@ function salesPriceInquiryUpdate(inquiry) {
   return update;
 }
 
+const NEGATIVE_MARGIN_REPLY = 'That rate is below the other price components. Which component should change: base, transport, loading, credit, or margin?';
+
+function readComponent(update, keys) {
+  if (!update || typeof update !== 'object') return null;
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(update, key)) continue;
+    const raw = update[key];
+    if (raw == null || raw === '') continue;
+    const amount = parseIndianAmount(raw);
+    if (amount == null || amount < 0) continue;
+    return amount;
+  }
+  return null;
+}
+
+function hasNamedPrice(update) {
+  return readComponent(update, [
+    'base',
+    'sales_base_price_per_mt',
+    'transport',
+    'transport_per_mt',
+    'loading',
+    'loading_per_mt',
+    'credit',
+    'credit_per_mt',
+    'margin',
+    'margin_per_mt',
+    'rate',
+    'rate_per_mt',
+  ]) != null;
+}
+
+function priceMaterialEdit(material, saved, update, delivery) {
+  const named = {
+    base: readComponent(update, ['base', 'sales_base_price_per_mt']),
+    transport: readComponent(update, ['transport', 'transport_per_mt']),
+    loading: readComponent(update, ['loading', 'loading_per_mt']),
+    credit: readComponent(update, ['credit', 'credit_per_mt']),
+    margin: readComponent(update, ['margin', 'margin_per_mt']),
+  };
+  const requestedRate = readComponent(update, ['rate', 'rate_per_mt']);
+  const hasNamed = Object.values(named).some((value) => value != null);
+  if (!hasNamed && requestedRate == null) return null;
+
+  const procurement = saved?.procurement_base_price_per_mt ?? null;
+  const salesBase = named.base != null ? named.base : (saved?.sales_base_price_per_mt ?? null);
+  const transport = named.transport != null ? named.transport : saved?.transport_per_mt;
+  const loading = named.loading != null ? named.loading : saved?.loading_per_mt;
+  const credit = named.credit != null ? named.credit : saved?.credit_per_mt;
+  let margin = named.margin != null ? named.margin : saved?.margin_per_mt;
+
+  if (!hasNamed && requestedRate != null) {
+    const nextMargin = money(
+      requestedRate
+      - nonNegative(salesBase ?? procurement)
+      - nonNegative(transport)
+      - nonNegative(loading)
+      - nonNegative(credit),
+    );
+    if (nextMargin < 0) return { error: NEGATIVE_MARGIN_REPLY };
+    margin = nextMargin;
+  }
+
+  const line = {
+    procurement_base_price_per_mt: procurement,
+    sales_base_price_per_mt: salesBase,
+    transport_per_mt: transport ?? 0,
+    loading_per_mt: loading ?? 0,
+    credit_per_mt: credit ?? 0,
+    margin_per_mt: margin ?? 0,
+    quantity: material?.quantity,
+    unit: material?.unit,
+    dimensions: material?.dimensions,
+    weight_mt: material?.weight_mt,
+    sku_text: material?.sku_text,
+  };
+  const rate = calculateSellRate(line);
+  const taxable = taxableFromRate(rate, line);
+  const gst = gstSplit(taxable, delivery);
+  const baseShown = nonNegative(salesBase ?? procurement);
+  const existing = saved && saved.line_key ? saved : null;
+  const row = {
+    line_key: existing?.line_key || material?.line_key,
+    sku_text: material?.sku_text || existing?.sku_text || null,
+    quantity: material?.quantity ?? existing?.quantity ?? null,
+    unit: material?.unit || existing?.unit || null,
+    procurement_base_price_per_mt: procurement,
+    procurement_line_note: existing?.procurement_line_note ?? null,
+    line_status: baseShown > 0 ? 'priced' : (existing?.line_status || 'needs_price'),
+    sales_base_price_per_mt: salesBase,
+    transport_per_mt: line.transport_per_mt,
+    loading_per_mt: line.loading_per_mt,
+    credit_per_mt: named.credit != null ? named.credit : (existing?.credit_per_mt ?? null),
+    margin_per_mt: line.margin_per_mt,
+    rate_per_mt: rate,
+    taxable_amount: taxable,
+    cgst_amount: gst.cgst_amount,
+    sgst_amount: gst.sgst_amount,
+    igst_amount: gst.igst_amount,
+    final_amount: money(taxable + gst.total),
+    updated_at: new Date().toISOString(),
+  };
+  if (existing?.priced_by) row.priced_by = existing.priced_by;
+  if (existing?.sales_priced_by) row.sales_priced_by = existing.sales_priced_by;
+  return {
+    materialId: material?.id || null,
+    rate,
+    row,
+  };
+}
+
+function parseNamedPriceEdit(text) {
+  const source = String(text || '');
+  const found = {};
+  const patterns = [
+    ['base', /\bbase(?:\s*price)?\b[^0-9₹]{0,16}(?:₹|rs\.?)?\s*(\d+(?:,\d+)*(?:\.\d+)?)/i],
+    ['transport', /\btransport\b[^0-9₹]{0,16}(?:₹|rs\.?)?\s*(\d+(?:,\d+)*(?:\.\d+)?)/i],
+    ['loading', /\bloading\b[^0-9₹]{0,16}(?:₹|rs\.?)?\s*(\d+(?:,\d+)*(?:\.\d+)?)/i],
+    ['credit', /\bcredit\b[^0-9₹]{0,16}(?:₹|rs\.?)?\s*(\d+(?:,\d+)*(?:\.\d+)?)/i],
+    ['margin', /\bmargin\b[^0-9₹]{0,16}(?:₹|rs\.?)?\s*(\d+(?:,\d+)*(?:\.\d+)?)/i],
+  ];
+  for (const [key, pattern] of patterns) {
+    const match = source.match(pattern);
+    if (!match) continue;
+    const amount = parseIndianAmount(match[1]);
+    if (amount != null) found[key] = amount;
+  }
+  return found;
+}
+
 function calculateSellRate(line) {
   const base = nonNegative(line.sales_base_price_per_mt ?? line.procurement_base_price_per_mt);
   return money(
@@ -168,6 +298,9 @@ function parseSalesPrices(text, lineCount) {
 }
 
 function prematureUpdateReply({ pricingStatus, stage, hasRate }) {
+  if (pricingStatus === 'sales_priced' && hasRate) {
+    return 'This inquiry is already sales priced. Price components are read-only in chat; change them from the dashboard.';
+  }
   const terminal = ['quoted', 'won', 'lost', 'confirmed'].includes(String(stage || '').toLowerCase());
   if (!terminal && !hasRate) return null;
   if (!pricingStatus || pricingStatus === 'sales_priced') return null;
@@ -498,7 +631,9 @@ function fullPricePrompt(inquiry, lines, lineIndex) {
     .join('\n');
   const current = lines[lineIndex] || {};
   const which = lines.length > 1 ? `Line ${lineIndex + 1}: ${current.sku_text || 'Material'}. ` : '';
-  return `${inquiry.procurement_number}\n${listed}\n\n${which}Reply with base, transport, loading, credit, and margin, in rupees per MT.\nExample: 62000, 1000, 500, 0, 1500`;
+  const sample = lines[0] || {};
+  const sampleLabel = `${sample.sku_text || 'Material'} ${sample.quantity || ''} ${sample.unit || 'MT'}`.replace(/\s+/g, ' ').trim();
+  return `${inquiry.procurement_number}\n${listed}\n\n${which}Reply with base, transport, loading, credit, and margin, in rupees per MT.\nExample: 62000, 1000, 500, 0, 1500\n${sampleLabel}: 62000, 1000, 500, 0, 1500`;
 }
 
 async function salesPriceScope(phone, deps) {
@@ -591,10 +726,137 @@ function namedParts(named) {
   return parts;
 }
 
-function applyFullPriceText(state, text) {
+const AMOUNT_TOKEN = /^(?:₹|rs\.?)?\s*(?:blank|none|na|n\/a|-|\d[\d,]*(?:\.\d+)?)\s*$/i;
+
+function isAmountToken(token) {
+  return AMOUNT_TOKEN.test(String(token || '').trim());
+}
+
+function splitAmountBody(body) {
+  const trimmed = String(body || '').trim();
+  if (!trimmed) return [];
+  const masked = trimmed.replace(/n\/a/gi, '§');
+  if (/[,/;|]/.test(masked)) {
+    return masked.split(/[,/;|]+/).map((bit) => bit.trim()).filter(Boolean).map((bit) => (bit === '§' ? 'n/a' : bit));
+  }
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length && words.every(isAmountToken)) return words;
+  return [trimmed];
+}
+
+function takeLineNumber(text) {
+  const source = String(text || '').trim();
+  const match = source.match(/^(?:line\s+)?(\d+)\s*[.)]\s+([\s\S]*)$/i)
+    || source.match(/^line\s+(\d+)\s*:\s*([\s\S]*)$/i);
+  if (!match) return null;
+  return { lineNumber: Number(match[1]) - 1, rest: match[2].trim() };
+}
+
+function isFieldLabelSide(left) {
+  return /^(?:base(?:\s+price)?|transport|loading|credit|margin)\b/i.test(String(left || '').trim());
+}
+
+function classifyPriceLine(raw) {
+  const numbered = takeLineNumber(raw);
+  let lineNumber = numbered ? numbered.lineNumber : null;
+  let source = numbered ? numbered.rest : String(raw || '').trim();
+  let prefix = '';
+  const colon = source.lastIndexOf(':');
+  if (colon > 0) {
+    const left = source.slice(0, colon).trim();
+    const right = source.slice(colon + 1).trim();
+    if (!isFieldLabelSide(left)) {
+      if (lineNumber == null) {
+        const nested = takeLineNumber(left);
+        if (nested) {
+          lineNumber = nested.lineNumber;
+          prefix = nested.rest;
+        } else {
+          prefix = left;
+        }
+      } else {
+        prefix = left;
+      }
+      source = right;
+    }
+  }
+  return { lineNumber, prefix, source, tokens: splitAmountBody(source) };
+}
+
+function normalizePriceName(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/(\d)\.(\d)/g, '$1#$2')
+    .replace(/[^a-z0-9#]+/g, ' ')
+    .replace(/#/g, '.')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function priceNameKey(value) {
+  return normalizePriceName(value)
+    .replace(/\d+(?:\.\d+)?/g, ' ')
+    .replace(/\b(?:mt|kg|kgs|nos|pcs|pc|sheet|sheets|meter|meters)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function priceNamesMatch(prefix, sku) {
+  const left = priceNameKey(prefix);
+  const right = priceNameKey(sku);
+  if (!left || !right) return false;
+  return right.includes(left) || left.includes(right);
+}
+
+function quantityIn(text) {
+  const matches = [...String(text || '').matchAll(/(\d+(?:\.\d+)?)\s*(mt|kg|kgs|nos|pcs|pc|sheets?|sheet)\b/gi)];
+  if (!matches.length) return null;
+  return Number(matches[matches.length - 1][1]);
+}
+
+function firstOpenPrice(rows, count) {
+  for (let index = 0; index < count; index += 1) {
+    if (rows[index] == null) return index;
+  }
+  return count;
+}
+
+function resolvePriceTarget(prefix, lineNumber, materials, rows, count) {
+  if (lineNumber != null) {
+    if (lineNumber < 0 || lineNumber >= count) return { error: `Line ${lineNumber + 1} is not on this inquiry.` };
+    if (rows[lineNumber] != null) return { error: `Line ${lineNumber + 1} was priced twice.` };
+    return { index: lineNumber };
+  }
+  const label = String(prefix || '').trim();
+  if (!label) return { index: null };
+  const wantedQty = quantityIn(label);
+  const ranked = (materials || []).map((line, index) => ({ line, index })).filter((item) => {
+    if (!priceNamesMatch(label, item.line?.sku_text)) return false;
+    if (wantedQty != null && Number(item.line?.quantity) !== wantedQty) return false;
+    return true;
+  });
+  const open = ranked.filter((item) => rows[item.index] == null);
+  if (open.length) return { index: open[0].index };
+  if (ranked.length) return { error: `${label} was priced twice.` };
+  return { error: `${label} is not on this inquiry.` };
+}
+
+function commitPriceParts(next, parts, index) {
+  const slot = index == null ? firstOpenPrice(next.rows, next.count) : index;
+  if (slot < 0 || slot >= next.count) return { error: 'Send base, transport, loading, credit, and margin.' };
+  if (next.rows[slot] != null) return { error: `Line ${slot + 1} was priced twice.` };
+  next.rows[slot] = parts;
+  next.named = {};
+  next.partial = [];
+  next.lineIndex = firstOpenPrice(next.rows, next.count);
+  if (next.lineIndex >= next.count) return { done: true, rows: next.rows };
+  return null;
+}
+
+function applyFullPriceText(state, text, materials = []) {
   const next = {
     number: state.number,
-    count: state.count,
+    count: Number(state.count) || materials.length || 0,
     lineIndex: state.lineIndex || 0,
     partial: [...(state.partial || [])],
     named: { ...(state.named || {}) },
@@ -603,9 +865,26 @@ function applyFullPriceText(state, text) {
   const lines = String(text || '').split(/\n+/).map((line) => line.trim()).filter(Boolean);
   const incoming = lines.length ? lines : [''];
   for (const line of incoming) {
-    const labeled = parseLabeledPrices(line);
+    const classified = classifyPriceLine(line);
+    const { lineNumber, prefix, source, tokens } = classified;
+    const amountLine = tokens.length > 0 && tokens.every(isAmountToken);
+
+    if (amountLine && tokens.length === FULL_PRICE_FIELDS.length) {
+      const parsed = parseFullPriceTokens(tokens);
+      if (parsed.error) return parsed;
+      const target = resolvePriceTarget(prefix, lineNumber, materials, next.rows, next.count);
+      if (target.error) return target;
+      const placed = commitPriceParts(next, parsed.parts, target.index);
+      if (placed) return placed;
+      continue;
+    }
+
+    const labeled = parseLabeledPrices(source);
     if (labeled) {
       if (labeled.error) return labeled;
+      const target = resolvePriceTarget(prefix, lineNumber, materials, next.rows, next.count);
+      if (target.error) return target;
+      if (target.index != null) next.lineIndex = target.index;
       const named = { ...next.named, ...(labeled.parts || labeled.found) };
       next.partial = [];
       const missing = FULL_PRICE_FIELDS.filter((field) => named[field.key] == null).map((field) => field.label);
@@ -613,25 +892,25 @@ function applyFullPriceText(state, text) {
         next.named = named;
         return { state: next, missing };
       }
-      next.rows.push(namedParts(named));
-      next.named = {};
-      next.lineIndex += 1;
-      if (next.lineIndex >= next.count) return { done: true, rows: next.rows };
+      const placed = commitPriceParts(next, namedParts(named), target.index == null ? next.lineIndex : target.index);
+      if (placed) return placed;
       continue;
     }
-    const tokens = line.split(/[,/]+/).map((bit) => bit.trim()).filter(Boolean);
-    if (tokens.length === FULL_PRICE_FIELDS.length) {
-      const parsed = parseFullPriceTokens(tokens);
-      if (!parsed.error) {
-        next.rows.push(parsed.parts);
-        next.named = {};
-        next.partial = [];
-        next.lineIndex += 1;
-        if (next.lineIndex >= next.count) return { done: true, rows: next.rows };
-        continue;
+
+    if (prefix || lineNumber != null) {
+      const target = resolvePriceTarget(prefix, lineNumber, materials, next.rows, next.count);
+      if (target.error) return target;
+      if (target.index != null) next.lineIndex = target.index;
+      next.named = {};
+      next.partial = amountLine ? tokens : [];
+      if (next.partial.length && next.partial.length < FULL_PRICE_FIELDS.length) {
+        const missing = FULL_PRICE_FIELDS.slice(next.partial.length).map((field) => field.label);
+        return { state: next, missing };
       }
+      if (!amountLine) return { error: `${prefix || `Line ${lineNumber + 1}`} is not on this inquiry.` };
     }
-    if (Object.keys(next.named).length) {
+
+    if (Object.keys(next.named).length && amountLine) {
       const missingFields = FULL_PRICE_FIELDS.filter((field) => next.named[field.key] == null);
       if (tokens.length > missingFields.length) {
         return { error: 'Send base, transport, loading, credit, and margin.' };
@@ -644,12 +923,11 @@ function applyFullPriceText(state, text) {
       const still = FULL_PRICE_FIELDS.filter((field) => next.named[field.key] == null).map((field) => field.label);
       next.partial = [];
       if (still.length) return { state: next, missing: still };
-      next.rows.push(namedParts(next.named));
-      next.named = {};
-      next.lineIndex += 1;
-      if (next.lineIndex >= next.count) return { done: true, rows: next.rows };
+      const placed = commitPriceParts(next, namedParts(next.named), next.lineIndex);
+      if (placed) return placed;
       continue;
     }
+
     const combined = next.partial.concat(tokens);
     if (!combined.length) continue;
     if (combined.length > FULL_PRICE_FIELDS.length) {
@@ -662,10 +940,8 @@ function applyFullPriceText(state, text) {
     }
     const parsed = parseFullPriceTokens(combined);
     if (parsed.error) return { error: parsed.error };
-    next.rows.push(parsed.parts);
-    next.partial = [];
-    next.lineIndex += 1;
-    if (next.lineIndex >= next.count) return { done: true, rows: next.rows };
+    const placed = commitPriceParts(next, parsed.parts, next.lineIndex);
+    if (placed) return placed;
   }
   if (next.partial.length) {
     const missing = FULL_PRICE_FIELDS.slice(next.partial.length).map((field) => field.label);
@@ -756,7 +1032,7 @@ async function continueFullPrice(text, lastIntent, phones, isAdmin, phone, deps)
   const inquiry = findNumberedInquiry(await loadSalesInquiries(deps.supabase, phones, isAdmin), state.number);
   if (!inquiry) return { handled: true, reply: 'That inquiry is no longer in your list.' };
   const lines = await loadFullPriceLines(inquiry, deps);
-  const applied = applyFullPriceText(state, text);
+  const applied = applyFullPriceText(state, text, lines);
   if (applied.error) return { handled: true, reply: applied.error };
   if (applied.done) return presentFullPriceConfirmation(inquiry, applied.rows, phone, deps);
   await deps.saveActiveSession(phone, 'Sales', encodeFullPrice(applied.state));
@@ -797,6 +1073,10 @@ module.exports = {
   calculateSellRate,
   priceSalesLine,
   parseSalesPrices,
+  salesPriceInquiryUpdate,
+  hasNamedPrice,
+  priceMaterialEdit,
+  parseNamedPriceEdit,
   prematureUpdateReply,
   orderRateReply,
   isSalesPriceText,

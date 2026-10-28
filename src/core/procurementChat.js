@@ -77,18 +77,49 @@ const VIEW_PERMISSION_REFUSAL = 'You do not have permission to view inquiries.';
 function matchesProcurementScope(item, scope) {
   if (!scope) return false;
   const ids = scope.ids || [];
-  if (item?.procurement_employee_id && ids.includes(item.procurement_employee_id)) {
-    return true;
+  return Boolean(item?.procurement_employee_id && ids.includes(item.procurement_employee_id));
+}
+
+async function stampRoutedInquiries(rows, employees, supabase) {
+  const byPhone = new Map();
+  const byEmployeeId = new Map();
+  for (const emp of employees || []) {
+    if (String(emp?.role || '') !== 'salesperson' || emp?.is_active === false) continue;
+    const owner = emp.assigned_procurement_employee_id;
+    if (!owner) continue;
+    if (emp.id) byEmployeeId.set(emp.id, owner);
+    const phone = normalizePhone(emp.phone);
+    if (phone.length === 10) byPhone.set(phone, owner);
   }
-  if (scope.stampedOnly) return false;
-  if (item?.procurement_employee_id) return false;
-  const status = String(item?.status || '').toLowerCase();
-  if (scope.includeUnassignedPool && OPEN_STATUSES.includes(status)) return true;
-  const phones = scope.salespersonPhones || [];
-  const employeeIds = scope.salespersonEmployeeIds || [];
-  if (item?.employee_id && employeeIds.includes(item.employee_id)) return true;
-  const phone = normalizePhone(item?.salesperson_phone || '');
-  return Boolean(phone && phones.includes(phone));
+  const groups = new Map();
+  for (const row of rows || []) {
+    if (!row?.id || row.procurement_employee_id) continue;
+    const employeeOwner = row.employee_id ? byEmployeeId.get(row.employee_id) : '';
+    const phone = normalizePhone(row.salesperson_phone || row.sender_phone || '');
+    const owner = employeeOwner || (phone.length === 10 ? byPhone.get(phone) : '');
+    if (!owner) continue;
+    const group = groups.get(owner) || [];
+    group.push(row);
+    groups.set(owner, group);
+  }
+  const assignedAt = new Date().toISOString();
+  for (const [owner, group] of groups.entries()) {
+    if (supabase?.from) {
+      const { error } = await supabase
+        .from('inquiries')
+        .update({
+          procurement_employee_id: owner,
+          procurement_assigned_at: assignedAt,
+        })
+        .in('id', group.map((row) => row.id))
+        .is('procurement_employee_id', null);
+      if (error) continue;
+    }
+    for (const row of group) {
+      row.procurement_employee_id = owner;
+      row.procurement_assigned_at = assignedAt;
+    }
+  }
 }
 
 function salespeopleRouted(employees, personIds) {
@@ -145,7 +176,7 @@ function scopeFromEmployees(employee, employees, permissions) {
   const routed = salespeopleRouted(employees, reports.map((emp) => emp.id));
   return {
     ids: Array.from(new Set([...ownId, ...reports.map((emp) => emp.id)])),
-    includeUnassignedPool: true,
+    includeUnassignedPool: false,
     salespersonPhones: routed.phones,
     salespersonEmployeeIds: routed.ids,
     team,
@@ -482,12 +513,14 @@ function basePriceHeader(inquiry, employees) {
   const number = inquiry?.procurement_number || 'No procurement number';
   const when = formatInquiryWhen(inquiry?.created_at);
   const who = salespersonName(inquiry, employees);
-  return [
+  const rows = [
     `*${number}*`,
     [when, who].filter(Boolean).join(' · '),
     inquiry?.delivery_location || 'Delivery not set',
     statusLabel(inquiry?.pricing_status),
-  ].join('\n');
+  ];
+  if (inquiry?.tonnage_review_open) rows.push('Tonnage updated');
+  return rows.join('\n');
 }
 
 function latestSaved(rows, lineKey) {
@@ -781,7 +814,7 @@ async function handleProcurementChat(text, phone, deps) {
   if (intent === 'procurement|team' && showTeam && !choice) {
     const person = findTeamPerson(clean, scope.team);
     if (person) {
-      const rows = await loadInquiries(deps);
+      const rows = await loadPreparedInquiries(deps, employees || []);
       const mine = visibleInquiries(rows, scope).filter((row) => row.procurement_employee_id === person.id);
       await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|menu');
       return { handled: true, reply: listReply(`*${person.name}*`, mine, employees || []) };
@@ -810,7 +843,7 @@ async function handleProcurementChat(text, phone, deps) {
     return basePriceListResult(rows, employees || [], supabase);
   }
   if (choice === 'team' && showTeam) {
-    const rows = visibleInquiries(await loadInquiries(deps), scope);
+    const rows = visibleInquiries(await loadPreparedInquiries(deps, employees || []), scope);
     await saveActiveSession(phone, employee.name || 'Procurement', 'procurement|team');
     return { handled: true, reply: teamReply(scope.team, rows) };
   }
@@ -824,7 +857,7 @@ async function handleProcurementChat(text, phone, deps) {
     return beginBasePrice(numberMatch[0], phone, employee, scope, employees || [], deps);
   }
 
-  const asked = answerSalespersonQuestion(clean, await loadInquiries(deps), employees || [], scope);
+  const asked = answerSalespersonQuestion(clean, await loadPreparedInquiries(deps, employees || []), employees || [], scope);
   if (asked) return asked;
 
   if (intent === 'procurement|ask') {
@@ -885,20 +918,21 @@ async function loadCustomerOwners(supabase, employees) {
   return owners;
 }
 
-async function loadScopedInquiries(deps, scope, employees) {
+async function loadPreparedInquiries(deps, employees) {
   const owners = await loadCustomerOwners(deps.supabase, employees);
-  const rows = await loadCanonicalInquiries(deps);
-  return byNewest(rows)
-    .map((row) => withResolvedSalesperson(row, owners))
-    .filter((row) => matchesProcurementScope(row, scope));
+  const rows = (await loadCanonicalInquiries(deps)).map((row) => withResolvedSalesperson(row, owners));
+  await stampRoutedInquiries(rows, employees, deps.supabase);
+  return rows;
+}
+
+async function loadScopedInquiries(deps, scope, employees) {
+  const rows = await loadPreparedInquiries(deps, employees);
+  return byNewest(rows).filter((row) => matchesProcurementScope(row, scope));
 }
 
 async function loadDashboardAwaiting(deps, scope, employees) {
-  const owners = await loadCustomerOwners(deps.supabase, employees);
-  const rows = await loadCanonicalInquiries(deps);
-  return byNewest(rows)
-    .map((row) => withResolvedSalesperson(row, owners))
-    .filter((row) => isDashboardAwaiting(row) && matchesProcurementScope(row, scope));
+  const rows = await loadPreparedInquiries(deps, employees);
+  return byNewest(rows).filter((row) => isDashboardAwaiting(row) && matchesProcurementScope(row, scope));
 }
 
 async function findBasePriceInquiry(deps, scope, employees, number) {
@@ -1187,4 +1221,6 @@ module.exports = {
   findTeamPerson,
   isProcurementRole,
   handleProcurementChat,
+  stageBadge,
+  inquiryBadge,
 };

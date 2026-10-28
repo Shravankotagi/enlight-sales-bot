@@ -307,8 +307,8 @@ test('log a base price lists the dashboard awaiting set without line buttons', a
   assert.doesNotMatch(listed.reply, /Acme Steel/);
   assert.doesNotMatch(listed.reply, /Hidden Buyer/);
   assert.equal(listed.interactiveList, undefined);
-  const inquiryCalls = session.db.calls.filter((call) => call.table === 'inquiries');
-  assert.equal(inquiryCalls.length, 0);
+  const inquirySelects = session.db.calls.filter((call) => call.table === 'inquiries' && call.op === 'select');
+  assert.equal(inquirySelects.length, 0);
 
   const opened = await session.handle('PR-30001');
   assert.match(opened.reply, /Reply with the base price/);

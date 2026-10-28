@@ -20,6 +20,8 @@
 
 const { HumanMessage, SystemMessage } = require('@langchain/core/messages');
 const { supabase, verifyAndGetCustomerName, saveActiveSession, getActiveSession } = require('../supabase');
+const { tonnageReviewPatch, commitInquiryUpdate, applyCommercialLines } = require('../core/tonnageReview');
+const { recordInSalesScope, loadCustomerOwnerMap, scopePhonesFor, isInquiryCode } = require('../core/inquiryScope');
 const { syncActivity } = require('./biginSyncAgent');
 const { logBotActivity } = require('../utils/activityLogger');
 const { resolveFinalPo, claimPoNumber } = require('../core/poResolver');
@@ -1407,6 +1409,27 @@ function getDealCode(deal) {
 /**
  * Synchronizes inquiries table ai_extraction_json with the latest deal and deal_items.
  */
+async function commercialReviewOpens(inquiryId, nextItems) {
+  if (!inquiryId || !Array.isArray(nextItems) || nextItems.length === 0) return false;
+  const { data } = await supabase
+    .from('inquiries')
+    .select('pricing_status, tonnage_review_open, tonnage_review, ai_extraction_json')
+    .eq('id', inquiryId)
+    .limit(1);
+  const inq = Array.isArray(data) ? data[0] : null;
+  if (!inq) return false;
+  const before = inq.ai_extraction_json?.line_items || inq.ai_extraction_json?.lineItems || [];
+  const after = applyCommercialLines(before, nextItems);
+  const review = tonnageReviewPatch({
+    pricingStatus: inq.pricing_status,
+    reviewOpen: inq.tonnage_review_open,
+    existingReview: inq.tonnage_review,
+    beforeLines: before,
+    afterLines: after,
+  });
+  return Boolean(review && review.tonnage_review_open);
+}
+
 async function syncInquiryFromDeal(inquiryId, dealObj, dealItems) {
   try {
     let targetInqId = inquiryId;
@@ -1449,22 +1472,22 @@ async function syncInquiryFromDeal(inquiryId, dealObj, dealItems) {
     if (!inq) return;
 
     const existingAi = inq.ai_extraction_json || {};
-    const formattedLineItems = (dealItems || []).map((di, idx) => {
-      const skuText = di.sku_text || di.product_requirement || 'Steel Material';
-      const dim = di.dimensions || '';
-      const qty = Number(di.quantity || di.quantity_mt || 0);
-      const unit = di.unit || 'MT';
-      const rate = Number(di.rate || di.rate_per_mt || 0);
-      const amount = Number(di.amount || (rate > 0 && qty > 0 ? rate * qty : 0));
-      const existingHsn = existingAi.line_items?.[idx]?.hsn_code || existingAi.lineItems?.[idx]?.hsn_code;
-      const hsn = di.hsn_code || existingHsn || detectHsnCode(skuText, dim);
-
+    const beforeLines = existingAi.line_items || existingAi.lineItems || [];
+    const formattedLineItems = applyCommercialLines(beforeLines, (dealItems || []).map((di) => ({
+      sku_text: di.sku_text || di.product_requirement || 'Steel Material',
+      dimensions: di.dimensions || '',
+      quantity: Number(di.quantity || di.quantity_mt || 0),
+      unit: di.unit || di.original_unit || 'MT',
+      rate: Number(di.rate || di.rate_per_mt || 0),
+      amount: Number(di.amount || 0),
+    }))).map((line, idx) => {
+      const di = (dealItems || [])[idx] || {};
+      const hsn = di.hsn_code || line.hsn_code || detectHsnCode(line.sku_text, line.dimensions);
+      const rate = Number(line.rate) || 0;
+      const amount = Number(line.amount) || (rate > 0 && Number(line.quantity) > 0 ? rate * Number(line.quantity) : 0);
       return {
-        sku_text: skuText,
-        dimensions: dim,
+        ...line,
         hsn_code: hsn,
-        quantity: qty,
-        unit: unit,
         rate: rate > 0 ? rate : null,
         amount: amount > 0 ? amount : null,
       };
@@ -1505,15 +1528,20 @@ async function syncInquiryFromDeal(inquiryId, dealObj, dealItems) {
       ai_extraction_json: updatedAi,
       sender_name: dealObj.customer_name || inq.sender_name,
     };
-    if (dealObj.stage) {
+    const review = tonnageReviewPatch({
+      pricingStatus: inq.pricing_status,
+      reviewOpen: inq.tonnage_review_open,
+      existingReview: inq.tonnage_review,
+      beforeLines,
+      afterLines: formattedLineItems,
+    });
+    if (review) Object.assign(inqUpdateFields, review);
+    if (dealObj.stage && !(review && review.tonnage_review_open)) {
       inqUpdateFields.stage = dealObj.stage;
       inqUpdateFields.status = dealObj.stage === 'won' ? 'confirmed' : dealObj.stage;
     }
 
-    const { error: inqUpdErr } = await supabase
-      .from('inquiries')
-      .update(inqUpdateFields)
-      .eq('id', inq.id);
+    const { error: inqUpdErr } = await commitInquiryUpdate(supabase, inq.id, inqUpdateFields);
 
     if (inqUpdErr) {
       console.error('[SalesAgent] Failed to update inquiries row:', inqUpdErr);
@@ -1908,25 +1936,9 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
     ? await getAccessibleSalespersonPhonesForBot(senderPhone)
     : { phones: null, isAdmin: true };
 
-  const isPhoneAccessible = (dealPhone) => {
-    if (!dealPhone) return true;
-    if (scope.isAdmin || scope.phones === null) return true;
-    const dealVariants = getPhoneVariants(dealPhone);
-    const accessibleSet = new Set();
-    if (Array.isArray(scope.phones)) {
-      for (const p of scope.phones) getPhoneVariants(p).forEach(pv => accessibleSet.add(pv));
-    }
-    if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => accessibleSet.add(pv));
-    return dealVariants.some(dv => accessibleSet.has(dv));
-  };
-
-  const isInquiryAccessible = (inq) => {
-    if (scope.isAdmin || scope.phones === null) return true;
-    if (!inq.salesperson_phone) return true;
-    if (isPhoneAccessible(inq.salesperson_phone)) return true;
-    if (isPhoneAccessible(inq.sender_phone)) return true;
-    return false;
-  };
+  const ownerMap = await loadCustomerOwnerMap(supabase);
+  const scopePhones = scopePhonesFor(scope, senderPhone);
+  const visibleToCaller = (row) => recordInSalesScope(row, scopePhones, ownerMap);
 
   // 1. Direct UUID lookup if clean is a standard UUID
   const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clean);
@@ -1936,7 +1948,7 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
       .select('*, deal_items(*)')
       .eq('id', clean.toLowerCase())
       .limit(1);
-    if (directDeal && directDeal.length > 0 && isPhoneAccessible(directDeal[0].salesperson_phone)) {
+    if (directDeal && directDeal.length > 0 && visibleToCaller(directDeal[0])) {
       return directDeal[0];
     }
 
@@ -1945,17 +1957,40 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
       .select('*, deal_items(*)')
       .eq('inquiry_id', clean.toLowerCase())
       .limit(1);
-    if (directInqDeal && directInqDeal.length > 0 && isPhoneAccessible(directInqDeal[0].salesperson_phone)) {
-      return directInqDeal[0];
-    }
 
     const { data: directInq } = await supabase
       .from('inquiries')
       .select('id, sender_name, status, sender_phone, salesperson_phone, employee_id, raw_text, ai_extraction_json, created_at')
       .eq('id', clean.toLowerCase())
       .limit(1);
-    if (directInq && directInq.length > 0 && isInquiryAccessible(directInq[0])) {
+    const inquiryVisible = directInq && directInq.length > 0 && visibleToCaller(directInq[0]);
+    if (directInqDeal && directInqDeal.length > 0 && (visibleToCaller(directInqDeal[0]) || inquiryVisible)) {
+      return directInqDeal[0];
+    }
+    if (inquiryVisible) {
       return buildDealStubFromInquiry(directInq[0], senderPhone);
+    }
+  }
+
+  if (!isUuid && /^[0-9A-F]{4,12}$/.test(clean)) {
+    const prefix = clean.slice(0, 8).toLowerCase();
+    const { data: prefixed } = await supabase
+      .from('inquiries')
+      .select('id, sender_name, status, sender_phone, salesperson_phone, employee_id, raw_text, ai_extraction_json, created_at')
+      .ilike('id', `${prefix}%`)
+      .limit(8);
+    const foundInq = (prefixed || []).find((inq) => {
+      const raw = (inq.id || '').replace(/-/g, '').toUpperCase();
+      return visibleToCaller(inq) && (raw.startsWith(clean) || raw.includes(clean));
+    });
+    if (foundInq) {
+      const { data: linked } = await supabase
+        .from('deals')
+        .select('*, deal_items(*)')
+        .eq('inquiry_id', foundInq.id)
+        .limit(1);
+      if (linked && linked.length > 0) return linked[0];
+      return buildDealStubFromInquiry(foundInq, senderPhone);
     }
   }
 
@@ -1973,7 +2008,7 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
       .limit(1000),
   ]);
 
-  const deals = (dealsRes?.data || []).filter(d => isPhoneAccessible(d.salesperson_phone));
+  const deals = (dealsRes?.data || []).filter((d) => visibleToCaller(d));
   if (deals.length > 0) {
     // Exact prefix match on Deal ID (with or without hyphens)
     let found = deals.find(
@@ -1999,7 +2034,7 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
   }
 
   const inquiries = (inqsRes?.data || [])
-    .filter(inq => isInquiryAccessible(inq))
+    .filter((inq) => visibleToCaller(inq))
     .filter(inq => {
       const rawText = inq.raw_text || '';
       const name = (inq.sender_name || inq.ai_extraction_json?.customer?.name || inq.ai_extraction_json?.companyName || '').toLowerCase();
@@ -2031,7 +2066,7 @@ async function findDealByCodeOrId(codeOrId, senderPhone) {
 
   // 3. Fallback: Search deals by customer name tokens if clean looks like a company name
   const cleanWords = clean.split(/\s+/).filter(w => w.length >= 3 && !['PVT', 'LTD', 'STEEL', 'PROJECTS', 'INFRASTRUCTURE', 'INDUSTRIES'].includes(w));
-  if (cleanWords.length > 0 && deals.length > 0) {
+  if (!isInquiryCode(String(codeOrId || '')) && cleanWords.length > 0 && deals.length > 0) {
     const foundByCust = deals.find(d => {
       const cName = (d.customer_name || '').toUpperCase();
       return cleanWords.every(w => cName.includes(w));
@@ -2062,6 +2097,11 @@ async function getAllOpenDealsForCustomer(customerName, senderPhone) {
     ? await getAccessibleSalespersonPhonesForBot(senderPhone)
     : { phones: null };
 
+  const ownerMap = await loadCustomerOwnerMap(supabase);
+  const scopePhones = scopePhonesFor(scope, senderPhone);
+  const keep = (rows) => (rows || []).filter((deal) => recordInSalesScope(deal, scopePhones, ownerMap));
+  if (Array.isArray(scope.phones) && scope.phones.length === 0 && !senderPhone) return [];
+
   let query = supabase
     .from('deals')
     .select('*, deal_items(*)')
@@ -2069,46 +2109,25 @@ async function getAllOpenDealsForCustomer(customerName, senderPhone) {
     .not('stage', 'in', '("won","lost")')
     .order('created_at', { ascending: false });
 
-  if (scope.phones !== null) {
-    const allPhones = new Set();
-    for (const p of scope.phones) {
-      getPhoneVariants(p).forEach((pv) => allPhones.add(pv));
-    }
-    if (senderPhone) {
-      getPhoneVariants(senderPhone).forEach((pv) => allPhones.add(pv));
-    }
-    const phoneList = Array.from(allPhones);
-    if (phoneList.length > 0) {
-      query = query.in('salesperson_phone', phoneList);
-    } else {
-      return [];
-    }
-  }
-
   let { data } = await query;
-  let deals = data || [];
+  let deals = keep(data);
 
   // If no deals found with full customer string, try word tokens
   if (deals.length === 0) {
     const words = cleanCust.split(/\s+/).filter(w => w.length >= 3 && !['pvt', 'ltd', 'steel', 'company', 'enterprises', 'industries', 'projects', 'infrastructure'].includes(w.toLowerCase()));
     if (words.length > 0) {
       const orClause = words.map(w => `customer_name.ilike.%${w}%`).join(',');
-      let wordQuery = supabase
+      const { data: wordDeals } = await supabase
         .from('deals')
         .select('*, deal_items(*)')
         .or(orClause)
         .not('stage', 'in', '("won","lost")')
         .order('created_at', { ascending: false });
-      if (scope.phones !== null) {
-        const allPhones = new Set();
-        for (const p of scope.phones) getPhoneVariants(p).forEach(pv => allPhones.add(pv));
-        if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => allPhones.add(pv));
-        wordQuery = wordQuery.in('salesperson_phone', Array.from(allPhones));
-      }
-      const { data: wordDeals } = await wordQuery;
-      if (wordDeals && wordDeals.length > 0) {
-        deals = wordDeals;
-      }
+      const named = (wordDeals || []).filter((deal) => {
+        const name = String(deal.customer_name || '').toLowerCase();
+        return words.some((word) => name.includes(word.toLowerCase()));
+      });
+      if (named.length > 0) deals = keep(named);
     }
   }
 
@@ -2194,38 +2213,27 @@ async function findBestDeal(customerName, senderPhone) {
     ? await getAccessibleSalespersonPhonesForBot(senderPhone)
     : { phones: null };
 
-  let queryActive = supabase
+  const ownerMap = await loadCustomerOwnerMap(supabase);
+  const scopePhones = scopePhonesFor(scope, senderPhone);
+  const firstVisible = (rows) => (rows || []).find((deal) => recordInSalesScope(deal, scopePhones, ownerMap)) || null;
+
+  const { data: ownActive } = await supabase
     .from('deals')
     .select('*, deal_items(*)')
     .ilike('customer_name', `%${customerName}%`)
     .not('stage', 'in', '("won","lost")')
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(20);
+  const active = firstVisible(ownActive);
+  if (active) return active;
 
-  if (scope.phones !== null) {
-    const allPhones = new Set();
-    for (const p of scope.phones) getPhoneVariants(p).forEach(pv => allPhones.add(pv));
-    if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => allPhones.add(pv));
-    queryActive = queryActive.in('salesperson_phone', Array.from(allPhones));
-  }
-
-  const { data: ownActive } = await queryActive.limit(1);
-  if (ownActive && ownActive.length > 0) return ownActive[0];
-
-  let queryAny = supabase
+  const { data: ownAny } = await supabase
     .from('deals')
     .select('*, deal_items(*)')
     .ilike('customer_name', `%${customerName}%`)
-    .order('created_at', { ascending: false });
-
-  if (scope.phones !== null) {
-    const allPhones = new Set();
-    for (const p of scope.phones) getPhoneVariants(p).forEach(pv => allPhones.add(pv));
-    if (senderPhone) getPhoneVariants(senderPhone).forEach(pv => allPhones.add(pv));
-    queryAny = queryAny.in('salesperson_phone', Array.from(allPhones));
-  }
-
-  const { data: ownAny } = await queryAny.limit(1);
-  return ownAny && ownAny.length > 0 ? ownAny[0] : null;
+    .order('created_at', { ascending: false })
+    .limit(20);
+  return firstVisible(ownAny);
 }
 
 async function getDealAmountFromItems(dealId) {
@@ -4038,9 +4046,10 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
         updateFields.total_amount = computedTotal;
       }
 
-      // Stage resolution: If deal is in new_inquiry, promote to quoted ONLY if ALL mandatory fields are complete!
+      // A commercial-weight change that reopens procurement leaves the deal stage where it is.
       const currentTargetStage = (targetExplicitDeal.stage || 'new_inquiry').toLowerCase().trim();
-      if (['new_inquiry', 'review', 'auto_created', 'pending', 'draft', 'needs_review'].includes(currentTargetStage)) {
+      const reviewOpens = await commercialReviewOpens(targetExplicitDeal.inquiry_id, updatedDealItems);
+      if (!reviewOpens && ['new_inquiry', 'review', 'auto_created', 'pending', 'draft', 'needs_review'].includes(currentTargetStage)) {
         const preCheckCompleteness = evaluateMandatoryFields({
           customerName: company,
           lineItems: updatedDealItems,
@@ -4054,7 +4063,7 @@ async function processSalesMessage(text, senderPhone, overrideData = null, calle
         } else {
           updateFields.stage = targetExplicitDeal.stage || 'new_inquiry';
         }
-      } else {
+      } else if (!reviewOpens) {
         updateFields.stage = targetExplicitDeal.stage;
       }
 
@@ -4825,6 +4834,7 @@ async function processSalesImage(imageBuffer, mimeType, senderPhone, messageId) 
 }
 
 module.exports = {
+  syncInquiryFromDeal,
   processSalesMessage,
   processSalesImage,
   handleSendQuotationMessage,
