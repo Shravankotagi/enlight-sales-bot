@@ -3763,10 +3763,13 @@ async function handleQuery(text, senderPhone) {
   // 1. Resolve role and access scope for sender
   const userScope = await getAccessibleSalespersonPhonesForBot(senderPhone);
   let effectiveScope = { ...userScope };
+  const { can } = require('./utils/permissions');
 
-  // Fast path for Direct Inquiry ID lookup (e.g. "check for this inquiry number INQ-F59404", "status of INQ-F59404")
   const directInqIdMatch = text.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,8})\b/i);
   if (directInqIdMatch) {
+    if (!(await can(senderPhone, 'inquiries.view')) && !(await can(senderPhone, 'orders.view'))) {
+      return 'Permission Denied: You do not have permission to view inquiries or orders.';
+    }
     const directRes = await getInquiryOrDealByCode(effectiveScope, text, directInqIdMatch[1]);
     if (directRes) return directRes;
   }
@@ -3776,6 +3779,9 @@ async function handleQuery(text, senderPhone) {
     /\b(?:deal\s*(?:ids?|numbers?|codes?)|deals?\s*(?:for|of))\b/i.test(lower) ||
     /^(?:get\s+|show\s+|what\s+is\s+|give\s+me\s+)?deal\s*ids?\b/i.test(lower)
   ) {
+    if (!(await can(senderPhone, 'inquiries.view'))) {
+      return 'Permission Denied: You do not have permission to view inquiries.';
+    }
     return await getDealIdsForCompany(effectiveScope, text);
   }
 
@@ -3785,6 +3791,9 @@ async function handleQuery(text, senderPhone) {
     (/\b(?:show|list|get|find|all|recent|hot|warm|cold|positive|neutral|negative|oem|fabricator|epc)\b/i.test(lower) ||
       /\b(?:this\s+month|last\s+month|today|this\s+week|last\s+week)\b/i.test(lower))
   ) {
+    if (!(await can(senderPhone, 'visits.view'))) {
+      return 'Permission Denied: You do not have permission to view visits.';
+    }
     if (
       lower.includes('follow-up') ||
       lower.includes('followup') ||

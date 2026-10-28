@@ -365,8 +365,8 @@ function createTools(senderPhone, rawUserText = '') {
     async (args) => {
       try {
         const { can } = require('../utils/permissions');
-        if (!await can(senderPhone, 'inquiries.view')) {
-          return 'Permission Denied: You do not have permission to view inquiries or deals. Please contact your administrator.';
+        if (!(await can(senderPhone, 'inquiries.view')) && !(await can(senderPhone, 'orders.view'))) {
+          return 'Permission Denied: You do not have permission to view inquiries or orders. Please contact your administrator.';
         }
         const caller = await resolveCallerContext(senderPhone);
         const res = await executeGetMyOpenDeals(args, caller);
@@ -393,6 +393,10 @@ function createTools(senderPhone, rawUserText = '') {
   const getReorderQueueTool = tool(
     async (args) => {
       try {
+        const { can } = require('../utils/permissions');
+        if (!(await can(senderPhone, 'orders.view'))) {
+          return 'Permission Denied: You do not have permission to view orders. Please contact your administrator.';
+        }
         const caller = await resolveCallerContext(senderPhone);
         const res = await executeGetReorderQueue(args, caller);
         return JSON.stringify(res.data, null, 2);
@@ -413,6 +417,10 @@ function createTools(senderPhone, rawUserText = '') {
   const getTeamPipelineTool = tool(
     async (args) => {
       try {
+        const { can } = require('../utils/permissions');
+        if (!(await can(senderPhone, 'inquiries.view')) && !(await can(senderPhone, 'orders.view'))) {
+          return 'Permission Denied: You do not have permission to view inquiries or orders. Please contact your administrator.';
+        }
         const caller = await resolveCallerContext(senderPhone);
         const res = await executeGetTeamPipeline(args, caller);
         return JSON.stringify(res.data, null, 2);
@@ -433,6 +441,10 @@ function createTools(senderPhone, rawUserText = '') {
   const getChurnRadarTool = tool(
     async (args) => {
       try {
+        const { can } = require('../utils/permissions');
+        if (!(await can(senderPhone, 'customers.view'))) {
+          return 'Permission Denied: You do not have permission to view customers. Please contact your administrator.';
+        }
         const caller = await resolveCallerContext(senderPhone);
         const res = await executeGetChurnRadar(args, caller);
         return JSON.stringify(res.data, null, 2);
@@ -452,6 +464,10 @@ function createTools(senderPhone, rawUserText = '') {
   const getLossAnalyticsTool = tool(
     async (args) => {
       try {
+        const { can } = require('../utils/permissions');
+        if (!(await can(senderPhone, 'inquiries.view')) && !(await can(senderPhone, 'orders.view'))) {
+          return 'Permission Denied: You do not have permission to view inquiries or orders. Please contact your administrator.';
+        }
         const caller = await resolveCallerContext(senderPhone);
         const res = await executeGetLossAnalytics(args, caller);
         return JSON.stringify(res.data, null, 2);
@@ -471,6 +487,10 @@ function createTools(senderPhone, rawUserText = '') {
   const getDealIdsTool = tool(
     async ({ company_name, customer_name }) => {
       try {
+        const { can } = require('../utils/permissions');
+        if (!(await can(senderPhone, 'inquiries.view'))) {
+          return 'Permission Denied: You do not have permission to view inquiries. Please contact your administrator.';
+        }
         const target = company_name || customer_name || '';
         const caller = await resolveCallerContext(senderPhone);
         const res = await executeGetDealIds({ company_name: target }, caller);
