@@ -17159,7 +17159,7 @@ async function handleCatalogFlow(rawText, senderPhone, options = {}) {
           if (Array.isArray(inq.deal_items) && inq.deal_items.length > 0) {
             const firstItem = inq.deal_items[0];
             if (firstItem.rate) rateStr = `₹${Number(firstItem.rate).toLocaleString('en-IN')}${firstItem.unit ? `/${firstItem.unit}` : '/MT'}`;
-            if (firstItem.preferred_make || firstItem.make) makeStr = firstItem.preferred_make || firstItem.make;
+            if (firstItem.brand || firstItem.preferred_make || firstItem.make) makeStr = firstItem.brand || firstItem.preferred_make || firstItem.make;
           }
           return {
             index: startIdx + idx + 1,

@@ -2149,8 +2149,8 @@ function formatOpenDealsListPrompt(customerName, openDeals) {
           if (it.rate) {
             rateStr = `₹${Number(it.rate).toLocaleString('en-IN')}/${unit}`;
           }
-          if (it.preferred_make || it.make) {
-            makeStr = it.preferred_make || it.make;
+          if (it.brand || it.preferred_make || it.make) {
+            makeStr = it.brand || it.preferred_make || it.make;
           }
           itemsDesc = `${it.sku_text || 'Item'}${spec} (${qty} ${unit})`;
         } else {
