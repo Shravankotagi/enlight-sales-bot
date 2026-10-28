@@ -269,7 +269,7 @@ test('a procurement manager can read a report procurement number', async () => {
   assert.doesNotMatch(result.reply, /Secret Mills/);
 });
 
-test('scope keeps a stamped inquiry with its owner and opens the unassigned pool to a manager', () => {
+test('scope keeps a stamped inquiry with its owner and hides an unstamped inquiry', () => {
   const employees = [person, report, manager, salesperson];
   const personScope = scopeFromEmployees(person, employees);
   const managerScope = scopeFromEmployees(manager, employees);
@@ -281,9 +281,9 @@ test('scope keeps a stamped inquiry with its owner and opens the unassigned pool
     customer_name: 'Secret Mills',
   });
   assert.equal(matchesProcurementScope(ownedByReport, personScope), false);
-  assert.equal(matchesProcurementScope(unassigned, personScope), true);
+  assert.equal(matchesProcurementScope(unassigned, personScope), false);
   assert.equal(matchesProcurementScope(ownedByReport, managerScope), true);
-  assert.equal(matchesProcurementScope(unassigned, managerScope), true);
+  assert.equal(matchesProcurementScope(unassigned, managerScope), false);
   const line = formatInquiryLine(ownedByReport, 'Ravi');
   assert.doesNotMatch(line, /Secret Mills/);
   assert.doesNotMatch(listReply('Pending', [ownedByReport], employees), /Secret Mills/);

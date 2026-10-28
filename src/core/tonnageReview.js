@@ -43,6 +43,35 @@ function weightMt(item) {
   return roundMt(quantity);
 }
 
+function applyCommercialLines(beforeLines, nextItems) {
+  const before = Array.isArray(beforeLines) ? beforeLines : [];
+  return (nextItems || []).map((item, index) => {
+    const prior = before[index] || {};
+    const nextUnit = item?.unit || item?.original_unit || prior.original_unit || prior.unit || 'MT';
+    const nextQty = Number(item?.quantity ?? item?.original_quantity ?? prior.quantity) || 0;
+    const unitKey = String(nextUnit).toLowerCase();
+    const line = {
+      ...prior,
+      sku_text: item?.sku_text || prior.sku_text || 'Material',
+      description: item?.sku_text || prior.description || prior.sku_text || 'Material',
+      dimensions: item?.dimensions ?? prior.dimensions,
+      spec: item?.dimensions ?? prior.spec,
+      quantity: nextQty,
+      unit: nextUnit,
+      original_quantity: nextQty,
+      original_unit: nextUnit,
+      rate: item?.rate != null && item?.rate !== '' ? Number(item.rate) || 0 : prior.rate,
+      amount: item?.amount != null && item?.amount !== '' ? Number(item.amount) || 0 : prior.amount,
+    };
+    if (!PIECE_UNITS.has(unitKey)) {
+      delete line.is_manual_mt;
+      delete line.converted_mt;
+      delete line.weight_mt;
+    }
+    return line;
+  });
+}
+
 function lineSnapshot(item) {
   return {
     sku_text: String(item?.sku_text || item?.description || 'Material'),
@@ -131,4 +160,5 @@ module.exports = {
   tonnageReviewPatch,
   commitInquiryUpdate,
   weightMt,
+  applyCommercialLines,
 };
