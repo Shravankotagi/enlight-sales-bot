@@ -17,6 +17,16 @@ test('catalogFlow blocks menu preemption when permission is revoked', async (t) 
   // 1. Revoke inquiries.manage
   setMockPermissions(TEST_PHONE, builtinFor('salesperson', { 'inquiries.manage': false }));
 
+  const filteredCatalog = await h.catalogFlow.catalogForPhone(TEST_PHONE);
+  const menuTitles = filteredCatalog.sections
+    .flatMap((section) => section.rows.map((row) => row.title))
+    .join('\n');
+  assert.doesNotMatch(menuTitles, /Log New Inquiry/i);
+  assert.equal(
+    filteredCatalog.items.some((item) => item.action === 'LOG_INQUIRY'),
+    false,
+  );
+
   const resInq = await h.catalogFlow.handleCatalogFlow('menu_1', TEST_PHONE);
   assert.equal(resInq.handled, true);
   assert.match(resInq.reply, /do not have permission to log inquiries/i);
@@ -69,6 +79,11 @@ test('OCR document intake blocks when permissions are revoked', async (t) => {
   const ocrOrder = await h.catalogFlow.handleOrderDocumentOcr(dummyBuffer, 'image/jpeg', TEST_PHONE);
   assert.equal(ocrOrder.handled, true);
   assert.match(ocrOrder.reply, /do not have permission to log orders/i);
+
+  setMockPermissions(TEST_PHONE, builtinFor('salesperson', { 'orders.create': true, 'orders.attach_po': false }));
+  const ocrOrderNoAttach = await h.catalogFlow.handleOrderDocumentOcr(dummyBuffer, 'image/jpeg', TEST_PHONE);
+  assert.equal(ocrOrderNoAttach.handled, true);
+  assert.match(ocrOrderNoAttach.reply, /do not have permission to attach PO documents/i);
 });
 
 test('Option 5 Add Price blocks when pricing permissions are absent', async (t) => {

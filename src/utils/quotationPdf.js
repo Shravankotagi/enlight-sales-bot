@@ -299,6 +299,7 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
               {
                 sku_text: details.productType || 'HR - COIL / SHEET',
                 dimensions: details.dimensions || details.thickness || undefined,
+                brand: details.preferred_make || details.brand || details.make || undefined,
                 quantity: Number(details.quantityTons || details.quantity || 0),
                 unit: 'MT',
                 rate: Number(details.unitPrice || details.rate || 0),
@@ -328,6 +329,7 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
         return {
           sku_text: (item.sku_text || item.description || item.productType || 'HR - COIL / SHEET').toUpperCase(),
           dimensions: item.dimensions || undefined,
+          brand: item.brand || item.make || item.preferred_make || details.preferred_make || undefined,
           hsn_code: item.hsn_code || item.hsn || detectHsnCode(item.sku_text || item.description || '', item.dimensions),
           quantity: qty,
           unit: calc.unit || 'MT',
@@ -363,17 +365,18 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
         doc.rect(leftX, headerY, contentWidth, 24).fill('#525E6F');
         doc.fillColor('#FFFFFF').font(fontBold).fontSize(7.5);
         doc.text('#', 40, headerY + 8, { width: 18, align: 'center', lineBreak: false });
-        doc.text('Item & Description', 62, headerY + 8, { width: 175, lineBreak: false });
-        doc.text('HSN/SAC', 240, headerY + 8, { width: 46, align: 'center', lineBreak: false });
-        doc.text('Qty', 289, headerY + 8, { width: 48, align: 'center', lineBreak: false });
-        doc.text('Rate', 340, headerY + 8, { width: 48, align: 'right', lineBreak: false });
+        doc.text('Item & Description', 60, headerY + 8, { width: 135, lineBreak: false });
+        doc.text('HSN/SAC', 198, headerY + 8, { width: 44, align: 'center', lineBreak: false });
+        doc.text('Brand/Make', 245, headerY + 8, { width: 44, align: 'center', lineBreak: false });
+        doc.text('Qty', 292, headerY + 8, { width: 46, align: 'center', lineBreak: false });
+        doc.text('Rate', 340, headerY + 8, { width: 46, align: 'right', lineBreak: false });
         if (isInterState) {
-          doc.text('IGST (18%)', 392, headerY + 8, { width: 100, align: 'right', lineBreak: false });
+          doc.text('IGST (18%)', 388, headerY + 8, { width: 104, align: 'right', lineBreak: false });
         } else {
-          doc.text('CGST (9%)', 392, headerY + 8, { width: 48, align: 'right', lineBreak: false });
-          doc.text('SGST (9%)', 444, headerY + 8, { width: 48, align: 'right', lineBreak: false });
+          doc.text('CGST (9%)', 388, headerY + 8, { width: 50, align: 'right', lineBreak: false });
+          doc.text('SGST (9%)', 441, headerY + 8, { width: 50, align: 'right', lineBreak: false });
         }
-        doc.text('Amount', 496, headerY + 8, { width: 51.28, align: 'right', lineBreak: false });
+        doc.text('Amount', 494, headerY + 8, { width: 53.28, align: 'right', lineBreak: false });
         return headerY + 24;
       };
 
@@ -381,9 +384,9 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
       let rowY = drawItemHeader(tableY);
       lineItems.forEach((item, idx) => {
         doc.font(fontBold).fontSize(8);
-        const skuH = doc.heightOfString(item.sku_text, { width: 175 });
+        const skuH = doc.heightOfString(item.sku_text, { width: 135 });
         const dimH = item.dimensions
-          ? doc.font(fontRegular).fontSize(7).heightOfString(item.dimensions, { width: 175 }) + 3
+          ? doc.font(fontRegular).fontSize(7).heightOfString(item.dimensions, { width: 135 }) + 3
           : 0;
         const rowH = Math.max(32, skuH + dimH + 16);
 
@@ -401,25 +404,31 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
         });
 
         // SKU title
-        doc.fillColor('#0F172A').font(fontBold).fontSize(8).text(item.sku_text, 62, rowY + 8, { width: 175 });
+        doc.fillColor('#0F172A').font(fontBold).fontSize(8).text(item.sku_text, 60, rowY + 8, { width: 135 });
 
         // Dimensions
         if (item.dimensions) {
-          doc.fillColor('#64748B').font(fontRegular).fontSize(7).text(item.dimensions, 62, rowY + 8 + skuH + 2, { width: 175 });
+          doc.fillColor('#64748B').font(fontRegular).fontSize(7).text(item.dimensions, 60, rowY + 8 + skuH + 2, { width: 135 });
         }
 
         // HSN/SAC
-        doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(item.hsn_code, 240, rowY + 8, {
-          width: 46,
+        doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(item.hsn_code, 198, rowY + 8, {
+          width: 44,
+          align: 'center',
+        });
+
+        // Brand / Make column
+        doc.fillColor('#0F172A').font(fontBold).fontSize(7).text(item.brand || '-', 245, rowY + 8, {
+          width: 44,
           align: 'center',
         });
 
         // Qty
         doc.fillColor('#0F172A').font(fontRegular).fontSize(7.5).text(
           item.qty_mt_label,
-          289,
+          292,
           rowY + 8,
-          { width: 48, align: 'center' }
+          { width: 46, align: 'center' }
         );
 
         // Rate
@@ -427,41 +436,41 @@ function generateQuotationPdfBuffer(qRefNum, customerName, details = {}) {
           formatIndianCurrency(item.rate, true),
           340,
           rowY + 8,
-          { width: 48, align: 'right' }
+          { width: 46, align: 'right' }
         );
 
         if (isInterState) {
           // IGST (18%)
           doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(
             formatIndianCurrency(item.igst_amount, true),
-            392,
+            388,
             rowY + 8,
-            { width: 100, align: 'right' }
+            { width: 104, align: 'right' }
           );
         } else {
           // CGST (9%)
           doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(
             formatIndianCurrency(item.cgst_amount, true),
-            392,
+            388,
             rowY + 8,
-            { width: 48, align: 'right' }
+            { width: 50, align: 'right' }
           );
 
           // SGST (9%)
           doc.fillColor('#475569').font(fontRegular).fontSize(7.5).text(
             formatIndianCurrency(item.sgst_amount, true),
-            444,
+            441,
             rowY + 8,
-            { width: 48, align: 'right' }
+            { width: 50, align: 'right' }
           );
         }
 
         // Amount (Base + 18% GST)
         doc.fillColor('#0F172A').font(fontBold).fontSize(7.5).text(
           formatIndianCurrency(item.final_amount, true),
-          496,
+          494,
           rowY + 8,
-          { width: 51.28, align: 'right' }
+          { width: 53.28, align: 'right' }
         );
 
         // Divider
