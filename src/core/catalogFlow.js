@@ -6545,6 +6545,13 @@ function extractPendingNewProductSeed(draft, invalidProductName) {
   };
 }
 
+function cleanProductField(value) {
+  return String(value || '')
+    .replace(/^\*+|\*+$/g, '')
+    .replace(/^[\s:=-]+|[\s:=-]+$/g, '')
+    .trim();
+}
+
 function mergePartialAddProductInput(pendingProd, rawText) {
   const next = {
     original_name: String(pendingProd?.original_name || pendingProd?.product_name || '').trim(),
@@ -6552,9 +6559,61 @@ function mergePartialAddProductInput(pendingProd, rawText) {
     dimensions: String(pendingProd?.dimensions || '').trim(),
     hsn_code: String(pendingProd?.hsn_code || '').trim(),
   };
-  let remaining = String(rawText || '').trim();
-  if (!remaining) return next;
+  const raw = String(rawText || '').trim();
+  if (!raw) return next;
 
+  const isDimensionLike = (str) =>
+    /(?:\d+(?:\.\d+)?\s*[xX*×]\s*\d+|\b\d+(?:\.\d+)?\s*(?:mm|cm|m|inch|in|ft|thk|gauge|swg|nb|od|sch|schedule|id|wt)\b|\b(?:is\s*\d+|grade\s*[a-z0-9-]+|astm\s*[a-z0-9-]+|fe\s*\d+)\b|^\d)/i.test(
+      str,
+    );
+
+  const rememberDimension = (value) => {
+    const piece = cleanProductField(value);
+    if (!piece) return;
+    const have = next.dimensions.toLowerCase();
+    if (have && (have.includes(piece.toLowerCase()) || piece.toLowerCase().includes(have))) {
+      if (piece.length > next.dimensions.length) next.dimensions = piece;
+      return;
+    }
+    next.dimensions = next.dimensions ? `${next.dimensions}, ${piece}` : piece;
+  };
+
+  const lines = raw.split(/\r?\n/).map((line) => line.replace(/^\s*\*+\s*/, '').trim()).filter(Boolean);
+  let sawLabeled = false;
+  const unlabeled = [];
+
+  for (const line of lines) {
+    const hsn = line.match(/^(?:hsn\s*\/?\s*sac(?:\s*code)?|hsn(?:\s*code)?|sac(?:\s*code)?)\s*\**\s*[:=-]\s*(.+)$/i);
+    if (hsn) {
+      const code = hsn[1].match(/([0-9]{4,8})/);
+      if (code) next.hsn_code = code[1];
+      sawLabeled = true;
+      continue;
+    }
+    const spec = line.match(/^(?:specifications?|specs?(?:\s*\/\s*dimensions?)?|dimensions?|size|thickness)\s*\**\s*[:=-]\s*(.+)$/i);
+    if (spec) {
+      next.dimensions = cleanProductField(spec[1]);
+      sawLabeled = true;
+      continue;
+    }
+    const name = line.match(/^(?:product\s*name|item\s*name|product|name)\s*\**\s*[:=-]\s*(.+)$/i);
+    if (name) {
+      next.product_name = cleanProductField(name[1]);
+      sawLabeled = true;
+      continue;
+    }
+    unlabeled.push(line);
+  }
+
+  if (sawLabeled) {
+    unlabeled.forEach((seg) => {
+      if (isDimensionLike(seg)) rememberDimension(seg);
+    });
+    if (!next.original_name && next.product_name) next.original_name = next.product_name;
+    return next;
+  }
+
+  let remaining = raw;
   const hsnLabeled = remaining.match(
     /\b(?:hsn\s*\/?\s*sac(?:\s*code)?|hsn(?:\s*code)?|sac(?:\s*code)?)\s*[:=-]?\s*([0-9]{4,8})\b/i,
   );
@@ -6563,80 +6622,32 @@ function mergePartialAddProductInput(pendingProd, rawText) {
     remaining = remaining.replace(hsnLabeled[0], ' ');
   }
 
-  const specLabeled = remaining.match(
-    /\b(?:specs?\s*\/?\s*dimensions?|specs?|dimensions?|size|thickness)\s*[:=-]\s*([^,\n|;]+)/i,
-  );
-  if (specLabeled) {
-    next.dimensions = specLabeled[1].trim();
-    remaining = remaining.replace(specLabeled[0], ' ');
-  }
-
-  const nameLabeled = remaining.match(
-    /\b(?:product\s*name|name|product)\s*[:=-]\s*([^,\n|;]+)/i,
-  );
-  if (nameLabeled) {
-    next.product_name = nameLabeled[1].trim();
-    remaining = remaining.replace(nameLabeled[0], ' ');
-  }
-
-  if (!hsnLabeled) {
-    const bareHsn = remaining.match(/(?:^|[\s,;|])([0-9]{4,8})(?=$|[\s,;|])/);
-    if (bareHsn) {
-      next.hsn_code = bareHsn[1].trim();
-      remaining = remaining.replace(bareHsn[1], ' ');
-    }
-  }
-
   const segments = remaining
-    .split(/[,;|\n]+/)
-    .map((s) => s.replace(/^[\s:=-]+|[\s:=-]+$/g, '').trim())
+    .split(/[;\n|]+/)
+    .map((s) => cleanProductField(s))
     .filter(Boolean);
-
-  const isDimensionLike = (str) =>
-    /(?:\d+(?:\.\d+)?\s*[xX*×]\s*\d+|\b\d+(?:\.\d+)?\s*(?:mm|cm|m|inch|in|ft|thk|gauge|swg|nb|od|sch|schedule|id|wt)\b|\b(?:is\s*\d+|grade\s*[a-z0-9-]+|astm\s*[a-z0-9-]+|fe\s*\d+)\b|^\d)/i.test(
-      str,
-    );
 
   segments.forEach((seg, idx) => {
     const inlineNameAndSpec = seg.match(
       /^([A-Za-z][A-Za-z\s/-]{1,40}?)\s+(\d+(?:\.\d+)?\s*(?:[xX*×]\s*\d+(?:\.\d+)?(?:\s*[xX*×]\s*\d+(?:\.\d+)?)?|\s*(?:mm|cm|m|inch|in|ft|thk|gauge|swg|nb|od)\b).*)$/i,
     );
-    if (inlineNameAndSpec && !specLabeled && !nameLabeled) {
+    if (inlineNameAndSpec && !next.product_name) {
       next.product_name = inlineNameAndSpec[1].trim();
-      next.dimensions = inlineNameAndSpec[2].trim();
+      rememberDimension(inlineNameAndSpec[2]);
       return;
     }
-
     if (isDimensionLike(seg)) {
-      if (!specLabeled) next.dimensions = seg;
+      rememberDimension(seg);
       return;
     }
-
-    if (segments.length >= 2 && idx === 0 && !nameLabeled) {
+    if (segments.length >= 2 && idx === 0 && !next.product_name) {
       next.product_name = seg;
       return;
     }
-    if (segments.length >= 2 && idx >= 1 && !specLabeled) {
-      next.dimensions = seg;
-      return;
-    }
-
-    if (!next.product_name) {
-      next.product_name = seg;
-    } else if (
-      /^(?:standard|custom|commercial|regular|normal|mill\s*edge|slit\s*edge|trimmed|untrimmed|any|na|n\/a)$/i.test(
-        seg,
-      )
-    ) {
-      next.dimensions = seg;
-    } else {
-      next.product_name = seg;
-    }
+    if (!next.product_name) next.product_name = seg;
   });
 
-  if (!next.original_name && next.product_name) {
-    next.original_name = next.product_name;
-  }
+  if (!next.original_name && next.product_name) next.original_name = next.product_name;
   return next;
 }
 
@@ -19014,6 +19025,7 @@ module.exports = {
   isDiscardOrCancelIntent,
   executeAction,
   handleCatalogFlow,
+  mergePartialAddProductInput,
   isOperationalQuery,
   isSalesOsDomainQuery,
   isOutOfScopeGenericPrompt,
