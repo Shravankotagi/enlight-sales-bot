@@ -688,6 +688,12 @@ function healthLabel(churn) {
   return 'Active';
 }
 
+function resolveCustomerSegment(storedSegment, totalTonnage, ltv, totalOrders, inquiriesCount = 0, visitsCount = 0) {
+  const explicit = String(storedSegment || '').toLowerCase().trim();
+  if (explicit === 'key_account' || explicit === 'growth' || explicit === 'new') return explicit;
+  return deriveCustomerSegment(totalTonnage, ltv, totalOrders, inquiriesCount, visitsCount);
+}
+
 function deriveCustomerSegment(totalTonnage, ltv, totalOrders, inquiriesCount = 0, visitsCount = 0) {
   if (totalTonnage >= 100 || ltv >= 5000000 || (totalOrders >= 4 && (ltv >= 2000000 || totalTonnage >= 30))) {
     return 'key_account';
@@ -3301,15 +3307,14 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
     let lifetimeWonVal = wonDeals.reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
     let totalTonnage = wonDeals.reduce((sum, d) => sum + getDealTonnage(d), 0);
 
-    let segment = 'new';
-    if (profile.segment) {
-      const s = String(profile.segment).toLowerCase().trim();
-      if (s.includes('key')) segment = 'key_account';
-      else if (s.includes('growth')) segment = 'growth';
-      else segment = 'new';
-    } else {
-      segment = deriveCustomerSegment(totalTonnage, lifetimeWonVal, wonDeals.length, inquiries.length, visits.length);
-    }
+    const segment = resolveCustomerSegment(
+      profile.segment,
+      totalTonnage,
+      lifetimeWonVal,
+      wonDeals.length,
+      inquiries.length,
+      visits.length,
+    );
 
     return {
       data: {
@@ -3426,15 +3431,14 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
     const tonnage = wonDeals.reduce((sum, d) => sum + getDealTonnage(d), 0);
     const totalOrders = wonDeals.length;
 
-    let segRaw = 'new';
-    if (c.segment) {
-      const s = String(c.segment).toLowerCase().trim();
-      if (s.includes('key')) segRaw = 'key_account';
-      else if (s.includes('growth')) segRaw = 'growth';
-      else segRaw = 'new';
-    } else {
-      segRaw = deriveCustomerSegment(tonnage, ltv, totalOrders, custInqs.length, custVisits.length);
-    }
+    const segRaw = resolveCustomerSegment(
+      c.segment,
+      tonnage,
+      ltv,
+      totalOrders,
+      custInqs.length,
+      custVisits.length,
+    );
 
     const segLabel = segRaw === 'key_account' ? 'Key Account' : (segRaw === 'growth' ? 'Growth' : 'New');
     const latestWon = wonDeals
@@ -4437,6 +4441,7 @@ module.exports = {
   parseVisitRemarks,
   categorizeProductFamily,
   deriveCustomerSegment,
+  resolveCustomerSegment,
   customersMatch,
   dashboardChurnRisk,
   normalizeDealStage,
