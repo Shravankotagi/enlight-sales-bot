@@ -534,6 +534,35 @@ function basePriceInquiryBlock(inquiry, employees, savedRows) {
   return [basePriceHeader(inquiry, employees), ...lines].join('\n\n');
 }
 
+function lineBaseAmount(line, saved) {
+  const price = Number(saved?.procurement_base_price_per_mt);
+  if (!saved || saved.line_status === 'cannot_price' || !Number.isFinite(price) || price <= 0) return null;
+  const { convertLineItemToMt } = require('../utils/pricingEngine');
+  const mt = Number(convertLineItemToMt(line));
+  const weight = Number.isFinite(mt) && mt > 0 ? mt : 0;
+  return Math.round(price * weight * 100) / 100;
+}
+
+function basePriceConfirmationBlock(inquiry, employees, savedRows) {
+  const { formatMoneyValue } = require('../utils/pricingEngine');
+  const saved = (savedRows || []).filter((row) => !row.inquiry_id || row.inquiry_id === inquiry.id);
+  const lines = sourceLines(inquiry);
+  let subtotal = 0;
+  const offers = lines.map((line, index) => {
+    const latest = latestSaved(saved, line.line_key);
+    const amount = lineBaseAmount(line, latest);
+    const offer = lineOffer(line, latest, index);
+    if (amount == null) return offer;
+    subtotal += amount;
+    return `${offer}\nAmount: ₹${formatMoneyValue(amount)}`;
+  });
+  return [
+    basePriceHeader(inquiry, employees),
+    ...offers,
+    `Subtotal: ₹${formatMoneyValue(subtotal)}`,
+  ].join('\n\n');
+}
+
 async function loadSavedLines(supabase, inquiryIds) {
   const ids = (inquiryIds || []).filter(Boolean);
   if (!ids.length) return [];
@@ -1057,7 +1086,7 @@ async function previewBasePrice(inquiry, employees, existing, pairs, phone, empl
   );
   return {
     handled: true,
-    reply: `*Save this base price?*\n\n${basePriceInquiryBlock({ ...inquiry, pricing_status: status }, employees, savedRows)}\n\nSave or Cancel.`,
+    reply: `*Save this base price?*\n\n${basePriceConfirmationBlock({ ...inquiry, pricing_status: status }, employees, savedRows)}\n\nSave or Cancel.`,
     interactiveType: 'buttons',
     interactiveButtons: BASE_PRICE_BUTTONS,
   };
