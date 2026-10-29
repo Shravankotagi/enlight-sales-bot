@@ -7856,39 +7856,12 @@ async function fetchEditableRecordsForModule(action, senderPhone, { customerFilt
   }
 
   if (action === 'UPDATE_ORDER') {
-    const [dealsRes, customersRes] = await Promise.all([
-      supabase
-        .from('deals')
-        .select('id, inquiry_id, customer_name, customer_phone, po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, po_confirmed_at, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)')
-        .eq('stage', 'won')
-        .order('won_at', { ascending: false, nullsFirst: false })
-        .limit(500),
-      supabase
-        .from('recurring_customers')
-        .select('customer_name, assigned_salesperson_phone')
-        .eq('is_active', true)
-    ]);
-
-    const customerOwnerMap = new Map();
-    customersRes.data?.forEach(c => {
-      if (c.customer_name && c.assigned_salesperson_phone) {
-        customerOwnerMap.set(c.customer_name.trim().toLowerCase(), c.assigned_salesperson_phone);
-      }
+    const dealSelect = 'id, inquiry_id, customer_name, customer_phone, po_number, reference_po_number, generated_po_number, po_source, po_status, po_generated_at, po_confirmed_at, po_date, stage, delivery_location, payment_terms, total_amount, won_at, created_at, salesperson_phone, deal_items(id, sku_text, grade, dimensions, quantity, unit, rate, amount)';
+    let scopedDeals = await dealsForSalesScope(supabase, scope, senderPhone, dealSelect, {
+      stage: 'won',
+      orderBy: 'won_at',
+      exactCustomerOwner: true,
     });
-
-    const allDeals = dealsRes.data || [];
-
-    const filterByScope = (items) => {
-      if (scope.isAdmin || scope.phones === null) return items || [];
-      return (items || []).filter(item => {
-        const assignedOwnerPhone = getAssignedPhoneFromCustomerMap(item.customer_name, customerOwnerMap);
-        const effectivePhone = assignedOwnerPhone || item.salesperson_phone;
-        if (!effectivePhone) return false;
-        return isPhoneInScope(effectivePhone, targetPhones);
-      });
-    };
-
-    let scopedDeals = filterByScope(allDeals);
 
     if (cleanCustFilter) {
       scopedDeals = scopedDeals.filter(d => isCustomerMatch(cleanCustFilter, null, d.customer_name, d.customer_phone));

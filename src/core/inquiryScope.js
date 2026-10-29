@@ -70,6 +70,27 @@ function ownerPhoneFor(customerName, ownerMap) {
   return '';
 }
 
+function exactOwnerPhone(customerName, ownerMap) {
+  if (!customerName || !ownerMap || !ownerMap.size) return '';
+  const clean = String(customerName).trim().toLowerCase();
+  if (ownerMap.has(clean)) return ownerMap.get(clean);
+  const stripped = strippedName(clean);
+  if (!stripped) return '';
+  for (const [name, phone] of ownerMap.entries()) {
+    if (strippedName(name) === stripped) return phone;
+  }
+  return '';
+}
+
+function orderInSalesScope(record, scopePhones, ownerMap) {
+  if (scopePhones == null) return true;
+  if (!Array.isArray(scopePhones) || scopePhones.length === 0) return false;
+  const phones = [record?.salesperson_phone, record?.sender_phone];
+  if (phones.some((phone) => phone && isPhoneInScope(phone, scopePhones))) return true;
+  const owner = exactOwnerPhone(customerLabel(record), ownerMap);
+  return Boolean(owner && isPhoneInScope(owner, scopePhones));
+}
+
 async function loadCustomerOwnerMap(supabase) {
   const map = new Map();
   if (!supabase?.from) return map;
@@ -187,10 +208,12 @@ async function inquiriesForSalesScope(supabase, scope, senderPhone, select, opti
   return scoped.filter(isDashboardInquiry);
 }
 
-async function dealsForSalesScope(supabase, scope, senderPhone, select) {
+async function dealsForSalesScope(supabase, scope, senderPhone, select, options = {}) {
   const suffixes = scopeSuffixes(scope, senderPhone);
   if (suffixes && suffixes.length === 0) return [];
-  let query = supabase.from('deals').select(select).order('created_at', { ascending: false });
+  const orderBy = options.orderBy || 'created_at';
+  let query = supabase.from('deals').select(select).order(orderBy, { ascending: false, nullsFirst: false });
+  if (options.stage) query = query.eq('stage', options.stage);
   if (suffixes) query = query.or(phoneOrClause(suffixes, ['salesperson_phone']));
   const { data } = await query.limit(500);
   const ownerMap = await loadCustomerOwnerMap(supabase);
@@ -205,23 +228,30 @@ async function dealsForSalesScope(supabase, scope, senderPhone, select) {
       .map(safeName)
       .filter((name) => name.length >= 3)
       .slice(0, 20)
-      .map((name) => `customer_name.ilike.%${name}%`)
+      .map((name) => options.exactCustomerOwner
+        ? `customer_name.ilike.${name}`
+        : `customer_name.ilike.%${name}%`)
       .join(',');
     if (clause) {
-      const { data: extra } = await supabase
+      let extraQuery = supabase
         .from('deals')
         .select(select)
         .or(clause)
-        .order('created_at', { ascending: false })
-        .limit(200);
+        .order(orderBy, { ascending: false, nullsFirst: false });
+      if (options.stage) extraQuery = extraQuery.eq('stage', options.stage);
+      const { data: extra } = await extraQuery.limit(200);
       const seen = new Set(rows.map((row) => row.id));
       for (const row of extra || []) {
         if (!seen.has(row.id)) rows.push(row);
       }
     }
   }
-  if (scopePhones == null) return rows;
-  return rows.filter((row) => recordInSalesScope(row, scopePhones, ownerMap));
+  const staged = options.stage ? rows.filter((row) => row.stage === options.stage) : rows;
+  if (scopePhones == null) return staged;
+  const allow = options.exactCustomerOwner
+    ? (row) => orderInSalesScope(row, scopePhones, ownerMap)
+    : (row) => recordInSalesScope(row, scopePhones, ownerMap);
+  return staged.filter(allow);
 }
 
 function dashboardInquiryCode(id) {
@@ -319,6 +349,7 @@ module.exports = {
   ownerPhoneFor,
   loadCustomerOwnerMap,
   recordInSalesScope,
+  orderInSalesScope,
   inquiriesForSalesScope,
   dealsForSalesScope,
   readInquirySelect,
