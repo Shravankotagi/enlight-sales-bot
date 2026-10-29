@@ -4347,9 +4347,9 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
           }
         }
       } else if (key === 'line_items' && Array.isArray(val)) {
-        if (val.length > 0) {
+          if (val.length > 0) {
           const existingList = Array.isArray(baseDraft.line_items) ? baseDraft.line_items : [];
-          merged.line_items = val.map((item, idx) => {
+          merged.line_items = restoreStarredDimensions(userInput, val.map((item, idx) => {
             const prevItem = existingList[idx] || (existingList.length === 1 ? existingList[0] : null);
             const qty = parseNumericValue(item.quantity) || (prevItem ? parseNumericValue(prevItem.quantity) || 0 : 0);
             const rawUnit = item.unit || prevItem?.unit || 'MT';
@@ -4386,7 +4386,7 @@ function mergeSingleDraft(action, baseDraft, newExtracted, userInput = '') {
               rate: rate || '',
               amount: amt || '',
             };
-          });
+          }));
 
           if (!merged.product_description || merged.product_description.length < 5) {
             merged.product_description = merged.line_items.map(it => `${it.sku_text || it.description}${it.quantity ? ` - ${it.quantity} ${it.unit || 'MT'}` : ''}`).join(', ');
@@ -6543,6 +6543,51 @@ function extractPendingNewProductSeed(draft, invalidProductName) {
     dimensions: '',
     hsn_code: '',
   };
+}
+
+function starredSpecsByProduct(text) {
+  const pairs = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const match = line.match(/^(.*?)\s*[-–:]\s*(\d+(?:\.\d+)?(?:\s*\*\s*\d+(?:\.\d+)?){1,3})/);
+    if (!match) continue;
+    const name = match[1].replace(/^[\s,*]+|[\s,*]+$/g, '').trim();
+    const spec = match[2].replace(/\s+/g, '');
+    if (name && spec.includes('*')) pairs.push({ name: name.toLowerCase(), spec });
+  }
+  return pairs;
+}
+
+function restoreStarredDimensions(userInput, lineItems) {
+  const pairs = starredSpecsByProduct(userInput);
+  if (!pairs.length || !Array.isArray(lineItems)) return lineItems;
+  const used = new Set();
+  return lineItems.map((item) => {
+    const current = String(item?.dimensions || item?.spec || '');
+    if (/[x×]/i.test(current) && !current.includes('*')) return item;
+    const label = String(item?.sku_text || item?.description || '').toLowerCase();
+    let pair = null;
+    for (let i = 0; i < pairs.length; i++) {
+      if (used.has(i)) continue;
+      if (label && (label.includes(pairs[i].name) || pairs[i].name.includes(label))) {
+        pair = pairs[i];
+        used.add(i);
+        break;
+      }
+    }
+    if (!pair) {
+      const digits = current.replace(/\D/g, '');
+      for (let i = 0; i < pairs.length; i++) {
+        if (used.has(i)) continue;
+        if (digits && pairs[i].spec.replace(/\D/g, '') === digits) {
+          pair = pairs[i];
+          used.add(i);
+          break;
+        }
+      }
+    }
+    if (!pair || current.replace(/\s+/g, '') === pair.spec) return item;
+    return { ...item, dimensions: pair.spec, spec: pair.spec };
+  });
 }
 
 function cleanProductField(value) {
@@ -18999,6 +19044,7 @@ module.exports = {
   executeAction,
   handleCatalogFlow,
   mergePartialAddProductInput,
+  restoreStarredDimensions,
   isOperationalQuery,
   isSalesOsDomainQuery,
   isOutOfScopeGenericPrompt,
