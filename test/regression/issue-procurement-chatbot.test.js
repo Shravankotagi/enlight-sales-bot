@@ -302,6 +302,8 @@ test('a base price of 500 makes the line price ready and a blank base makes it u
   const ready = chat(person, [owned], 'procurement|base|PR-10041', { inquiry_line_pricing: existing });
   const preview = await ready.handle('500');
   assert.match(preview.reply, /Save this base price/);
+  assert.match(preview.reply, /Amount: ₹5,000/);
+  assert.match(preview.reply, /Subtotal: ₹5,000/);
   assert.deepEqual(preview.interactiveButtons.map((button) => button.id), ['btn_price_save', 'btn_confirm_cancel']);
   assert.equal(ready.db.store.inquiries[0].pricing_status, 'awaiting_price');
   const priced = await ready.handle('btn_price_save');
@@ -318,6 +320,8 @@ test('a base price of 500 makes the line price ready and a blank base makes it u
   });
   const unavailablePreview = await blank.handle('unavailable: not in stock');
   assert.match(unavailablePreview.reply, /Save this base price/);
+  assert.match(unavailablePreview.reply, /Subtotal: ₹0/);
+  assert.doesNotMatch(unavailablePreview.reply, /Amount:/);
   assert.equal(blank.db.store.inquiries[0].pricing_status, 'awaiting_price');
   const unavailable = await blank.handle('yes');
   assert.match(unavailable.reply, /Unavailable/);
