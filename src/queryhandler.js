@@ -9,6 +9,27 @@ function getSupabase() {
   return supabase;
 }
 
+const { denyView, denyAnyView } = require('./utils/permissions');
+
+function scopePhone(scopeOrPhone) {
+  if (scopeOrPhone == null) return '';
+  if (typeof scopeOrPhone === 'string') return scopeOrPhone;
+  return (
+    scopeOrPhone.employee?.phone ||
+    scopeOrPhone.phone ||
+    (Array.isArray(scopeOrPhone.phones) ? scopeOrPhone.phones[0] : '') ||
+    ''
+  );
+}
+
+async function blockView(scopeOrPhone, key) {
+  return denyView(scopePhone(scopeOrPhone), key);
+}
+
+async function blockAnyView(scopeOrPhone, keys) {
+  return denyAnyView(scopePhone(scopeOrPhone), keys);
+}
+
 // Operational action logging patterns (inquiries, deals, visits, payments, complaints, onboarding)
 function checkOperationalAction(lowerText) {
   if (!lowerText) return false;
@@ -575,6 +596,8 @@ function applySalespersonFilter(
 // ── QUERY HANDLERS ────────────────────────────────────────────────────────
 
 async function getSalesThisMonth(scopeOrPhone, text = '') {
+  const denied = await blockView(scopeOrPhone, 'orders.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const { start, end, monthName, year } = getMonthRangeFromQuery(text);
@@ -650,6 +673,8 @@ async function getSalesThisMonth(scopeOrPhone, text = '') {
 
 
 async function getDealIdsForCompany(scopeOrPhone, text = '', explicitCustomer = null) {
+  const denied = await blockView(scopeOrPhone, 'inquiries.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const scope =
@@ -876,6 +901,8 @@ Return ONLY the company name or "NONE":`;
 }
 
 async function getPendingDeals(scopeOrPhone) {
+  const denied = await blockAnyView(scopeOrPhone, ['inquiries.view', 'orders.view']);
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const scope =
@@ -1023,6 +1050,8 @@ function getInquiryTonnage(inq) {
 }
 
 async function getInquiriesThisMonth(scopeOrPhone, text = '') {
+  const denied = await blockView(scopeOrPhone, 'inquiries.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const { start, end, monthName, year } = getMonthRangeFromQuery(text);
@@ -1189,6 +1218,8 @@ async function getInquiriesThisMonth(scopeOrPhone, text = '') {
 }
 
 async function getPendingInquiries(scopeOrPhone) {
+  const denied = await blockView(scopeOrPhone, 'inquiries.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const scope =
@@ -1241,6 +1272,8 @@ async function getPendingInquiries(scopeOrPhone) {
 }
 
 async function getDealsThisWeek(scopeOrPhone) {
+  const denied = await blockAnyView(scopeOrPhone, ['inquiries.view', 'orders.view']);
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const { start, end } = getWeekRange();
@@ -1538,6 +1571,8 @@ async function getKRAStatus(scopeOrPhone, text = '') {
 
 /** Won customer names + product + qty breakdown */
 async function getWonCustomers(scopeOrPhone, text = '') {
+  const denied = await blockView(scopeOrPhone, 'orders.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const { start, end, monthName, year } = getMonthRangeFromQuery(text);
@@ -1623,6 +1658,8 @@ async function getWonCustomers(scopeOrPhone, text = '') {
 
 /** Active deals with full stage + items detail */
 async function getActiveDealsDetail(scopeOrPhone) {
+  const denied = await blockAnyView(scopeOrPhone, ['inquiries.view', 'orders.view']);
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const scope =
@@ -1674,6 +1711,8 @@ async function getActiveDealsDetail(scopeOrPhone) {
 
 /** Full registered customer list */
 async function getCustomerList(scopeOrPhone) {
+  const denied = await blockView(scopeOrPhone, 'customers.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const scope =
@@ -1736,6 +1775,8 @@ async function getRateSheet() {
 
 /** Customer visits list */
 async function getVisitList(scopeOrPhone, text = '') {
+  const denied = await blockView(scopeOrPhone, 'visits.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const timeRange = getDateRangeFromQuery(text, 'recent_or_month');
@@ -1843,6 +1884,8 @@ async function getVisitList(scopeOrPhone, text = '') {
 }
 
 async function getVisitSummary(scopeOrPhone, text = '') {
+  const denied = await blockView(scopeOrPhone, 'visits.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const timeRange = getDateRangeFromQuery(text, 'recent_or_month');
@@ -2041,6 +2084,8 @@ function classifyFollowUp(visit) {
 
 /** Pending Follow-up Visits (Actionable deliverables vs scheduled check-ins & Due Date Verification) */
 async function getVisitsPendingFollowup(scopeOrPhone, text = '') {
+  const denied = await blockView(scopeOrPhone, 'visits.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const scope =
@@ -2269,6 +2314,8 @@ async function getVisitsPendingFollowup(scopeOrPhone, text = '') {
 
 /** Month-over-Month Visit Count & Outcomes Comparison */
 async function getVisitCountComparison(scopeOrPhone, text = '') {
+  const denied = await blockView(scopeOrPhone, 'visits.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const scope =
@@ -2421,6 +2468,8 @@ async function getVisitCountComparison(scopeOrPhone, text = '') {
 
 /** Inactive / Churn Risk customers (no order in 60+ days) */
 async function getInactiveCustomers(scopeOrPhone) {
+  const denied = await blockView(scopeOrPhone, 'customers.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const scope =
@@ -2532,6 +2581,8 @@ async function getInactiveCustomers(scopeOrPhone) {
 
 /** Reorder Queue (customers due for reorder) */
 async function getReorderQueue(scopeOrPhone) {
+  const denied = await blockView(scopeOrPhone, 'orders.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const scope =
@@ -2589,6 +2640,8 @@ async function getReorderQueue(scopeOrPhone) {
 
 /** Payment aging / outstanding list */
 async function getPaymentAging(scopeOrPhone) {
+  const denied = await blockView(scopeOrPhone, 'orders.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const scope =
@@ -2725,6 +2778,8 @@ async function getPaymentAging(scopeOrPhone) {
 
 /** Lost deals breakdown with reasons */
 async function getLostDeals(scopeOrPhone, text = '') {
+  const denied = await blockAnyView(scopeOrPhone, ['inquiries.view', 'orders.view']);
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const { start, end, monthName, year } = getMonthRangeFromQuery(text);
@@ -2781,6 +2836,8 @@ async function getLostDeals(scopeOrPhone, text = '') {
 }
 
 async function getCustomer360(senderPhone, text, extractedName = null) {
+  const denied = await blockView(senderPhone, 'customers.view');
+  if (denied) return denied;
   let customerName = extractedName;
   try {
     const supabase = getSupabase();
@@ -2944,6 +3001,8 @@ async function getKnowledgeBaseAnswer(senderPhone, queryText) {
 }
 
 async function getReorderQueue(senderPhone) {
+  const denied = await blockView(senderPhone, 'orders.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const phoneStr =
@@ -2989,6 +3048,8 @@ async function getReorderQueue(senderPhone) {
 }
 
 async function getChurnRadar(senderPhone) {
+  const denied = await blockView(senderPhone, 'customers.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const phoneStr =
@@ -3242,6 +3303,8 @@ Return ONLY a JSON object (no markdown, no backticks, no prose):
  * amount/value range, quantity (MT), date/month, and target salesperson.
  */
 async function getFilteredOrders(scopeOrPhone, text = '') {
+  const denied = await blockView(scopeOrPhone, 'orders.view');
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const scope =
@@ -3535,7 +3598,7 @@ async function getFilteredOrders(scopeOrPhone, text = '') {
 async function routeToHandler(category, text, scope, supabase, extra = {}) {
   const phone =
     typeof scope === 'object'
-      ? scope.phone || (scope.phones && scope.phones[0])
+      ? scope.employee?.phone || scope.phone || (scope.phones && scope.phones[0])
       : scope;
   switch (category) {
     case 'customer_360':
@@ -3571,9 +3634,9 @@ async function routeToHandler(category, text, scope, supabase, extra = {}) {
     case 'visit_summary':
       return await getVisitSummary(scope, text);
     case 'payment_summary':
-      return await getPaymentSummary(scope);
+      return await blockView(scope, 'orders.view') || await getPaymentSummary(scope);
     case 'complaint_summary':
-      return await getComplaintSummary(scope);
+      return await blockView(scope, 'complaints.view') || await getComplaintSummary(scope);
     case 'full_report':
       return await generateFullKRAReport(scope, getMonthRangeFromQuery(text));
     case 'deals_this_week':
@@ -3586,7 +3649,7 @@ async function routeToHandler(category, text, scope, supabase, extra = {}) {
     case 'pending_inquiries':
       return await getPendingInquiries(scope);
     case 'new_customers_summary':
-      return await getNewCustomerSummary(scope);
+      return await blockView(scope, 'customers.view') || await getNewCustomerSummary(scope);
     case 'won_customers':
       return await getWonCustomers(scope, text);
     case 'active_deals_detail':
@@ -3623,6 +3686,8 @@ async function routeToHandler(category, text, scope, supabase, extra = {}) {
 }
 
 async function getInquiryOrDealByCode(scopeOrPhone, text, explicitCode = null) {
+  const denied = await blockAnyView(scopeOrPhone, ['inquiries.view', 'orders.view']);
+  if (denied) return denied;
   try {
     const supabase = getSupabase();
     const codeMatch = explicitCode
@@ -3768,7 +3833,7 @@ async function handleQuery(text, senderPhone) {
   const directInqIdMatch = text.match(/#?(?:DEAL|INQ)-([A-F0-9]{4,8})\b/i);
   if (directInqIdMatch) {
     if (!(await can(senderPhone, 'inquiries.view')) && !(await can(senderPhone, 'orders.view'))) {
-      return 'Permission Denied: You do not have permission to view inquiries or orders.';
+      return 'Permission denied: inquiries or orders view is disabled. Please contact your admin for view permission.';
     }
     const directRes = await getInquiryOrDealByCode(effectiveScope, text, directInqIdMatch[1]);
     if (directRes) return directRes;
@@ -3780,7 +3845,7 @@ async function handleQuery(text, senderPhone) {
     /^(?:get\s+|show\s+|what\s+is\s+|give\s+me\s+)?deal\s*ids?\b/i.test(lower)
   ) {
     if (!(await can(senderPhone, 'inquiries.view'))) {
-      return 'Permission Denied: You do not have permission to view inquiries.';
+      return 'Permission denied: inquiries view is disabled. Please contact your admin for view permission.';
     }
     return await getDealIdsForCompany(effectiveScope, text);
   }
@@ -3792,7 +3857,7 @@ async function handleQuery(text, senderPhone) {
       /\b(?:this\s+month|last\s+month|today|this\s+week|last\s+week)\b/i.test(lower))
   ) {
     if (!(await can(senderPhone, 'visits.view'))) {
-      return 'Permission Denied: You do not have permission to view visits.';
+      return 'Permission denied: visits view is disabled. Please contact your admin for view permission.';
     }
     if (
       lower.includes('follow-up') ||
@@ -4170,15 +4235,15 @@ async function handleQuery(text, senderPhone) {
   }
   // Payment summary (KRA 5 totals)
   if (lower.includes('payment') || lower.includes('collection')) {
-    return await getPaymentSummary(effectiveScope);
+    return await blockView(effectiveScope, 'orders.view') || await getPaymentSummary(effectiveScope);
   }
   // Complaints
   if (lower.includes('complaint') || lower.includes('shikayat')) {
-    return await getComplaintSummary(effectiveScope);
+    return await blockView(effectiveScope, 'complaints.view') || await getComplaintSummary(effectiveScope);
   }
   // New customers KRA 2
   if (lower.includes('new customer') || lower.includes('kra 2')) {
-    return await getNewCustomerSummary(effectiveScope);
+    return await blockView(effectiveScope, 'customers.view') || await getNewCustomerSummary(effectiveScope);
   }
   // Dashboard link
   if (

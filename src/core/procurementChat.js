@@ -72,7 +72,7 @@ function canSeeTeam(permissions) {
 }
 
 const BASE_PRICE_PERMISSION_REFUSAL = 'You can view inquiries, but you cannot enter a base price.';
-const VIEW_PERMISSION_REFUSAL = 'You do not have permission to view inquiries.';
+const VIEW_PERMISSION_REFUSAL = 'Permission denied: inquiries view is disabled. Please contact your admin for view permission.';
 
 function matchesProcurementScope(item, scope) {
   if (!scope) return false;

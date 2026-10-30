@@ -5,6 +5,7 @@ const {
   mergePermissions,
   normalizeRoleId,
   can,
+  denyView,
   denialReply,
   setMockPermissions,
   invalidateBotPermissions,
@@ -73,6 +74,15 @@ test('can() and denialReply() enforce permission gating for all modules', async 
     /do not have permission to add inquiry prices/i,
   );
 
-  // 3. Invalidate cache flushes correctly
+  // 3. A disabled view permission is a denial, not missing data
+  const noCustomers = builtinFor('salesperson', { 'customers.view': false });
+  setMockPermissions(testPhone, noCustomers);
+  assert.match(
+    await denyView(testPhone, 'customers.view'),
+    /customers view is disabled/i,
+  );
+  assert.equal(await denyView(testPhone, 'orders.view'), null);
+
+  // 4. Invalidate cache flushes correctly
   invalidateBotPermissions(testPhone);
 });

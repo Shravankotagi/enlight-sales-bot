@@ -142,7 +142,7 @@ test('LangGraph conversational AI tools enforce permission gating', async () => 
   assert.match(custRes, /Permission Denied.*edit customer profiles/i);
 
   const inqRes = await getInq.invoke({});
-  assert.match(inqRes, /Permission Denied.*view inquiries/i);
+  assert.match(inqRes, /inquiries view is disabled/i);
 
   invalidateBotPermissions(phone);
 });
