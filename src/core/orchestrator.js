@@ -352,6 +352,19 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
   try {
     console.log(`[Orchestrator] Processing: "${text?.substring(0, 80)}..." from ${senderPhone}`);
 
+    // Known list phrases skip Gemini. The model round trip is the multi-second wait.
+    if (!imageBuffer && text) {
+      const { replyPlainCustomerList } = require('../queryhandler');
+      const fastList = await replyPlainCustomerList(text, senderPhone);
+      if (fastList) {
+        const clean = stripAsterisks(fastList);
+        await addChatHistory(senderPhone, text, clean, { agent: 'query' });
+        await recordSessionMessage(senderPhone, 'user', text);
+        await recordSessionMessage(senderPhone, 'assistant', clean, { agent: 'query' });
+        return clean;
+      }
+    }
+
     // Create tools with senderPhone and raw text pre-bound per request
     const TOOLS = createTools(senderPhone, text);
 

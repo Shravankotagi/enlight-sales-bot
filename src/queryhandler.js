@@ -1710,6 +1710,35 @@ async function getActiveDealsDetail(scopeOrPhone) {
 }
 
 /** Full registered customer list */
+const PLAIN_CUSTOMER_LIST = new Set([
+  'my customers',
+  'all my customers',
+  'show my customers',
+  'show all my customers',
+  'show me my customers',
+  'show me all my customers',
+  'show all my customers list',
+  'my customers list',
+  'list my customers',
+  'customer list',
+  'all customers',
+  'show all customers',
+]);
+
+function isPlainCustomerList(text) {
+  const s = String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return PLAIN_CUSTOMER_LIST.has(s);
+}
+
+async function replyPlainCustomerList(text, phone) {
+  if (!isPlainCustomerList(text)) return null;
+  return getCustomerList(phone);
+}
+
 async function getCustomerList(scopeOrPhone) {
   const denied = await blockView(scopeOrPhone, 'customers.view');
   if (denied) return denied;
@@ -4262,6 +4291,8 @@ async function handleQuery(text, senderPhone) {
 
 module.exports = {
   isQuery,
+  isPlainCustomerList,
+  replyPlainCustomerList,
   handleQuery,
   getVisitSummary,
   getVisitsPendingFollowup,
