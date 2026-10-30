@@ -178,6 +178,39 @@ const ACTION_KEYS = {
   ADD_PRICE: ['inquiries.fill_base_prices', 'add inquiry prices'],
 };
 
+const VIEW_LABELS = {
+  'customers.view': 'customers',
+  'inquiries.view': 'inquiries',
+  'orders.view': 'orders',
+  'visits.view': 'visits',
+  'complaints.view': 'complaints',
+};
+
+function viewDeniedText(keys) {
+  const labels = keys.map((key) => VIEW_LABELS[key] || 'this');
+  return `Permission denied: ${labels.join(' or ')} view is disabled. Please contact your admin for view permission.`;
+}
+
+async function denyView(phone, key) {
+  try {
+    if (await can(phone, key)) return null;
+  } catch (err) {
+    console.warn('Bot view permission failed closed:', err?.message || err);
+  }
+  return viewDeniedText([key]);
+}
+
+async function denyAnyView(phone, keys) {
+  try {
+    for (const key of keys) {
+      if (await can(phone, key)) return null;
+    }
+  } catch (err) {
+    console.warn('Bot view permission failed closed:', err?.message || err);
+  }
+  return viewDeniedText(keys);
+}
+
 async function denialReply(phone, action) {
   if (action === 'ADD_PRICE') {
     const allowed =
@@ -204,6 +237,8 @@ async function denialReply(phone, action) {
 module.exports = {
   resolvePermissions,
   can,
+  denyView,
+  denyAnyView,
   denialReply,
   mergePermissions,
   normalizeRoleId,
