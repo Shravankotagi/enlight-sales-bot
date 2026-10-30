@@ -63,6 +63,7 @@ When returning or listing multiple records for any retrieval query (Inquiries, D
    - ALWAYS append a clear dashboard navigation notice at the end of the message:
      "Please navigate to the dashboard to view all records." (or e.g. "Showing 8 of [Total] records. Please navigate to the dashboard to view all [Total] records.").
 4. If there are 8 or fewer records (1 to 8 records), display all of them cleanly without needing the dashboard overflow notice.
+5. If a tool result says "Permission denied:", reply with that sentence only. Do not list records.
 
 ## Chain-of-Thought Instructions (Execute Mentally Before Responding)
 1. **Analyze Tool Results**: Check what activities were saved (Visit, Deal, Payment, Complaint).
@@ -350,6 +351,19 @@ async function runOrchestrator(textOrParams, senderPhoneParam, options = {}) {
 
   try {
     console.log(`[Orchestrator] Processing: "${text?.substring(0, 80)}..." from ${senderPhone}`);
+
+    // Known list phrases skip Gemini. The model round trip is the multi-second wait.
+    if (!imageBuffer && text) {
+      const { replyPlainCustomerList } = require('../queryhandler');
+      const fastList = await replyPlainCustomerList(text, senderPhone);
+      if (fastList) {
+        const clean = stripAsterisks(fastList);
+        await addChatHistory(senderPhone, text, clean, { agent: 'query' });
+        await recordSessionMessage(senderPhone, 'user', text);
+        await recordSessionMessage(senderPhone, 'assistant', clean, { agent: 'query' });
+        return clean;
+      }
+    }
 
     // Create tools with senderPhone and raw text pre-bound per request
     const TOOLS = createTools(senderPhone, text);

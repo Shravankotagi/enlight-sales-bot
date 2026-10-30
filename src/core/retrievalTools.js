@@ -61,8 +61,16 @@ async function resolveCallerContext(senderPhone) {
   let email = employee?.email || '';
 
   if (employee) {
+    const { resolvePermissions } = require('../utils/permissions');
+    const access = await resolvePermissions(senderPhone);
     const rawRole = (employee.role || '').toLowerCase();
-    if (isProcurementRole(rawRole)) {
+    if (access?.dataScope === 'all') {
+      role = 'admin';
+    } else if (access?.dataScope === 'team') {
+      role = 'manager';
+    } else if (access?.dataScope === 'own') {
+      role = 'salesperson';
+    } else if (isProcurementRole(rawRole)) {
       role = rawRole;
     } else if (rawRole.includes('admin')) {
       role = 'admin';
@@ -613,6 +621,77 @@ function categorizeProductFamily(productName, description) {
     category,
     specificProduct: productName || 'General Steel Product',
   };
+}
+
+function phone10(value) {
+  return String(value || '').replace(/\D/g, '').slice(-10);
+}
+
+function customersMatch(customer, targetName, targetPhone) {
+  const cClean = cleanLegalSuffixes(customer?.customer_name);
+  const tClean = cleanLegalSuffixes(targetName);
+  if (cClean && tClean && cClean === tClean) return true;
+  if (
+    cClean &&
+    tClean &&
+    (cClean.startsWith(tClean) || tClean.startsWith(cClean)) &&
+    Math.min(cClean.length, tClean.length) >= 4
+  ) {
+    return true;
+  }
+  const genericWords = new Set([
+    'steel', 'metals', 'traders', 'industries', 'engineering', 'enterprises',
+    'enterprise', 'infra', 'works', 'projects', 'systems',
+  ]);
+  if (cClean && tClean && cClean.length >= 4 && tClean.length >= 4) {
+    const cWords = cClean.split(' ').filter((w) => w.length > 2 && !genericWords.has(w));
+    const tWords = tClean.split(' ').filter((w) => w.length > 2 && !genericWords.has(w));
+    if (cWords.length > 0 && tWords.length > 0) {
+      if (cWords.every((w) => tWords.includes(w)) || tWords.every((w) => cWords.includes(w))) return true;
+    }
+  }
+  const cp = phone10(customer?.customer_phone);
+  const tp = phone10(targetPhone);
+  if (cp && tp && cp === tp && cClean && tClean) {
+    if (cClean === tClean || cClean.startsWith(tClean) || tClean.startsWith(cClean)) return true;
+  }
+  return false;
+}
+
+function ownedByAssignedRep(customer, recordPhone) {
+  const rep = phone10(customer?.assigned_salesperson_phone);
+  if (!rep) return true;
+  return phone10(recordPhone) === rep;
+}
+
+function dashboardChurnRisk(customer, wonDeals, now = new Date()) {
+  const latest = (wonDeals || [])
+    .map((deal) => deal.won_at || deal.created_at)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b) - new Date(a))[0];
+  const lastOrder = latest || customer?.last_order_date || null;
+  const daysSinceOrder = lastOrder
+    ? Math.max(0, Math.floor((now.getTime() - new Date(lastOrder).getTime()) / 86400000))
+    : null;
+  const daysSinceCreated = customer?.created_at
+    ? Math.floor((now.getTime() - new Date(customer.created_at).getTime()) / 86400000)
+    : 0;
+  const days = daysSinceOrder !== null && !Number.isNaN(daysSinceOrder) ? daysSinceOrder : daysSinceCreated;
+  if (days > 45) return 'churning';
+  if (days >= 35) return 'at_risk';
+  return 'active';
+}
+
+function healthLabel(churn) {
+  if (churn === 'churning') return 'Churning (>45d)';
+  if (churn === 'at_risk') return 'At Risk (35-45d)';
+  return 'Active';
+}
+
+function resolveCustomerSegment(storedSegment, totalTonnage, ltv, totalOrders, inquiriesCount = 0, visitsCount = 0) {
+  const explicit = String(storedSegment || '').toLowerCase().trim();
+  if (explicit === 'key_account' || explicit === 'growth' || explicit === 'new') return explicit;
+  return deriveCustomerSegment(totalTonnage, ltv, totalOrders, inquiriesCount, visitsCount);
 }
 
 function deriveCustomerSegment(totalTonnage, ltv, totalOrders, inquiriesCount = 0, visitsCount = 0) {
@@ -3228,15 +3307,14 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
     let lifetimeWonVal = wonDeals.reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
     let totalTonnage = wonDeals.reduce((sum, d) => sum + getDealTonnage(d), 0);
 
-    let segment = 'new';
-    if (profile.segment) {
-      const s = String(profile.segment).toLowerCase().trim();
-      if (s.includes('key')) segment = 'key_account';
-      else if (s.includes('growth')) segment = 'growth';
-      else segment = 'new';
-    } else {
-      segment = deriveCustomerSegment(totalTonnage, lifetimeWonVal, wonDeals.length, inquiries.length, visits.length);
-    }
+    const segment = resolveCustomerSegment(
+      profile.segment,
+      totalTonnage,
+      lifetimeWonVal,
+      wonDeals.length,
+      inquiries.length,
+      visits.length,
+    );
 
     return {
       data: {
@@ -3268,8 +3346,8 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
 
   // Directory / Directory Segmentation Mode
   let custQuery = supabaseAdmin.from('recurring_customers').select('*').eq('is_active', true);
-  let dealsQuery = supabaseAdmin.from('deals').select('id, customer_name, stage, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, dimensions, quantity, unit, rate, amount)');
-  let visitsQuery = supabaseAdmin.from('customer_visits').select('id, customer_name, visited_at, salesperson_phone, employee_id');
+  let dealsQuery = supabaseAdmin.from('deals').select('id, customer_name, customer_phone, stage, inquiry_type, total_amount, po_number, created_at, won_at, salesperson_phone, employee_id, deal_items(sku_text, dimensions, quantity, unit, rate, amount)');
+  let visitsQuery = supabaseAdmin.from('customer_visits').select('id, customer_name, contact_no, visited_at, salesperson_phone, employee_id');
   let inqsQuery = supabaseAdmin.from('inquiries').select('id, sender_name, created_at, salesperson_phone, sender_phone');
   let compQuery = supabaseAdmin.from('complaints').select('id, customer_name, status, created_at, reported_by, employee_id');
 
@@ -3335,48 +3413,41 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
 
   // Enrich each customer with derived metrics & segment
   const enrichedCustomers = uniqueCustRows.map((c) => {
-    const cName = (c.customer_name || '').toLowerCase().trim();
-    const cClean = cleanLegalSuffixes(c.customer_name);
+    const custDeals = deals.filter((d) => ownedByAssignedRep(c, d.salesperson_phone) && customersMatch(c, d.customer_name, d.customer_phone));
+    const wonDeals = custDeals.filter((d) => d.stage === 'won' || d.stage === 'order' || Boolean(d.po_number) || d.inquiry_type === 'purchase_order');
+    const openDeals = custDeals.filter((d) => d.stage !== 'won' && d.stage !== 'lost' && d.stage !== 'order');
 
-    const custDeals = deals.filter((d) => {
-      const dName = (d.customer_name || '').toLowerCase().trim();
-      return dName === cName || (cClean && cleanLegalSuffixes(d.customer_name) === cClean);
-    });
+    const custVisits = visits.filter((v) => ownedByAssignedRep(c, v.salesperson_phone) && customersMatch(c, v.customer_name, v.contact_no));
+    const custInqs = inqs.filter((i) => ownedByAssignedRep(c, i.salesperson_phone) && customersMatch(c, i.sender_name, i.sender_phone));
+    const custComps = complaints.filter((comp) => ownedByAssignedRep(c, comp.reported_by) && customersMatch(c, comp.customer_name, null));
 
-    const wonDeals = custDeals.filter((d) => d.stage === 'won' || Boolean(d.po_number));
-    const openDeals = custDeals.filter((d) => d.stage !== 'won' && d.stage !== 'lost');
-
-    const custVisits = visits.filter((v) => {
-      const vName = (v.customer_name || '').toLowerCase().trim();
-      return vName === cName || (cClean && cleanLegalSuffixes(v.customer_name) === cClean);
-    });
-
-    const custInqs = inqs.filter((i) => {
-      const iName = (i.sender_name || '').toLowerCase().trim();
-      return iName === cName || (cClean && cleanLegalSuffixes(i.sender_name) === cClean);
-    });
-
-    const custComps = complaints.filter((comp) => {
-      const compName = (comp.customer_name || '').toLowerCase().trim();
-      return compName === cName || (cClean && cleanLegalSuffixes(comp.customer_name) === cClean);
-    });
-
-    const ltv = wonDeals.reduce((sum, d) => sum + Number(d.total_amount || 0), 0);
+    const ltv = wonDeals.reduce((sum, d) => {
+      let amt = Number(d.total_amount || 0);
+      if (amt <= 0 && Array.isArray(d.deal_items) && d.deal_items.length > 0) {
+        amt = d.deal_items.reduce((s, item) => s + (Number(item.amount) || Number(item.rate) * Number(item.quantity) || 0), 0);
+      }
+      return sum + amt;
+    }, 0);
     const tonnage = wonDeals.reduce((sum, d) => sum + getDealTonnage(d), 0);
     const totalOrders = wonDeals.length;
 
-    let segRaw = 'new';
-    if (c.segment) {
-      const s = String(c.segment).toLowerCase().trim();
-      if (s.includes('key')) segRaw = 'key_account';
-      else if (s.includes('growth')) segRaw = 'growth';
-      else segRaw = 'new';
-    } else {
-      segRaw = deriveCustomerSegment(tonnage, ltv, totalOrders, custInqs.length, custVisits.length);
-    }
+    const segRaw = resolveCustomerSegment(
+      c.segment,
+      tonnage,
+      ltv,
+      totalOrders,
+      custInqs.length,
+      custVisits.length,
+    );
 
     const segLabel = segRaw === 'key_account' ? 'Key Account' : (segRaw === 'growth' ? 'Growth' : 'New');
-    const lastOrder = c.last_order_date || (wonDeals[0]?.won_at ? wonDeals[0].won_at.split('T')[0] : (wonDeals[0]?.created_at ? wonDeals[0].created_at.split('T')[0] : 'N/A'));
+    const latestWon = wonDeals
+      .map((deal) => deal.won_at || deal.created_at)
+      .filter(Boolean)
+      .sort((a, b) => new Date(b) - new Date(a))[0];
+    const lastOrderRaw = latestWon || c.last_order_date || null;
+    const lastOrder = lastOrderRaw ? String(lastOrderRaw).split('T')[0] : 'N/A';
+    const churn = dashboardChurnRisk({ ...c, last_order_date: lastOrderRaw }, wonDeals);
 
     return {
       customer_name: c.customer_name,
@@ -3385,6 +3456,8 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
       address: c.customer_address || c.address || 'N/A',
       gst: c.customer_gst || c.gst || 'N/A',
       segment: segLabel,
+      health_status: healthLabel(churn),
+      _churn: churn,
       _segRaw: segRaw,
       total_orders: totalOrders,
       total_tonnage_mt: Math.round(tonnage * 1000) / 1000,
@@ -3439,7 +3512,7 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
   if (isZeroOrdersMode) {
     const zeroOrders = dateFiltered.filter((c) => c.total_orders === 0 && c.is_active);
     const totalZero = zeroOrders.length;
-    const displayZero = zeroOrders.slice(0, 8).map(({ _segRaw, _created_at_raw, ...cleanCust }) => ({
+    const displayZero = zeroOrders.slice(0, 8).map(({ _segRaw, _created_at_raw, _churn, ...cleanCust }) => ({
       ...cleanCust,
       health_status: 'Active (0 Orders)',
     }));
@@ -3479,8 +3552,8 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
     total_customers: finalCustomers.length,
     date_range_applied: dateRange || 'all',
     segment_filter_applied: segmentFilter || 'all',
-    at_risk_count: 0,
-    churning_count: 0,
+    at_risk_count: finalCustomers.filter((c) => c._churn === 'at_risk').length,
+    churning_count: finalCustomers.filter((c) => c._churn === 'churning').length,
   };
 
   if (!isSegmentFiltered) {
@@ -3501,7 +3574,7 @@ async function executeGetCustomer360(args, callerContext, supabaseAdmin = supaba
   }
 
   const totalCusts = finalCustomers.length;
-  const displayCusts = finalCustomers.slice(0, 8).map(({ _segRaw, _created_at_raw, ...cleanCust }) => cleanCust);
+  const displayCusts = finalCustomers.slice(0, 8).map(({ _segRaw, _created_at_raw, _churn, ...cleanCust }) => cleanCust);
   const hasMoreCusts = totalCusts > 8;
 
   return {
@@ -4368,6 +4441,9 @@ module.exports = {
   parseVisitRemarks,
   categorizeProductFamily,
   deriveCustomerSegment,
+  resolveCustomerSegment,
+  customersMatch,
+  dashboardChurnRisk,
   normalizeDealStage,
   executeGetInquiries,
   executeGetVisits,

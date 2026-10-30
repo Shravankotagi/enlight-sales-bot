@@ -1,5 +1,6 @@
 const { createClient } = require('@supabase/supabase-js');
 const { isProcurementRole } = require('./utils/roles');
+const { resolvePermissions } = require('./utils/permissions');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceRoleKey =
@@ -206,10 +207,14 @@ async function getAccessibleSalespersonPhonesForBot(senderPhone) {
     };
   }
 
+  const access = await resolvePermissions(senderPhone);
+  const dataScope = access?.dataScope;
   const role = (employee.role || 'salesperson').toLowerCase();
-  const isAdmin = role === 'admin' || (role.includes('admin') && !isProcurementRole(role));
-  // procurement_manager contains "manager"; it is not a sales manager.
-  if (isProcurementRole(role)) {
+  const isAdmin =
+    dataScope === 'all' ||
+    (!dataScope &&
+      (role === 'admin' || (role.includes('admin') && !isProcurementRole(role))));
+  if (isProcurementRole(role) && dataScope !== 'all' && dataScope !== 'team') {
     return {
       role,
       phones: [],
@@ -219,7 +224,9 @@ async function getAccessibleSalespersonPhonesForBot(senderPhone) {
       assignedSalespersons: [],
     };
   }
-  const isManager = role.includes('manager') || role === 'sales_manager';
+  const isManager =
+    dataScope === 'team' ||
+    (!dataScope && (role === 'sales_manager' || role === 'manager'));
 
   if (isAdmin) {
     return {
