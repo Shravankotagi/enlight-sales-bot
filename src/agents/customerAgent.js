@@ -38,6 +38,7 @@ Extract into ONLY a JSON object (no prose, no markdown, no backticks):
   "phone": "<phone number if mentioned (digits only), else null>",
   "gst": "<GST number if mentioned, else null>",
   "city": "<city/location if mentioned, else null>",
+  "industry": "<industry/segment if mentioned (e.g. Boilers, Storage Racks, Automobile, Fabricator, OEM, PEB, Tubes & Pipes), else null>",
   "order_frequency_days": <number of days for order cycle/frequency if mentioned (e.g. 45, 30), else null>,
   "confidence": <float 0.0 to 1.0>
 }
@@ -153,6 +154,17 @@ async function processCustomerMessage(text, senderPhone) {
           if (payload.newPayload?.city) updateData.customer_address = payload.newPayload.city;
           if (payload.newPayload?.contact_person) updateData.contact_person = payload.newPayload.contact_person;
           if (payload.newPayload?.order_frequency_days) updateData.avg_order_frequency_days = Number(payload.newPayload.order_frequency_days);
+          if (payload.newPayload?.industry) {
+            const cleanInd = String(payload.newPayload.industry).trim();
+            const { data: currRec } = await supabase.from('recurring_customers').select('notes').eq('id', payload.existingId).single();
+            let baseNotes = currRec?.notes || '';
+            if (/\[Industry:\s*[^\]]+\]/i.test(baseNotes)) {
+              baseNotes = baseNotes.replace(/\[Industry:\s*[^\]]+\]/i, `[Industry: ${cleanInd}]`);
+            } else {
+              baseNotes = baseNotes ? `${baseNotes} | [Industry: ${cleanInd}]` : `[Industry: ${cleanInd}]`;
+            }
+            updateData.notes = baseNotes;
+          }
 
           const { error: updErr } = await supabase
             .from('recurring_customers')
@@ -255,6 +267,16 @@ async function processCustomerMessage(text, senderPhone) {
         if (data.order_frequency_days) {
           updateFields.avg_order_frequency_days = Number(data.order_frequency_days);
         }
+        if (data.industry) {
+          const cleanInd = String(data.industry).trim();
+          let baseNotes = exactMatch.notes || '';
+          if (/\[Industry:\s*[^\]]+\]/i.test(baseNotes)) {
+            baseNotes = baseNotes.replace(/\[Industry:\s*[^\]]+\]/i, `[Industry: ${cleanInd}]`);
+          } else {
+            baseNotes = baseNotes ? `${baseNotes} | [Industry: ${cleanInd}]` : `[Industry: ${cleanInd}]`;
+          }
+          updateFields.notes = baseNotes;
+        }
         if (!exactMatch.assigned_salesperson_phone) {
           updateFields.assigned_salesperson_phone = senderPhone;
         }
@@ -311,6 +333,7 @@ async function processCustomerMessage(text, senderPhone) {
       customer_gst: data.gst || null,
       city: data.city || null,
       contact_person: data.contact_person || null,
+      industry: data.industry || null,
       avg_order_frequency_days: data.order_frequency_days || 30,
       allowCreate: true,
     });
@@ -356,6 +379,7 @@ async function processCustomerMessage(text, senderPhone) {
 
     return `👤 *New Customer Onboarded!*\n\n` +
       `Company: *${customerName}*\n` +
+      (data.industry ? `Industry: *${data.industry}*\n` : '') +
       (data.contact_person ? `Contact/Owner: *${data.contact_person}*\n` : '') +
       (data.phone ? `Phone: *${data.phone}*\n` : '') +
       (data.city ? `City: *${data.city}*\n` : '') +

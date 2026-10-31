@@ -642,6 +642,16 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
       if (extraData.assigned_salesperson_phone && scope.isAdmin)
         updatePayload.assigned_salesperson_phone =
           extraData.assigned_salesperson_phone;
+      if (extraData.industry) {
+        const cleanInd = String(extraData.industry).trim();
+        let baseNotes = rec.notes || '';
+        if (/\[Industry:\s*[^\]]+\]/i.test(baseNotes)) {
+          baseNotes = baseNotes.replace(/\[Industry:\s*[^\]]+\]/i, `[Industry: ${cleanInd}]`);
+        } else {
+          baseNotes = baseNotes ? `${baseNotes} | [Industry: ${cleanInd}]` : `[Industry: ${cleanInd}]`;
+        }
+        updatePayload.notes = baseNotes;
+      }
 
       if (Object.keys(updatePayload).length > 0) {
         updatePayload.updated_at = new Date().toISOString();
@@ -684,6 +694,11 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
       return null;
     }
 
+    const notesParts = [];
+    if (extraData.email) notesParts.push(`Email: ${String(extraData.email).trim()}`);
+    if (extraData.industry) notesParts.push(`[Industry: ${String(extraData.industry).trim()}]`);
+    const initialNotes = notesParts.length > 0 ? notesParts.join(' | ') : (extraData.notes || null);
+
     const insertPayload = {
       customer_name: cleanName,
       assigned_salesperson_phone:
@@ -692,6 +707,7 @@ async function ensureCustomerRecord(customerName, senderPhone, extraData = {}) {
       customer_gst: extraData.customer_gst || null,
       customer_address: extraData.city || null,
       contact_person: extraData.contact_person || null,
+      notes: initialNotes,
       is_active: true,
       avg_order_frequency_days:
         Number(extraData.avg_order_frequency_days) || 30,

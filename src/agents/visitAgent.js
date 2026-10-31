@@ -432,6 +432,7 @@ async function autoOnboardProspect(customerName, senderPhone, extractedData) {
       city: extractedData.city,
       customer_phone: extractedData.contact_no,
       contact_person: extractedData.person_met,
+      industry: extractedData.customer_type || null,
     });
     console.log(`[VisitAgent] Auto-created new prospect: ${customerName}`);
     return rec ? rec.customer_name : customerName;
@@ -704,7 +705,7 @@ async function saveCompletedVisit(visitState, senderPhone) {
   }
 
   // Update customer master profile in recurring_customers
-  if (city || contact_no || person_met || email) {
+  if (city || contact_no || person_met || email || customer_type) {
     const custUpdate = { updated_at: new Date().toISOString() };
     if (city) custUpdate.city = city;
     if (contact_no) custUpdate.customer_phone = contact_no;
@@ -712,6 +713,13 @@ async function saveCompletedVisit(visitState, senderPhone) {
     if (email) custUpdate.customer_email = email;
     const exactCustomerName = String(finalCustomerName || '').trim().replace(/[\\%_]/g, (ch) => `\\${ch}`);
     if (exactCustomerName) {
+      if (customer_type) {
+        const { data: cRec } = await supabase.from('recurring_customers').select('notes').ilike('customer_name', exactCustomerName).limit(1);
+        const existingNotes = cRec?.[0]?.notes || '';
+        if (!/\[Industry:\s*[^\]]+\]/i.test(existingNotes) && !/Industry:\s*[^|;\n\r]+/i.test(existingNotes)) {
+          custUpdate.notes = existingNotes ? `${existingNotes} | [Industry: ${customer_type}]` : `[Industry: ${customer_type}]`;
+        }
+      }
       await supabase
         .from('recurring_customers')
         .update(custUpdate)

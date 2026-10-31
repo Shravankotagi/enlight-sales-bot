@@ -1529,13 +1529,14 @@ Please provide the following details:
 - **Contact Person:** *
 - **Mobile Number:** *
 - **Delivery Location:** *
+- **Industry:** (optional — e.g. Boilers, Storage Racks, Automobile, Fabricator, Tubes & Pipes)
 - **Email:** (optional)
 - **GST Number:** (optional)
 
 You can reply in any format — just include the field names or values in order.
 
 Example:
-"Apex Steel Structures, Contact: Rajesh Sharma, Phone: 9820123456, Location: Chakan Pune, Email: rajesh@apexsteel.com, GST: 27AABCU9603R1ZM"`,
+"Apex Steel Structures, Contact: Rajesh Sharma, Phone: 9820123456, Location: Chakan Pune, Industry: Storage Racks, Email: rajesh@apexsteel.com, GST: 27AABCU9603R1ZM"`,
 
   LOG_COMPLAINT: `⚠️ **Log Customer Complaint**
 
@@ -2614,6 +2615,7 @@ LOG_NEW_CUSTOMER:
   "contact_person": "<Owner / Contact Person Name, else null>",
   "mobile_number": "<10-digit mobile number, digits only, else null>",
   "delivery_location": "<City / Delivery Address / Location, else null>",
+  "industry": "<Industry / Segment if mentioned (e.g. Boilers, Storage Racks, Automobile, Fabricator, Tubes & Pipes), else null>",
   "email": "<Email address if mentioned, else null>",
   "gst_number": "<GST number if mentioned, else null>",
   "entries": [
@@ -2622,6 +2624,7 @@ LOG_NEW_CUSTOMER:
       "contact_person": "<Contact Person>",
       "mobile_number": "<Mobile Number>",
       "delivery_location": "<Location>",
+      "industry": "<Industry / Segment>",
       "email": "<Email>",
       "gst_number": "<GST>"
     }
@@ -2937,7 +2940,7 @@ function getAllowedFieldsListForAction(action) {
     case 'UPDATE_COMPLAINT':
       return `- *Complaint Raised By*\n- *Complaint Type*\n- *Complaint Description*\n- *Status (Pending, In Progress, Resolved, Closed)*\n- *Resolution Notes*`;
     case 'LOG_NEW_CUSTOMER':
-      return `- *Company Name*\n- *Contact Person*\n- *Mobile Number*\n- *Delivery Location / City*\n- *Email Address*\n- *GST Number*`;
+      return `- *Company Name*\n- *Contact Person*\n- *Mobile Number*\n- *Delivery Location / City*\n- *Industry*\n- *Email Address*\n- *GST Number*`;
     default:
       return `- *Rate*\n- *Quantity*\n- *Payment Terms*\n- *Delivery Location*`;
   }
@@ -10543,6 +10546,9 @@ function buildConfirmationSummary(action, draft) {
       summary += `• *Mobile Number:* ${phoneVal}\n`;
       const locVal = draft.delivery_location || draft.city_location || draft.address || '-';
       summary += `• *Delivery Location:* ${locVal}\n`;
+      if (draft.industry || draft.segment) {
+        summary += `• *Industry:* ${draft.industry || draft.segment}\n`;
+      }
       summary += `• *Email:* ${draft.email || '-'}\n`;
       const gstVal = draft.gst_number || draft.gst || '-';
       summary += `• *GST Number:* ${gstVal}\n`;
@@ -13253,12 +13259,18 @@ async function executeAction(action, draft, senderPhone) {
         const deliveryLoc = (draft.delivery_location || draft.city_location || draft.address || '').trim() || null;
         const gstNum = (draft.gst_number || draft.gst || '').trim() || null;
         const email = draft.email ? String(draft.email).trim() : null;
+        const industry = (draft.industry || draft.segment || draft.sector || '').trim() || null;
 
         // 1. Exact duplicate check across recurring_customers
         const regCheck = await checkCompanyWideCustomerRegistration(companyName, senderPhone);
         if (regCheck && regCheck.isRegistered) {
           return regCheck.conflictMessage;
         }
+
+        const notesParts = [];
+        if (email) notesParts.push(`Email: ${email}`);
+        if (industry) notesParts.push(`[Industry: ${industry}]`);
+        const notes = notesParts.length > 0 ? notesParts.join(' | ') : null;
 
         // 2. Insert new record into recurring_customers
         const { data: newCust, error: custErr } = await supabase
@@ -13269,7 +13281,7 @@ async function executeAction(action, draft, senderPhone) {
             customer_phone: mobileNumber || null,
             customer_address: deliveryLoc,
             customer_gst: gstNum,
-            notes: email ? `Email: ${email}` : null,
+            notes,
             assigned_salesperson_phone: senderPhone,
             is_active: true,
             avg_order_frequency_days: 30,
@@ -13328,6 +13340,7 @@ async function executeAction(action, draft, senderPhone) {
           `• *Contact Person:* ${contactPerson || 'N/A'}\n` +
           `• *Mobile Number:* ${mobileNumber || 'N/A'}\n` +
           `• *Delivery Location:* ${deliveryLoc || 'N/A'}\n` +
+          (industry ? `• *Industry:* ${industry}\n` : '') +
           (email ? `• *Email:* ${email}\n` : '') +
           (gstNum ? `• *GST Number:* ${gstNum}\n` : '') +
           `\nCustomer record created & added to your portfolio! ✅`;
